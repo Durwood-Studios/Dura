@@ -1,3 +1,51 @@
+export type DreyfusStage = "novice" | "advanced-beginner" | "competent" | "proficient" | "expert";
+export type BloomLevel = "remember" | "understand" | "apply" | "analyze" | "evaluate" | "create";
+
+export interface LessonMeta {
+  id: string;
+  slug: string;
+  moduleId: string;
+  phaseId: string;
+  title: string;
+  description: string;
+  estimatedMinutes: number;
+  difficulty: 1 | 2 | 3 | 4 | 5;
+  bloom: BloomLevel;
+  dreyfus: DreyfusStage;
+  standards: {
+    cs2023?: string[];
+    swebok?: string[];
+    sfia?: string;
+  };
+  vocabulary: string[];
+  order: number;
+}
+
+export interface Module {
+  id: string;
+  phaseId: string;
+  slug: string;
+  title: string;
+  description: string;
+  estimatedHours: number;
+  lessonCount: number;
+  order: number;
+}
+
+export interface Phase {
+  id: string;
+  slug: string;
+  title: string;
+  tagline: string;
+  description: string;
+  color: string;
+  estimatedHours: number;
+  moduleCount: number;
+  lessonCount: number;
+  order: number;
+  modules: Module[];
+}
+
 export interface LessonProgress {
   lessonId: string;
   phaseId: string;
