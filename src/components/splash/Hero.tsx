@@ -15,7 +15,7 @@ export function Hero(): React.ReactElement {
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, ease: "easeOut" }}
-          className="text-6xl font-semibold tracking-tight text-[#171717] sm:text-7xl"
+          className="text-5xl font-semibold tracking-tight text-[#171717] sm:text-6xl md:text-7xl"
         >
           DURA
         </motion.h1>
@@ -24,7 +24,7 @@ export function Hero(): React.ReactElement {
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, ease: "easeOut", delay: 0.1 }}
-          className="mt-6 font-serif text-2xl text-[#525252] italic sm:text-3xl"
+          className="mt-6 font-serif text-xl text-[#525252] italic sm:text-2xl md:text-3xl"
         >
           Engineering education, hardened by design.
         </motion.p>
@@ -42,17 +42,17 @@ export function Hero(): React.ReactElement {
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, ease: "easeOut", delay: 0.3 }}
-          className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row sm:gap-4"
+          className="mt-10 flex w-full flex-col items-stretch justify-center gap-3 sm:w-auto sm:flex-row sm:items-center sm:gap-4"
         >
           <Link
             href="/learn"
-            className="inline-flex h-12 min-w-[180px] items-center justify-center rounded-lg bg-[#10B981] px-6 text-base font-medium text-white shadow-sm transition-all duration-200 hover:bg-[#059669] hover:shadow-md"
+            className="inline-flex h-12 items-center justify-center rounded-lg bg-[#10B981] px-6 text-base font-medium text-white shadow-sm transition-all duration-200 hover:bg-[#059669] hover:shadow-md sm:min-w-[180px]"
           >
             Start Learning
           </Link>
           <Link
             href="/dictionary"
-            className="inline-flex h-12 min-w-[180px] items-center justify-center rounded-lg border border-[#E5E5E5] bg-white px-6 text-base font-medium text-[#171717] shadow-sm transition-all duration-200 hover:border-[#10B981] hover:text-[#10B981]"
+            className="inline-flex h-12 items-center justify-center rounded-lg border border-[#E5E5E5] bg-white px-6 text-base font-medium text-[#171717] shadow-sm transition-all duration-200 hover:border-[#10B981] hover:text-[#10B981] sm:min-w-[180px]"
           >
             Explore Dictionary
           </Link>
