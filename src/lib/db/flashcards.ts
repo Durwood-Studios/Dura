@@ -50,6 +50,16 @@ export async function getCardsByLesson(lessonId: string): Promise<FlashCard[]> {
   }
 }
 
+export async function getCardByTermSlug(slug: string): Promise<FlashCard | undefined> {
+  try {
+    const all = await getAllCards();
+    return all.find((c) => c.termSlug === slug);
+  } catch (error) {
+    console.error("[flashcards] getCardByTermSlug failed", error);
+    return undefined;
+  }
+}
+
 export async function getAllCards(): Promise<FlashCard[]> {
   try {
     const db = await getDB();

@@ -30,6 +30,57 @@ export const DICTIONARY: DictionaryTerm[] = [
     standards: { cs2023: ["AL/Foundational"] },
   },
   {
+    slug: "bit",
+    term: "Bit",
+    aliases: ["binary digit"],
+    category: "fundamentals",
+    phaseIds: ["0"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The smallest piece of data a computer stores — a single 0 or 1, like a switch that's off or on.",
+      intermediate:
+        "A binary digit. The fundamental unit of information, taking one of two values (0 or 1). Eight bits make a byte; groups of bits encode numbers, characters, and machine instructions.",
+      advanced:
+        "An information-theoretic unit equal to one shannon — the entropy of a uniformly distributed binary random variable. In hardware, realized as a two-state circuit (voltage high/low, magnetic polarity, charge present/absent).",
+    },
+    seeAlso: ["byte", "binary"],
+  },
+  {
+    slug: "byte",
+    term: "Byte",
+    aliases: ["octet"],
+    category: "fundamentals",
+    phaseIds: ["0"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Eight bits grouped together. One byte can hold any number from 0 to 255 — enough for a single letter or symbol.",
+      intermediate:
+        "A group of 8 bits, capable of representing 256 distinct values. Bytes are the smallest addressable unit in most CPU architectures and the basis for character encodings like ASCII and UTF-8.",
+      advanced:
+        "Historically variable-width on early architectures; standardized to 8 bits (an octet) by IEEE 1541. Memory addresses index bytes; word size, alignment, and endianness determine how multi-byte values are laid out and accessed.",
+    },
+    seeAlso: ["bit", "binary"],
+  },
+  {
+    slug: "binary",
+    term: "Binary",
+    aliases: ["base 2"],
+    category: "fundamentals",
+    phaseIds: ["0"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Counting using only two digits — 0 and 1. It's how computers represent everything internally.",
+      intermediate:
+        "A positional number system with base 2. Each column is a power of two, so 1010 = 8 + 2 = 10. All digital data, from numbers to images, ultimately reduces to binary.",
+      advanced:
+        "Base-2 positional notation. Closed under arithmetic with carry propagation. Direct correspondence to two-state digital logic makes it the natural representation for hardware. Two's complement extends it to signed integers without a separate sign bit.",
+    },
+    seeAlso: ["bit", "byte"],
+  },
+  {
     slug: "variable",
     term: "Variable",
     aliases: ["binding"],
