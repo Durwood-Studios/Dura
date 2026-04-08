@@ -1,28 +1,82 @@
 "use client";
 
-import { useState } from "react";
-import { ArrowUp, ArrowDown } from "lucide-react";
+import { useMemo, useState } from "react";
+import { ArrowUp, ArrowDown, ChevronRight, ChevronLeft, X } from "lucide-react";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 
-interface ParsonsPanelProps {
-  blocks: string[];
-  solution: number[];
+export interface ParsonsBlock {
+  id: string;
+  content: string;
 }
 
-/**
- * Base Parsons panel: button-based reorder with up/down controls.
- * Phase B (B4) replaces the controls with native HTML5 drag-and-drop +
- * touch support and adds distractor blocks plus indentation.
- */
-export function ParsonsPanel({ blocks, solution }: ParsonsPanelProps): React.ReactElement {
-  const [order, setOrder] = useState<number[]>(() => blocks.map((_, i) => i));
-  const [result, setResult] = useState<"idle" | "correct" | "wrong">("idle");
+export interface ParsonsSolutionStep {
+  id: string;
+  indent: number;
+}
 
-  const move = (from: number, delta: number) => {
+interface ParsonsPanelProps {
+  /** Source blocks the learner can pull from. */
+  blocks: ParsonsBlock[];
+  /** Wrong-answer blocks that must NOT appear in the solution. */
+  distractors?: ParsonsBlock[];
+  /** The correct ordered solution, including indentation. */
+  solution: ParsonsSolutionStep[];
+  /** Maximum indent level. Defaults to 3. */
+  maxIndent?: number;
+}
+
+interface PlacedBlock {
+  id: string;
+  indent: number;
+}
+
+const REVEAL_AFTER_ATTEMPTS = 3;
+
+/**
+ * Parsons problem with native HTML5 drag-and-drop, click-to-move (works
+ * on touch), keyboard reorder, and indentation. Distractors live in the
+ * source pool but must not appear in the solution.
+ */
+export function ParsonsPanel({
+  blocks,
+  distractors = [],
+  solution,
+  maxIndent = 3,
+}: ParsonsPanelProps): React.ReactElement {
+  const allBlocks = useMemo<ParsonsBlock[]>(
+    () => [...blocks, ...distractors],
+    [blocks, distractors]
+  );
+  const blockMap = useMemo(() => new Map(allBlocks.map((b) => [b.id, b])), [allBlocks]);
+
+  const initialPool = useMemo(() => allBlocks.map((b) => b.id), [allBlocks]);
+  const [pool, setPool] = useState<string[]>(initialPool);
+  const [placed, setPlaced] = useState<PlacedBlock[]>([]);
+  const [attempts, setAttempts] = useState(0);
+  const [result, setResult] = useState<"idle" | "correct" | "wrong">("idle");
+  const [revealed, setRevealed] = useState(false);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  const moveToTarget = (id: string) => {
+    if (revealed) return;
+    if (placed.find((p) => p.id === id)) return;
+    setPool((prev) => prev.filter((pid) => pid !== id));
+    setPlaced((prev) => [...prev, { id, indent: 0 }]);
+    setResult("idle");
+  };
+
+  const removeFromTarget = (id: string) => {
+    if (revealed) return;
+    setPlaced((prev) => prev.filter((p) => p.id !== id));
+    setPool((prev) => [...prev, id]);
+    setResult("idle");
+  };
+
+  const moveWithin = (from: number, delta: -1 | 1) => {
     const to = from + delta;
-    if (to < 0 || to >= order.length) return;
-    setOrder((prev) => {
+    if (to < 0 || to >= placed.length) return;
+    setPlaced((prev) => {
       const next = [...prev];
       [next[from], next[to]] = [next[to], next[from]];
       return next;
@@ -30,62 +84,196 @@ export function ParsonsPanel({ blocks, solution }: ParsonsPanelProps): React.Rea
     setResult("idle");
   };
 
+  const setIndent = (i: number, delta: -1 | 1) => {
+    setPlaced((prev) => {
+      const next = [...prev];
+      const target = Math.max(0, Math.min(maxIndent, next[i].indent + delta));
+      next[i] = { ...next[i], indent: target };
+      return next;
+    });
+    setResult("idle");
+  };
+
+  const onDragStart = (id: string) => (e: React.DragEvent) => {
+    setDraggingId(id);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", id);
+  };
+  const onDragEnd = () => setDraggingId(null);
+
+  const onDropToTarget = (e: React.DragEvent) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData("text/plain") || draggingId;
+    if (id) moveToTarget(id);
+    setDraggingId(null);
+  };
+
+  const onDropToPool = (e: React.DragEvent) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData("text/plain") || draggingId;
+    if (id && placed.find((p) => p.id === id)) removeFromTarget(id);
+    setDraggingId(null);
+  };
+
+  const allowDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
   const check = () => {
-    const correct = order.length === solution.length && order.every((id, i) => id === solution[i]);
+    const nextAttempts = attempts + 1;
+    setAttempts(nextAttempts);
+    const correct =
+      placed.length === solution.length &&
+      placed.every((p, i) => p.id === solution[i].id && p.indent === solution[i].indent);
     setResult(correct ? "correct" : "wrong");
-    void track("quiz_attempted", { type: "parsons", correct });
+    void track("quiz_attempted", { type: "parsons", correct, attempts: nextAttempts });
+
+    if (!correct && nextAttempts >= REVEAL_AFTER_ATTEMPTS) {
+      setRevealed(true);
+      setPlaced(solution.map((s) => ({ id: s.id, indent: s.indent })));
+      setPool(initialPool.filter((id) => !solution.find((s) => s.id === id)));
+    }
   };
 
   const reset = () => {
-    setOrder(blocks.map((_, i) => i));
+    setPool(initialPool);
+    setPlaced([]);
     setResult("idle");
+    setRevealed(false);
   };
 
   return (
     <section className="my-8 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
       <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
-        Reorder the blocks to form a valid solution.
+        Drag or tap blocks to build a valid solution. Some blocks are distractors and should not
+        appear in your answer.
       </p>
-      <ol className="flex flex-col gap-2">
-        {order.map((blockId, i) => (
-          <li
-            key={`${blockId}-${i}`}
-            className={cn(
-              "flex items-center gap-2 rounded-lg border bg-[var(--color-bg-subtle)] px-3 py-2 font-mono text-sm",
-              result === "correct" && "border-emerald-500 bg-emerald-50",
-              result === "wrong" && "border-rose-500 bg-rose-50",
-              result === "idle" && "border-[var(--color-border)]"
-            )}
-          >
-            <span className="flex flex-col">
+
+      {/* Source pool */}
+      <div
+        onDragOver={allowDrop}
+        onDrop={onDropToPool}
+        className="mb-4 flex flex-wrap gap-2 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-3"
+      >
+        {pool.length === 0 && (
+          <p className="text-xs text-[var(--color-text-muted)]">All blocks placed.</p>
+        )}
+        {pool.map((id) => {
+          const block = blockMap.get(id);
+          if (!block) return null;
+          return (
+            <button
+              key={id}
+              type="button"
+              draggable
+              onDragStart={onDragStart(id)}
+              onDragEnd={onDragEnd}
+              onClick={() => moveToTarget(id)}
+              className={cn(
+                "rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-left font-mono text-sm text-[var(--color-text-primary)] shadow-sm transition hover:border-emerald-400",
+                draggingId === id && "opacity-50"
+              )}
+            >
+              {block.content}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Solution target */}
+      <ol
+        onDragOver={allowDrop}
+        onDrop={onDropToTarget}
+        className="mb-4 flex min-h-[80px] flex-col gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-3"
+      >
+        {placed.length === 0 && (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Drop or tap blocks here to build your solution.
+          </p>
+        )}
+        {placed.map((p, i) => {
+          const block = blockMap.get(p.id);
+          if (!block) return null;
+          return (
+            <li
+              key={`${p.id}-${i}`}
+              draggable={!revealed}
+              onDragStart={onDragStart(p.id)}
+              onDragEnd={onDragEnd}
+              style={{ paddingLeft: `${p.indent * 20}px` }}
+              className={cn(
+                "flex items-center gap-2 rounded-lg border bg-white px-3 py-2 font-mono text-sm shadow-sm transition",
+                result === "correct" && "border-emerald-500 bg-emerald-50",
+                result === "wrong" && "border-rose-500 bg-rose-50",
+                result === "idle" && "border-[var(--color-border)]",
+                draggingId === p.id && "opacity-50"
+              )}
+            >
+              <span className="flex flex-col">
+                <button
+                  type="button"
+                  onClick={() => moveWithin(i, -1)}
+                  disabled={i === 0 || revealed}
+                  aria-label="Move up"
+                  className="text-[var(--color-text-muted)] hover:text-emerald-600 disabled:opacity-30"
+                >
+                  <ArrowUp className="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveWithin(i, 1)}
+                  disabled={i === placed.length - 1 || revealed}
+                  aria-label="Move down"
+                  className="text-[var(--color-text-muted)] hover:text-emerald-600 disabled:opacity-30"
+                >
+                  <ArrowDown className="h-3 w-3" />
+                </button>
+              </span>
+              <code className="flex-1 whitespace-pre">{block.content}</code>
               <button
                 type="button"
-                onClick={() => move(i, -1)}
-                disabled={i === 0}
-                aria-label="Move up"
+                onClick={() => setIndent(i, -1)}
+                disabled={p.indent === 0 || revealed}
+                aria-label="Indent left"
                 className="text-[var(--color-text-muted)] hover:text-emerald-600 disabled:opacity-30"
               >
-                <ArrowUp className="h-3 w-3" />
+                <ChevronLeft className="h-3 w-3" />
               </button>
               <button
                 type="button"
-                onClick={() => move(i, 1)}
-                disabled={i === order.length - 1}
-                aria-label="Move down"
+                onClick={() => setIndent(i, 1)}
+                disabled={p.indent === maxIndent || revealed}
+                aria-label="Indent right"
                 className="text-[var(--color-text-muted)] hover:text-emerald-600 disabled:opacity-30"
               >
-                <ArrowDown className="h-3 w-3" />
+                <ChevronRight className="h-3 w-3" />
               </button>
-            </span>
-            <code className="flex-1 whitespace-pre">{blocks[blockId]}</code>
-          </li>
-        ))}
+              <button
+                type="button"
+                onClick={() => removeFromTarget(p.id)}
+                disabled={revealed}
+                aria-label="Remove"
+                className="text-[var(--color-text-muted)] hover:text-rose-600 disabled:opacity-30"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </li>
+          );
+        })}
       </ol>
-      <div className="mt-4 flex gap-2">
+
+      <div className="flex flex-wrap gap-2">
         <button
           type="button"
           onClick={check}
-          className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600"
+          disabled={placed.length === 0 || revealed}
+          className={cn(
+            "rounded-lg px-4 py-2 text-sm font-semibold transition",
+            placed.length > 0 && !revealed
+              ? "bg-emerald-500 text-white hover:bg-emerald-600"
+              : "cursor-not-allowed bg-[var(--color-bg-subtle)] text-[var(--color-text-muted)]"
+          )}
         >
           Check
         </button>
@@ -97,11 +285,20 @@ export function ParsonsPanel({ blocks, solution }: ParsonsPanelProps): React.Rea
           Reset
         </button>
       </div>
-      {result === "wrong" && (
-        <p className="mt-3 text-sm text-rose-600">Not quite — try a different order.</p>
+
+      {result === "wrong" && !revealed && (
+        <p className="mt-3 text-sm text-rose-600">
+          Not quite — try a different order or indentation. ({REVEAL_AFTER_ATTEMPTS - attempts}{" "}
+          attempts left before the answer is revealed.)
+        </p>
       )}
-      {result === "correct" && (
-        <p className="mt-3 text-sm font-medium text-emerald-600">Correct order.</p>
+      {result === "correct" && !revealed && (
+        <p className="mt-3 text-sm font-medium text-emerald-600">Correct.</p>
+      )}
+      {revealed && (
+        <p className="mt-3 text-sm font-medium text-amber-600">
+          Here&apos;s the correct solution. Reset to try again.
+        </p>
       )}
     </section>
   );
