@@ -181,6 +181,23 @@ The app MUST work fully without Supabase. Auth is optional. Sync is optional. Of
 
 ---
 
+## RULE 7: FREE FOREVER
+
+DURA's core platform is free. Permanently. This is a Durwood Studios LLC commitment.
+
+- NEVER build feature gates that check payment or subscription status
+- NEVER create "premium" content tiers within the core curriculum
+- NEVER add "upgrade to unlock" UI anywhere in the learning experience
+- NEVER paywall lessons, dictionary terms, flashcards, sandboxes, or verification
+- The "Support the Developer" tip button is voluntary — it unlocks nothing
+- The AGPLv3 license legally guarantees the source stays open
+
+Future revenue (if any) comes from NEW products built ON TOP of DURA: managed hosting, enterprise SSO, white-label, analytics dashboards, consulting. Never from restricting what already exists. Trust at scale is the product.
+
+If any code review reveals a payment gate on core features, it is a bug. Revert it immediately.
+
+---
+
 ## DESIGN SYSTEM
 
 ### Colors (use these CSS custom properties)
