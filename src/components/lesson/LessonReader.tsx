@@ -51,6 +51,7 @@ export function LessonReader({ lesson, next, shareUrl }: LessonReaderProps): Rea
 
       <CompletionGate
         estimatedMinutes={meta.estimatedMinutes}
+        lessonTitle={meta.title}
         nextHref={next?.href}
         nextTitle={next?.title}
       />
