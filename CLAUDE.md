@@ -158,6 +158,7 @@ The app MUST work fully without Supabase. Auth is optional. Sync is optional. Of
 - SQL via Supabase client is parameterized by default — never concatenate user input into queries
 - Content Security Policy headers must be configured in next.config.ts
 - RLS policies on every Supabase table — no exceptions
+- The `SUPABASE_SERVICE_ROLE_KEY` must never exist in this codebase. The only Supabase keys permitted are `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` — both public by design. RLS protects the data. If admin access is ever needed, it will be discussed and approved explicitly before any implementation.
 
 ---
 
