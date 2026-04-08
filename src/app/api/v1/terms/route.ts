@@ -1,4 +1,5 @@
 import { searchTerms } from "@/lib/dictionary";
+import { DICTIONARY } from "@/content/dictionary";
 import { errorResponse, jsonResponse, optionsResponse } from "../_lib";
 import type { NextRequest } from "next/server";
 
@@ -19,6 +20,7 @@ export function GET(request: NextRequest): Response {
   const results = searchTerms({ query, phaseId, category, limit });
   return jsonResponse({
     count: results.length,
+    total: DICTIONARY.length,
     query: query ?? null,
     filters: { phaseId: phaseId ?? null, category: category ?? null },
     terms: results.map((t) => ({

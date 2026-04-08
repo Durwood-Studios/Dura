@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, Lock, Trophy, ArrowRight } from "lucide-react";
+import { Check, Lock, Trophy, ArrowRight, Repeat } from "lucide-react";
 import { useProgressStore } from "@/stores/progress";
 import { XP_AWARDS, levelFromXP } from "@/lib/xp";
 import { track } from "@/lib/analytics";
 import { getDB } from "@/lib/db";
+import { getDueCards } from "@/lib/db/flashcards";
 import { Confetti } from "@/components/motion/Confetti";
 import { ShareButton } from "@/components/seo/ShareButton";
 import { SITE_URL } from "@/lib/og";
@@ -74,6 +75,7 @@ export function CompletionGate({
   const [celebrating, setCelebrating] = useState(false);
   const [previousLevel, setPreviousLevel] = useState<number | null>(null);
   const [newLevel, setNewLevel] = useState<number | null>(null);
+  const [dueAfter, setDueAfter] = useState<number>(0);
   const xp = useTween(XP_AWARDS.lesson, XP_TWEEN_MS, celebrating);
 
   const checks = useMemo(
@@ -94,6 +96,12 @@ export function CompletionGate({
       setCelebrating(true);
     }
   }, [completed, celebrating]);
+
+  // After celebrating, fetch due card count for the review prompt.
+  useEffect(() => {
+    if (!celebrating) return;
+    void getDueCards().then((cards) => setDueAfter(cards.length));
+  }, [celebrating]);
 
   const onComplete = async () => {
     if (!current || completed) return;
@@ -155,6 +163,15 @@ export function CompletionGate({
             >
               Next: {nextTitle}
               <ArrowRight className="h-4 w-4" />
+            </Link>
+          )}
+          {dueAfter > 0 && (
+            <Link
+              href="/review"
+              className="inline-flex items-center gap-2 rounded-lg border border-emerald-300 bg-white px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-50"
+            >
+              <Repeat className="h-4 w-4" />
+              {dueAfter} flashcard{dueAfter === 1 ? "" : "s"} due for review
             </Link>
           )}
           <ShareButton url={shareUrl} title={shareText} text={shareText} />

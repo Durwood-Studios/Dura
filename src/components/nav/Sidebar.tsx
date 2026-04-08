@@ -14,6 +14,7 @@ import {
   Settings,
   GraduationCap,
 } from "lucide-react";
+import { ReviewBadge } from "@/components/review/ReviewBadge";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
@@ -51,7 +52,8 @@ export function Sidebar(): React.ReactElement {
               )}
             >
               <Icon className="h-4 w-4" aria-hidden />
-              {label}
+              <span className="flex-1">{label}</span>
+              {href === "/review" && <ReviewBadge />}
             </Link>
           );
         })}

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { X, LayoutDashboard, BookOpen, Repeat, BookMarked, BarChart3 } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
+import { ReviewBadge } from "@/components/review/ReviewBadge";
 import { cn } from "@/lib/utils";
 
 const TABS = [
@@ -30,7 +31,12 @@ export function MobileBottomTabs(): React.ReactElement {
               active ? "text-emerald-600" : "text-neutral-500"
             )}
           >
-            <Icon className="h-5 w-5" aria-hidden />
+            <span className="relative">
+              <Icon className="h-5 w-5" aria-hidden />
+              {href === "/review" && (
+                <ReviewBadge className="absolute -top-1 -right-2 h-4 min-w-[16px] text-[9px]" />
+              )}
+            </span>
             {label}
           </Link>
         );

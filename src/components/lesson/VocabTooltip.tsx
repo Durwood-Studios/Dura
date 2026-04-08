@@ -150,6 +150,12 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
               {inDeck ? "In your deck" : "Add to flashcards"}
             </button>
             {justAdded && <span className="text-[10px] text-emerald-600">Added “{term.term}”</span>}
+            <Link
+              href={`/dictionary/${slug}`}
+              className="ml-auto text-[11px] font-medium text-emerald-600 hover:text-emerald-700"
+            >
+              View in dictionary →
+            </Link>
           </span>
         </span>
       )}
