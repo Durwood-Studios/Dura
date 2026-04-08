@@ -4,6 +4,7 @@ import { Quiz } from "@/components/lesson/Quiz";
 import { FillBlank } from "@/components/lesson/FillBlank";
 import { ParsonsPanel } from "@/components/lesson/ParsonsPanel";
 import { VocabTooltip } from "@/components/lesson/VocabTooltip";
+import { SandboxExercise } from "@/components/lesson/SandboxExercise";
 import type { MDXComponents as MDXComponentsType } from "mdx/types";
 
 /**
@@ -17,6 +18,7 @@ export const mdxComponents: MDXComponentsType = {
   FillBlank: FillBlank as unknown as MDXComponentsType[string],
   ParsonsPanel: ParsonsPanel as unknown as MDXComponentsType[string],
   VocabTooltip: VocabTooltip as unknown as MDXComponentsType[string],
+  SandboxExercise: SandboxExercise as unknown as MDXComponentsType[string],
   h1: ({ children, ...props }) => (
     <h1 className="mt-8 mb-4 text-4xl font-semibold text-[var(--color-text-primary)]" {...props}>
       {children}
