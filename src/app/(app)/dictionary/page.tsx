@@ -1,12 +1,20 @@
 import type { Metadata } from "next";
+import { DictionaryClient } from "@/components/dictionary/DictionaryClient";
+import { DICTIONARY } from "@/content/dictionary";
 
-export const metadata: Metadata = { title: "Dictionary — DURA" };
+export const metadata: Metadata = {
+  title: "Dictionary — DURA",
+  description: "Verified engineering terms with three-tier definitions.",
+};
 
 export default function DictionaryPage(): React.ReactElement {
   return (
-    <main className="mx-auto max-w-5xl px-6 py-12">
-      <h1 className="text-3xl font-semibold">Dictionary</h1>
-      <p className="mt-2 text-neutral-600">Verified engineering terms.</p>
+    <main className="mx-auto max-w-5xl px-6 py-8">
+      <h1 className="mb-1 text-3xl font-semibold">Dictionary</h1>
+      <p className="mb-6 text-[var(--color-text-secondary)]">
+        {DICTIONARY.length} verified terms. Three tiers each: beginner, intermediate, advanced.
+      </p>
+      <DictionaryClient totalCount={DICTIONARY.length} />
     </main>
   );
 }
