@@ -4,9 +4,10 @@ import type { FlashCard, ReviewLog } from "@/types/flashcard";
 import type { Goal } from "@/types/goal";
 import type { Preferences } from "@/types/preferences";
 import type { AnalyticsEvent } from "@/types/analytics";
+import type { SandboxSave } from "@/types/sandbox";
 
 export const DB_NAME = "dura";
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
 export interface DuraDBSchema extends DBSchema {
   progress: {
@@ -50,6 +51,11 @@ export interface DuraDBSchema extends DBSchema {
     key: string;
     value: AnalyticsEvent;
     indexes: { "by-synced": number; "by-timestamp": number };
+  };
+  "sandbox-saves": {
+    key: string;
+    value: SandboxSave;
+    indexes: { "by-updated": number };
   };
 }
 
@@ -102,6 +108,11 @@ export function getDB(): Promise<DuraDB> {
           const store = db.createObjectStore("analytics", { keyPath: "id" });
           store.createIndex("by-synced", "synced");
           store.createIndex("by-timestamp", "timestamp");
+        }
+        // v2: sandbox saves
+        if (!db.objectStoreNames.contains("sandbox-saves")) {
+          const store = db.createObjectStore("sandbox-saves", { keyPath: "id" });
+          store.createIndex("by-updated", "updatedAt");
         }
       },
       blocked() {
