@@ -52,6 +52,7 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
   const [done, setDone] = useState(false);
   const [addedTerms, setAddedTerms] = useState<Set<string>>(new Set());
   const passQuiz = useProgressStore((s) => s.passQuiz);
+  const setQuizScore = useProgressStore((s) => s.setQuizScore);
 
   const total = questions.length;
   const question = questions[index];
@@ -93,6 +94,7 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
     const correctCount = history.filter((h) => h.correct).length;
     const finalScore = correctCount / total;
     setDone(true);
+    void setQuizScore(finalScore);
     if (finalScore >= passingScore) {
       passQuiz();
       void track("quiz_passed", { score: finalScore, total });

@@ -5,9 +5,10 @@ import type { Goal } from "@/types/goal";
 import type { Preferences } from "@/types/preferences";
 import type { AnalyticsEvent } from "@/types/analytics";
 import type { SandboxSave } from "@/types/sandbox";
+import type { AssessmentResult, Certificate } from "@/types/assessment";
 
 export const DB_NAME = "dura";
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 export interface DuraDBSchema extends DBSchema {
   progress: {
@@ -56,6 +57,16 @@ export interface DuraDBSchema extends DBSchema {
     key: string;
     value: SandboxSave;
     indexes: { "by-updated": number };
+  };
+  "assessment-results": {
+    key: string;
+    value: AssessmentResult;
+    indexes: { "by-target": string; "by-type": string; "by-completed": number };
+  };
+  certificates: {
+    key: string;
+    value: Certificate;
+    indexes: { "by-phase": string; "by-hash": string };
   };
 }
 
@@ -113,6 +124,18 @@ export function getDB(): Promise<DuraDB> {
         if (!db.objectStoreNames.contains("sandbox-saves")) {
           const store = db.createObjectStore("sandbox-saves", { keyPath: "id" });
           store.createIndex("by-updated", "updatedAt");
+        }
+        // v3: assessment results + certificates
+        if (!db.objectStoreNames.contains("assessment-results")) {
+          const store = db.createObjectStore("assessment-results", { keyPath: "id" });
+          store.createIndex("by-target", "targetId");
+          store.createIndex("by-type", "type");
+          store.createIndex("by-completed", "completedAt");
+        }
+        if (!db.objectStoreNames.contains("certificates")) {
+          const store = db.createObjectStore("certificates", { keyPath: "id" });
+          store.createIndex("by-phase", "phaseId");
+          store.createIndex("by-hash", "verificationHash");
         }
       },
       blocked() {

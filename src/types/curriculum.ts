@@ -55,6 +55,8 @@ export interface LessonProgress {
   scrollPercent: number;
   timeSpentMs: number;
   quizPassed: boolean;
+  /** Numeric score 0-1 from the lesson's quiz, null if no quiz attempted yet. */
+  quizScore: number | null;
   xpEarned: number;
   synced: 0 | 1;
 }

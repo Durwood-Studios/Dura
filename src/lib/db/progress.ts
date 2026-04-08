@@ -1,10 +1,19 @@
 import { getDB } from "@/lib/db";
 import type { LessonProgress, ModuleProgress, PhaseProgress } from "@/types/curriculum";
 
+/** Backfill defaults for fields added in later schema versions. */
+function normalize<T extends LessonProgress | undefined>(record: T): T {
+  if (!record) return record;
+  if (record.quizScore === undefined) {
+    return { ...record, quizScore: null } as T;
+  }
+  return record;
+}
+
 export async function getLessonProgress(lessonId: string): Promise<LessonProgress | undefined> {
   try {
     const db = await getDB();
-    return await db.get("progress", lessonId);
+    return normalize(await db.get("progress", lessonId));
   } catch (error) {
     console.error("[progress] getLessonProgress failed", error);
     return undefined;
@@ -23,7 +32,8 @@ export async function putLessonProgress(progress: LessonProgress): Promise<void>
 export async function getProgressByPhase(phaseId: string): Promise<LessonProgress[]> {
   try {
     const db = await getDB();
-    return await db.getAllFromIndex("progress", "by-phase", phaseId);
+    const records = await db.getAllFromIndex("progress", "by-phase", phaseId);
+    return records.map((r) => normalize(r) as LessonProgress);
   } catch (error) {
     console.error("[progress] getProgressByPhase failed", error);
     return [];
@@ -33,7 +43,8 @@ export async function getProgressByPhase(phaseId: string): Promise<LessonProgres
 export async function getProgressByModule(moduleId: string): Promise<LessonProgress[]> {
   try {
     const db = await getDB();
-    return await db.getAllFromIndex("progress", "by-module", moduleId);
+    const records = await db.getAllFromIndex("progress", "by-module", moduleId);
+    return records.map((r) => normalize(r) as LessonProgress);
   } catch (error) {
     console.error("[progress] getProgressByModule failed", error);
     return [];
