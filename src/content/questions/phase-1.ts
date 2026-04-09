@@ -417,4 +417,121 @@ export const PHASE_1_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["memoization"]
   ),
+
+  // ── Module 1-4: Data Structures ──────────────────────────────────────────
+  q(
+    "1-4-q1",
+    "1-4",
+    "multiple-choice",
+    "What is the index of the first element in a JavaScript array?",
+    ["1", "0", "-1", "It depends"],
+    1,
+    "Arrays are zero-indexed.",
+    "easy",
+    ["array", "index"]
+  ),
+  q(
+    "1-4-q2",
+    "1-4",
+    "multiple-choice",
+    "Which method adds an element to the end of an array?",
+    ["unshift", "push", "concat", "splice"],
+    1,
+    "push adds to the end; unshift adds to the front.",
+    "easy",
+    ["array", "push"]
+  ),
+  q(
+    "1-4-q3",
+    "1-4",
+    "multiple-choice",
+    "Which returns an array of an object's property names?",
+    ["Object.values()", "Object.keys()", "Object.entries()", "Object.from()"],
+    1,
+    "Object.keys() returns the keys as an array of strings.",
+    "easy",
+    ["object", "keys"]
+  ),
+  q(
+    "1-4-q4",
+    "1-4",
+    "code-output",
+    "What does this print?\n```js\nconst { a, b = 5 } = { a: 1 };\nconsole.log(b);\n```",
+    ["undefined", "null", "5", "Error"],
+    2,
+    "b defaults to 5 because the property is missing.",
+    "easy",
+    ["destructuring", "default"]
+  ),
+  q(
+    "1-4-q5",
+    "1-4",
+    "multiple-choice",
+    "What does adding a duplicate to a Set do?",
+    ["Throws an error", "Overwrites the value", "Silently ignores it", "Adds it twice"],
+    2,
+    "Sets only hold unique values. Duplicates are silently ignored.",
+    "medium",
+    ["set"]
+  ),
+  q(
+    "1-4-q6",
+    "1-4",
+    "multiple-choice",
+    "What happens when you JSON.parse invalid JSON?",
+    ["Returns null", "Returns undefined", "Throws a SyntaxError", "Returns {}"],
+    2,
+    "JSON.parse throws on invalid input.",
+    "medium",
+    ["json", "parse"]
+  ),
+  q(
+    "1-4-q7",
+    "1-4",
+    "multiple-choice",
+    "Why should you avoid `for...in` on arrays?",
+    [
+      "It is slower",
+      "It gives string keys and may include inherited properties",
+      "It doesn't work in strict mode",
+      "It reverses the order",
+    ],
+    1,
+    "for...in iterates enumerable string keys, including inherited ones.",
+    "medium",
+    ["for-in", "array"]
+  ),
+  q(
+    "1-4-q8",
+    "1-4",
+    "multiple-choice",
+    "Which array method returns the first element that passes a test?",
+    ["filter", "find", "some", "indexOf"],
+    1,
+    "find returns the first matching element or undefined.",
+    "medium",
+    ["find", "array"]
+  ),
+  q(
+    "1-4-q9",
+    "1-4",
+    "code-output",
+    "What does this print?\n```js\nconsole.log([...new Set([1,2,2,3,3])]);\n```",
+    ["[1,2,2,3,3]", "[1,2,3]", "[2,3]", "Error"],
+    1,
+    "Set removes duplicates; spreading into an array gives [1,2,3].",
+    "hard",
+    ["set", "spread"]
+  ),
+  q(
+    "1-4-q10",
+    "1-4",
+    "multiple-choice",
+    "What does `flatMap` do?",
+    ["Flattens deeply", "Maps then flattens one level", "Sorts and flattens", "Filters then maps"],
+    1,
+    "flatMap applies the callback then flattens the result by one level.",
+    "hard",
+    ["flatMap", "array"]
+  ),
 ];
