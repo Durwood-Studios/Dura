@@ -506,6 +506,256 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["function"],
   },
+  // ── Phase 1 expansion ────────────────────────────────────────────────────
+  {
+    slug: "constant",
+    term: "Constant",
+    aliases: ["const"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A variable whose binding cannot be changed after it is set.",
+      intermediate:
+        "Declared with `const`. The binding is immutable — you cannot reassign it. But if the value is an object or array, its contents can still be mutated.",
+      advanced:
+        "A lexically scoped, non-reassignable binding. `const` prevents reassignment of the identifier; it does not freeze the value. `Object.freeze()` is needed for shallow immutability of the value itself.",
+    },
+    seeAlso: ["variable", "scope"],
+  },
+  {
+    slug: "primitive",
+    term: "Primitive",
+    aliases: ["primitive type"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A simple value that is not an object — like a number, string, or boolean.",
+      intermediate:
+        "One of JavaScript's seven primitive types: string, number, bigint, boolean, undefined, null, symbol. Primitives are immutable and compared by value, not reference.",
+      advanced:
+        "Autoboxed to wrapper objects (String, Number, Boolean) when a method is called on them. The autoboxing is temporary — the primitive itself is never an object. Stored on the stack in optimized engines.",
+    },
+    seeAlso: ["variable", "string"],
+  },
+  {
+    slug: "type-coercion",
+    term: "Type Coercion",
+    aliases: ["implicit conversion"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "When JavaScript silently converts one type to another to make an operation work — like turning a number into a string during `+`.",
+      intermediate:
+        "Implicit type conversion applied by the Abstract Equality Comparison (==), arithmetic operators, and string concatenation. `2 + '3'` gives `'23'` because `+` prefers string concatenation when one operand is a string.",
+      advanced:
+        "Governed by the ToPrimitive, ToNumber, and ToString abstract operations in the ECMAScript spec. == follows a complex comparison algorithm (§7.2.14) that is the primary argument for always using ===.",
+    },
+    seeAlso: ["variable"],
+  },
+  {
+    slug: "recursion",
+    term: "Recursion",
+    aliases: [],
+    category: "fundamentals",
+    phaseIds: ["1", "3"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "When a function calls itself. It keeps going until it hits a base case that says 'stop.'",
+      intermediate:
+        "A technique where a function solves a problem by calling itself with a smaller input. Every recursive function needs a base case (when to stop) and a recursive case (when to call itself). Without a base case, you get infinite recursion and a stack overflow.",
+      advanced:
+        "Expressively equivalent to iteration but with different performance characteristics. Each call adds a frame to the call stack. Tail-call optimization (TCO) can reuse the frame, but only Safari implements it in JS. Prefer iteration for performance-critical paths.",
+    },
+    seeAlso: ["function", "loop"],
+  },
+  {
+    slug: "pure-function",
+    term: "Pure Function",
+    aliases: [],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A function with no surprises — same input always gives the same output, and it changes nothing outside itself.",
+      intermediate:
+        "A function that is deterministic (same arguments → same return value) and side-effect-free (no mutation of external state, no I/O, no logging). Pure functions are trivially testable and safe to memoize.",
+      advanced:
+        "Referentially transparent: the function call can be replaced with its return value without changing program behavior. Foundation of functional programming. React's render model assumes component functions are pure.",
+    },
+    seeAlso: ["function", "closure"],
+  },
+  {
+    slug: "higher-order-function",
+    term: "Higher-Order Function",
+    aliases: ["HOF"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A function that takes another function as input or returns one as output.",
+      intermediate:
+        "A function that operates on other functions — either by taking them as arguments (map, filter, reduce) or by returning a new function (factory, decorator). Higher-order functions enable composition and abstraction.",
+      advanced:
+        "In type theory, a function of type (A → B) → C or A → (B → C). JavaScript's first-class functions make every function potentially higher-order. Currying transforms a multi-argument function into a chain of unary higher-order functions.",
+    },
+    seeAlso: ["function", "callback", "closure"],
+  },
+  {
+    slug: "map-method",
+    term: "Array.map()",
+    aliases: ["map"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Runs a function on every element and returns a new array of the results.",
+      intermediate:
+        "Calls the provided callback once for each element, collects the return values into a new array of the same length. Does not mutate the original. The callback receives (element, index, array).",
+      advanced:
+        "A functor operation: maps a function over a container's values. In category theory terms, Array is a functor and .map is its fmap. Equivalent to a for-of loop with push, but declarative.",
+    },
+    seeAlso: ["array", "callback", "filter-method"],
+  },
+  {
+    slug: "filter-method",
+    term: "Array.filter()",
+    aliases: ["filter"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Runs a test on every element and returns a new array of only the ones that passed.",
+      intermediate:
+        "Calls the callback for each element; if the callback returns truthy, the element is included in the new array. Does not mutate. The result may be shorter than the original (or empty).",
+      advanced:
+        "A selection operation over a collection. O(n) time, O(k) space where k is the number of matching elements. Often chained with .map() to select-then-transform.",
+    },
+    seeAlso: ["array", "callback", "map-method"],
+  },
+  {
+    slug: "reduce",
+    term: "Array.reduce()",
+    aliases: ["reduce", "fold"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Collapses an entire array into a single value by running a function that accumulates as it goes.",
+      intermediate:
+        "Calls the callback with (accumulator, currentElement) for each item. The return value becomes the next accumulator. The second argument to reduce is the initial accumulator. Without it, the first element is used — which can be surprising on empty arrays.",
+      advanced:
+        "A catamorphism (fold) over a list. Universal: any operation expressible with a loop over an array can be expressed as a reduce. In practice, readability often favors a combination of map + filter over a single complex reduce.",
+    },
+    seeAlso: ["array", "callback"],
+  },
+  {
+    slug: "set",
+    term: "Set",
+    aliases: [],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A collection that only holds unique values. Adding a duplicate does nothing.",
+      intermediate:
+        "A built-in JavaScript collection that stores unique values of any type. Primary methods: add, has, delete, clear. Iterates in insertion order. `[...new Set(arr)]` is the standard deduplication idiom.",
+      advanced:
+        "Implemented as a hash set with O(1) average-case add/has/delete. Uses the SameValueZero comparison algorithm (like === but treats NaN as equal to NaN). No index access — convert to array if you need positions.",
+    },
+    seeAlso: ["array", "object"],
+  },
+  {
+    slug: "hash-map",
+    term: "Map",
+    aliases: ["hash map", "dictionary"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A collection of key-value pairs where the key can be anything — not just a string.",
+      intermediate:
+        "A built-in key-value store with any-type keys, guaranteed insertion order, and a .size property. Methods: set, get, has, delete, clear. Preferred over plain objects when keys are dynamic, non-string, or when frequent addition/deletion is needed.",
+      advanced:
+        "Implemented as a hash table with O(1) average-case get/set. Keys are compared with SameValueZero. Iterates in insertion order (spec-guaranteed since ES2015). Weak variant (WeakMap) allows garbage collection of key objects.",
+    },
+    seeAlso: ["object", "set"],
+  },
+  {
+    slug: "stack-trace",
+    term: "Stack Trace",
+    aliases: ["traceback", "backtrace"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A list of function calls that shows exactly where an error happened and who called whom.",
+      intermediate:
+        "Printed when an error is thrown, showing the call chain from the throw site to the entry point. Read top-to-bottom: the top line is where the error occurred; each subsequent line is the caller. File names and line numbers are included.",
+      advanced:
+        "Captured from the call stack at the point of Error construction (not throw). V8 lazily formats the trace via Error.prepareStackTrace. Stack depth is limited (~10K frames by default); deep recursion truncates. Source maps translate minified positions to original source.",
+    },
+    seeAlso: ["function"],
+  },
+  {
+    slug: "breakpoint",
+    term: "Breakpoint",
+    aliases: [],
+    category: "tools",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A marker that tells the debugger to pause the program at a specific line so you can inspect variables.",
+      intermediate:
+        "Set in the browser DevTools (click a line number) or in code with the `debugger` statement. Conditional breakpoints only pause when a specified expression is true. Logpoints log a message without pausing.",
+      advanced:
+        "Implemented by the engine inserting an interrupt instruction at the bytecode offset corresponding to the source position. Hardware breakpoints (used in native debuggers) use CPU debug registers. Web debuggers communicate via the Chrome DevTools Protocol (CDP).",
+    },
+    seeAlso: ["stack-trace"],
+  },
+  {
+    slug: "linter",
+    term: "Linter",
+    aliases: ["ESLint"],
+    category: "tools",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A tool that reads your code and flags potential bugs before you run it.",
+      intermediate:
+        "Static analysis tool that checks source code against a set of rules — catching unused variables, missing awaits, inconsistent equality operators, and other patterns. ESLint is the dominant JavaScript linter; rules are configurable per project.",
+      advanced:
+        "Operates on the AST (Abstract Syntax Tree) produced by the parser. Each rule is a visitor function that walks the tree and reports violations. Custom rules can be written as ESLint plugins. Can auto-fix many issues (--fix flag).",
+    },
+    seeAlso: ["variable"],
+  },
+  {
+    slug: "unit-test",
+    term: "Unit Test",
+    aliases: ["test"],
+    category: "fundamentals",
+    phaseIds: ["1"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Code that automatically checks whether a small piece of your code works correctly.",
+      intermediate:
+        "A test that exercises a single function or module in isolation. Follows the Arrange/Act/Assert pattern: set up inputs, call the function, check the output. Frameworks like Vitest and Jest discover and run tests automatically.",
+      advanced:
+        "Unit tests verify behavior at the smallest granularity — typically one function per test case. They should be fast (no I/O), deterministic (same result every run), and independent (no shared state between tests). Test doubles (mocks, stubs, spies) isolate the unit from dependencies.",
+    },
+    seeAlso: ["function"],
+  },
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
