@@ -1,7 +1,9 @@
 import { create } from "zustand";
 import { getDueCards, getAllCards } from "@/lib/db/flashcards";
 import { applyReview } from "@/lib/db/flashcards-review";
+import { awardXP } from "@/lib/db/xp";
 import { extendStreak } from "@/lib/streak-manager";
+import { XP_AWARDS } from "@/lib/xp";
 import { track } from "@/lib/analytics";
 import type { FlashCard, ReviewRating } from "@/types/flashcard";
 
@@ -81,6 +83,9 @@ export const useReviewStore = create<ReviewState>((set, get) => ({
 
     const responseTimeMs = state.flippedAt ? Date.now() - state.flippedAt : 0;
     await applyReview(card, rating);
+    // Per-card-per-day XP — one awardXP line per card per calendar day.
+    const day = new Date().toISOString().slice(0, 10);
+    void awardXP("flashcard", XP_AWARDS.flashcard, `${card.id}_${day}`);
 
     const isCorrect = RATING_VALUE[rating] >= 3;
     const sessionStats: SessionStats = {

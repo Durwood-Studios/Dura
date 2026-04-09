@@ -6,9 +6,10 @@ import type { Preferences } from "@/types/preferences";
 import type { AnalyticsEvent } from "@/types/analytics";
 import type { SandboxSave } from "@/types/sandbox";
 import type { AssessmentResult, Certificate } from "@/types/assessment";
+import type { XPEvent } from "@/types/xp";
 
 export const DB_NAME = "dura";
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 export interface DuraDBSchema extends DBSchema {
   progress: {
@@ -67,6 +68,11 @@ export interface DuraDBSchema extends DBSchema {
     key: string;
     value: Certificate;
     indexes: { "by-phase": string; "by-hash": string };
+  };
+  "xp-events": {
+    key: string;
+    value: XPEvent;
+    indexes: { "by-source": string; "by-awarded": number };
   };
 }
 
@@ -136,6 +142,12 @@ export function getDB(): Promise<DuraDB> {
           const store = db.createObjectStore("certificates", { keyPath: "id" });
           store.createIndex("by-phase", "phaseId");
           store.createIndex("by-hash", "verificationHash");
+        }
+        // v4: xp events log
+        if (!db.objectStoreNames.contains("xp-events")) {
+          const store = db.createObjectStore("xp-events", { keyPath: "id" });
+          store.createIndex("by-source", "source");
+          store.createIndex("by-awarded", "awardedAt");
         }
       },
       blocked() {

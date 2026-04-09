@@ -6,8 +6,8 @@ import { Check, Lock, Trophy, ArrowRight, Repeat } from "lucide-react";
 import { useProgressStore } from "@/stores/progress";
 import { XP_AWARDS, levelFromXP } from "@/lib/xp";
 import { track } from "@/lib/analytics";
-import { getDB } from "@/lib/db";
 import { getDueCards } from "@/lib/db/flashcards";
+import { awardXP, getTotalXP } from "@/lib/db/xp";
 import { extendStreak } from "@/lib/streak-manager";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { Confetti } from "@/components/motion/Confetti";
@@ -25,17 +25,6 @@ interface CompletionGateProps {
 const SCROLL_REQUIRED = 85;
 const TIME_REQUIRED_RATIO = 0.7;
 const XP_TWEEN_MS = 1000;
-
-async function readTotalXp(): Promise<number> {
-  try {
-    const db = await getDB();
-    const all = await db.getAll("progress");
-    return all.reduce((sum, p) => sum + (p.completedAt ? p.xpEarned : 0), 0);
-  } catch (error) {
-    console.error("[gate] readTotalXp failed", error);
-    return 0;
-  }
-}
 
 function useTween(target: number, durationMs: number, run: boolean): number {
   const [value, setValue] = useState(0);
@@ -109,9 +98,10 @@ export function CompletionGate({
 
   const onComplete = async () => {
     if (!current || completed) return;
-    const before = await readTotalXp();
+    const before = await getTotalXP();
     setPreviousLevel(levelFromXP(before));
     await complete(XP_AWARDS.lesson);
+    await awardXP("lesson", XP_AWARDS.lesson, current.lessonId);
     const after = before + XP_AWARDS.lesson;
     setNewLevel(levelFromXP(after));
     setCelebrating(true);

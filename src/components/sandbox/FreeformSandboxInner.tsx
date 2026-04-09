@@ -12,6 +12,8 @@ import {
 } from "@codesandbox/sandpack-react";
 import { Save, Copy, Download, RotateCcw, ChevronDown } from "lucide-react";
 import { getRecentSaves, putSave } from "@/lib/db/sandbox";
+import { awardXP } from "@/lib/db/xp";
+import { XP_AWARDS } from "@/lib/xp";
 import { generateId } from "@/lib/utils";
 import { track } from "@/lib/analytics";
 import type { SandboxLanguage, SandboxSave } from "@/types/sandbox";
@@ -203,6 +205,9 @@ function Toolbar({
 
   const onRun = () => {
     void track("sandbox_executed", { language, success: true });
+    // Daily-per-language XP cap — earn sandbox XP at most once per day per language.
+    const day = new Date().toISOString().slice(0, 10);
+    void awardXP("sandbox", XP_AWARDS.sandbox, `freeform_${language}_${day}`);
     sandpack.runSandpack();
   };
 

@@ -11,6 +11,8 @@ import {
   ASSESSMENT_PASSING_SCORE,
 } from "@/lib/assessment";
 import { putResult, getLatestResult } from "@/lib/db/assessments";
+import { awardXP } from "@/lib/db/xp";
+import { XP_AWARDS } from "@/lib/xp";
 import { putCertificate, getCertificatesByPhase } from "@/lib/db/certificates";
 import { generateVerificationHash } from "@/lib/crypto";
 import { track } from "@/lib/analytics";
@@ -170,6 +172,8 @@ export function PhaseTest({
         targetId: phaseId,
         score: scored.score,
       });
+      void awardXP("verification", XP_AWARDS.verification, phaseId);
+      void awardXP("phase-complete", XP_AWARDS.phaseComplete, phaseId);
     }
     setStatus("results");
   };

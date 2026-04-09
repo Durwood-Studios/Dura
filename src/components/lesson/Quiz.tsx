@@ -9,6 +9,7 @@ import { putCard } from "@/lib/db/flashcards";
 import { getTerm } from "@/lib/dictionary";
 import { generateId, cn } from "@/lib/utils";
 import { XP_AWARDS } from "@/lib/xp";
+import { awardXP } from "@/lib/db/xp";
 
 export type QuizQuestionType = "multiple-choice" | "multiple-select" | "true-false" | "code-output";
 
@@ -53,6 +54,7 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
   const [addedTerms, setAddedTerms] = useState<Set<string>>(new Set());
   const passQuiz = useProgressStore((s) => s.passQuiz);
   const setQuizScore = useProgressStore((s) => s.setQuizScore);
+  const currentLesson = useProgressStore((s) => s.current);
 
   const total = questions.length;
   const question = questions[index];
@@ -98,6 +100,9 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
     if (finalScore >= passingScore) {
       passQuiz();
       void track("quiz_passed", { score: finalScore, total });
+      if (currentLesson) {
+        void awardXP("quiz", XP_AWARDS.quiz, currentLesson.lessonId);
+      }
     }
   };
 

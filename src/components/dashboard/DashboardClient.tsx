@@ -6,6 +6,7 @@ import { Trophy, BookOpen, Repeat, ArrowRight } from "lucide-react";
 import { getDB } from "@/lib/db";
 import { getAllCards, getDueCards } from "@/lib/db/flashcards";
 import { levelProgress } from "@/lib/xp";
+import { getTotalXP } from "@/lib/db/xp";
 import { isStreakAlive, type StreakState, INITIAL_STREAK } from "@/lib/streak";
 import { getCurrentStreak } from "@/lib/streak-manager";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
@@ -31,7 +32,7 @@ async function loadDashboard(): Promise<DashboardData> {
     const allProgress = await db.getAll("progress");
     const completed = allProgress.filter((p) => p.completedAt !== null);
     const inProgress = allProgress.filter((p) => p.completedAt === null);
-    const totalXp = completed.reduce((sum, p) => sum + p.xpEarned, 0);
+    const totalXp = await getTotalXP();
     const totalTimeMs = allProgress.reduce((sum, p) => sum + p.timeSpentMs, 0);
     const streak = await getCurrentStreak();
     const due = await getDueCards();
