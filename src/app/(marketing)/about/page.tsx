@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight, Shield, BookOpen, Code2 } from "lucide-react";
 import { buildMetadata } from "@/lib/og";
+import { TipButton } from "@/components/support/TipButton";
 
 export const metadata: Metadata = buildMetadata({
   title: "About",
@@ -103,6 +104,9 @@ export default function AboutPage(): React.ReactElement {
           If this platform helps your journey, a tip keeps the lights on. If it doesn&apos;t, it
           costs you nothing. That&apos;s the whole deal.
         </p>
+        <div className="mt-4">
+          <TipButton variant="inline" />
+        </div>
       </section>
 
       <section>
