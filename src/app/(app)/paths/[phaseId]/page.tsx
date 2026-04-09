@@ -1,3 +1,7 @@
+import { notFound } from "next/navigation";
+import { getPhase } from "@/content/phases";
+import { PhaseDetailClient } from "@/components/paths/PhaseDetailClient";
+
 type Params = Promise<{ phaseId: string }>;
 
 export default async function PhasePage({
@@ -6,10 +10,12 @@ export default async function PhasePage({
   params: Params;
 }): Promise<React.ReactElement> {
   const { phaseId } = await params;
+  const phase = getPhase(phaseId);
+  if (!phase) notFound();
+
   return (
-    <main className="mx-auto max-w-5xl px-6 py-12">
-      <p className="font-mono text-sm text-neutral-500">Phase {phaseId}</p>
-      <h1 className="mt-2 text-3xl font-semibold">Modules</h1>
+    <main className="mx-auto max-w-4xl px-6 py-10">
+      <PhaseDetailClient phase={phase} />
     </main>
   );
 }
