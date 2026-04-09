@@ -148,4 +148,136 @@ export const PHASE_1_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["var", "scope"]
   ),
+
+  // ── Module 1-2: Control Flow ─────────────────────────────────────────────
+  q(
+    "1-2-q1",
+    "1-2",
+    "multiple-choice",
+    "How many blocks can execute in an if/else if/else chain?",
+    ["All of them", "Exactly one", "At least one", "Zero or more"],
+    1,
+    "Exactly one block runs — the first whose condition is true, or the else.",
+    "easy",
+    ["if", "else"]
+  ),
+  q(
+    "1-2-q2",
+    "1-2",
+    "code-output",
+    "What does this print?\n```js\nconst x = 0;\nif (x) { console.log('yes'); } else { console.log('no'); }\n```",
+    ["'yes'", "'no'", "undefined", "Error"],
+    1,
+    "0 is falsy, so the else branch runs.",
+    "easy",
+    ["falsy", "if"]
+  ),
+  q(
+    "1-2-q3",
+    "1-2",
+    "multiple-choice",
+    "What does `continue` do inside a loop?",
+    [
+      "Exits the loop entirely",
+      "Skips to the next iteration",
+      "Restarts the loop",
+      "Pauses the loop",
+    ],
+    1,
+    "continue skips the rest of the current iteration and moves to the next.",
+    "easy",
+    ["loop", "continue"]
+  ),
+  q(
+    "1-2-q4",
+    "1-2",
+    "true-false",
+    "True or false: `do...while` always runs its body at least once.",
+    ["True", "False"],
+    0,
+    "do...while checks the condition after the body, guaranteeing at least one execution.",
+    "easy",
+    ["while", "do-while"]
+  ),
+  q(
+    "1-2-q5",
+    "1-2",
+    "multiple-choice",
+    "What happens if you forget `break` in a switch case?",
+    [
+      "An error is thrown",
+      "Execution falls through to the next case",
+      "Only the matching case runs",
+      "The switch exits",
+    ],
+    1,
+    "Without break, execution continues into the next case — intentional or not.",
+    "medium",
+    ["switch", "break"]
+  ),
+  q(
+    "1-2-q6",
+    "1-2",
+    "multiple-choice",
+    "What is a guard clause?",
+    [
+      "A deeply nested if",
+      "An early return handling an edge case",
+      "A switch at the top of a function",
+      "A try/catch block",
+    ],
+    1,
+    "Guard clauses return early on edge cases so the main logic stays flat.",
+    "medium",
+    ["guard-clause", "early-return"]
+  ),
+  q(
+    "1-2-q7",
+    "1-2",
+    "code-output",
+    "What does this print?\n```js\nconsole.log(0 || 'fallback');\n```",
+    ["0", "'fallback'", "false", "null"],
+    1,
+    "0 is falsy, so || returns the next operand.",
+    "medium",
+    ["logical-or", "falsy"]
+  ),
+  q(
+    "1-2-q8",
+    "1-2",
+    "multiple-choice",
+    "When does the `finally` block run?",
+    ["Only on error", "Only on success", "Always, error or not", "Only when catch re-throws"],
+    2,
+    "finally always runs. Use it for cleanup.",
+    "medium",
+    ["try-catch", "finally"]
+  ),
+  q(
+    "1-2-q9",
+    "1-2",
+    "code-output",
+    "What does this print?\n```js\nfor (let i = 0; i < 3; i++) {\n  if (i === 1) continue;\n  console.log(i);\n}\n```",
+    ["0, 1, 2", "0, 2", "1", "0, 1"],
+    1,
+    "continue skips the iteration when i is 1, so only 0 and 2 are logged.",
+    "hard",
+    ["for", "continue"]
+  ),
+  q(
+    "1-2-q10",
+    "1-2",
+    "multiple-choice",
+    "Why is chaining ternary operators (a ? b : c ? d : e) discouraged?",
+    [
+      "It's slower",
+      "It's harder to read than if/else",
+      "It doesn't work in strict mode",
+      "It only supports two branches",
+    ],
+    1,
+    "Chained ternaries are syntactically valid but much harder to read than equivalent if/else.",
+    "hard",
+    ["ternary", "readability"]
+  ),
 ];
