@@ -2,8 +2,12 @@ import "server-only";
 import { PHASES, getPhase, getModule } from "@/content/phases";
 import { listLessons, loadLesson, type LoadedLesson } from "@/lib/content";
 import type { LessonMeta, Phase, Module } from "@/types/curriculum";
-import type { AssessmentQuestion } from "@/types/assessment";
-import { PHASE_0_QUESTIONS } from "@/content/questions/phase-0";
+export {
+  ALL_QUESTIONS,
+  getAllQuestions,
+  getQuestionsByPhase,
+  getQuestionsByModule,
+} from "@/content/questions";
 
 /**
  * Aggregate iteration helpers for curriculum data. Used by the teacher
@@ -64,25 +68,6 @@ export async function listAllLessonMeta(): Promise<LessonMeta[]> {
 }
 
 // ─── Questions ──────────────────────────────────────────────────────────────
-
-/**
- * Every authored question across every phase. Phase 0 is the only pool
- * today (40 questions); additional phases will register here as their
- * question banks are authored during the content sprint.
- */
-export const ALL_QUESTIONS: AssessmentQuestion[] = [...PHASE_0_QUESTIONS];
-
-export function getAllQuestions(): AssessmentQuestion[] {
-  return ALL_QUESTIONS;
-}
-
-export function getQuestionsByPhase(phaseId: string): AssessmentQuestion[] {
-  return ALL_QUESTIONS.filter((q) => q.phaseId === phaseId);
-}
-
-export function getQuestionsByModule(moduleId: string): AssessmentQuestion[] {
-  return ALL_QUESTIONS.filter((q) => q.moduleId === moduleId);
-}
 
 // ─── Standards extraction ───────────────────────────────────────────────────
 
