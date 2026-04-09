@@ -313,9 +313,43 @@ Research: 90% of learners prefer 5-10 min modules. Completion jumps from 20% to 
 Inline: Shiki + console mock — read-only display
 Light: Sandpack — JS/TS/React interactive exercises
 Full: Monaco + Pyodide — Python + data science
-Advanced: Monaco + Judge0 API — 60+ languages (C, Rust, Go)
+Advanced: Monaco + Judge0 API — compiled languages
 
 Freeform sandbox page at /sandbox. Choose language, write/run/save code, share via URL, fork lesson exercises. Works offline (Sandpack + Pyodide run in-browser).
+
+### Language Support Tiers
+
+DURA prioritizes depth over breadth. We do not aim to support "every language."
+
+Tier 1 — Full support (lessons + sandbox + exercises + dictionary terms):
+JavaScript, TypeScript, Python, HTML/CSS, SQL
+These cover 90% of DURA's curriculum (Phases 0-6, 8).
+
+Tier 2 — Sandbox support via Judge0 (run code, referenced in lessons):
+Rust, Go, C, C++, Java
+These cover systems engineering and advanced topics (Phases 5, 7).
+
+Tier 3 — Reference only (mentioned in lessons, no sandbox):
+Everything else. DURA is not Exercism or LeetCode. We teach engineering
+principles through a focused set of languages, not syntax for 60+ languages.
+
+### Operating System Support
+
+The platform: Equal on all OS. DURA is a PWA — Chrome, Firefox, Safari, Edge
+on Windows, macOS, Linux, iOS, Android. Responsive. Offline.
+
+The content: Linux-primary with Windows equivalents.
+
+- Terminal lessons (Phase 0): bash commands primary, PowerShell in expandable
+  "Windows" callout blocks. macOS terminal is bash-compatible by default.
+- Git lessons: identical on all OS.
+- Dev environment setup: VS Code setup covered for Windows, macOS, and Linux.
+- Docker lessons: Linux-native concepts, Docker Desktop for macOS/Windows noted.
+- Systems engineering (Phase 5): Linux-centric by nature (OS internals, networking).
+  This is not a bias — production servers run Linux. We teach what's real.
+
+Lesson MDX supports a <PlatformToggle> component (future) that lets users set
+their OS preference and see relevant commands throughout all lessons.
 
 ---
 
@@ -564,6 +598,29 @@ Sustainability: Free core forever. Future managed cloud and enterprise tiers bui
 
 Every lesson frontmatter includes: CS2023 knowledge units, SWEBOK v4 knowledge area, Bloom's level, SFIA level, Dreyfus stage. Teacher dashboard filters by any standard.
 
+### Current Standards (verified April 2026)
+
+ACM CS2023 — Current. No successor exists. ACM's Living Curriculum Taskforce is exploring a continuously-updated model, but no output yet. Next full revision ~2033 under the old cycle.
+
+SWEBOK v4.0a — Current (minor correction release September 2025). SWEBOK v5 is aspirational only. SWEBOK Summit 2026 at ICSE (April 2026, Rio) is gathering input. No timeline for v5.
+
+SFIA 9 — Current (October 2024). SFIA 10 is in early consultation (accepting change requests). Expected ~2027 based on the 3-year cycle. Monitor closely.
+
+DURA will update mappings when new versions are formally published. Until then, CS2023 + SWEBOK v4 + SFIA 9 are the authoritative references.
+
+### AI Engineering Competency Framework
+
+No industry-standard "AI Body of Knowledge" equivalent to SWEBOK exists specifically for AI/ML engineering. The field moves faster than standards bodies.
+
+DURA's approach:
+
+- Map Phase 6 (AI/ML Engineering) lessons to CS2023's AI knowledge area and SFIA 9's AI-specific skills (machine learning, data engineering, AI model development).
+- Publish DURA's own open-source "AI Engineering Competency Framework" as a structured reference. If DURA's framework becomes a community-adopted reference, that is moat.
+- Framework covers: prompt engineering, RAG pipelines, agentic systems, MCP development, fine-tuning, evaluation (RAGAS), deployment, monitoring, responsible AI.
+- Structured as: Competency → Knowledge Units → Skill Levels (Dreyfus mapping).
+- Published at /standards/ai-engineering and as a downloadable PDF.
+- Updated as the field evolves — this is a living document, not a static standard.
+
 ---
 
 ## 29. Analytics and Data
@@ -699,6 +756,76 @@ Phase I (Week 20-22): Polish, audits, launch.
 
 ---
 
-DURA — Engineering education, hardened by design.
-A Durwood Studios LLC product. Ideation by Dustin Snellings.
-Open source. Free forever. Built for everyone. Works everywhere.
+## Appendix A — Build Concerns and Deferred Items (Living)
+
+> Tracked here so PLANNING.md reflects the real state of the codebase.
+> Last synced: end of Phase E, 49 commits on main.
+
+### A1. Known deferred (filed by phase)
+
+- **Bite, Review, Challenge study modes** — declared in preferences type;
+  Focus + Sprint are the only modes with behavior. Filed for a later polish
+  round after Phase I launch.
+- **Strict gating enforcement** — Settings has a toggle (Phase E) but the
+  paths navigation still lets users bypass mastery gates. UI flag exists;
+  enforcement in the route layer is not wired. File to Phase I polish.
+- **`phase_unlocked` analytics event** — declared in the type union since
+  infrastructure, never fired. Will fire when strict-gating enforcement
+  ships (same blocker as above).
+- **MilestoneBadge component** — Phase E prompt asked for it; shipped
+  LevelBadge + StreakFlame + toasts + dashboard streak instead. Dedicated
+  milestone grid is a polish item.
+- **Streak-extended toast** — toast store supports `kind: "streak"` but
+  nothing currently pushes it. One-line add in streak-manager.
+- **Home page 151 kB First Load** — pre-existing, slightly over the
+  150 kB target. Standalone chore, Phase I.
+- **Sandpack console pass/fail verdict** — the in-lesson exercise verdict
+  in `SandboxExerciseInner.tsx` is optimistic (doesn't actually read
+  console output). Real verdict requires reading Sandpack client listeners.
+  Phase C refinement, filed.
+- **Prettier MDX template literals** — Prettier collapses indentation
+  inside `initialCode` / `solution` template strings in lesson MDX files.
+  JS still parses; authored code renders uglier than intended. Fix with
+  `<!-- prettier-ignore -->` blocks. Batch chore, unscheduled.
+- **PWA / Serwist** — deliberately deferred during Phase A. Phase I.
+- **Cross-device certificate verification** — certificates are local-only
+  because there is no auth backend yet. The `/verify/[hash]` not-found
+  page already explains this. Blocked on Supabase auth, filed post-launch.
+- **Dictionary scale** — 30 terms shipped in Phase C vs. the 500+
+  planning target. Will scale during the Phase H content sprint alongside
+  lesson writing.
+
+### A2. Scope clarifications applied during the build
+
+- **Streak persistence strategy** — planning §24 lists "goals, preferences,
+  dictionary-cache, analytics" as the IDB stores. Streak was added as a
+  **field on the Preferences record** (not its own store) because it's a
+  singleton. DB v4 has progress, moduleProgress, phaseProgress, flashcards,
+  reviewLogs, goals, preferences, dictionaryCache, analytics, sandbox-saves,
+  assessment-results, certificates, xp-events.
+- **XP persistence strategy** — originally lesson-only via
+  `LessonProgress.xpEarned`. Phase E added a dedicated `xp-events` store
+  with a deterministic id (`xp_{source}_{sourceId}`) so the same award
+  can never double-write. `LessonProgress.xpEarned` is retained for
+  back-compat but new totals read from `getTotalXP()`.
+- **Question bank shape** — planning §16 says "different questions each
+  attempt". Phase D shipped `selectMasteryQuestions` with a mulberry32
+  PRNG seeded by `Date.now()` so consecutive attempts get different
+  orderings. Phase verification uses weighted selection across the pool
+  (30% easy, 50% medium, 20% hard).
+- **Certificate security model** — planning §16 mentions "verification
+  hash". Phase D ships a client-side SHA-256 with a versioned salt
+  (`dura-verify-v1`). Documented in `src/lib/crypto.ts` as
+  "honest-but-curious" — true tamper proofing requires server-side HMAC,
+  filed for when Supabase lands.
+- **Soft gating v1** — Phase D/E deliberately do not hard-block navigation
+  to locked modules. Mastery icons are purely visual. Strict mode is a
+  preference toggle with no enforcer yet.
+
+### A3. Standards mapping coverage
+
+All Phase 0 lessons and Phase 0 question bank entries include partial
+standards frontmatter (CS2023, SWEBOK, Bloom, SFIA, Dreyfus). Phases 1-9
+lessons do not exist yet (Phase H content sprint). The AI Engineering
+Competency Framework (§28) is not yet published; it lands when Phase 6
+content is authored.
