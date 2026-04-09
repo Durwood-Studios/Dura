@@ -168,4 +168,131 @@ export const PHASE_2_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["accessibility", "skip-link"]
   ),
+
+  // ── Module 2-2: CSS Fundamentals ─────────────────────────────────────────
+  q(
+    "2-2-q1",
+    "2-2",
+    "multiple-choice",
+    "What does `box-sizing: border-box` do?",
+    [
+      "Makes the box invisible",
+      "Includes padding and border in the element's total width/height",
+      "Removes all borders",
+      "Centers the box",
+    ],
+    1,
+    "border-box means padding and border are inside the declared width, not added to it.",
+    "easy",
+    ["box-model", "css"]
+  ),
+  q(
+    "2-2-q2",
+    "2-2",
+    "multiple-choice",
+    "Which CSS display value makes an element take the full width and start on a new line?",
+    ["inline", "block", "inline-block", "flex"],
+    1,
+    "Block elements take the full width and start on a new line. Inline elements do not.",
+    "easy",
+    ["display", "css"]
+  ),
+  q(
+    "2-2-q3",
+    "2-2",
+    "multiple-choice",
+    "In flexbox, which property aligns items along the main axis?",
+    ["align-items", "justify-content", "flex-wrap", "flex-direction"],
+    1,
+    "justify-content aligns along the main axis; align-items aligns along the cross axis.",
+    "easy",
+    ["flexbox", "css"]
+  ),
+  q(
+    "2-2-q4",
+    "2-2",
+    "true-false",
+    "True or false: CSS Grid and Flexbox solve different layout problems and are often used together.",
+    ["True", "False"],
+    0,
+    "Grid is for 2D layouts; Flexbox is for 1D. They complement each other.",
+    "easy",
+    ["grid", "flexbox"]
+  ),
+  q(
+    "2-2-q5",
+    "2-2",
+    "multiple-choice",
+    "What does 'mobile-first' mean in responsive design?",
+    [
+      "Design for desktop first, then adapt",
+      "Write CSS for small screens first, then add media queries for larger screens",
+      "Only support mobile devices",
+      "Use only viewport units",
+    ],
+    1,
+    "Mobile-first means base styles target small screens; @media (min-width) adds complexity for larger viewports.",
+    "medium",
+    ["responsive", "mobile-first"]
+  ),
+  q(
+    "2-2-q6",
+    "2-2",
+    "multiple-choice",
+    "Which position value keeps an element in normal flow but offsets it relative to its original position?",
+    ["static", "relative", "absolute", "fixed"],
+    1,
+    "relative offsets from the element's normal position without removing it from flow.",
+    "medium",
+    ["position", "css"]
+  ),
+  q(
+    "2-2-q7",
+    "2-2",
+    "multiple-choice",
+    "Which CSS property should you prefer for animations to avoid triggering layout recalculations?",
+    ["top/left", "margin", "transform", "width/height"],
+    2,
+    "transform and opacity are composited on the GPU. top/left/margin trigger layout.",
+    "medium",
+    ["animation", "performance"]
+  ),
+  q(
+    "2-2-q8",
+    "2-2",
+    "multiple-choice",
+    "What does the CSS `fr` unit represent in Grid?",
+    ["Fixed pixels", "A fraction of the available space", "Font-relative size", "Full row"],
+    1,
+    "fr distributes remaining space proportionally. 1fr 2fr gives a 1:2 ratio.",
+    "medium",
+    ["grid", "fr"]
+  ),
+  q(
+    "2-2-q9",
+    "2-2",
+    "multiple-choice",
+    "Which CSS selector has the highest specificity?",
+    [".class", "#id", "element", "*"],
+    1,
+    "ID selectors (#) have higher specificity than class (.) which beats element selectors.",
+    "hard",
+    ["specificity", "selector"]
+  ),
+  q(
+    "2-2-q10",
+    "2-2",
+    "multiple-choice",
+    "What does `position: sticky` do?",
+    [
+      "Removes the element from flow",
+      "Acts like relative until a scroll threshold, then like fixed",
+      "Centers the element",
+      "Makes the element invisible",
+    ],
+    1,
+    "sticky toggles between relative and fixed based on the scroll position.",
+    "hard",
+    ["position", "sticky"]
+  ),
 ];
