@@ -661,4 +661,141 @@ export const PHASE_1_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["reference", "mutation"]
   ),
+
+  // ── Module 1-6: First Projects ───────────────────────────────────────────
+  q(
+    "1-6-q1",
+    "1-6",
+    "multiple-choice",
+    "What should you build first in a project?",
+    ["The user interface", "The core logic", "The CSS styling", "The deployment pipeline"],
+    1,
+    "Core logic first, then interface.",
+    "easy",
+    ["planning", "project"]
+  ),
+  q(
+    "1-6-q2",
+    "1-6",
+    "multiple-choice",
+    "What does CRUD stand for?",
+    [
+      "Copy, Read, Undo, Delete",
+      "Create, Read, Update, Delete",
+      "Create, Run, Update, Deploy",
+      "Compile, Read, Update, Debug",
+    ],
+    1,
+    "Create, Read, Update, Delete — the four basic data operations.",
+    "easy",
+    ["crud"]
+  ),
+  q(
+    "1-6-q3",
+    "1-6",
+    "true-false",
+    "True or false: separating data from logic makes both easier to test and reuse.",
+    ["True", "False"],
+    0,
+    "Data and logic should be separate so each can be changed independently.",
+    "easy",
+    ["design", "separation"]
+  ),
+  q(
+    "1-6-q4",
+    "1-6",
+    "multiple-choice",
+    "What is continuous deployment?",
+    [
+      "Deploying once a year",
+      "Automatically deploying on every push",
+      "Manually uploading files",
+      "Running tests locally",
+    ],
+    1,
+    "Continuous deployment auto-builds and deploys on every push to main.",
+    "easy",
+    ["deployment", "ci"]
+  ),
+  q(
+    "1-6-q5",
+    "1-6",
+    "multiple-choice",
+    "What does the 'Arrange, Act, Assert' pattern describe?",
+    [
+      "Three deployment stages",
+      "The structure of a test",
+      "Three variable types",
+      "The Git workflow",
+    ],
+    1,
+    "Arrange inputs, Act by calling the function, Assert the outputs.",
+    "medium",
+    ["testing", "pattern"]
+  ),
+  q(
+    "1-6-q6",
+    "1-6",
+    "multiple-choice",
+    "What should code review feedback include?",
+    ["Just 'looks good'", "Specific observations with reasoning", "A full rewrite", "Only praise"],
+    1,
+    "Specific, reasoned feedback helps the author learn.",
+    "medium",
+    ["code-review"]
+  ),
+  q(
+    "1-6-q7",
+    "1-6",
+    "multiple-choice",
+    "Where should API keys and secrets be stored?",
+    ["In the source code", "In environment variables", "In the README", "In the HTML"],
+    1,
+    "Secrets go in environment variables, never in committed code.",
+    "medium",
+    ["security", "env"]
+  ),
+  q(
+    "1-6-q8",
+    "1-6",
+    "multiple-choice",
+    "Why validate user input before using it?",
+    [
+      "It makes code slower",
+      "Invalid input causes bugs, crashes, or security holes",
+      "JavaScript requires it",
+      "It improves SEO",
+    ],
+    1,
+    "Unvalidated input is the root cause of most application bugs and security vulnerabilities.",
+    "medium",
+    ["validation", "input"]
+  ),
+  q(
+    "1-6-q9",
+    "1-6",
+    "multiple-choice",
+    "What is the developer workflow loop?",
+    [
+      "Code → Ship → Hope",
+      "Write → Test → Commit → Push → Deploy",
+      "Plan → Code → Plan → Code",
+      "Read → Watch → Repeat",
+    ],
+    1,
+    "The professional development loop: write, test, commit, push, deploy.",
+    "hard",
+    ["workflow"]
+  ),
+  q(
+    "1-6-q10",
+    "1-6",
+    "multiple-choice",
+    "Which array method pattern creates a composable data pipeline?",
+    ["for loop", "while loop", "Chaining .filter().map().sort()", "switch statement"],
+    2,
+    "Chained array methods read like a pipeline and each step is independently testable.",
+    "hard",
+    ["composition", "array-methods"]
+  ),
 ];
