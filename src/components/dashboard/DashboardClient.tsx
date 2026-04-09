@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Trophy, BookOpen, Repeat, ArrowRight } from "lucide-react";
+import { BookOpen, Repeat, ArrowRight } from "lucide-react";
 import { getDB } from "@/lib/db";
 import { getAllCards, getDueCards } from "@/lib/db/flashcards";
 import { levelProgress } from "@/lib/xp";
@@ -10,6 +10,7 @@ import { getTotalXP } from "@/lib/db/xp";
 import { isStreakAlive, type StreakState, INITIAL_STREAK } from "@/lib/streak";
 import { getCurrentStreak } from "@/lib/streak-manager";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
+import { LevelBadge } from "@/components/gamification/LevelBadge";
 import { cn, formatMinutes } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { TOTAL_LESSONS } from "@/content/phases";
@@ -99,7 +100,7 @@ export function DashboardClient(): React.ReactElement {
     <div className="flex flex-col gap-6">
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          icon={<Trophy className="h-4 w-4 text-amber-500" />}
+          icon={<LevelBadge level={level.level} size="sm" />}
           label="Level"
           value={String(level.level)}
           hint={`${level.current} / ${level.needed} XP to next`}

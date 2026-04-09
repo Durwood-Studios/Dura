@@ -10,7 +10,7 @@ import {
   ASSESSMENT_PASSING_SCORE,
 } from "@/lib/assessment";
 import { putResult, getLatestResult } from "@/lib/db/assessments";
-import { awardXP } from "@/lib/db/xp";
+import { awardXPWithToast } from "@/lib/xp-manager";
 import { XP_AWARDS } from "@/lib/xp";
 import { extendStreak } from "@/lib/streak-manager";
 import { track } from "@/lib/analytics";
@@ -169,7 +169,7 @@ export function MasteryGate({
         targetId: moduleId,
         score: scored.score,
       });
-      void awardXP("mastery-gate", XP_AWARDS.moduleComplete, moduleId);
+      void awardXPWithToast("mastery-gate", XP_AWARDS.moduleComplete, moduleId);
     }
   };
 

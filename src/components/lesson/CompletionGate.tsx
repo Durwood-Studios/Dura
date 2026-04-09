@@ -7,7 +7,8 @@ import { useProgressStore } from "@/stores/progress";
 import { XP_AWARDS, levelFromXP } from "@/lib/xp";
 import { track } from "@/lib/analytics";
 import { getDueCards } from "@/lib/db/flashcards";
-import { awardXP, getTotalXP } from "@/lib/db/xp";
+import { getTotalXP } from "@/lib/db/xp";
+import { awardXPWithToast } from "@/lib/xp-manager";
 import { extendStreak } from "@/lib/streak-manager";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { Confetti } from "@/components/motion/Confetti";
@@ -101,7 +102,7 @@ export function CompletionGate({
     const before = await getTotalXP();
     setPreviousLevel(levelFromXP(before));
     await complete(XP_AWARDS.lesson);
-    await awardXP("lesson", XP_AWARDS.lesson, current.lessonId);
+    await awardXPWithToast("lesson", XP_AWARDS.lesson, current.lessonId);
     const after = before + XP_AWARDS.lesson;
     setNewLevel(levelFromXP(after));
     setCelebrating(true);

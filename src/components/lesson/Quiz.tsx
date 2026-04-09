@@ -9,7 +9,7 @@ import { putCard } from "@/lib/db/flashcards";
 import { getTerm } from "@/lib/dictionary";
 import { generateId, cn } from "@/lib/utils";
 import { XP_AWARDS } from "@/lib/xp";
-import { awardXP } from "@/lib/db/xp";
+import { awardXPWithToast } from "@/lib/xp-manager";
 
 export type QuizQuestionType = "multiple-choice" | "multiple-select" | "true-false" | "code-output";
 
@@ -101,7 +101,7 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
       passQuiz();
       void track("quiz_passed", { score: finalScore, total });
       if (currentLesson) {
-        void awardXP("quiz", XP_AWARDS.quiz, currentLesson.lessonId);
+        void awardXPWithToast("quiz", XP_AWARDS.quiz, currentLesson.lessonId);
       }
     }
   };

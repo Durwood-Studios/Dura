@@ -3,6 +3,7 @@
 import { Menu, Search } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { SprintTimer } from "@/components/study/SprintTimer";
+import { TopBarGamification } from "@/components/gamification/TopBarGamification";
 
 export function TopBar(): React.ReactElement {
   const toggleMobileNav = useUIStore((s) => s.toggleMobileNav);
@@ -18,7 +19,8 @@ export function TopBar(): React.ReactElement {
       >
         <Menu className="h-5 w-5" />
       </button>
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ml-auto flex items-center gap-3">
+        <TopBarGamification />
         <SprintTimer />
       </div>
       <button

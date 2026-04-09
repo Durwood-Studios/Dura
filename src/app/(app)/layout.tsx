@@ -4,6 +4,7 @@ import { MobileBottomTabs, MobileDrawer } from "@/components/nav/MobileNav";
 import { Breadcrumbs } from "@/components/nav/Breadcrumbs";
 import { FocusModeProvider } from "@/components/study/FocusModeProvider";
 import { FocusExitButton } from "@/components/study/FocusExitButton";
+import { ToastLayer } from "@/components/gamification/ToastLayer";
 
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
@@ -18,6 +19,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
       <MobileBottomTabs />
       <MobileDrawer />
       <FocusExitButton />
+      <ToastLayer />
     </div>
   );
 }
