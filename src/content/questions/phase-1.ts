@@ -280,4 +280,141 @@ export const PHASE_1_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["ternary", "readability"]
   ),
+
+  // ── Module 1-3: Functions ────────────────────────────────────────────────
+  q(
+    "1-3-q1",
+    "1-3",
+    "multiple-choice",
+    "What is the difference between a parameter and an argument?",
+    [
+      "They are the same",
+      "Parameter is in the definition; argument is the value at call time",
+      "Argument is in the definition",
+      "Parameters are for arrow functions only",
+    ],
+    1,
+    "Parameters are placeholders; arguments are the actual values passed.",
+    "easy",
+    ["parameter", "argument"]
+  ),
+  q(
+    "1-3-q2",
+    "1-3",
+    "true-false",
+    "True or false: a function declaration is hoisted (available before its line in the code).",
+    ["True", "False"],
+    0,
+    "Function declarations are hoisted. Expressions and arrows are not.",
+    "easy",
+    ["hoisting", "function"]
+  ),
+  q(
+    "1-3-q3",
+    "1-3",
+    "multiple-choice",
+    "What does a function return if it has no return statement?",
+    ["null", "undefined", "0", "Error"],
+    1,
+    "An implicit return gives undefined.",
+    "easy",
+    ["return", "undefined"]
+  ),
+  q(
+    "1-3-q4",
+    "1-3",
+    "code-output",
+    "What does this print?\n```js\nconst fn = (a, b = 10) => a + b;\nconsole.log(fn(5));\n```",
+    ["5", "10", "15", "NaN"],
+    2,
+    "b defaults to 10 when not passed. 5 + 10 = 15.",
+    "easy",
+    ["default-parameter"]
+  ),
+  q(
+    "1-3-q5",
+    "1-3",
+    "multiple-choice",
+    "What is a closure?",
+    [
+      "A function that self-destructs",
+      "A function bundled with references to its outer scope",
+      "A function with no parameters",
+      "A function that runs once",
+    ],
+    1,
+    "A closure retains access to its enclosing scope even after that scope has returned.",
+    "medium",
+    ["closure"]
+  ),
+  q(
+    "1-3-q6",
+    "1-3",
+    "multiple-choice",
+    "Which array method transforms each element and returns a new array?",
+    ["filter", "reduce", "map", "forEach"],
+    2,
+    "map applies a callback to every element and collects the returns.",
+    "medium",
+    ["map", "callback"]
+  ),
+  q(
+    "1-3-q7",
+    "1-3",
+    "multiple-select",
+    "Which are requirements for a function to be pure? Select all.",
+    [
+      "Same input always gives same output",
+      "No side effects",
+      "Must use arrow syntax",
+      "Must return a value",
+    ],
+    [0, 1],
+    "Pure = deterministic output + no side effects.",
+    "medium",
+    ["pure-function"]
+  ),
+  q(
+    "1-3-q8",
+    "1-3",
+    "multiple-choice",
+    "What does `await` do?",
+    [
+      "Stops all code everywhere",
+      "Pauses the current async function until the promise settles",
+      "Cancels the promise",
+      "Converts a promise to a callback",
+    ],
+    1,
+    "await pauses only the enclosing async function; other code continues.",
+    "medium",
+    ["async", "await"]
+  ),
+  q(
+    "1-3-q9",
+    "1-3",
+    "code-output",
+    "What does this print?\n```js\nfunction makeAdder(a) { return b => a + b; }\nconst add10 = makeAdder(10);\nconsole.log(add10(5));\n```",
+    ["5", "10", "15", "NaN"],
+    2,
+    "makeAdder(10) returns a closure over a=10. add10(5) computes 10+5=15.",
+    "hard",
+    ["closure", "factory"]
+  ),
+  q(
+    "1-3-q10",
+    "1-3",
+    "multiple-choice",
+    "What does memoization do?",
+    [
+      "Deletes old calls",
+      "Caches results so repeated calls skip the computation",
+      "Runs in a worker",
+      "Converts to arrow function",
+    ],
+    1,
+    "Memoization trades memory for speed by caching previously computed results.",
+    "hard",
+    ["memoization"]
+  ),
 ];
