@@ -2,6 +2,7 @@
 
 import { Menu, Search } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
+import { SprintTimer } from "@/components/study/SprintTimer";
 
 export function TopBar(): React.ReactElement {
   const toggleMobileNav = useUIStore((s) => s.toggleMobileNav);
@@ -17,10 +18,13 @@ export function TopBar(): React.ReactElement {
       >
         <Menu className="h-5 w-5" />
       </button>
+      <div className="ml-auto flex items-center gap-2">
+        <SprintTimer />
+      </div>
       <button
         type="button"
         onClick={toggleCommandPalette}
-        className="ml-auto flex items-center gap-2 rounded-lg border border-[#E5E5E5] bg-white px-3 py-1.5 text-sm text-neutral-500 transition hover:bg-[#F5F5F4]"
+        className="flex items-center gap-2 rounded-lg border border-[#E5E5E5] bg-white px-3 py-1.5 text-sm text-neutral-500 transition hover:bg-[#F5F5F4]"
       >
         <Search className="h-4 w-4" />
         <span className="hidden sm:inline">Search</span>

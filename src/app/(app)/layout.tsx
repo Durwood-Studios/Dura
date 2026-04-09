@@ -2,10 +2,13 @@ import { Sidebar } from "@/components/nav/Sidebar";
 import { TopBar } from "@/components/nav/TopBar";
 import { MobileBottomTabs, MobileDrawer } from "@/components/nav/MobileNav";
 import { Breadcrumbs } from "@/components/nav/Breadcrumbs";
+import { FocusModeProvider } from "@/components/study/FocusModeProvider";
+import { FocusExitButton } from "@/components/study/FocusExitButton";
 
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
     <div className="flex min-h-screen bg-[#FAFAFA] text-neutral-900">
+      <FocusModeProvider />
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
@@ -14,6 +17,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
       </div>
       <MobileBottomTabs />
       <MobileDrawer />
+      <FocusExitButton />
     </div>
   );
 }
