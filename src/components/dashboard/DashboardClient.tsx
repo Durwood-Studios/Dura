@@ -2,11 +2,13 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Flame, Trophy, BookOpen, Repeat, ArrowRight } from "lucide-react";
+import { Trophy, BookOpen, Repeat, ArrowRight } from "lucide-react";
 import { getDB } from "@/lib/db";
 import { getAllCards, getDueCards } from "@/lib/db/flashcards";
 import { levelProgress } from "@/lib/xp";
 import { isStreakAlive, type StreakState, INITIAL_STREAK } from "@/lib/streak";
+import { getCurrentStreak } from "@/lib/streak-manager";
+import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { cn, formatMinutes } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { TOTAL_LESSONS } from "@/content/phases";
@@ -31,6 +33,7 @@ async function loadDashboard(): Promise<DashboardData> {
     const inProgress = allProgress.filter((p) => p.completedAt === null);
     const totalXp = completed.reduce((sum, p) => sum + p.xpEarned, 0);
     const totalTimeMs = allProgress.reduce((sum, p) => sum + p.timeSpentMs, 0);
+    const streak = await getCurrentStreak();
     const due = await getDueCards();
     let nextDue: number | null = null;
     if (due.length === 0) {
@@ -50,7 +53,7 @@ async function loadDashboard(): Promise<DashboardData> {
       totalTimeMs,
       dueCardCount: due.length,
       nextDue,
-      streak: INITIAL_STREAK,
+      streak,
       lastLesson,
     };
   } catch (error) {
@@ -101,7 +104,7 @@ export function DashboardClient(): React.ReactElement {
           hint={`${level.current} / ${level.needed} XP to next`}
         />
         <StatCard
-          icon={<Flame className="h-4 w-4 text-rose-500" />}
+          icon={<StreakFlame days={data.streak.current} />}
           label="Streak"
           value={`${data.streak.current}d`}
           hint={streakAlive ? "Keep it going" : "Start today"}

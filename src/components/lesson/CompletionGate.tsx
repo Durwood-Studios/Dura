@@ -8,6 +8,8 @@ import { XP_AWARDS, levelFromXP } from "@/lib/xp";
 import { track } from "@/lib/analytics";
 import { getDB } from "@/lib/db";
 import { getDueCards } from "@/lib/db/flashcards";
+import { extendStreak } from "@/lib/streak-manager";
+import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { Confetti } from "@/components/motion/Confetti";
 import { ShareButton } from "@/components/seo/ShareButton";
 import { SITE_URL } from "@/lib/og";
@@ -76,6 +78,8 @@ export function CompletionGate({
   const [previousLevel, setPreviousLevel] = useState<number | null>(null);
   const [newLevel, setNewLevel] = useState<number | null>(null);
   const [dueAfter, setDueAfter] = useState<number>(0);
+  const [streakDays, setStreakDays] = useState<number>(0);
+  const [streakExtended, setStreakExtended] = useState<boolean>(false);
   const xp = useTween(XP_AWARDS.lesson, XP_TWEEN_MS, celebrating);
 
   const checks = useMemo(
@@ -111,6 +115,16 @@ export function CompletionGate({
     const after = before + XP_AWARDS.lesson;
     setNewLevel(levelFromXP(after));
     setCelebrating(true);
+    // Extend the streak and record whether it grew.
+    try {
+      const { getCurrentStreak } = await import("@/lib/streak-manager");
+      const prev = await getCurrentStreak();
+      const updated = await extendStreak();
+      setStreakDays(updated.current);
+      setStreakExtended(updated.current > prev.current);
+    } catch (error) {
+      console.error("[gate] streak extend failed", error);
+    }
     void track("lesson_completed", {
       lessonId: current.lessonId,
       phaseId: current.phaseId,
@@ -150,6 +164,16 @@ export function CompletionGate({
             style={{ animation: "celebrate-in 400ms ease-out 0.9s forwards" }}
           >
             ⭐ Level up — Level {newLevel}
+          </p>
+        )}
+        {streakExtended && streakDays > 0 && (
+          <p
+            className="mt-2 inline-flex items-center justify-center gap-1 text-sm font-medium text-amber-600 opacity-0"
+            style={{ animation: "celebrate-in 400ms ease-out 1s forwards" }}
+          >
+            <StreakFlame days={streakDays} />
+            {streakDays} day streak
+            {[7, 14, 30, 60, 100, 365].includes(streakDays) && " — milestone!"}
           </p>
         )}
         <div

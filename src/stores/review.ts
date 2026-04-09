@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { getDueCards, getAllCards } from "@/lib/db/flashcards";
 import { applyReview } from "@/lib/db/flashcards-review";
+import { extendStreak } from "@/lib/streak-manager";
 import { track } from "@/lib/analytics";
 import type { FlashCard, ReviewRating } from "@/types/flashcard";
 
@@ -99,6 +100,7 @@ export const useReviewStore = create<ReviewState>((set, get) => ({
         cardsReviewed: total,
         accuracy,
       });
+      void extendStreak();
       set({
         index: nextIndex,
         flippedAt: null,

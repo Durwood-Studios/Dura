@@ -1,3 +1,6 @@
+import type { StreakState } from "@/lib/streak";
+import { INITIAL_STREAK } from "@/lib/streak";
+
 export type Theme = "light" | "dark" | "system";
 export type StudyMode = "standard" | "bite" | "focus" | "review" | "sprint" | "challenge";
 export type FontSize = "sm" | "md" | "lg" | "xl";
@@ -10,6 +13,8 @@ export interface Preferences {
   reducedMotion: boolean;
   soundEnabled: boolean;
   dailyGoalMinutes: number;
+  strictGating: boolean;
+  streak: StreakState;
   updatedAt: number;
 }
 
@@ -21,5 +26,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   reducedMotion: false,
   soundEnabled: true,
   dailyGoalMinutes: 20,
+  strictGating: false,
+  streak: INITIAL_STREAK,
   updatedAt: 0,
 };

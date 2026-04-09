@@ -10,6 +10,7 @@ import {
   ASSESSMENT_PASSING_SCORE,
 } from "@/lib/assessment";
 import { putResult, getLatestResult } from "@/lib/db/assessments";
+import { extendStreak } from "@/lib/streak-manager";
 import { track } from "@/lib/analytics";
 import { generateId, formatTime, cn } from "@/lib/utils";
 import type { AssessmentQuestion, AssessmentResult, QuestionResult } from "@/types/assessment";
@@ -156,6 +157,7 @@ export function MasteryGate({
       questionResults: scored.results,
     };
     await putResult(record);
+    void extendStreak();
     setLatestResult(record);
     setResultRecord(scored);
     setStatus("results");

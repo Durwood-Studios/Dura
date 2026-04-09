@@ -1,11 +1,23 @@
 import { getDB } from "@/lib/db";
 import { DEFAULT_PREFERENCES, type Preferences } from "@/types/preferences";
+import { INITIAL_STREAK } from "@/lib/streak";
+
+/** Backfill defaults for fields added in later schema versions. */
+function normalize(stored: Preferences | undefined): Preferences {
+  if (!stored) return DEFAULT_PREFERENCES;
+  return {
+    ...DEFAULT_PREFERENCES,
+    ...stored,
+    streak: stored.streak ?? INITIAL_STREAK,
+    strictGating: stored.strictGating ?? false,
+  };
+}
 
 export async function getPreferences(): Promise<Preferences> {
   try {
     const db = await getDB();
     const stored = await db.get("preferences", "user");
-    return stored ?? DEFAULT_PREFERENCES;
+    return normalize(stored);
   } catch (error) {
     console.error("[preferences] getPreferences failed", error);
     return DEFAULT_PREFERENCES;
