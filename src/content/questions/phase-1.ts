@@ -534,4 +534,131 @@ export const PHASE_1_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["flatMap", "array"]
   ),
+
+  // ── Module 1-5: Debugging ────────────────────────────────────────────────
+  q(
+    "1-5-q1",
+    "1-5",
+    "multiple-choice",
+    "Which error type means you used a variable that doesn't exist?",
+    ["TypeError", "ReferenceError", "SyntaxError", "RangeError"],
+    1,
+    "ReferenceError means the name was never declared.",
+    "easy",
+    ["error", "reference"]
+  ),
+  q(
+    "1-5-q2",
+    "1-5",
+    "multiple-choice",
+    "In a stack trace, which position shows where the error was thrown?",
+    ["The last line", "The first line after the message", "The middle", "Random"],
+    1,
+    "Stack traces list the most recent call first.",
+    "easy",
+    ["stack-trace"]
+  ),
+  q(
+    "1-5-q3",
+    "1-5",
+    "multiple-choice",
+    "Which console method displays data as a formatted table?",
+    ["console.log", "console.table", "console.group", "console.dir"],
+    1,
+    "console.table renders arrays of objects as a formatted table.",
+    "easy",
+    ["console"]
+  ),
+  q(
+    "1-5-q4",
+    "1-5",
+    "true-false",
+    "True or false: rubber duck debugging means explaining code line by line to reveal bugs.",
+    ["True", "False"],
+    0,
+    "Explaining forces precision and reveals mismatches between intent and reality.",
+    "easy",
+    ["rubber-duck"]
+  ),
+  q(
+    "1-5-q5",
+    "1-5",
+    "multiple-choice",
+    "What does 'Step Over' do in a debugger?",
+    [
+      "Skips the function entirely",
+      "Runs the line and pauses on the next line in the same function",
+      "Enters the called function",
+      "Resumes to the end",
+    ],
+    1,
+    "Step Over runs the line (including function calls) and pauses on the next.",
+    "medium",
+    ["debugger", "step"]
+  ),
+  q(
+    "1-5-q6",
+    "1-5",
+    "multiple-choice",
+    "What is an off-by-one error?",
+    [
+      "Using the wrong variable",
+      "A loop that runs one too many or few times",
+      "A syntax error on line 1",
+      "A network timeout",
+    ],
+    1,
+    "Off-by-one means the boundary is wrong by exactly one.",
+    "medium",
+    ["bug-pattern"]
+  ),
+  q(
+    "1-5-q7",
+    "1-5",
+    "multiple-choice",
+    "What does a linter do?",
+    [
+      "Compiles code",
+      "Flags suspicious patterns before runtime",
+      "Formats whitespace",
+      "Deploys the app",
+    ],
+    1,
+    "A linter scans for potential bugs and bad practices statically.",
+    "medium",
+    ["linting", "eslint"]
+  ),
+  q(
+    "1-5-q8",
+    "1-5",
+    "multiple-choice",
+    "What is the first step in the debugging workflow?",
+    ["Fix the bug", "Reproduce the bug reliably", "Refactor surrounding code", "Add a test"],
+    1,
+    "You cannot fix what you cannot reliably reproduce.",
+    "medium",
+    ["debugging-workflow"]
+  ),
+  q(
+    "1-5-q9",
+    "1-5",
+    "multiple-choice",
+    "Which tool auto-formats your code so style arguments never happen?",
+    ["ESLint", "Prettier", "TypeScript", "webpack"],
+    1,
+    "Prettier handles formatting. ESLint handles logic.",
+    "hard",
+    ["prettier", "formatting"]
+  ),
+  q(
+    "1-5-q10",
+    "1-5",
+    "code-output",
+    "What does this print?\n```js\nconst a = { x: 1 };\nconst b = a;\nb.x = 99;\nconsole.log(a.x);\n```",
+    ["1", "99", "undefined", "Error"],
+    1,
+    "b is a reference to the same object. Changing b.x also changes a.x.",
+    "hard",
+    ["reference", "mutation"]
+  ),
 ];
