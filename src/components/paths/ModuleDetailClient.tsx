@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, ChevronLeft, Check } from "lucide-react";
 import { MasteryGate } from "@/components/verify/MasteryGate";
-import { PHASE_0_QUESTIONS } from "@/content/questions/phase-0";
+import { getQuestionsByPhase } from "@/content/questions";
 import { getProgressByModule } from "@/lib/db/progress";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { formatMinutes, cn } from "@/lib/utils";
@@ -39,7 +39,7 @@ export function ModuleDetailClient({
     };
   }, [moduleId]);
 
-  const questionPool = phaseId === "0" ? PHASE_0_QUESTIONS : [];
+  const questionPool = getQuestionsByPhase(phaseId);
   const completedCount = progress
     ? Array.from(progress.values()).filter((p) => p.completedAt !== null).length
     : 0;

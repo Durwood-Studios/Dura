@@ -5,7 +5,7 @@ import Link from "next/link";
 import { ArrowRight, CheckCircle2, Lock, Clock, Award } from "lucide-react";
 import { summarizePhase, type PhaseSummary } from "@/lib/progress-aggregate";
 import { PhaseTest } from "@/components/verify/PhaseTest";
-import { PHASE_0_QUESTIONS } from "@/content/questions/phase-0";
+import { getQuestionsByPhase } from "@/content/questions";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { cn } from "@/lib/utils";
 import type { Phase } from "@/types/curriculum";
@@ -39,7 +39,7 @@ export function PhaseDetailClient({ phase }: PhaseDetailClientProps): React.Reac
     );
   }
 
-  const questionPool = phase.id === "0" ? PHASE_0_QUESTIONS : [];
+  const questionPool = getQuestionsByPhase(phase.id);
 
   return (
     <>
