@@ -1,0 +1,313 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Trophy, BookOpen, Clock, Award } from "lucide-react";
+import { getDB } from "@/lib/db";
+import { getTotalXP, getXPBySource } from "@/lib/db/xp";
+import { getAllCards } from "@/lib/db/flashcards";
+import { getCurrentStreak } from "@/lib/streak-manager";
+import { levelProgress } from "@/lib/xp";
+import { formatMinutes, formatTime } from "@/lib/utils";
+import { PHASES } from "@/content/phases";
+import { summarizeAllPhases, type PhaseSummary } from "@/lib/progress-aggregate";
+import { StreakFlame } from "@/components/gamification/StreakFlame";
+import { Skeleton } from "@/components/ui/Skeleton";
+import type { LessonProgress } from "@/types/curriculum";
+import type { StreakState } from "@/lib/streak";
+
+interface StatsData {
+  totalXp: number;
+  lessonXp: number;
+  quizXp: number;
+  flashcardXp: number;
+  sandboxXp: number;
+  assessmentXp: number;
+  completedCount: number;
+  totalTimeMs: number;
+  streak: StreakState;
+  weekly: number[]; // last 7 days, oldest first
+  phases: PhaseSummary[];
+  deckSize: number;
+  dueToday: number;
+  retentionRate: number;
+}
+
+function startOfDay(ts: number): number {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+async function loadStats(): Promise<StatsData> {
+  const db = await getDB();
+  const allProgress: LessonProgress[] = await db.getAll("progress");
+  const completed = allProgress.filter((p) => p.completedAt !== null);
+  const totalTimeMs = allProgress.reduce((sum, p) => sum + p.timeSpentMs, 0);
+
+  const [totalXp, lessonXp, quizXp, flashcardXp, sandboxXp, masteryXp, verifyXp, phaseXp] =
+    await Promise.all([
+      getTotalXP(),
+      getXPBySource("lesson"),
+      getXPBySource("quiz"),
+      getXPBySource("flashcard"),
+      getXPBySource("sandbox"),
+      getXPBySource("mastery-gate"),
+      getXPBySource("verification"),
+      getXPBySource("phase-complete"),
+    ]);
+
+  const streak = await getCurrentStreak();
+
+  // Weekly activity: last 7 days
+  const weekly: number[] = [];
+  const today = startOfDay(Date.now());
+  for (let i = 6; i >= 0; i--) {
+    const dayStart = today - i * 86_400_000;
+    const dayEnd = dayStart + 86_400_000;
+    const count = completed.filter(
+      (p) => (p.completedAt ?? 0) >= dayStart && (p.completedAt ?? 0) < dayEnd
+    ).length;
+    weekly.push(count);
+  }
+
+  const phases = await summarizeAllPhases();
+
+  const cards = await getAllCards();
+  const now = Date.now();
+  const dueToday = cards.filter((c) => c.due <= now).length;
+  const reviewState = cards.filter((c) => c.state === "review").length;
+  const retentionRate = cards.length === 0 ? 0 : reviewState / cards.length;
+
+  return {
+    totalXp,
+    lessonXp,
+    quizXp,
+    flashcardXp,
+    sandboxXp,
+    assessmentXp: masteryXp + verifyXp + phaseXp,
+    completedCount: completed.length,
+    totalTimeMs,
+    streak,
+    weekly,
+    phases,
+    deckSize: cards.length,
+    dueToday,
+    retentionRate,
+  };
+}
+
+export function StatsClient(): React.ReactElement {
+  const [data, setData] = useState<StatsData | null>(null);
+
+  useEffect(() => {
+    void loadStats().then(setData);
+  }, []);
+
+  if (!data) {
+    return (
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => (
+          <Skeleton key={i} className="h-28" />
+        ))}
+      </div>
+    );
+  }
+
+  const level = levelProgress(data.totalXp);
+  const maxWeekly = Math.max(1, ...data.weekly);
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const todayIndex = new Date().getDay();
+  const weeklyLabels = Array.from({ length: 7 }, (_, i) => days[(todayIndex - 6 + i + 7) % 7]);
+
+  const xpBreakdown = [
+    { label: "Lessons", amount: data.lessonXp, color: "bg-emerald-500" },
+    { label: "Quizzes", amount: data.quizXp, color: "bg-cyan-500" },
+    { label: "Flashcards", amount: data.flashcardXp, color: "bg-purple-500" },
+    { label: "Sandbox", amount: data.sandboxXp, color: "bg-amber-500" },
+    { label: "Assessments", amount: data.assessmentXp, color: "bg-rose-500" },
+  ];
+  const totalBreakdown = xpBreakdown.reduce((s, b) => s + b.amount, 0);
+
+  return (
+    <div className="flex flex-col gap-8">
+      {/* Overview */}
+      <section>
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <StatCard
+            icon={<Trophy className="h-4 w-4 text-amber-500" />}
+            label="Total XP"
+            value={String(data.totalXp)}
+            hint={`Level ${level.level} · ${level.current}/${level.needed} to next`}
+          />
+          <StatCard
+            icon={<StreakFlame days={data.streak.current} />}
+            label="Day streak"
+            value={`${data.streak.current}`}
+            hint={`Longest: ${data.streak.longest}d · Freezes: ${data.streak.freezesAvailable}`}
+          />
+          <StatCard
+            icon={<BookOpen className="h-4 w-4 text-emerald-500" />}
+            label="Lessons done"
+            value={String(data.completedCount)}
+            hint={`of ${PHASES.reduce((s, p) => s + p.lessonCount, 0)}`}
+          />
+          <StatCard
+            icon={<Clock className="h-4 w-4 text-cyan-500" />}
+            label="Study time"
+            value={formatMinutes(Math.round(data.totalTimeMs / 60_000))}
+            hint={formatTime(data.totalTimeMs)}
+          />
+        </div>
+      </section>
+
+      {/* Weekly Activity */}
+      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+        <h2 className="mb-4 text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+          Last 7 days
+        </h2>
+        <div className="flex h-32 items-end justify-between gap-2">
+          {data.weekly.map((count, i) => {
+            const height = count === 0 ? 4 : Math.max(6, (count / maxWeekly) * 100);
+            return (
+              <div
+                key={i}
+                className="flex flex-1 flex-col items-center gap-1"
+                title={`${count} lessons`}
+              >
+                <div
+                  className="w-full rounded-t bg-emerald-500 transition-all"
+                  style={{ height: `${height}%`, minHeight: count === 0 ? "2px" : "6px" }}
+                />
+                <span className="text-[10px] text-[var(--color-text-muted)]">
+                  {weeklyLabels[i]}
+                </span>
+                <span className="font-mono text-[10px] text-[var(--color-text-secondary)]">
+                  {count}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Phase Progress */}
+      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+        <h2 className="mb-4 text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+          Phase progress
+        </h2>
+        <ul className="flex flex-col gap-3">
+          {data.phases.map((p) => {
+            const ratio = p.totalLessons === 0 ? 0 : p.completedLessons / p.totalLessons;
+            return (
+              <li key={p.phase.id} className="flex items-center gap-3">
+                <span className="w-24 text-xs text-[var(--color-text-secondary)]">
+                  Phase {p.phase.id}
+                </span>
+                <div className="h-2 flex-1 overflow-hidden rounded-full bg-[var(--color-bg-subtle)]">
+                  <div
+                    className="h-full transition-all duration-300"
+                    style={{
+                      width: `${Math.round(ratio * 100)}%`,
+                      background: p.phase.color,
+                    }}
+                  />
+                </div>
+                <span className="w-20 text-right font-mono text-[10px] text-[var(--color-text-muted)]">
+                  {p.completedLessons}/{p.totalLessons}
+                </span>
+                {p.certificate && (
+                  <Award className="h-4 w-4 text-emerald-500" aria-label="Verified" />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+
+      {/* XP Breakdown */}
+      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+        <h2 className="mb-4 text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+          XP by source
+        </h2>
+        {totalBreakdown === 0 ? (
+          <p className="text-sm text-[var(--color-text-muted)]">No XP earned yet.</p>
+        ) : (
+          <>
+            <div className="mb-3 flex h-3 overflow-hidden rounded-full bg-[var(--color-bg-subtle)]">
+              {xpBreakdown.map((b) => (
+                <div
+                  key={b.label}
+                  className={b.color}
+                  style={{ width: `${(b.amount / totalBreakdown) * 100}%` }}
+                />
+              ))}
+            </div>
+            <ul className="flex flex-col gap-1 text-sm">
+              {xpBreakdown.map((b) => (
+                <li
+                  key={b.label}
+                  className="flex items-center justify-between text-[var(--color-text-secondary)]"
+                >
+                  <span className="flex items-center gap-2">
+                    <span className={`h-2 w-2 rounded ${b.color}`} />
+                    {b.label}
+                  </span>
+                  <span className="font-mono">{b.amount} XP</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </section>
+
+      {/* Review Stats */}
+      {data.deckSize > 0 && (
+        <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+          <h2 className="mb-4 text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+            Review deck
+          </h2>
+          <div className="grid grid-cols-3 gap-4 text-center">
+            <div>
+              <p className="text-2xl font-semibold text-[var(--color-text-primary)]">
+                {data.deckSize}
+              </p>
+              <p className="text-[10px] text-[var(--color-text-muted)]">Cards total</p>
+            </div>
+            <div>
+              <p className="text-2xl font-semibold text-[var(--color-text-primary)]">
+                {data.dueToday}
+              </p>
+              <p className="text-[10px] text-[var(--color-text-muted)]">Due now</p>
+            </div>
+            <div>
+              <p className="text-2xl font-semibold text-[var(--color-text-primary)]">
+                {Math.round(data.retentionRate * 100)}%
+              </p>
+              <p className="text-[10px] text-[var(--color-text-muted)]">Retention</p>
+            </div>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+interface StatCardProps {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  hint: string;
+}
+
+function StatCard({ icon, label, value, hint }: StatCardProps): React.ReactElement {
+  return (
+    <div className="flex flex-col gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4">
+      <div className="flex items-center gap-2 font-mono text-[10px] text-[var(--color-text-muted)] uppercase">
+        {icon}
+        {label}
+      </div>
+      <div className="text-2xl font-semibold text-[var(--color-text-primary)]">{value}</div>
+      <div className="text-[10px] text-[var(--color-text-muted)]">{hint}</div>
+    </div>
+  );
+}
