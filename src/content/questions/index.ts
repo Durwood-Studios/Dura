@@ -1,13 +1,18 @@
 import type { AssessmentQuestion } from "@/types/assessment";
 import { PHASE_0_QUESTIONS } from "@/content/questions/phase-0";
 import { PHASE_1_QUESTIONS } from "@/content/questions/phase-1";
+import { PHASE_2_QUESTIONS } from "@/content/questions/phase-2";
 
 /**
  * Every authored question across every phase. Isomorphic — safe to
  * import from client components. New phase banks register here by
  * adding an import and spreading into ALL_QUESTIONS.
  */
-export const ALL_QUESTIONS: AssessmentQuestion[] = [...PHASE_0_QUESTIONS, ...PHASE_1_QUESTIONS];
+export const ALL_QUESTIONS: AssessmentQuestion[] = [
+  ...PHASE_0_QUESTIONS,
+  ...PHASE_1_QUESTIONS,
+  ...PHASE_2_QUESTIONS,
+];
 
 export function getAllQuestions(): AssessmentQuestion[] {
   return ALL_QUESTIONS;
