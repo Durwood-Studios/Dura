@@ -1,0 +1,286 @@
+---
+title: "Data Fetching"
+description: "Fetch data in server components, understand caching, and control revalidation."
+phase: 2
+module: "2-5-nextjs"
+order: 5
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["WS-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - isr
+  - server-fetch
+  - revalidation
+  - cache-strategy
+  - suspense
+---
+
+## Why this matters
+
+Every real application fetches data. In traditional React, that meant `useEffect` + `useState` + loading flags + error handling — a waterfall of boilerplate before you showed a single piece of content. In the App Router, you `await` data directly in the component. The framework handles caching, loading states, and revalidation. The result is less code that does more.
+
+## Fetching in server components
+
+Because Server Components can be `async`, you fetch data the same way you'd write any Node.js code — just `await` a promise:
+
+```typescript
+// app/products/page.tsx
+export default async function ProductsPage() {
+  // No useEffect. No useState. Just await.
+  const products = await fetch("https://api.example.com/products").then(
+    (res) => res.json()
+  );
+
+  return (
+    <ul>
+      {products.map((p) => (
+        <li key={p.id}>{p.name}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+This runs entirely on the server. The browser receives a finished HTML list — not a loading spinner that becomes a list. The user never sees the data-fetching happen.
+
+## Next.js extends fetch with caching
+
+Next.js patches the native `fetch` function in server environments to add caching behavior. You control it with the `cache` option and the `next` option:
+
+### `cache: 'force-cache'` (default behavior in older Next.js)
+
+```typescript
+const data = await fetch("https://api.example.com/data", {
+  cache: "force-cache",
+});
+// Result is cached indefinitely. Identical requests return the cached value.
+// Useful for data that never changes: country lists, static config.
+```
+
+### `cache: 'no-store'`
+
+```typescript
+const data = await fetch("https://api.example.com/data", {
+  cache: "no-store",
+});
+// Never cache. Always fetch fresh on every request.
+// Useful for real-time data: prices, live counts, personalized content.
+```
+
+### `next: { revalidate: N }` — Incremental Static Regeneration
+
+```typescript
+const data = await fetch("https://api.example.com/data", {
+  next: { revalidate: 60 }, // revalidate at most every 60 seconds
+});
+// Cached, but refreshed in the background after N seconds.
+// Useful for content that changes occasionally: blog posts, product listings.
+```
+
+This third option — **ISR (Incremental Static Regeneration)** — is one of Next.js's most powerful features. A page is served from cache (fast), but the cache refreshes automatically in the background on a schedule. You get the speed of static with the freshness of dynamic.
+
+## React's `cache()` for deduplication
+
+When multiple components on a page need the same data, you don't want three separate network requests. React's `cache()` function deduplicates calls within a single render:
+
+```typescript
+import { cache } from "react";
+
+// Wrap your fetch in cache() — identical calls in the same render
+// return the same promise, resulting in one actual network request.
+export const getUser = cache(async (id: string) => {
+  const res = await fetch(`https://api.example.com/users/${id}`);
+  return res.json();
+});
+
+// Now both components can call getUser(userId) safely.
+// Only one fetch happens per request cycle.
+```
+
+This pattern is the recommended way to share data across a page without prop drilling — define a cached fetcher in a shared module and call it wherever needed.
+
+## Parallel vs sequential fetching
+
+The order in which you `await` matters for performance.
+
+**Sequential** (slow — second fetch can't start until first completes):
+
+```typescript
+// Each await blocks the next — total time = A + B
+const user = await getUser(userId);
+const posts = await getPostsByUser(user.username); // needs user first
+```
+
+Sequential fetching is sometimes necessary when the second request depends on the first result. But when requests are independent, it's wasteful.
+
+**Parallel** (fast — both fetches start simultaneously):
+
+```typescript
+// Both fetches start at the same time — total time = max(A, B)
+const [user, posts] = await Promise.all([getUser(userId), getPosts()]);
+```
+
+Always reach for `Promise.all` when your fetches are independent. The savings compound: if fetching a user takes 200ms and fetching posts takes 300ms, sequential takes 500ms. Parallel takes 300ms.
+
+## Loading states with `loading.tsx` and Suspense
+
+A `loading.tsx` file in the same directory as a page automatically wraps that page in a Suspense boundary. While the async page component is fetching, the loading component renders:
+
+```typescript
+// app/products/loading.tsx
+export default function Loading() {
+  return (
+    <div className="grid grid-cols-3 gap-4">
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div key={i} className="h-40 bg-gray-800 animate-pulse rounded-xl" />
+      ))}
+    </div>
+  );
+}
+```
+
+For more granular control, you can use Suspense directly in your components to progressively reveal parts of a page:
+
+```typescript
+import { Suspense } from "react";
+
+export default async function Page() {
+  return (
+    <div>
+      <h1>Dashboard</h1>
+      {/* This section shows immediately */}
+      <StaticStats />
+      {/* This section shows a skeleton while LiveFeed fetches */}
+      <Suspense fallback={<FeedSkeleton />}>
+        <LiveFeed />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+This pattern — called **streaming** — lets you show a partial page immediately and fill in the slow parts as they load, rather than waiting for everything before showing anything.
+
+## Dynamic metadata
+
+Pages can export `generateMetadata` to produce dynamic `<title>` and `<meta>` tags that depend on fetched data:
+
+```typescript
+// app/blog/[slug]/page.tsx
+import type { Metadata } from "next";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}): Promise<Metadata> {
+  const { slug } = await params;
+  const post = await fetchPost(slug);
+  return {
+    title: post.title,
+    description: post.excerpt,
+    openGraph: {
+      title: post.title,
+      images: [post.coverImage],
+    },
+  };
+}
+```
+
+Next.js calls `generateMetadata` in parallel with the page component and injects the result into the `<head>`. You get per-page SEO without any third-party library.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a createCachedFetcher(ttlSeconds) function.
+// Returns a fetch(key, dataFn) function that:
+//   - Calls dataFn() the first time a key is requested
+//   - Caches the result for ttlSeconds
+//   - Returns the cached result on subsequent calls within the TTL
+//   - Calls dataFn() again after the TTL expires
+
+function createCachedFetcher(ttlSeconds) {
+const cache = {};
+
+return async function fetch(key, dataFn) {
+const now = Date.now();
+const entry = cache[key];
+
+    if (entry && now - entry.timestamp < ttlSeconds * 1000) {
+      return entry.value;
+    }
+
+    const value = await dataFn();
+    cache[key] = { value, timestamp: now };
+    return value;
+
+};
+}
+
+// Simulate a database call with a counter to prove caching works
+let fetchCount = 0;
+
+async function mockDbCall() {
+fetchCount++;
+return { data: "some data", fetchNumber: fetchCount };
+}
+
+// Run the demo
+async function demo() {
+const fetcher = createCachedFetcher(5); // 5 second TTL
+
+const result1 = await fetcher("users", mockDbCall);
+console.log("First call:", result1); // fetchNumber: 1
+console.log("Fetch count:", fetchCount); // 1
+
+const result2 = await fetcher("users", mockDbCall);
+console.log("Second call:", result2); // fetchNumber: 1 (cached!)
+console.log("Fetch count:", fetchCount); // still 1
+
+const result3 = await fetcher("posts", mockDbCall);
+console.log("Different key:", result3); // fetchNumber: 2 (new key)
+console.log("Fetch count:", fetchCount); // 2
+}
+
+demo();`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Which fetch cache strategy fetches fresh data on every request and never uses a cached version?"
+  options={[
+    "cache: 'force-cache'",
+    "next: { revalidate: 0 }",
+    "cache: 'no-store'",
+    "cache: 'reload'",
+  ]}
+  answer={2}
+  explanation="cache: 'no-store' tells Next.js never to cache this fetch result. Every request to this page triggers a fresh fetch. Use this for real-time data like stock prices, live scores, or personalized user content where stale data would be incorrect."
+/>
+
+<Quiz
+  question="Promise.all allows multiple independent fetch calls to run simultaneously instead of one after another."
+  options={["True", "False"]}
+  answer={0}
+  explanation="True. Promise.all starts all promises at the same time and resolves when all complete. If you await fetches sequentially, each must finish before the next starts. With Promise.all, the total wait time is only as long as the slowest request — not the sum of all requests."
+/>
+
+<FillBlank
+  question="The Next.js fetch option ______ caches a response but revalidates it in the background after a set number of seconds — the pattern called Incremental Static Regeneration."
+  answer="next: { revalidate: N }"
+/>
+
+## What you learned
+
+- Async Server Components fetch data with plain `await` — no `useEffect`, no loading state boilerplate
+- The `cache` option on `fetch` controls caching: `'no-store'` for always-fresh, `next: { revalidate: N }` for ISR (cached but refreshed on a schedule)
+- React's `cache()` deduplicates identical fetch calls within a single render, preventing redundant network requests
+- Use `Promise.all` for independent fetches (parallel is faster); sequential awaits only when a request depends on a previous result
+- `loading.tsx` provides automatic Suspense boundaries; streaming with explicit `<Suspense>` lets you progressively reveal slow page sections

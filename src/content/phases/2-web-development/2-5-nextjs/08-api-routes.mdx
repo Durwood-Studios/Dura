@@ -1,0 +1,311 @@
+---
+title: "API Routes"
+description: "Build server endpoints in Next.js using Route Handlers — GET, POST, and beyond."
+phase: 2
+module: "2-5-nextjs"
+order: 8
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["WS-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - route-handler
+  - nextrequest
+  - nextresponse
+  - middleware
+  - api-route
+---
+
+## Why this matters
+
+Not everything in a web app flows through a form. Mobile apps, third-party services, webhooks, and browser-side JavaScript all need HTTP endpoints they can call directly. Next.js Route Handlers let you build these endpoints in the same project as your UI — no separate Express server, no CORS configuration between two different deployments, no separate deploy pipeline.
+
+## Route Handlers
+
+A Route Handler is a file named `route.ts` (or `route.js`) inside the `app/` directory. Like pages, their location in the file tree determines their URL — but instead of exporting a React component, they export named functions for each HTTP method.
+
+```
+app/
+└── api/
+    ├── users/
+    │   └── route.ts    ← handles GET /api/users, POST /api/users
+    └── users/
+        └── [id]/
+            └── route.ts ← handles GET /api/users/42, DELETE /api/users/42
+```
+
+A basic Route Handler:
+
+```typescript
+// app/api/users/route.ts
+import { NextRequest, NextResponse } from "next/server";
+
+export async function GET(request: NextRequest) {
+  const users = await db.users.findAll();
+  return NextResponse.json(users);
+}
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  const user = await db.users.create(body);
+  return NextResponse.json(user, { status: 201 });
+}
+```
+
+HTTP methods map directly to exported function names: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`. Unimplemented methods automatically return `405 Method Not Allowed`.
+
+## NextRequest and NextResponse
+
+**`NextRequest`** extends the standard Web `Request` API with Next.js-specific additions:
+
+```typescript
+export async function GET(request: NextRequest) {
+  // URL and search params
+  const url = request.nextUrl; // URL object
+  const page = request.nextUrl.searchParams.get("page"); // "2"
+  const sort = request.nextUrl.searchParams.get("sort"); // "created_at"
+
+  // Headers
+  const auth = request.headers.get("authorization"); // "Bearer eyJ..."
+
+  // Cookies
+  const sessionId = request.cookies.get("session")?.value;
+}
+```
+
+**`NextResponse`** extends the standard Web `Response` API:
+
+```typescript
+// Return JSON with a status code
+return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+// Redirect
+return NextResponse.redirect(new URL("/login", request.url));
+
+// Set response headers
+const response = NextResponse.json({ ok: true });
+response.headers.set("X-Custom-Header", "value");
+return response;
+
+// Set cookies on the response
+const response = NextResponse.json({ ok: true });
+response.cookies.set("session", sessionId, {
+  httpOnly: true,
+  secure: true,
+  sameSite: "lax",
+  maxAge: 60 * 60 * 24 * 7, // 7 days
+});
+return response;
+```
+
+## Reading request data
+
+Different request types deliver data differently:
+
+```typescript
+export async function POST(request: NextRequest) {
+  const contentType = request.headers.get("content-type") ?? "";
+
+  if (contentType.includes("application/json")) {
+    const body = await request.json(); // parsed JSON object
+    return NextResponse.json({ received: body });
+  }
+
+  if (contentType.includes("multipart/form-data")) {
+    const formData = await request.formData(); // FormData instance
+    const name = formData.get("name");
+    return NextResponse.json({ name });
+  }
+
+  const text = await request.text(); // raw string
+  return NextResponse.json({ received: text });
+}
+```
+
+Always check `Content-Type` before parsing — calling `request.json()` on a non-JSON body throws an error.
+
+## Dynamic route handlers
+
+Route Handlers support the same dynamic segment syntax as pages. The segment values arrive as the second argument to the handler function:
+
+```typescript
+// app/api/users/[id]/route.ts
+interface Context {
+  params: Promise<{ id: string }>;
+}
+
+export async function GET(request: NextRequest, { params }: Context) {
+  const { id } = await params;
+  const user = await db.users.findById(id);
+
+  if (!user) {
+    return NextResponse.json({ error: "User not found" }, { status: 404 });
+  }
+
+  return NextResponse.json(user);
+}
+
+export async function DELETE(request: NextRequest, { params }: Context) {
+  const { id } = await params;
+  await db.users.delete(id);
+  return new NextResponse(null, { status: 204 });
+}
+```
+
+## Middleware
+
+`middleware.ts` at the project root runs before every request that matches its `matcher` pattern. It's the right place for auth checks, redirects, logging, and rate limiting — anything that should run on every request to a set of routes.
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from "next/server";
+
+export function middleware(request: NextRequest) {
+  const sessionToken = request.cookies.get("session")?.value;
+
+  // Protect all /dashboard routes
+  if (request.nextUrl.pathname.startsWith("/dashboard")) {
+    if (!sessionToken) {
+      return NextResponse.redirect(new URL("/login", request.url));
+    }
+  }
+
+  return NextResponse.next(); // continue to the route
+}
+
+export const config = {
+  // Only run middleware on these paths
+  matcher: ["/dashboard/:path*", "/api/:path*"],
+};
+```
+
+Middleware runs at the **edge** — on the CDN server closest to the user, before the request reaches your Node.js app. This makes it extremely fast for simple checks. Keep middleware logic simple and dependency-free; heavy database calls belong in the route handler, not middleware.
+
+## Route Handlers vs Server Actions
+
+Both Route Handlers and Server Actions run on the server. When should you use each?
+
+**Use Server Actions when:**
+
+- Handling form submissions from your own UI
+- Mutating data in response to user interaction
+- You want progressive enhancement (works without JavaScript)
+- The caller is your own React components
+
+**Use Route Handlers when:**
+
+- Building an API that external clients will call (mobile apps, third-party services)
+- Receiving webhooks from services like Stripe or GitHub
+- Building a public API that other developers will consume
+- You need full control over request/response headers and status codes
+
+If it's your own UI submitting data, use a Server Action. If something outside your codebase needs to call a URL, use a Route Handler.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement createRouteHandler(routes).
+// routes: object with optional GET and POST keys, each a function.
+//
+// Returns handle(method, url, body) that:
+//   - Calls the right handler for the method
+//   - Passes a request-like object { url, body, searchParams }
+//   - Returns { status, data } from the handler
+//   - Returns { status: 405, data: { error: "Method Not Allowed" } }
+//     for unregistered methods
+
+function createRouteHandler(routes) {
+return async function handle(method, url, body = null) {
+const handler = routes[method.toUpperCase()];
+
+    if (!handler) {
+      return { status: 405, data: { error: "Method Not Allowed" } };
+    }
+
+    // Build a request-like object
+    const parsedUrl = new URL(url, "http://localhost");
+    const request = {
+      url,
+      body,
+      searchParams: parsedUrl.searchParams,
+      method: method.toUpperCase(),
+    };
+
+    // Handlers return { status, data }
+    const response = await handler(request);
+    return response;
+
+};
+}
+
+// Test it
+const usersHandler = createRouteHandler({
+GET: async (req) => {
+const page = req.searchParams.get("page") || "1";
+return {
+status: 200,
+data: { users: ["Alice", "Bob"], page: Number(page) },
+};
+},
+POST: async (req) => {
+if (!req.body?.name) {
+return { status: 400, data: { error: "Name is required" } };
+}
+return { status: 201, data: { id: 99, name: req.body.name } };
+},
+});
+
+async function runTests() {
+// GET request
+const getResult = await usersHandler("GET", "http://localhost/api/users?page=2");
+console.log("GET:", getResult); // { status: 200, data: { users: [...], page: 2 } }
+
+// POST with valid body
+const postOk = await usersHandler("POST", "http://localhost/api/users", { name: "Carol" });
+console.log("POST OK:", postOk); // { status: 201, data: { id: 99, name: "Carol" } }
+
+// POST with invalid body
+const postFail = await usersHandler("POST", "http://localhost/api/users", {});
+console.log("POST Fail:", postFail); // { status: 400, data: { error: "Name is required" } }
+
+// DELETE — not registered
+const deleteResult = await usersHandler("DELETE", "http://localhost/api/users/1");
+console.log("DELETE:", deleteResult); // { status: 405, data: { error: "Method Not Allowed" } }
+}
+
+runTests();`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What HTTP status code does Next.js automatically return when a Route Handler receives a request method that has no corresponding exported function?"
+  options={["404 Not Found", "400 Bad Request", "405 Method Not Allowed", "501 Not Implemented"]}
+  answer={2}
+  explanation="405 Method Not Allowed is the correct HTTP status for a server that understands the request but doesn't support the method. Next.js returns this automatically when no exported function matches the incoming method — for example, receiving a DELETE request when only GET and POST are exported."
+/>
+
+<Quiz
+  question="Middleware in Next.js runs on the same Node.js server that handles your API routes and pages."
+  options={["True", "False"]}
+  answer={1}
+  explanation="False. Middleware runs at the edge — on CDN nodes geographically close to the user, before the request reaches your Node.js application server. This makes middleware extremely fast for simple operations like auth redirects, but it also means middleware must be dependency-free and cannot use Node.js APIs that aren't available in the edge runtime."
+/>
+
+<FillBlank
+  question="In a Route Handler, the object ______ from 'next/server' is used to construct and return responses with JSON data, status codes, and custom headers."
+  answer="NextResponse"
+/>
+
+## What you learned
+
+- Route Handlers live in `route.ts` files inside `app/` — their URL is determined by their directory location, just like pages
+- Export named functions (`GET`, `POST`, `DELETE`, etc.) — unimplemented methods automatically return `405 Method Not Allowed`
+- `NextRequest` provides access to URL params, search params, headers, cookies, and request body; `NextResponse` builds responses with JSON, redirects, headers, and cookies
+- Middleware runs at the edge before routes for auth checks and redirects — keep it dependency-free and fast
+- Use Server Actions for your own UI mutations; use Route Handlers for external clients, webhooks, and public APIs

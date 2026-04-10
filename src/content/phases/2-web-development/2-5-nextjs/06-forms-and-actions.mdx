@@ -1,0 +1,304 @@
+---
+title: "Forms and Server Actions"
+description: "Submit data directly to server functions — no API route needed."
+phase: 2
+module: "2-5-nextjs"
+order: 6
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["WS-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - server-action
+  - form-data
+  - use-server
+  - revalidate-path
+  - progressive-enhancement
+---
+
+## Why this matters
+
+Every web application accepts user input: logins, contact forms, blog post editors, checkout flows. Traditionally, handling a form meant writing an API route, fetching from the client, managing loading state, and handling errors in two places. Server Actions collapse all of that into a single function. You write a function on the server, call it from a form, and Next.js handles the plumbing.
+
+## What Server Actions are
+
+A **Server Action** is an async function marked with the `'use server'` directive. When called from a form or client code, it runs on the server — never in the browser. The browser sends a request, the function executes on the server, and the result comes back.
+
+```typescript
+// app/contact/actions.ts
+"use server";
+
+export async function sendMessage(formData: FormData) {
+  const name = formData.get("name") as string;
+  const message = formData.get("message") as string;
+
+  await db.messages.create({ name, message });
+  // That's it. No API route, no fetch call from the client.
+}
+```
+
+The key thing: `sendMessage` runs on the server. It can access your database, read server-only environment variables, and do anything a server-side function can do. The browser never sees this code.
+
+## Using a Server Action in a form
+
+Connect a Server Action to a form via the `action` prop:
+
+```typescript
+// app/contact/page.tsx
+import { sendMessage } from "./actions";
+
+export default function ContactPage() {
+  return (
+    <form action={sendMessage}>
+      <input name="name" placeholder="Your name" required />
+      <textarea name="message" placeholder="Your message" required />
+      <button type="submit">Send</button>
+    </form>
+  );
+}
+```
+
+When the form submits, the browser serializes the form fields into a `FormData` object and sends it to the Server Action. Your function receives that `FormData` directly.
+
+No `onSubmit` handler. No `fetch`. No API endpoint to create. The form just works.
+
+## Reading FormData
+
+`FormData` is a browser standard for representing form field values. You read values from it with `.get()`:
+
+```typescript
+"use server";
+
+export async function createPost(formData: FormData) {
+  const title = formData.get("title") as string;
+  const body = formData.get("body") as string;
+  const tags = formData.getAll("tags") as string[]; // multiple values
+
+  // Validate before using
+  if (!title || title.length < 3) {
+    return { success: false, error: "Title must be at least 3 characters." };
+  }
+
+  await db.posts.create({ title, body, tags });
+  return { success: true };
+}
+```
+
+`.get(name)` returns the first value for that field name, or `null` if not present. `.getAll(name)` returns all values — useful for checkboxes or multi-select fields.
+
+## Validation with Zod
+
+Server Actions receive raw user input — always validate before using it. Zod is the standard validation library in the Next.js ecosystem:
+
+```typescript
+"use server";
+
+import { z } from "zod";
+
+const ContactSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  email: z.string().email("Invalid email address"),
+  message: z.string().min(10, "Message must be at least 10 characters"),
+});
+
+export async function submitContact(formData: FormData) {
+  const result = ContactSchema.safeParse({
+    name: formData.get("name"),
+    email: formData.get("email"),
+    message: formData.get("message"),
+  });
+
+  if (!result.success) {
+    return {
+      success: false,
+      errors: result.error.flatten().fieldErrors,
+    };
+  }
+
+  await db.contacts.create(result.data);
+  redirect("/thank-you");
+}
+```
+
+`safeParse` returns `{ success: true, data }` or `{ success: false, error }` — it never throws. You get structured validation errors you can display next to the relevant fields.
+
+## `useActionState` — pending state and error display
+
+The `useActionState` hook (available in React 19) connects a Client Component to a Server Action, giving you access to the pending state and the action's return value:
+
+```typescript
+"use client";
+
+import { useActionState } from "react";
+import { submitContact } from "./actions";
+
+export function ContactForm() {
+  const [state, action, isPending] = useActionState(submitContact, null);
+
+  return (
+    <form action={action}>
+      <input name="name" />
+      {state?.errors?.name && (
+        <p className="text-red-500">{state.errors.name[0]}</p>
+      )}
+      <input name="email" />
+      {state?.errors?.email && (
+        <p className="text-red-500">{state.errors.email[0]}</p>
+      )}
+      <textarea name="message" />
+      <button disabled={isPending}>
+        {isPending ? "Sending..." : "Send"}
+      </button>
+    </form>
+  );
+}
+```
+
+`isPending` is `true` while the action is in flight — use it to disable the submit button and show a loading indicator. `state` holds whatever the action returned on the most recent submission.
+
+## Progressive enhancement
+
+One of Server Actions' best qualities is that they work without JavaScript. A plain `<form action={serverAction}>` submits via a normal HTTP POST if JavaScript hasn't loaded or is disabled. The server action runs, `redirect()` sends the browser to a new page, and the user gets a working form experience.
+
+When JavaScript is available, the form submission is intercepted and handled with a fetch-style request instead, enabling `isPending` states and in-place error display without full page reloads.
+
+This is called **progressive enhancement** — the baseline experience works for everyone, and JavaScript enhances it for users who have it.
+
+## Invalidating cached data with `revalidatePath`
+
+After a mutation, any cached pages that display the changed data need to be refreshed. `revalidatePath` marks a route's cache as stale so the next request gets fresh data:
+
+```typescript
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+
+export async function createPost(formData: FormData) {
+  const title = formData.get("title") as string;
+  await db.posts.create({ title });
+
+  // Bust the cache for the blog listing page
+  revalidatePath("/blog");
+  redirect("/blog");
+}
+```
+
+`revalidateTag` is a finer-grained alternative — you tag fetch calls with a label and invalidate all fetches with that tag at once, rather than invalidating an entire route.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement createActionHandler(schema, handler).
+// schema: an object where each key maps to a validation function
+//   that returns an error string or null.
+//   e.g. { name: (v) => v ? null : "Name is required" }
+// handler: async function called with validated data if all fields pass.
+//
+// Returns an async function that:
+//   - Accepts a plain object (simulating FormData key/values)
+//   - Validates each field against the schema
+//   - Returns { success: false, errors } if validation fails
+//   - Calls handler(data) and returns { success: true, result } if valid
+
+function createActionHandler(schema, handler) {
+return async function action(input) {
+const errors = {};
+
+    for (const [field, validate] of Object.entries(schema)) {
+      const value = input[field] ?? "";
+      const error = validate(value);
+      if (error) {
+        errors[field] = error;
+      }
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return { success: false, errors };
+    }
+
+    const result = await handler(input);
+    return { success: true, result };
+
+};
+}
+
+// Test it
+const contactAction = createActionHandler(
+{
+name: (v) => (v.trim().length >= 1 ? null : "Name is required"),
+email: (v) => (v.includes("@") ? null : "Invalid email"),
+message: (v) =>
+v.trim().length >= 10 ? null : "Message must be at least 10 characters",
+},
+async (data) => {
+// Simulate saving to a database
+return { id: 42, savedAt: new Date().toISOString() };
+}
+);
+
+async function runTests() {
+// Invalid: all fields empty
+const fail = await contactAction({ name: "", email: "", message: "" });
+console.log("Validation failed:", fail.success === false);
+console.log("Errors:", fail.errors);
+
+// Invalid: email wrong
+const partial = await contactAction({
+name: "Alice",
+email: "not-an-email",
+message: "This is a long enough message",
+});
+console.log("Partial fail:", partial.errors);
+
+// Valid
+const ok = await contactAction({
+name: "Alice",
+email: "alice@example.com",
+message: "Hello, this is a valid message!",
+});
+console.log("Success:", ok.success === true);
+console.log("Result:", ok.result);
+}
+
+runTests();`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Where does a Server Action's code execute when a form is submitted?"
+  options={[
+    "In the browser, using a Web Worker",
+    "On the server, with access to Node.js APIs and environment variables",
+    "In the browser, but in a sandboxed iframe",
+    "On the server, but only if JavaScript is disabled on the client",
+  ]}
+  answer={1}
+  explanation="Server Actions always execute on the server, regardless of how they're triggered. This is what makes them safe for database access and secret environment variables — none of the Server Action code is ever sent to or run in the browser."
+/>
+
+<Quiz
+  question="A form with a Server Action as its action prop requires JavaScript to submit successfully."
+  options={["True", "False"]}
+  answer={1}
+  explanation="False. This is the progressive enhancement benefit of Server Actions. A plain HTML form with an action pointing to a Server Action submits as a standard HTML POST if JavaScript is unavailable. The Server Action runs on the server and a redirect sends the browser to the result. JavaScript enhances the experience (pending states, in-place errors) but is not required for basic form submission."
+/>
+
+<FillBlank
+  question="After a Server Action mutates data, call ______ to mark a route's cached response as stale so the next visitor gets fresh data."
+  answer="revalidatePath"
+/>
+
+## What you learned
+
+- Server Actions are `async` functions marked `'use server'` that run on the server and receive `FormData` from forms
+- Connect a Server Action to a form with the `action` prop — no `onSubmit` handler or manual `fetch` call needed
+- Always validate user input before processing — Zod's `safeParse` returns structured errors without throwing
+- `useActionState` gives Client Components access to a Server Action's pending state and return value for loading indicators and error display
+- `revalidatePath` invalidates cached pages after mutations so subsequent requests get fresh data

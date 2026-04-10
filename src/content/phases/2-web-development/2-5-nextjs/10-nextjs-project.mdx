@@ -1,0 +1,361 @@
+---
+title: "Next.js Project: Build a Blog"
+description: "Full-stack from scratch — App Router, data fetching, MDX content, and deployment."
+phase: 2
+module: "2-5-nextjs"
+order: 10
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["WS-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - static-generation
+  - generateStaticParams
+  - generateMetadata
+  - mdx-rendering
+  - full-stack
+---
+
+## Why this matters
+
+You've learned the pieces: routing, server components, data fetching, forms, styling, API routes, deployment. Now you put them together. A blog is the ideal capstone project — it touches every layer of the stack without unnecessary complexity. You'll build something real, deploy it, and have a concrete reference for every concept in this module.
+
+## Project architecture
+
+The finished blog has this structure:
+
+```
+my-blog/
+├── app/
+│   ├── layout.tsx              ← root layout with nav
+│   ├── page.tsx                ← homepage
+│   ├── blog/
+│   │   ├── page.tsx            ← post listing
+│   │   └── [slug]/
+│   │       ├── page.tsx        ← individual post
+│   │       └── loading.tsx     ← skeleton while post loads
+│   └── contact/
+│       ├── page.tsx            ← contact form
+│       └── actions.ts          ← Server Action for form submission
+├── content/
+│   ├── hello-world.mdx
+│   └── my-second-post.mdx
+├── lib/
+│   └── posts.ts                ← data access layer
+└── components/
+    ├── PostCard.tsx
+    └── ContactForm.tsx
+```
+
+The `content/` directory holds your MDX files. The `lib/posts.ts` module handles reading and parsing them. Components stay in `components/`. The `app/` directory stays focused on routing and page composition.
+
+## Storing posts as MDX files
+
+MDX files live in `content/` with frontmatter at the top:
+
+```
+---
+title: "Hello World"
+date: "2024-01-15"
+excerpt: "My first blog post on this new platform."
+---
+
+## Introduction
+
+This is the content of the post. It's written in **Markdown**
+but can also include JSX components.
+```
+
+Frontmatter is a YAML block between `---` delimiters. It holds structured metadata — title, date, excerpt, tags — that you parse separately from the body content.
+
+## Reading files with the Node.js `fs` module
+
+Server Components can use Node.js APIs directly. The `fs` module reads files from disk:
+
+```typescript
+// lib/posts.ts
+import { readdir, readFile } from "fs/promises";
+import path from "path";
+
+const CONTENT_DIR = path.join(process.cwd(), "content");
+
+export async function getAllPosts() {
+  const files = await readdir(CONTENT_DIR);
+  const mdxFiles = files.filter((f) => f.endsWith(".mdx"));
+
+  const posts = await Promise.all(
+    mdxFiles.map(async (file) => {
+      const slug = file.replace(".mdx", "");
+      const content = await readFile(path.join(CONTENT_DIR, file), "utf-8");
+      const { frontmatter } = parseFrontmatter(content);
+      return { slug, ...frontmatter };
+    })
+  );
+
+  return posts.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+}
+
+export async function getPostBySlug(slug: string) {
+  const filePath = path.join(CONTENT_DIR, `${slug}.mdx`);
+  const content = await readFile(filePath, "utf-8");
+  return parseFrontmatter(content);
+}
+```
+
+`process.cwd()` returns the root of your project. Always build paths with `path.join` rather than string concatenation — it handles different operating systems' path separators correctly.
+
+## Rendering MDX with `next-mdx-remote`
+
+`next-mdx-remote` parses and renders MDX content server-side:
+
+```typescript
+// app/blog/[slug]/page.tsx
+import { MDXRemote } from "next-mdx-remote/rsc";
+import { getPostBySlug } from "@/lib/posts";
+
+export default async function BlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
+  const { slug } = await params;
+  const { frontmatter, content } = await getPostBySlug(slug);
+
+  return (
+    <article className="max-w-2xl mx-auto prose prose-invert">
+      <h1>{frontmatter.title}</h1>
+      <time>{frontmatter.date}</time>
+      <MDXRemote source={content} />
+    </article>
+  );
+}
+```
+
+The `/rsc` import is the Server Component version — it renders MDX entirely on the server with no client JavaScript. You can pass custom components to replace default HTML elements:
+
+```typescript
+<MDXRemote
+  source={content}
+  components={{
+    h2: ({ children }) => (
+      <h2 className="text-2xl font-bold mt-8">{children}</h2>
+    ),
+    code: ({ children }) => (
+      <code className="font-mono text-emerald-400 bg-surface px-1 rounded">
+        {children}
+      </code>
+    ),
+  }}
+/>
+```
+
+## Pre-rendering with `generateStaticParams`
+
+Export `generateStaticParams` to pre-render all blog posts at build time:
+
+```typescript
+// app/blog/[slug]/page.tsx
+export async function generateStaticParams() {
+  const posts = await getAllPosts();
+  return posts.map((post) => ({ slug: post.slug }));
+}
+```
+
+Next.js calls this at build time, gets all slugs, and generates a static HTML file for each one. Visitors get served pre-built HTML instantly — no server rendering at request time.
+
+## SEO with `generateMetadata`
+
+Export `generateMetadata` for per-post titles and descriptions:
+
+```typescript
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const { frontmatter } = await getPostBySlug(slug);
+
+  return {
+    title: frontmatter.title,
+    description: frontmatter.excerpt,
+    openGraph: {
+      title: frontmatter.title,
+      description: frontmatter.excerpt,
+      type: "article",
+      publishedTime: frontmatter.date,
+    },
+  };
+}
+```
+
+Next.js runs `generateMetadata` in parallel with the page component and injects the result into `<head>`. Every post gets a unique title and description for search engines and social sharing — without any third-party SEO library.
+
+## Contact form with a Server Action
+
+The contact page collects messages and saves them server-side:
+
+```typescript
+// app/contact/actions.ts
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+
+export async function submitContact(formData: FormData) {
+  const name = formData.get("name") as string;
+  const email = formData.get("email") as string;
+  const message = formData.get("message") as string;
+
+  if (!name || !email || !message) {
+    return { success: false, error: "All fields are required." };
+  }
+
+  // Save to database, send email, etc.
+  await db.contacts.create({ name, email, message });
+
+  redirect("/contact?sent=true");
+}
+```
+
+```typescript
+// app/contact/page.tsx
+import { submitContact } from "./actions";
+
+export default function ContactPage() {
+  return (
+    <form action={submitContact} className="flex flex-col gap-4 max-w-md">
+      <input name="name" placeholder="Your name" required />
+      <input name="email" type="email" placeholder="Email" required />
+      <textarea name="message" rows={5} placeholder="Message" required />
+      <button type="submit">Send Message</button>
+    </form>
+  );
+}
+```
+
+No API route. No client-side fetch. The form works even without JavaScript, thanks to progressive enhancement.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Write parseFrontmatter(mdxContent).
+// Given a string like:
+//   ---
+//   title: Hello World
+//   date: 2024-01-15
+//   excerpt: My first post.
+//   ---
+//
+//   # Content starts here
+//
+// Return: { frontmatter: { title, date, excerpt }, content: "# Content starts here" }
+//
+// Rules:
+//   - Frontmatter is between two "---" lines at the top of the string
+//   - Each frontmatter line is "key: value"
+//   - Content is everything after the closing ---
+//   - Trim whitespace from keys, values, and content
+//   - If no frontmatter block is found, return { frontmatter: {}, content: mdxContent }
+
+function parseFrontmatter(mdxContent) {
+const lines = mdxContent.split("\\n");
+
+// First non-empty line must be "---"
+let i = 0;
+while (i < lines.length && lines[i].trim() === "") i++;
+
+if (lines[i]?.trim() !== "---") {
+return { frontmatter: {}, content: mdxContent.trim() };
+}
+
+// Find the closing "---"
+let closingIndex = -1;
+for (let j = i + 1; j < lines.length; j++) {
+if (lines[j].trim() === "---") {
+closingIndex = j;
+break;
+}
+}
+
+if (closingIndex === -1) {
+return { frontmatter: {}, content: mdxContent.trim() };
+}
+
+// Parse frontmatter lines
+const frontmatter = {};
+const frontmatterLines = lines.slice(i + 1, closingIndex);
+
+for (const line of frontmatterLines) {
+const colonIndex = line.indexOf(":");
+if (colonIndex === -1) continue;
+const key = line.slice(0, colonIndex).trim();
+const value = line.slice(colonIndex + 1).trim();
+frontmatter[key] = value;
+}
+
+// Everything after the closing ---
+const content = lines.slice(closingIndex + 1).join("\\n").trim();
+
+return { frontmatter, content };
+}
+
+// Tests
+const mdx1 = \`---
+title: Hello World
+date: 2024-01-15
+excerpt: My first blog post.
+
+---
+
+## Introduction
+
+Welcome to my blog!\`;
+
+const result1 = parseFrontmatter(mdx1);
+console.log("Title:", result1.frontmatter.title); // "Hello World"
+console.log("Date:", result1.frontmatter.date); // "2024-01-15"
+console.log("Excerpt:", result1.frontmatter.excerpt); // "My first blog post."
+console.log("Content starts with:", result1.content.slice(0, 14)); // "## Introduction"
+
+// No frontmatter
+const mdx2 = "# Just content\\nNo frontmatter here.";
+const result2 = parseFrontmatter(mdx2);
+console.log("Empty frontmatter:", Object.keys(result2.frontmatter).length === 0); // true
+console.log("Content preserved:", result2.content === mdx2.trim()); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In a Next.js blog, what is the purpose of exporting generateStaticParams from the [slug]/page.tsx file?"
+  options={[
+    "It validates that all slugs match a URL-safe pattern before the build",
+    "It tells Next.js which slugs to pre-render as static HTML files at build time",
+    "It runs at request time to look up the correct database record for each slug",
+    "It generates TypeScript types for the params object automatically",
+  ]}
+  answer={1}
+  explanation="generateStaticParams runs at build time and returns all possible param values (slugs). Next.js uses this list to pre-render a static HTML file for each post. At request time, the server just serves the pre-built file — no rendering or database call needed per request. It's what makes a dynamic route behave like SSG."
+/>
+
+<Quiz
+  question="The MDXRemote component from 'next-mdx-remote/rsc' renders MDX content on the server and sends HTML — no client-side JavaScript is needed to display the content."
+  options={["True", "False"]}
+  answer={0}
+  explanation="True. The /rsc import is the React Server Component version of MDXRemote. It processes and renders the MDX entirely on the server, sending finished HTML to the browser. The client never downloads MDX parsing libraries or processes the content — making it both faster and more efficient than client-side rendering of MDX."
+/>
+
+<FillBlank
+  question="To add dynamic per-page SEO metadata (title, description, Open Graph tags) to a Next.js page, export an async function called ______."
+  answer="generateMetadata"
+/>
+
+## What you learned
+
+- A blog capstone project connects every App Router concept: file-based routing, Server Components with `fs`, dynamic routes, `generateStaticParams` for SSG, and `generateMetadata` for SEO
+- MDX files with frontmatter are a practical content format — parse the YAML header for metadata, render the body with `next-mdx-remote/rsc`
+- `generateStaticParams` pre-renders all posts at build time; visitors get instant static HTML with no per-request server work
+- Server Actions handle form submissions without API routes, with progressive enhancement as a built-in benefit
+- The full stack — content, UI, data fetching, mutation, SEO, and deployment — lives in a single Next.js project
