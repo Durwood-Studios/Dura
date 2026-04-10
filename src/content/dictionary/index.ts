@@ -756,6 +756,528 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["function"],
   },
+
+  // ── Phase 2: Web Development ─────────────────────────────────────────────
+  {
+    slug: "html",
+    term: "HTML",
+    aliases: ["hypertext markup language"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The language that gives web pages their structure — headings, paragraphs, links, images, and forms.",
+      intermediate:
+        "A markup language of nested elements. Each element is an opening tag, content, and a closing tag. Browsers parse HTML into the DOM tree. Semantic elements (<article>, <nav>, <main>) convey meaning beyond visual appearance.",
+      advanced:
+        "Defined by the WHATWG HTML Living Standard. Parsed by a tokenizer that handles malformed markup with a prescribed error-recovery algorithm. The resulting DOM is an interface between the document and JavaScript via the Web IDL specification.",
+    },
+    examples: [
+      {
+        language: "html",
+        code: '<!DOCTYPE html>\n<html lang="en">\n  <head><title>Page</title></head>\n  <body><h1>Hello</h1></body>\n</html>',
+      },
+    ],
+    seeAlso: ["dom", "css"],
+  },
+  {
+    slug: "css",
+    term: "CSS",
+    aliases: ["cascading style sheets"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner: "The language that controls how HTML looks — colors, fonts, sizes, and layout.",
+      intermediate:
+        "A stylesheet language that selects DOM elements and applies visual properties. Rules cascade: when multiple rules match, specificity and source order determine which wins. The box model defines how elements take up space.",
+      advanced:
+        "A declarative language evaluated by the browser's style system. The cascade is a deterministic algorithm combining specificity (inline > ID > class > element), importance (!important), and document order. Computed values resolve relative units; used values apply layout constraints.",
+    },
+    examples: [
+      {
+        language: "css",
+        code: ".button {\n  background: #10b981;\n  padding: 8px 16px;\n  border-radius: 8px;\n}",
+      },
+    ],
+    seeAlso: ["html", "selector", "flexbox"],
+  },
+  {
+    slug: "selector",
+    term: "CSS Selector",
+    aliases: ["selector"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The part of a CSS rule that picks which elements to style — like `.button` or `h1`.",
+      intermediate:
+        "A pattern that matches elements in the DOM. Types: element (`p`), class (`.card`), ID (`#header`), attribute (`[type='text']`), pseudo-class (`:hover`), pseudo-element (`::before`), and combinators (` `, `>`, `+`, `~`) for relationships.",
+      advanced:
+        "Evaluated right-to-left by the style engine for efficiency. Specificity is calculated as a three-number tuple (ID, class/attr/pseudo-class, element/pseudo-element). `!important` overrides specificity; the specificity of `:is()` and `:not()` comes from their most specific argument.",
+    },
+    seeAlso: ["css"],
+  },
+  {
+    slug: "flexbox",
+    term: "Flexbox",
+    aliases: ["flex", "flexible box"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A CSS layout mode that lines items up in a row or column and handles spacing and alignment automatically.",
+      intermediate:
+        "A one-dimensional layout model. `display: flex` on a container makes its children flex items. `justify-content` distributes items along the main axis; `align-items` aligns them on the cross axis. `gap` adds space between items.",
+      advanced:
+        "Items are sized by the flex algorithm: each item starts at its flex-basis, then flex-grow distributes remaining space proportionally, and flex-shrink absorbs overflow. The `flex` shorthand is `grow shrink basis`.",
+    },
+    seeAlso: ["css", "grid", "responsive"],
+  },
+  {
+    slug: "grid",
+    term: "CSS Grid",
+    aliases: ["css grid", "grid layout"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A CSS layout system that lets you place items in rows AND columns at the same time.",
+      intermediate:
+        "A two-dimensional layout model. `display: grid` with `grid-template-columns` defines columns. The `fr` unit distributes remaining space proportionally. Items can span multiple cells with `grid-column` and `grid-row`.",
+      advanced:
+        "Grid creates a formatting context with explicit and implicit tracks. `auto-fill` and `auto-fit` with `minmax()` enable responsive layouts without media queries. Subgrid (now widely supported) lets nested grids align to parent tracks.",
+    },
+    seeAlso: ["css", "flexbox", "responsive"],
+  },
+  {
+    slug: "responsive",
+    term: "Responsive Design",
+    aliases: ["responsive web design", "RWD"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Building websites that look good on any screen size — phone, tablet, and desktop.",
+      intermediate:
+        "Designing UIs that adapt to viewport size using fluid layouts, flexible images, and media queries. The mobile-first approach writes base styles for small screens and adds complexity with min-width breakpoints.",
+      advanced:
+        "Beyond media queries: CSS Grid's `auto-fill/auto-fit + minmax()` creates intrinsically responsive layouts. Container queries (`@container`) scope breakpoints to the component's own size. `clamp()` smoothly interpolates values between minimum and maximum viewport widths.",
+    },
+    seeAlso: ["media-query", "flexbox", "grid"],
+  },
+  {
+    slug: "media-query",
+    term: "Media Query",
+    aliases: ["@media"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A CSS rule that only applies when the screen matches certain conditions — like 'only on screens wider than 768px'.",
+      intermediate:
+        "An `@media` block with conditions. `@media (min-width: 768px)` matches tablets and above. Conditions include width, height, orientation, hover capability, color scheme (prefers-color-scheme: dark), and reduced motion.",
+      advanced:
+        "Part of the CSS Media Queries Level 4 spec. The 'range' syntax (`@media (width >= 768px)`) is now widely supported and more readable than legacy min/max forms. Container queries (`@container`) are often preferable to media queries for component-level responsiveness.",
+    },
+    seeAlso: ["responsive", "css"],
+  },
+  {
+    slug: "dom",
+    term: "DOM",
+    aliases: ["document object model"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The browser's live map of your webpage — a tree of objects JavaScript can read and change.",
+      intermediate:
+        "A language-neutral API that represents an HTML document as a tree of nodes. JavaScript can query (`querySelector`), create (`createElement`), update (`textContent`, `classList`), and delete (`removeChild`) nodes. Changes to the DOM are immediately reflected in what the browser renders.",
+      advanced:
+        "Defined by the WHATWG DOM Living Standard. The DOM is a tree of `Node` objects — `Element`, `Text`, `Comment`, `DocumentFragment`, etc. Mutations queue microtasks (MutationObserver) and may trigger layout (reflow) and paint (repaint) passes in the browser rendering pipeline.",
+    },
+    examples: [
+      {
+        language: "javascript",
+        code: "const btn = document.querySelector('#save');\nbtn.textContent = 'Saved!';\nbtn.classList.add('success');",
+      },
+    ],
+    seeAlso: ["html", "event", "reflow"],
+  },
+  {
+    slug: "event",
+    term: "DOM Event",
+    aliases: ["event", "browser event"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A signal the browser sends when something happens — a click, a keypress, a form submission — so your JavaScript can respond.",
+      intermediate:
+        "An object representing a user action or browser occurrence. Attached with `addEventListener(type, handler)`. The event object carries `.target` (element that fired it), `.type`, and type-specific properties. Events bubble up the DOM tree by default.",
+      advanced:
+        "Events propagate in three phases: capture (root → target), at-target, and bubble (target → root). `addEventListener(type, fn, {capture: true})` fires during capture. `stopPropagation()` halts traversal; `stopImmediatePropagation()` also prevents other listeners on the same node.",
+    },
+    seeAlso: ["dom", "bubbling"],
+  },
+  {
+    slug: "bubbling",
+    term: "Event Bubbling",
+    aliases: ["bubbling"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "When a click (or other event) fires on an element and then travels upward through its parent elements too.",
+      intermediate:
+        "After an event fires at the target element, it propagates up through all ancestor elements — each ancestor's listeners for that event type also fire. This enables event delegation: one listener on the parent handles events from all its children.",
+      advanced:
+        "Part of the W3C DOM Events specification. Bubbling follows the ancestor chain to the document root. `event.stopPropagation()` halts the chain. Not all events bubble (e.g., `focus`, `blur` — use `focusin`/`focusout` instead). Custom events default to non-bubbling; pass `{bubbles: true}` to CustomEvent.",
+    },
+    seeAlso: ["event", "dom"],
+  },
+  {
+    slug: "fetch",
+    term: "Fetch API",
+    aliases: ["fetch"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A built-in browser function for making HTTP requests — like asking a server for data.",
+      intermediate:
+        "A modern alternative to XMLHttpRequest. `fetch(url)` returns a Promise resolving to a Response. Call `.json()` to parse JSON (also a Promise). Check `response.ok` before using the body — fetch only rejects on network failure, not 4xx/5xx status codes.",
+      advanced:
+        "Extended by Next.js to add caching semantics (`cache`, `next.revalidate`). Supports streaming responses via `response.body` (a ReadableStream). Can be cancelled with AbortController/AbortSignal. In Node.js 18+, fetch is available globally without a polyfill.",
+    },
+    examples: [
+      {
+        language: "javascript",
+        code: "const res = await fetch('/api/data');\nif (!res.ok) throw new Error(res.statusText);\nconst data = await res.json();",
+      },
+    ],
+    seeAlso: ["promise", "async-await", "http"],
+  },
+  {
+    slug: "jsx",
+    term: "JSX",
+    aliases: ["javascript xml"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An HTML-like syntax you write inside JavaScript to describe what a React component should display.",
+      intermediate:
+        "A syntax extension compiled by build tools into `React.createElement()` calls. Allows HTML-like markup in JS files. Differences from HTML: `className` instead of `class`, `htmlFor` instead of `for`, camelCase event names (`onClick`), and all tags must be closed.",
+      advanced:
+        "Transpiled by Babel/SWC using the JSX transform. The modern transform (React 17+) imports `jsx` from 'react/jsx-runtime' automatically without requiring `import React`. JSX can represent any component — not just HTML elements. TSX is JSX in TypeScript files.",
+    },
+    examples: [
+      {
+        language: "jsx",
+        code: 'function Greeting({ name }) {\n  return <h1 className="title">Hello, {name}!</h1>;\n}',
+      },
+    ],
+    seeAlso: ["component", "props", "virtual-dom"],
+  },
+  {
+    slug: "component",
+    term: "React Component",
+    aliases: ["component"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A reusable piece of UI written as a function — takes in data and returns what to display.",
+      intermediate:
+        "A function that accepts props and returns JSX. Components compose: use them like HTML tags inside other components. React calls the function each time state or props change, producing a new virtual DOM tree to diff against the previous one.",
+      advanced:
+        "In Next.js App Router, components are Server Components by default (rendered on the server, zero client JS). Adding 'use client' marks a component as a Client Component (rendered on both server and client, hydrated in the browser). The two types have different capabilities and import rules.",
+    },
+    seeAlso: ["jsx", "props", "state", "server-component"],
+  },
+  {
+    slug: "props",
+    term: "Props",
+    aliases: ["properties"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Data passed into a React component from its parent — like arguments to a function.",
+      intermediate:
+        "An object of named values passed to a component via JSX attributes. Props are read-only inside the component — only the parent that passes them can change them. The `children` prop holds any JSX nested between the component's opening and closing tags.",
+      advanced:
+        "Immutable from the component's perspective. React compares old and new props during reconciliation to decide if a component needs re-rendering. `React.memo()` wraps a component to skip re-renders when props are shallowly equal. Prop types can be enforced with TypeScript generics or PropTypes at runtime.",
+    },
+    seeAlso: ["component", "state", "jsx"],
+  },
+  {
+    slug: "state",
+    term: "State (React)",
+    aliases: ["component state"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Data that a component owns and can change over time, causing the UI to update when it does.",
+      intermediate:
+        "Managed with `useState` or `useReducer`. Each state update schedules a re-render. State is local to the component instance. To share state between sibling components, lift it to their common ancestor.",
+      advanced:
+        "React state updates are batched (React 18+ batches across all event handlers, not just synthetic events). Updater functions (`setCount(n => n + 1)`) avoid stale closure bugs. State lives in the fiber tree; it persists across renders but is destroyed when the component unmounts.",
+    },
+    seeAlso: ["useState", "component", "props"],
+  },
+  {
+    slug: "hook",
+    term: "React Hook",
+    aliases: ["hook"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A special React function (starting with 'use') that lets you tap into React features like state or side effects inside a function component.",
+      intermediate:
+        "Functions like `useState`, `useEffect`, `useContext`, `useRef`, and `useReducer`. Must be called at the top level of a component or custom hook — not inside conditions or loops. Custom hooks are plain functions that call other hooks.",
+      advanced:
+        "Hooks store their state in a linked list on the fiber. The call order determines which fiber slot each hook reads from — hence the no-conditional-calls rule. The React DevTools highlight stale closures and missing dependencies.",
+    },
+    seeAlso: ["useState", "useEffect", "component"],
+  },
+  {
+    slug: "useState",
+    term: "useState",
+    aliases: ["use-state"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The React hook for adding a changeable value to a component. Returns the current value and a function to update it.",
+      intermediate:
+        "Returns `[value, setValue]`. Calling `setValue(next)` queues a re-render with the new value. For objects and arrays, always pass a new reference — mutating the existing one won't trigger a render. Use the functional form (`setValue(prev => ...)`) to avoid stale state bugs.",
+      advanced:
+        "Backed by a fiber slot. React compares old and new values with `Object.is`. If equal, the render is bailed out. React 18 batches multiple `setState` calls in the same event handler into one re-render.",
+    },
+    seeAlso: ["hook", "state", "useEffect"],
+  },
+  {
+    slug: "useEffect",
+    term: "useEffect",
+    aliases: ["use-effect"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A React hook for running code after the component renders — used for fetching data, timers, and subscriptions.",
+      intermediate:
+        "Runs after every render by default. A dependency array limits re-runs. The optional cleanup function (returned from the effect) runs before the next effect and on unmount — use it to clear timers, cancel requests, and unsubscribe.",
+      advanced:
+        "Fires asynchronously after paint (non-blocking). `useLayoutEffect` fires synchronously after DOM mutation but before paint — use it only when you need to read layout. Strict Mode runs effects twice in development to surface cleanup bugs.",
+    },
+    seeAlso: ["hook", "state", "useState"],
+  },
+  {
+    slug: "virtual-dom",
+    term: "Virtual DOM",
+    aliases: ["vdom"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "React's in-memory copy of the webpage structure — React compares it to the real DOM and only updates what changed.",
+      intermediate:
+        "A lightweight JavaScript object tree mirroring the DOM. On each render, React diffs the new virtual DOM against the previous one (reconciliation) and applies only the necessary real DOM mutations. This batching makes updates efficient.",
+      advanced:
+        "React 18's Fiber architecture replaces the synchronous vdom diff with an interruptible work loop. Rendering is split into two phases: the render phase (pure, can be interrupted) and the commit phase (applies mutations, synchronous). Concurrent features like `useTransition` mark lower-priority updates that Fiber can deprioritize.",
+    },
+    seeAlso: ["dom", "component", "reconciliation"],
+  },
+  {
+    slug: "reconciliation",
+    term: "Reconciliation",
+    aliases: ["diffing"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "React's process of comparing the old and new UI trees to figure out the minimum set of real DOM changes needed.",
+      intermediate:
+        "React's diffing algorithm. It compares element types first: same type → update props; different type → unmount old, mount new. The `key` prop lets React match list items across renders even if they reorder.",
+      advanced:
+        "O(n) heuristic reconciler (not optimal O(n³) tree edit distance). Assumes: (1) elements of different types produce different trees; (2) keys hint identity across renders. React 18's Fiber breaks the diff work into small units that can be paused, aborted, or resumed.",
+    },
+    seeAlso: ["virtual-dom", "key-prop", "component"],
+  },
+  {
+    slug: "server-component",
+    term: "Server Component",
+    aliases: ["RSC", "React Server Component"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A React component that runs only on the server — it can read databases and files directly, and sends HTML to the browser with zero JavaScript.",
+      intermediate:
+        "Default in Next.js App Router. Can use `async`/`await`, access env vars, and call databases — none of which is exposed to the client. Cannot use `useState`, `useEffect`, or event handlers. Data is serialized and sent as RSC payload.",
+      advanced:
+        "Part of React's server rendering architecture. RSC payload is a serialized component tree (not HTML). Client components hydrate independently. Server and client components can be interleaved, but a client component cannot import a server component as a child — it must receive it via `children` or a slot prop.",
+    },
+    seeAlso: ["client-component", "ssr", "component"],
+  },
+  {
+    slug: "client-component",
+    term: "Client Component",
+    aliases: ["'use client'"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A React component that runs in the browser and can use state, effects, and event handlers. Marked with 'use client' at the top of the file.",
+      intermediate:
+        "Marked with `'use client'` directive. Renders on both server (initial HTML) and client (hydration). Can use `useState`, `useEffect`, browser APIs, and event handlers. All its imports are also treated as client-side.",
+      advanced:
+        "Defines a boundary in the component tree. Everything below a 'use client' file is client-side by default. The boundary cannot be crossed back — a client module cannot render an async server component. The boundary is a module boundary, not a component boundary.",
+    },
+    seeAlso: ["server-component", "component", "hook"],
+  },
+  {
+    slug: "route",
+    term: "Route",
+    aliases: ["page route", "URL route"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A URL path mapped to a specific page or handler in your application.",
+      intermediate:
+        "In Next.js App Router, routes are defined by the file system: `app/about/page.tsx` serves `/about`. Dynamic segments use brackets: `app/blog/[slug]/page.tsx`. Routes can be grouped (`(group)`) without affecting the URL.",
+      advanced:
+        "The App Router uses React Suspense as the streaming primitive. Layouts persist across navigations, reducing remounts. Parallel routes (`@slot` syntax) render multiple pages simultaneously. Intercepting routes (`(..)segment`) overlay a route while preserving the URL context.",
+    },
+    seeAlso: ["layout", "app-router", "dynamic-route"],
+  },
+  {
+    slug: "layout",
+    term: "Layout (Next.js)",
+    aliases: ["layout.tsx"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A shared shell that wraps every page in a folder — like a header or sidebar that stays while you navigate.",
+      intermediate:
+        "Defined in `layout.tsx`. Accepts a `children` prop and wraps it. Layouts nest: the root layout wraps everything; inner layouts wrap their segment's pages. Layouts do NOT remount on navigation — they persist their state.",
+      advanced:
+        "Server Component by default. Root layout (`app/layout.tsx`) must include `<html>` and `<body>`. Can be made a Client Component when interactive state (like a theme provider or Zustand store) is needed at the root. `template.tsx` is like layout but remounts on every navigation.",
+    },
+    seeAlso: ["route", "app-router", "server-component"],
+  },
+  {
+    slug: "middleware",
+    term: "Middleware",
+    aliases: ["middleware.ts"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Code that runs on every incoming request before it reaches your page — used for checking auth or redirecting.",
+      intermediate:
+        "In Next.js, defined in `middleware.ts` at the project root. Runs at the edge before the matched route. Can rewrite URLs, redirect, set headers, or return a response. Configured to match specific paths with the `matcher` export.",
+      advanced:
+        "Executes in the Edge Runtime (V8 isolates, not Node.js) for low latency. Cannot use Node.js APIs. Reads cookies and headers via `NextRequest`; sets them on `NextResponse`. Common patterns: auth token validation, geolocation-based redirects, A/B testing via cookie.",
+    },
+    seeAlso: ["route", "api-route", "deployment"],
+  },
+  {
+    slug: "api-route",
+    term: "API Route",
+    aliases: ["route handler"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A server endpoint in your Next.js app that responds to HTTP requests — like a mini backend.",
+      intermediate:
+        "Defined as `app/api/route.ts` with exported `GET`, `POST`, etc. functions. Receives a `NextRequest`, returns a `NextResponse`. Can access databases, env vars, and perform any server-side work. Alternative to a separate backend for simple APIs.",
+      advanced:
+        "Route Handlers replace the Pages Router's `/pages/api` convention. They can run in the Node.js runtime (full Node APIs) or Edge Runtime (global subset only). When to prefer over Server Actions: third-party webhooks, public APIs, streaming responses, or non-form HTTP clients.",
+    },
+    seeAlso: ["middleware", "server-component", "deployment"],
+  },
+  {
+    slug: "deployment",
+    term: "Deployment",
+    aliases: ["deploy", "shipping"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The process of taking your code from your computer and putting it on a server so other people can use it.",
+      intermediate:
+        "For Next.js: `npm run build` produces the `.next` output. `next start` serves it with Node.js. Vercel connects to your git repo and auto-deploys on every push — preview deployments for PRs, production on main. Environment variables are set in the platform dashboard.",
+      advanced:
+        "Next.js supports three output modes: default (Node.js server), `output: 'standalone'` (self-contained Docker-friendly bundle), and `output: 'export'` (fully static, no server). Vercel uses ISR via its KV-backed cache; self-hosted ISR requires a cache handler implementation.",
+    },
+    seeAlso: ["ssr", "middleware", "api-route"],
+  },
+  {
+    slug: "ssr",
+    term: "SSR",
+    aliases: ["server-side rendering"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Generating the full HTML of a page on the server before sending it to the browser — so users see content instantly.",
+      intermediate:
+        "The server renders the React component tree to HTML for each request, sends it to the browser, and then the client 'hydrates' — attaches event listeners to the existing HTML. Benefits: faster first paint, better SEO, works without JavaScript. Cost: server latency per request.",
+      advanced:
+        "Contrasted with CSR (client-side rendering, hydrate from blank div), SSG (static generation at build time), and ISR (static + revalidation). Next.js App Router routes with uncached fetches are dynamic (SSR); cached fetches are static (SSG). Streaming SSR (`Suspense`) sends HTML in chunks as data resolves.",
+    },
+    seeAlso: ["server-component", "deployment", "isr"],
+  },
+  {
+    slug: "isr",
+    term: "ISR",
+    aliases: ["incremental static regeneration"],
+    category: "web",
+    phaseIds: ["2"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A Next.js feature that serves a cached static page instantly, then quietly rebuilds it in the background so it stays fresh.",
+      intermediate:
+        "Set `next: {revalidate: 60}` in a fetch call. The first request after the TTL triggers a background regeneration while the stale page is still served. Once regeneration completes, all subsequent requests get the fresh version.",
+      advanced:
+        "Stale-while-revalidate applied to page-level rendering. On Vercel, the CDN cache is purged on successful regeneration. `revalidatePath()` and `revalidateTag()` allow on-demand revalidation from Server Actions or API routes — enabling instant updates after CMS edits.",
+    },
+    seeAlso: ["ssr", "deployment", "server-component"],
+  },
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(

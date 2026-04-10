@@ -91,27 +91,35 @@ export const PHASES: Phase[] = [
     lessonCount: 50,
     order: 2,
     modules: [
-      mod("2", 1, "html-css", "HTML and CSS", "Semantic markup, layout, design tokens.", 55, 10),
+      mod(
+        "2",
+        1,
+        "html-foundations",
+        "HTML Foundations",
+        "Semantic markup, forms, accessibility.",
+        55,
+        10
+      ),
       mod(
         "2",
         2,
+        "css-fundamentals",
+        "CSS Fundamentals",
+        "Box model, flexbox, grid, responsive design.",
+        55,
+        10
+      ),
+      mod(
+        "2",
+        3,
         "javascript-in-the-browser",
         "JavaScript in the Browser",
         "DOM, events, fetch, async.",
         55,
         10
       ),
-      mod("2", 3, "react", "React", "Components, hooks, state, effects.", 60, 10),
-      mod(
-        "2",
-        4,
-        "accessibility",
-        "Accessibility",
-        "WCAG, ARIA, keyboard, screen readers.",
-        50,
-        10
-      ),
-      mod("2", 5, "deploying", "Deploying", "Build pipelines, hosting, domains, CI.", 55, 10),
+      mod("2", 4, "react", "React Fundamentals", "Components, hooks, state, effects.", 60, 10),
+      mod("2", 5, "nextjs", "Next.js 15", "App router, server components, data fetching.", 50, 10),
     ],
   },
   {
