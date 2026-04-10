@@ -1,0 +1,199 @@
+---
+title: "Replication: Leader-Follower, Quorums, and Consistency"
+description: "Understand how databases replicate data across multiple nodes, the tradeoffs between replication strategies, and what 'eventual consistency' actually means in practice."
+phase: 5
+module: "5-3-database-internals"
+order: 6
+difficulty: "medium"
+bloom: "evaluate"
+vocabulary: ["replication", "leader", "follower", "replication-lag", "quorum"]
+---
+
+## Why replication exists
+
+A single database server is a single point of failure. If that machine crashes, loses power, or has a hardware failure, your application goes down and potentially loses data. Replication solves this by maintaining copies of the database on multiple servers, so that the failure of any single node is survivable.
+
+Replication serves three purposes simultaneously: **fault tolerance** (the system keeps running when a node fails), **read scalability** (read queries can be distributed across replicas), and **low-latency reads** (replicas can be placed geographically close to users in different regions).
+
+The cost of replication is complexity. Now you have multiple copies of data that must stay (or at least eventually become) consistent. Changes made to one node must propagate to others. What happens if a network partition prevents propagation? These questions define the landscape of replication strategies.
+
+## Leader-follower replication
+
+The dominant pattern for relational databases is **leader-follower** (also called primary-replica or master-slave). One node is designated the **leader** — the only node that accepts writes. All other nodes are **followers** — they receive a stream of changes from the leader and apply them in the same order.
+
+In PostgreSQL, this stream is the WAL. Every change written to the leader's WAL is shipped to followers, which replay it. The followers maintain an exact copy of the leader's data at some point in the past. The gap between the leader's current state and what followers have applied is the **replication lag**.
+
+**Synchronous replication** (PostgreSQL: `synchronous_standby_names`) requires at least one follower to acknowledge receiving and writing the WAL record before the leader reports `COMMIT` success. This guarantees zero replication lag on the synchronous replica but adds latency to every write — you're waiting for the network round-trip to the replica before responding to the application.
+
+**Asynchronous replication** (the default) lets the leader commit and return immediately. Followers catch up in the background. This keeps write latency low but means followers might be behind by milliseconds, seconds, or (under heavy load or network issues) longer. If the leader crashes before followers catch up, those writes may be lost.
+
+**Failover:** When the leader fails, a follower must be promoted to become the new leader. The promoted follower becomes the new write destination, and other followers repoint to it. The catch: if the promoted follower was lagging, it might be missing some writes that the old leader acknowledged. This is why synchronous replication is critical for systems where data loss is unacceptable.
+
+## Multi-leader replication
+
+In multi-leader (or multi-primary) replication, multiple nodes accept writes independently. This enables writes to continue even if one datacenter is partitioned from others. The tradeoff: when two leaders accept writes to the same row concurrently, a **conflict** arises. Someone has to resolve it.
+
+Conflict resolution strategies include: last-write-wins (the write with the later timestamp survives — simple but loses data), merge (combine both updates somehow — works for counters and sets, not for arbitrary edits), and application-defined resolution (the application receives the conflict and decides — most flexible, most complex).
+
+Multi-leader replication is used by some NoSQL databases and by systems designed for geographic distribution, but it is unusual in traditional relational databases because conflict resolution is genuinely hard and the semantics are difficult to reason about.
+
+## Quorum reads and writes
+
+Quorum-based systems (used by Cassandra, DynamoDB, and distributed databases built on Paxos/Raft) don't have a single leader for all operations. Instead, they define a **quorum** — the minimum number of nodes that must acknowledge a read or write before it is considered successful.
+
+In a cluster of N nodes with write quorum W and read quorum R, the system guarantees consistency as long as W + R > N. The classic configuration for 3 nodes: W = 2, R = 2. Any write requires 2 of 3 nodes to acknowledge it. Any read queries 2 of 3 nodes and takes the most recent value. Since any two sets of 2 overlap in at least one node, the reader always sees the latest write.
+
+**Replication lag** in quorum systems is bounded by the read quorum — you read from enough nodes that at least one has the latest data. But with eventually consistent systems (R = 1, W = 1), you may read stale data from a node that hasn't received the latest write yet.
+
+## What eventual consistency actually means
+
+"Eventual consistency" means that, in the absence of further updates, all replicas will _eventually_ converge to the same value. It says nothing about _how long_ "eventually" takes, and it does not guarantee what you read in the meantime.
+
+For user-facing applications, eventual consistency can cause jarring experiences: a user submits a form, the write goes to one replica, the page refreshes and the GET request hits a different replica that hasn't received the write yet — the update appears to disappear. "Read-your-own-writes" consistency is a weaker guarantee that specifically addresses this: a user always sees the effects of their own writes, even if other users might temporarily not.
+
+Strong consistency (or linearizability) guarantees that all reads after a write return the new value, regardless of which replica is queried. This requires coordination — either a single leader, or quorum with W + R > N. It is slower but predictable.
+
+<SandboxExercise
+  title="Simulate Leader-Follower Replication with Lag"
+  instructions="Implement a leader-follower replication simulation. The leader accepts writes immediately. Followers apply writes after a simulated lag (delay). Implement `readFromLeader()`, `readFromFollower(followerId)`, and `simulateTime(ms)` to advance the clock and apply pending replication events. Demonstrate reading stale data from a lagging follower."
+  starterCode={`// Leader-follower replication simulation with configurable lag
+
+class ReplicationCluster {
+constructor(followerLags = [50, 150]) {
+// followerLags: array of lag in ms for each follower
+this.currentTime = 0;
+this.leaderData = {};
+this.followers = followerLags.map((lag, i) => ({
+id: i + 1,
+lag,
+data: {},
+pendingWrites: [], // { applyAt, key, value }
+}));
+this.writeCount = 0;
+}
+
+write(key, value) {
+const writeTime = this.currentTime;
+this.leaderData[key] = { value, writtenAt: writeTime };
+console.log(\`[t=\${writeTime}ms] Leader: wrote \${key} = \${JSON.stringify(value)}\`);
+
+    // Schedule replication to each follower
+    for (const follower of this.followers) {
+      follower.pendingWrites.push({
+        applyAt: writeTime + follower.lag,
+        key,
+        value,
+        writtenAt: writeTime,
+      });
+    }
+    this.writeCount++;
+
+}
+
+simulateTime(ms) {
+this.currentTime += ms;
+// Apply any pending writes that are due
+for (const follower of this.followers) {
+const due = follower.pendingWrites.filter(w => w.applyAt <= this.currentTime);
+follower.pendingWrites = follower.pendingWrites.filter(w => w.applyAt > this.currentTime);
+for (const w of due) {
+follower.data[w.key] = { value: w.value, writtenAt: w.writtenAt };
+console.log(\`[t=\${this.currentTime}ms] Follower \${follower.id}: applied \${w.key} (lag was \${this.currentTime - w.writtenAt}ms)\`);
+}
+}
+}
+
+readFromLeader(key) {
+const entry = this.leaderData[key];
+return entry ? entry.value : null;
+}
+
+readFromFollower(followerId, key) {
+const follower = this.followers.find(f => f.id === followerId);
+const entry = follower.data[key];
+const leaderEntry = this.leaderData[key];
+const isStale = leaderEntry && (!entry || entry.writtenAt < leaderEntry.writtenAt);
+return {
+value: entry ? entry.value : null,
+isStale,
+lagMs: isStale ? (this.currentTime - (entry ? entry.writtenAt : 0)) : 0,
+};
+}
+
+status() {
+console.log(\`\\n[t=\${this.currentTime}ms] Cluster status:\`);
+console.log(' Leader data:', this.leaderData);
+for (const f of this.followers) {
+console.log(\` Follower \${f.id} data:\`, f.data, \`pending: \${f.pendingWrites.length}\`);
+}
+}
+}
+
+// Simulate a write followed by reads at different times
+const cluster = new ReplicationCluster([50, 200]);
+
+cluster.write('user:42', { name: 'Alice', role: 'admin' });
+console.log('\\n--- Immediately after write ---');
+cluster.status();
+console.log('Read from leader:', cluster.readFromLeader('user:42'));
+console.log('Read from follower 1:', cluster.readFromFollower(1, 'user:42'));
+console.log('Read from follower 2:', cluster.readFromFollower(2, 'user:42'));
+
+cluster.simulateTime(75); // Advance 75ms — follower 1 should be caught up
+console.log('\\n--- After 75ms ---');
+console.log('Read from follower 1:', cluster.readFromFollower(1, 'user:42'));
+console.log('Read from follower 2:', cluster.readFromFollower(2, 'user:42'));
+
+cluster.simulateTime(150); // Advance another 150ms — follower 2 now caught up
+console.log('\\n--- After 225ms total ---');
+console.log('Read from follower 2:', cluster.readFromFollower(2, 'user:42'));
+`}
+  solution={`// The starter code is a complete working solution.
+// Key observations from running it:
+// - Immediately after write: both followers return null (stale) or old value
+// - After 75ms: follower 1 (50ms lag) has caught up; follower 2 (200ms lag) still stale
+// - After 225ms: both followers are up to date
+// This demonstrates why reading from followers can return stale data.
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="In synchronous leader-follower replication, what happens to write latency compared to asynchronous replication?"
+  options={[
+    "Write latency decreases because the leader doesn't wait for the data page write",
+    "Write latency increases because the leader waits for at least one follower to acknowledge the WAL record",
+    "Write latency is unchanged — the synchronous vs asynchronous distinction only affects failover behavior",
+    "Write latency is non-deterministic because followers apply writes in batches",
+  ]}
+  answer={1}
+  explanation="In synchronous replication, the leader's COMMIT does not complete until at least one follower has written the WAL record to its own disk. This adds a full network round-trip to every write. The benefit is zero data loss on leader failure — the follower has everything. Asynchronous replication avoids this latency but risks losing the most recent writes on failover."
+/>
+
+<Quiz
+  question="A quorum system has 5 nodes and requires a write quorum of 3 (W=3). To guarantee reading the latest write, the minimum read quorum R must be:"
+  options={[
+    "1 (read from any one node)",
+    "2 (read from any two nodes)",
+    "3 (read from any three nodes)",
+    "5 (read from all nodes)",
+  ]}
+  answer={2}
+  explanation="The quorum condition for consistency is W + R > N, where N=5 and W=3. So R > N - W = 5 - 3 = 2, meaning R must be at least 3. Any set of 3 readers overlaps with any set of 3 writers in at least one node, guaranteeing the reader sees the latest write."
+/>
+
+<FillBlank
+  sentence="The delay between when the leader commits a write and when a follower applies that write is called ___ ___."
+  answer="replication lag"
+  hint="It describes how far 'behind' a follower is relative to the leader"
+/>
+
+## What you learned
+
+- Leader-follower replication routes all writes to one node (leader); followers receive and replay the change stream
+- Synchronous replication eliminates data loss on failover but adds latency to every write
+- Asynchronous replication keeps write latency low but risks losing the most recent writes on leader failure
+- Multi-leader replication allows writes to multiple nodes but introduces write conflicts that require resolution strategies
+- Quorum writes and reads (W + R > N) guarantee consistency without a single leader, at the cost of higher coordination
+- Eventual consistency means replicas converge over time but may serve stale reads in the interim

@@ -1,0 +1,259 @@
+---
+title: "Concurrency Control: MVCC, Locks, and Isolation"
+description: "Understand how databases serve thousands of simultaneous readers and writers without corruption, using multi-version concurrency control, locks, and isolation levels."
+phase: 5
+module: "5-3-database-internals"
+order: 4
+difficulty: "hard"
+bloom: "analyze"
+vocabulary: ["mvcc", "row-version", "optimistic-lock", "pessimistic-lock", "isolation"]
+---
+
+## The concurrency problem
+
+At any given moment a production database might be handling thousands of concurrent transactions. Two users update the same account balance. A report reads millions of rows while new orders are being inserted. Without coordination, these concurrent operations corrupt data in subtle, hard-to-detect ways. Concurrency control is the set of mechanisms databases use to make concurrent transactions behave as if they ran one at a time.
+
+The naive solution — one global lock that serializes all transactions — is correct but catastrophically slow. Modern databases use far more sophisticated approaches that allow high concurrency while maintaining correctness guarantees.
+
+## MVCC: the key insight
+
+**Multi-version concurrency control** (MVCC) is the dominant concurrency control strategy in systems like PostgreSQL, Oracle, and MySQL InnoDB. The core insight is simple: instead of locking rows so readers and writers block each other, the database keeps multiple **versions** of each row simultaneously.
+
+When a transaction updates a row, it does not overwrite the old version. Instead, it creates a new row version stamped with the current transaction ID, and marks the old version as superseded. When a transaction reads a row, it sees the most recent version that was committed _before the reading transaction started_ — not necessarily the latest version.
+
+This design achieves **readers never block writers, and writers never block readers**. A long-running report can scan a table for minutes while ongoing transactions insert and update rows freely. The report sees a consistent snapshot of the database as of its start time; newer row versions are simply invisible to it.
+
+**The tradeoff:** Old row versions accumulate until they are no longer needed by any active transaction. PostgreSQL's VACUUM process periodically reclaims this "dead tuple" space. If VACUUM cannot keep up with your write rate, the table bloats. Very long-running transactions are particularly harmful — they prevent VACUUM from cleaning up any version newer than the transaction's start time.
+
+## Transaction IDs and visibility rules
+
+PostgreSQL assigns every transaction a monotonically increasing **transaction ID** (XID). Each row version is stamped with the XID of the transaction that created it (`xmin`) and, if deleted or superseded, the XID that removed it (`xmax`).
+
+Visibility rule: a row version is visible to transaction T if:
+
+- `xmin` was committed before T started, AND
+- `xmax` is either not set, or committed after T started
+
+This simple rule, applied to every row version, produces snapshot isolation: each transaction sees a consistent point-in-time view with no lock contention between readers and writers.
+
+## Pessimistic vs. optimistic locking
+
+**Pessimistic locking** assumes conflicts are frequent. Transactions acquire locks on resources before accessing them, blocking other transactions that want the same resources. This is safe but reduces concurrency — a slow transaction holding many locks starves other transactions.
+
+PostgreSQL's `SELECT ... FOR UPDATE` is pessimistic locking: it acquires a row-level lock immediately, preventing other transactions from updating those rows until the current transaction commits or rolls back.
+
+**Optimistic locking** assumes conflicts are rare. Transactions proceed without acquiring locks, reading and modifying data freely. At commit time, the transaction verifies that none of the data it read has changed. If a conflict is detected, the transaction is aborted and retried. This works well when conflicts genuinely are rare (many readers, few writers on the same rows). When conflicts are frequent, the retry overhead makes it worse than pessimistic locking.
+
+A common application-level optimistic locking pattern: add a `version` integer column. When reading a row, remember its version. Before updating, check that the version matches. If another transaction has incremented it, abort.
+
+## Isolation levels
+
+SQL defines four isolation levels that trade correctness guarantees for concurrency:
+
+**Read Uncommitted:** Transactions see uncommitted changes from other transactions ("dirty reads"). Rarely used; usually forbidden.
+
+**Read Committed:** Transactions see only committed data, but may see different data if they read the same row twice within a transaction (non-repeatable read). PostgreSQL's default.
+
+**Repeatable Read:** The same query returns the same data no matter how many times you run it within a transaction (no non-repeatable reads). New rows from concurrent inserts may still appear (phantom reads). PostgreSQL implements this with MVCC snapshot isolation.
+
+**Serializable:** Full isolation — concurrent transactions produce exactly the results that some serial execution would produce. PostgreSQL implements this with Serializable Snapshot Isolation (SSI), detecting dangerous read-write cycles at commit time. Performance penalty is usually acceptable for the safety it provides.
+
+The right isolation level depends on your application. Most OLTP applications work correctly at Read Committed. Financial applications handling account transfers often need Repeatable Read or Serializable.
+
+<SandboxExercise
+  title="Simulate MVCC Row Versioning"
+  instructions="Implement a simplified MVCC store. Each row has a version history. `readRow(txId, rowId)` should return the most recent version committed before the given transaction started. `writeRow(txId, rowId, data)` creates a new version. `commitTx(txId)` marks the transaction as committed. `startTx()` returns a new transaction ID based on the current committed snapshot."
+  starterCode={`// Simplified MVCC simulation
+// Each row version: { xmin, xmax, data }
+// xmin = transaction that created this version
+// xmax = transaction that deleted/superseded this version (null if current)
+
+class MVCCStore {
+constructor() {
+this.nextTxId = 1;
+this.committedTxIds = new Set();
+// rows: Map<rowId, Array<{ xmin, xmax, data }>>
+this.rows = new Map();
+// pendingTx: Map<txId, { startSnapshot: Set<number> }>
+this.pendingTx = new Map();
+}
+
+startTx() {
+const txId = this.nextTxId++;
+// Snapshot = set of committed transactions at this moment
+this.pendingTx.set(txId, { startSnapshot: new Set(this.committedTxIds) });
+return txId;
+}
+
+commitTx(txId) {
+this.committedTxIds.add(txId);
+this.pendingTx.delete(txId);
+console.log(\`TX \${txId} committed\`);
+}
+
+writeRow(txId, rowId, data) {
+if (!this.rows.has(rowId)) this.rows.set(rowId, []);
+const versions = this.rows.get(rowId);
+// Supersede the currently visible version for this writer
+const current = versions.find(v => v.xmax === null && v.xmin !== txId);
+if (current) current.xmax = txId;
+versions.push({ xmin: txId, xmax: null, data });
+console.log(\`TX \${txId} wrote row \${rowId}:, data\`);
+}
+
+readRow(txId, rowId) {
+const tx = this.pendingTx.get(txId);
+if (!tx) throw new Error(\`Unknown transaction \${txId}\`);
+const { startSnapshot } = tx;
+
+    const versions = this.rows.get(rowId) || [];
+    // Find the most recent version visible to this transaction
+    // Visible if: xmin was committed before we started AND xmax is null or committed after we started
+    const visible = versions.filter(v => {
+      const xminCommitted = startSnapshot.has(v.xmin);
+      const xmaxOk = v.xmax === null || !startSnapshot.has(v.xmax);
+      return xminCommitted && xmaxOk;
+    });
+
+    if (visible.length === 0) return null;
+    // Return the version with the highest xmin (most recent visible)
+    visible.sort((a, b) => b.xmin - a.xmin);
+    return visible[0].data;
+
+}
+}
+
+// Demonstrate MVCC: reader sees snapshot from before writer committed
+const db = new MVCCStore();
+
+// Bootstrap: tx1 writes initial data and commits
+const tx1 = db.startTx();
+db.writeRow(tx1, 'account:alice', { balance: 1000 });
+db.commitTx(tx1);
+
+// tx2 starts a long-running read
+const tx2 = db.startTx();
+
+// tx3 modifies alice's balance and commits
+const tx3 = db.startTx();
+db.writeRow(tx3, 'account:alice', { balance: 500 });
+db.commitTx(tx3);
+
+// tx4 reads after tx3 commits — sees new balance
+const tx4 = db.startTx();
+
+console.log('\\ntx2 reads alice (started before tx3):', db.readRow(tx2, 'account:alice')); // 1000
+console.log('tx4 reads alice (started after tx3):', db.readRow(tx4, 'account:alice')); // 500
+`}
+  solution={`// The starter code demonstrates the core MVCC pattern correctly.
+// The critical insight: tx2 reads 1000 even though tx3 has already committed 500,
+// because tx2's snapshot was taken before tx3 committed.
+// This is how long-running reports see consistent data during live writes.
+
+class MVCCStore {
+constructor() {
+this.nextTxId = 1;
+this.committedTxIds = new Set();
+this.rows = new Map();
+this.pendingTx = new Map();
+}
+
+startTx() {
+const txId = this.nextTxId++;
+this.pendingTx.set(txId, { startSnapshot: new Set(this.committedTxIds) });
+return txId;
+}
+
+commitTx(txId) {
+this.committedTxIds.add(txId);
+this.pendingTx.delete(txId);
+}
+
+writeRow(txId, rowId, data) {
+if (!this.rows.has(rowId)) this.rows.set(rowId, []);
+const versions = this.rows.get(rowId);
+const current = versions.find(v => v.xmax === null && v.xmin !== txId);
+if (current) current.xmax = txId;
+versions.push({ xmin: txId, xmax: null, data });
+}
+
+readRow(txId, rowId) {
+const { startSnapshot } = this.pendingTx.get(txId);
+const versions = this.rows.get(rowId) || [];
+const visible = versions.filter(v =>
+startSnapshot.has(v.xmin) && (v.xmax === null || !startSnapshot.has(v.xmax))
+);
+if (!visible.length) return null;
+visible.sort((a, b) => b.xmin - a.xmin);
+return visible[0].data;
+}
+}
+
+const db = new MVCCStore();
+const tx1 = db.startTx();
+db.writeRow(tx1, 'account:alice', { balance: 1000 });
+db.commitTx(tx1);
+
+const tx2 = db.startTx();
+const tx3 = db.startTx();
+db.writeRow(tx3, 'account:alice', { balance: 500 });
+db.commitTx(tx3);
+
+const tx4 = db.startTx();
+console.log('tx2 sees:', db.readRow(tx2, 'account:alice')); // { balance: 1000 }
+console.log('tx4 sees:', db.readRow(tx4, 'account:alice')); // { balance: 500 }
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="In an MVCC database, when a transaction updates a row:"
+  options={[
+    "The old row is overwritten immediately and the WAL records what it was",
+    "A new row version is created; the old version remains visible to transactions that started before the update",
+    "The row is locked until the transaction commits, then overwritten",
+    "The row is copied to a separate 'undo log' table for rollback purposes",
+  ]}
+  answer={1}
+  explanation="MVCC never overwrites old row versions. The old version stays in place, visible to transactions whose snapshot predates the update. The new version is stamped with the writing transaction's ID and becomes visible only after that transaction commits — and only to transactions that started after the commit."
+/>
+
+<Quiz
+  question="Which isolation level prevents phantom reads — new rows inserted by concurrent transactions appearing in a repeated query?"
+  options={[
+    "Read Committed",
+    "Read Uncommitted",
+    "Repeatable Read (in PostgreSQL's MVCC implementation)",
+    "No isolation level prevents phantom reads",
+  ]}
+  answer={2}
+  explanation="In PostgreSQL, Repeatable Read uses a full transaction snapshot, so new rows inserted by concurrent transactions are not visible to the snapshot holder — preventing phantom reads. Standard SQL's Repeatable Read only prevents non-repeatable reads; PostgreSQL's implementation goes further."
+/>
+
+<Quiz
+  question="Optimistic locking is most appropriate when:"
+  options={[
+    "Multiple transactions frequently modify the same rows",
+    "The database runs on a single-core machine with low concurrency",
+    "Conflicts are rare — most transactions read and write different data",
+    "You need strict serializable isolation guarantees",
+  ]}
+  answer={2}
+  explanation="Optimistic locking works by detecting conflicts at commit time and retrying. When conflicts are rare, the overhead of retrying occasional aborted transactions is low and throughput is high. When conflicts are frequent, optimistic locking causes many retries, reducing effective throughput below what pessimistic locking would achieve."
+/>
+
+<FillBlank
+  sentence="In PostgreSQL's MVCC implementation, each row version is stamped with the ___ of the transaction that created it."
+  answer="transaction ID"
+  hint="Every transaction gets a unique sequential number, stored as xmin on each row version"
+/>
+
+## What you learned
+
+- MVCC stores multiple versions of each row, letting readers see a consistent snapshot without blocking writers
+- Each row version is stamped with the creating transaction's ID (xmin) and the superseding transaction's ID (xmax)
+- Visibility rules determine which version a transaction sees based on its start-time snapshot
+- Pessimistic locking acquires locks before access; optimistic locking detects conflicts at commit time
+- Isolation levels trade correctness guarantees for concurrency — Read Committed is the default; Serializable is the safest
+- Long-running transactions prevent MVCC cleanup (VACUUM), causing table bloat

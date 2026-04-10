@@ -1,0 +1,220 @@
+---
+title: "Query Processing: From SQL to Results"
+description: "Follow a SQL query through the parser, optimizer, and executor, and learn how cost-based optimization chooses between execution strategies."
+phase: 5
+module: "5-3-database-internals"
+order: 3
+difficulty: "medium"
+bloom: "analyze"
+vocabulary: ["query-optimizer", "cost-model", "execution-plan", "join-order", "selectivity"]
+---
+
+## The journey of a SQL query
+
+When you run `SELECT * FROM orders WHERE user_id = 42 AND status = 'shipped'`, several distinct systems inside the database engine process your request before the first row is returned. Understanding these stages explains why two logically equivalent queries can have wildly different performance, and how the database chooses between them.
+
+The pipeline has three main stages: **parsing**, **optimization**, and **execution**. Each stage transforms the query from one representation to another.
+
+## Stage 1: Parsing and semantic analysis
+
+The **parser** treats the SQL string as text and applies the SQL grammar to produce an **abstract syntax tree** (AST) — a tree-shaped data structure representing the query's logical structure. At this stage, the parser checks syntax only. It has no idea whether the tables or columns in your query actually exist.
+
+**Semantic analysis** follows parsing. The analyzer resolves table and column names against the database catalog, verifies that joins are between compatible columns, applies type checking, and expands `*` into a concrete column list. The result is a **logical plan** — a tree of relational algebra operations (Select, Project, Join, Sort, etc.) that describes _what_ to compute, not _how_ to compute it.
+
+At this point, all equivalent reformulations of the query (`WHERE a = 1 AND b = 2` vs `WHERE b = 2 AND a = 1`) produce identical logical plans. The optimizer's job is to choose the best physical implementation.
+
+## Stage 2: The query optimizer
+
+The **query optimizer** is arguably the most sophisticated component in a relational database. Its job is to take the logical plan and choose an **execution plan** — a concrete sequence of physical operations — that minimizes execution cost. Two decisions dominate query optimization: choosing access paths (sequential scan vs. index scan) and choosing join order.
+
+### Cost models and selectivity
+
+The optimizer uses a **cost model** — a mathematical function that estimates the CPU and I/O cost of each operation. It consults statistics stored in the catalog: table row counts, column histograms (distributions of values), and number of distinct values.
+
+**Selectivity** is the fraction of rows a filter condition is expected to return. An equality filter on a high-cardinality column (like `user_id = 42` in a table of millions) has low selectivity — it returns very few rows. A filter on a low-cardinality column (like `status = 'active'` where 90% of rows are active) has high selectivity — most rows pass the filter.
+
+Low selectivity means the optimizer prefers an index scan (fetch only the matching 0.001% of rows). High selectivity means a sequential scan might be cheaper (you'd visit most pages anyway via random index lookups). The optimizer computes an estimated cost for each plan alternative and picks the minimum.
+
+### Join ordering
+
+For a query joining three tables A, B, C, there are multiple valid join orders: `(A JOIN B) JOIN C`, `(A JOIN C) JOIN B`, `(B JOIN C) JOIN A`, and their mirror images — a total of 12 orderings for 3 tables, and n!/2 orderings for n tables. With 8 tables in a complex query, this is over 20,000 possibilities.
+
+Real optimizers use **dynamic programming** with memoization to explore the plan space efficiently, pruning obviously expensive branches early. PostgreSQL uses this approach for small numbers of tables and falls back to a genetic algorithm for queries with many joins.
+
+The order matters enormously. Joining the large table first can produce an intermediate result with millions of rows that must then be filtered. Joining the most selective filtered table first keeps intermediate results small.
+
+## Stage 3: Execution
+
+The **executor** walks the physical plan tree, calling each operator to produce rows. PostgreSQL uses a **volcano model** (also called iterator model): each operator implements a `next()` function that pulls one row from its child operators. The query result is materialized row by row from the bottom of the plan tree upward.
+
+Physical operators include:
+
+- **Sequential scan**: iterate over every page of the table
+- **Index scan**: walk the B+ tree, fetch matching heap pages
+- **Hash join**: build a hash table from the smaller relation, probe it with rows from the larger
+- **Nested loop join**: for each row in the outer table, scan (or index-scan) the inner table
+- **Merge join**: join two pre-sorted streams by merging them, requires both inputs sorted on join key
+- **Sort**: materialize all rows, sort them (or use a top-N heap for LIMIT queries)
+- **Aggregate**: compute GROUP BY results using hash aggregation or sorted aggregation
+
+<SandboxExercise
+  title="Cost-Based Access Path Selection"
+  instructions="Implement a simplified query optimizer that decides between a sequential scan and an index scan based on estimated cost. Use the provided table statistics and filter selectivity to compute each plan's cost, then return the cheaper option along with an explanation."
+  starterCode={`// Simplified cost model — simulates how a real optimizer chooses access paths
+
+function estimateSelectivity(filter, stats) {
+// stats: { rowCount, distinctValues: { [column]: number } }
+if (!filter) return 1.0;
+const distinct = stats.distinctValues[filter.column] || stats.rowCount;
+if (filter.op === '=') return 1 / distinct;
+if (filter.op === 'range') return filter.fraction || 0.1;
+return 0.5;
+}
+
+function costSequentialScan(rowCount, pageSize = 8192, rowSize = 200) {
+// Every row must be read; rows are packed into pages sequentially
+const pagesPerRow = rowSize / pageSize;
+const totalPages = Math.ceil(rowCount \* pagesPerRow);
+// Sequential I/O is fast: cost unit = 1 per page
+return totalPages;
+}
+
+function costIndexScan(rowCount, selectivity, indexHeight = 3) {
+// Index traversal cost: O(log n) to find start
+const indexTraversalCost = indexHeight;
+// Heap fetch cost: one random I/O per matched row (expensive)
+const matchedRows = rowCount _ selectivity;
+const heapFetchCost = matchedRows _ 4; // random I/O costs ~4x sequential
+return indexTraversalCost + heapFetchCost;
+}
+
+function choosePlan(tableName, filter, hasIndex, stats) {
+const sel = estimateSelectivity(filter, stats);
+const matchedRows = Math.round(stats.rowCount \* sel);
+
+const seqCost = costSequentialScan(stats.rowCount);
+const idxCost = hasIndex ? costIndexScan(stats.rowCount, sel) : Infinity;
+
+const plan = idxCost < seqCost ? 'index-scan' : 'sequential-scan';
+const chosenCost = Math.min(seqCost, idxCost);
+
+return {
+table: tableName,
+filter: filter ? \`\${filter.column} \${filter.op} ?\` : 'none',
+selectivity: (sel \* 100).toFixed(2) + '%',
+estimatedRows: matchedRows,
+costs: { sequentialScan: seqCost.toFixed(1), indexScan: hasIndex ? idxCost.toFixed(1) : 'N/A (no index)' },
+chosenPlan: plan,
+chosenCost: chosenCost.toFixed(1),
+};
+}
+
+// TODO: try different table sizes and selectivities to see when the optimizer switches plans
+
+const usersStats = { rowCount: 1_000_000, distinctValues: { user_id: 1_000_000, status: 3, country: 50 } };
+
+console.log('=== users.user_id = 42 (high selectivity, indexed) ===');
+console.log(choosePlan('users', { column: 'user_id', op: '=' }, true, usersStats));
+
+console.log('\\n=== users.status = active (low selectivity, indexed) ===');
+console.log(choosePlan('users', { column: 'status', op: '=' }, true, usersStats));
+
+console.log('\\n=== users.country (medium selectivity, no index) ===');
+console.log(choosePlan('users', { column: 'country', op: '=' }, false, usersStats));
+
+console.log('\\n=== full table scan (no filter) ===');
+console.log(choosePlan('users', null, true, usersStats));
+`}
+  solution={`// The starter code is a complete solution — experiment with it.
+// Key insight: when selectivity is low (few rows match), index wins.
+// When selectivity is high (most rows match), sequential scan wins
+// because random I/O for each heap fetch outweighs scanning sequentially.
+
+function estimateSelectivity(filter, stats) {
+if (!filter) return 1.0;
+const distinct = stats.distinctValues[filter.column] || stats.rowCount;
+if (filter.op === '=') return 1 / distinct;
+if (filter.op === 'range') return filter.fraction || 0.1;
+return 0.5;
+}
+
+function costSequentialScan(rowCount, pageSize = 8192, rowSize = 200) {
+const totalPages = Math.ceil(rowCount \* (rowSize / pageSize));
+return totalPages;
+}
+
+function costIndexScan(rowCount, selectivity, indexHeight = 3) {
+return indexHeight + rowCount _ selectivity _ 4;
+}
+
+function choosePlan(tableName, filter, hasIndex, stats) {
+const sel = estimateSelectivity(filter, stats);
+const seqCost = costSequentialScan(stats.rowCount);
+const idxCost = hasIndex ? costIndexScan(stats.rowCount, sel) : Infinity;
+const plan = idxCost < seqCost ? 'index-scan' : 'sequential-scan';
+return {
+table: tableName,
+selectivity: (sel _ 100).toFixed(2) + '%',
+estimatedRows: Math.round(stats.rowCount _ sel),
+costs: { sequentialScan: seqCost.toFixed(1), indexScan: hasIndex ? idxCost.toFixed(1) : 'N/A' },
+chosenPlan: plan,
+};
+}
+
+const usersStats = { rowCount: 1_000_000, distinctValues: { user_id: 1_000_000, status: 3, country: 50 } };
+console.log(choosePlan('users', { column: 'user_id', op: '=' }, true, usersStats));
+console.log(choosePlan('users', { column: 'status', op: '=' }, true, usersStats));
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A column with 3 distinct values (status: active, inactive, deleted) in a table of 1 million rows has:"
+  options={[
+    "High selectivity on an equality filter — the index will almost always be used",
+    "Low selectivity on an equality filter — a sequential scan is likely cheaper",
+    "Undefined selectivity — the optimizer cannot estimate costs without a histogram",
+    "Perfect selectivity — it returns exactly one row per filter",
+  ]}
+  answer={1}
+  explanation="Selectivity for an equality filter on a column with 3 distinct values is roughly 1/3 — meaning about 333,000 rows match. At that fraction, accessing each via random index lookups (heap fetches) is far more expensive than a single sequential scan. Low selectivity (many matching rows) favors sequential scans."
+/>
+
+<Quiz
+  question="Why does join ordering matter so much for query performance?"
+  options={[
+    "Some join algorithms are slower than others regardless of input size",
+    "The order determines which tables use sequential scans vs index scans",
+    "Joining the most selective filtered table first keeps intermediate result sets small, reducing downstream work",
+    "The optimizer cannot use indexes when tables are joined in the wrong order",
+  ]}
+  answer={2}
+  explanation="Each join produces an intermediate result set. If you join large unfiltered tables first, that intermediate set can have millions of rows that must then be filtered or joined further. Applying selective filters early and joining small intermediate results keeps the plan fast. This is why the optimizer explores many join orderings."
+/>
+
+<Quiz
+  question="The volcano (iterator) model of query execution:"
+  options={[
+    "Materializes all intermediate results before passing them to the next operator",
+    "Uses a push model where producers send rows downstream to consumers",
+    "Uses a pull model where each operator calls next() on its child to get one row at a time",
+    "Executes operators in parallel across multiple CPU cores",
+  ]}
+  answer={2}
+  explanation="In the volcano model, the root operator (e.g., the client receiving results) calls next() on its child. That child calls next() on its child, and so on, pulling rows up through the plan tree one at a time. This requires minimal memory — rows are processed as they arrive rather than all materialized at once."
+/>
+
+<FillBlank
+  sentence="The fraction of rows a filter condition is expected to return, used by the optimizer to estimate plan costs, is called ___."
+  answer="selectivity"
+  hint="A filter that returns very few rows has low ___"
+/>
+
+## What you learned
+
+- Parsing converts SQL text into an AST; semantic analysis resolves names and produces a logical plan
+- The query optimizer uses a cost model with table statistics to estimate the cost of each plan alternative
+- Selectivity is the fraction of rows a filter returns; low selectivity favors index scans, high selectivity favors sequential scans
+- Join ordering is critical — joining the most selective filtered table first minimizes intermediate result sizes
+- The executor implements the volcano model, pulling rows up through the plan tree operator by operator

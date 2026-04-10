@@ -1,0 +1,183 @@
+---
+title: "Storage Engines: B-Trees vs LSM-Trees"
+description: "Understand how databases physically organize data on disk, and why the choice between B-trees and LSM-trees determines a database's read vs write performance profile."
+phase: 5
+module: "5-3-database-internals"
+order: 1
+difficulty: "medium"
+bloom: "analyze"
+vocabulary: ["b-tree", "lsm-tree", "storage-engine", "compaction", "write-amplification"]
+---
+
+## Why storage engines matter
+
+When you write `INSERT INTO users (name) VALUES ('Alice')`, you probably assume that row lands somewhere on disk. But _how_ it lands — in what data structure, in what order, with what overhead — is entirely the storage engine's job. The choice of storage engine determines whether your database is fast at reads, fast at writes, or somewhere in between. It is one of the most consequential decisions in database design.
+
+Two families of storage engines dominate the industry: **B-trees** (used by PostgreSQL, MySQL InnoDB, SQLite) and **LSM-trees** (used by RocksDB, Cassandra, LevelDB, and increasingly by newer systems like CockroachDB). They make radically different tradeoffs.
+
+## B-trees: the read-optimized classic
+
+A B-tree is a self-balancing tree where each node holds multiple keys and pointers to child nodes. The "B" does not stand for binary — a B-tree node can have hundreds of children. This wide branching factor means a B-tree with millions of rows is only 3–4 levels deep. Finding any record requires at most 3–4 disk seeks, which is why B-trees have dominated relational databases for fifty years.
+
+B-tree nodes correspond to fixed-size disk pages (typically 4KB or 8KB). When you insert a row, the engine finds the correct leaf page and writes the new key in sorted position. If the page is full, it splits into two pages and updates the parent node to point to both. This split can cascade up the tree, but it is rare in practice.
+
+**The write penalty:** Every update to a B-tree is an in-place modification of an existing page. If you update a single byte in a row, the engine still rewrites the entire 4KB page. More importantly, if one logical write requires modifying multiple pages (a split, or a cascade of splits), you need to ensure all those pages are written atomically. This is why B-tree databases require a **write-ahead log** (WAL) — if the system crashes mid-split, the WAL lets the database recover to a consistent state. That means every write actually involves at least two disk writes: one to the WAL, one to the data page.
+
+**The read advantage:** Because B-tree pages are always in sorted order and stored in a stable location on disk, range scans are highly efficient. Reading all users with IDs between 1000 and 2000 means finding the leaf page for ID 1000 and then scanning forward — the pages are physically adjacent (or nearly so) on disk.
+
+## LSM-trees: the write-optimized challenger
+
+An LSM-tree — Log-Structured Merge-tree — takes a completely different approach. Writes never modify existing data. Instead, every write is appended to an in-memory buffer called a **memtable**, which is also mirrored in an append-only log on disk for crash safety. When the memtable fills up, it is flushed to disk as an immutable, sorted file called an **SSTable** (Sorted String Table).
+
+This means every write is a sequential append — the fastest possible disk operation. There is no hunting for the right page to modify. You simply tack new data onto the end. This is why LSM-tree databases can sustain dramatically higher write throughput than B-tree databases under heavy write load.
+
+**The read penalty:** Data for a single key might be spread across the memtable, multiple levels of SSTables, and the most recent SSTable that supersedes older ones. To read a key, the engine must check all of these in sequence, from newest to oldest, until it finds the key. In the worst case, this touches many files. Bloom filters (probabilistic data structures) help skip SSTables that definitely don't contain the key, but reads are still more expensive than in a B-tree.
+
+**Compaction:** Left unchecked, SSTables accumulate indefinitely, making reads slower and consuming more disk. **Compaction** is the background process that merges older SSTables together, discarding deleted and overwritten data. Compaction keeps read performance bounded but introduces its own cost: the engine must read and rewrite data that might have already been written once. This is **write amplification** — the ratio of actual bytes written to disk versus logical bytes written by the application. A write amplification factor of 10 means a 1MB logical write causes 10MB of actual disk I/O.
+
+## Choosing the right engine
+
+The choice depends on your workload:
+
+| Workload                                 | Choose                                    |
+| ---------------------------------------- | ----------------------------------------- |
+| Heavy reads, moderate writes             | B-tree (PostgreSQL, MySQL)                |
+| Write-heavy, time-series, event logs     | LSM-tree (RocksDB, Cassandra)             |
+| Mixed, needs SQL                         | B-tree (battle-tested, mature)            |
+| Mobile / embedded with high write bursts | LSM-tree (SQLite in WAL mode is a hybrid) |
+
+Modern databases blur these lines. PostgreSQL's heap storage is a B-tree variant, but it borrows LSM ideas (like the WAL). RocksDB allows tunable compaction strategies. Understanding the tradeoffs means you can make informed decisions when picking a database and tuning its configuration.
+
+<SandboxExercise
+  title="Simulate a B-Tree Node Search"
+  instructions="A simplified B-tree node stores sorted keys and pointers to children. Implement `btreeSearch(node, targetKey)` that searches a B-tree recursively. The node structure is provided — each node has a `keys` array and a `children` array. Leaf nodes have no children. Return the value if found, or null if not found."
+  starterCode={`// B-tree node structure:
+// { keys: number[], values: any[], children: BTreeNode[] }
+// Leaf nodes: children is empty []
+// Internal nodes: children.length === keys.length + 1
+
+function createLeaf(keys, values) {
+return { keys, values, children: [] };
+}
+
+function createInternal(keys, values, children) {
+return { keys, values, children };
+}
+
+// TODO: implement recursive B-tree search
+function btreeSearch(node, targetKey) {
+// 1. Find the index i where node.keys[i] >= targetKey
+// 2. If node.keys[i] === targetKey, return node.values[i]
+// 3. If this is a leaf (no children), return null
+// 4. Otherwise recurse into the appropriate child
+}
+
+// Build a small 2-level B-tree manually
+// [20, 40]
+// / | \\
+// [10,15] [25,30] [45,50]
+
+const leaf1 = createLeaf([10, 15], ['user10', 'user15']);
+const leaf2 = createLeaf([25, 30], ['user25', 'user30']);
+const leaf3 = createLeaf([45, 50], ['user45', 'user50']);
+const root = createInternal([20, 40], ['user20', 'user40'], [leaf1, leaf2, leaf3]);
+
+// Test searches
+console.log(btreeSearch(root, 15)); // should find 'user15'
+console.log(btreeSearch(root, 30)); // should find 'user30'
+console.log(btreeSearch(root, 99)); // should return null
+console.log(btreeSearch(root, 20)); // should find 'user20'
+`}
+  solution={`function createLeaf(keys, values) {
+return { keys, values, children: [] };
+}
+
+function createInternal(keys, values, children) {
+return { keys, values, children };
+}
+
+function btreeSearch(node, targetKey) {
+// Find the first index where keys[i] >= targetKey
+let i = 0;
+while (i < node.keys.length && targetKey > node.keys[i]) {
+i++;
+}
+
+// Exact match found at this node
+if (i < node.keys.length && node.keys[i] === targetKey) {
+return node.values[i];
+}
+
+// If leaf, key doesn't exist
+if (node.children.length === 0) {
+return null;
+}
+
+// Recurse into the appropriate child
+return btreeSearch(node.children[i], targetKey);
+}
+
+const leaf1 = createLeaf([10, 15], ['user10', 'user15']);
+const leaf2 = createLeaf([25, 30], ['user25', 'user30']);
+const leaf3 = createLeaf([45, 50], ['user45', 'user50']);
+const root = createInternal([20, 40], ['user20', 'user40'], [leaf1, leaf2, leaf3]);
+
+console.log(btreeSearch(root, 15)); // 'user15'
+console.log(btreeSearch(root, 30)); // 'user30'
+console.log(btreeSearch(root, 99)); // null
+console.log(btreeSearch(root, 20)); // 'user20'
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="Why do B-tree databases require a write-ahead log (WAL)?"
+  options={[
+    "To speed up sequential writes by batching them",
+    "To ensure atomicity of multi-page writes that could be interrupted by a crash",
+    "To compress data before writing it to disk",
+    "To support multiple concurrent writers without locks",
+  ]}
+  answer={1}
+  explanation="B-tree writes can span multiple pages (for example, a node split updates the split page, a new sibling page, and the parent). If the system crashes mid-operation, the database could be left inconsistent. The WAL records the intended changes first, so recovery can replay or undo them to restore a consistent state."
+/>
+
+<Quiz
+  question="Which workload benefits most from an LSM-tree storage engine?"
+  options={[
+    "A reporting database that runs complex analytical queries over many rows",
+    "An online store product catalog with infrequent updates and many reads",
+    "An IoT sensor platform ingesting millions of time-stamped events per second",
+    "A database that serves primary-key lookups for user profile pages",
+  ]}
+  answer={2}
+  explanation="LSM-trees excel at write-heavy workloads because every write is a sequential append. An IoT platform ingesting millions of events per second benefits enormously from this. The other options involve read-heavy or mixed workloads where B-trees' O(log n) lookup and stable page layout win."
+/>
+
+<Quiz
+  question="Write amplification in an LSM-tree means:"
+  options={[
+    "Writes are duplicated across multiple replicas for redundancy",
+    "The WAL doubles every write, causing 2x disk usage",
+    "Compaction rewrites data that was already written once, so actual disk I/O exceeds logical write volume",
+    "Large values are split across multiple SSTables, amplifying storage consumption",
+  ]}
+  answer={2}
+  explanation="Write amplification is the ratio of bytes written to disk versus bytes written by the application. Compaction merges SSTables, which requires reading and rewriting existing data. A write amplification factor of 10 means writing 1MB of application data causes 10MB of actual disk writes."
+/>
+
+<FillBlank
+  sentence="The background process in an LSM-tree database that merges older SSTables together to keep read performance bounded is called ___."
+  answer="compaction"
+  hint="It 'compacts' multiple sorted files into fewer, larger ones"
+/>
+
+## What you learned
+
+- B-trees organize data in sorted, fixed-size pages on disk; reads are fast because range scans are physically sequential
+- B-tree writes modify pages in-place and require a WAL for crash safety, adding write overhead
+- LSM-trees append all writes sequentially to memory then flush to immutable sorted files (SSTables), making writes extremely fast
+- Compaction merges SSTables in the background, but introduces write amplification
+- Write amplification is the ratio of actual disk I/O to logical application writes
+- B-trees win for read-heavy workloads; LSM-trees win for write-heavy workloads like event streams and time-series data

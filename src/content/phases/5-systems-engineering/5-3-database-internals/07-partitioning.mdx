@@ -1,0 +1,200 @@
+---
+title: "Partitioning and Sharding"
+description: "Learn how databases split data across multiple nodes using range and hash partitioning, when each strategy is appropriate, and how hotspots destroy the benefit of sharding."
+phase: 5
+module: "5-3-database-internals"
+order: 7
+difficulty: "medium"
+bloom: "apply"
+vocabulary: ["partitioning", "sharding", "range-partition", "hash-partition", "hotspot"]
+---
+
+## When one machine is not enough
+
+Replication copies data to multiple machines, which helps with fault tolerance and read scalability. But what happens when a single table grows so large that one machine cannot store it? Or when write throughput exceeds what a single leader can handle? This is the problem **partitioning** (also called **sharding**) solves.
+
+Partitioning splits a dataset into smaller subsets called **partitions** or **shards**, each stored on a different node. Where replication gives you copies of everything, partitioning gives you fractions of everything. A table with one billion rows might be split across 10 nodes, each storing 100 million rows. Writes and reads are distributed across nodes, scaling both storage and throughput horizontally.
+
+The challenge is deciding which rows go to which partition. This is the **partition key** decision, and it is one of the most consequential architectural choices you'll make when designing a distributed data system. A bad partition key can turn a well-resourced distributed system into a bottleneck worse than a single machine.
+
+## Range partitioning
+
+**Range partitioning** assigns rows to partitions based on a range of values of the partition key. The key space is divided into contiguous ranges, and each range maps to a specific shard.
+
+For example, a table of sales records partitioned by `sale_date`:
+
+- Shard 1: 2020-01-01 to 2020-12-31
+- Shard 2: 2021-01-01 to 2021-12-31
+- Shard 3: 2022-01-01 to 2022-12-31
+
+**Advantage:** Range queries are efficient. `WHERE sale_date BETWEEN '2021-01-01' AND '2021-06-30'` touches only Shard 2. The database can prune all other shards without scanning them.
+
+**Disadvantage: hotspots.** If all new writes have today's date, 100% of writes go to the current shard while all other shards sit idle. This is the definition of a **hotspot** — one partition receiving disproportionate load while others are underutilized. A hotspot eliminates the scaling benefit of partitioning. Cassandra's time-series data frequently suffers from this: the "current time" partition is always hot.
+
+The fix is to add entropy to the partition key. Instead of partitioning on `user_id` alone, some systems hash `user_id` first, then range-partition on the hash. Or they prefix the partition key with a random value (sharding key = `random_prefix + timestamp`), distributing writes across many shards while keeping logical ordering within each prefix group.
+
+## Hash partitioning
+
+**Hash partitioning** computes a hash of the partition key and assigns the row to `hash(key) % N` where N is the number of shards. This distributes writes and reads evenly across all shards — no hotspots for typical random-key workloads.
+
+**Advantage:** Even distribution of load. A user table partitioned by `hash(user_id) % 8` will distribute 8 million users approximately uniformly across 8 shards.
+
+**Disadvantage:** Range queries fan out across all shards. `WHERE user_id BETWEEN 1000 AND 2000` cannot be answered by a single shard — the user IDs in that range are scattered across all shards by the hash function. The query must be sent to all shards and the results merged. This is called a **scatter-gather** query and is expensive.
+
+**Consistent hashing** is a refinement used by systems like DynamoDB and Cassandra. Instead of `hash(key) % N`, consistent hashing maps keys and nodes onto a ring. Adding or removing a node only requires redistributing the keys adjacent to that node on the ring, rather than rehashing all keys. This makes scaling the cluster (adding/removing shards) far less disruptive.
+
+## Composite partitioning
+
+Many production systems use **composite partitioning** — partitioning on multiple keys in a hierarchy. Cassandra uses this model explicitly: the first part of the key is the **partition key** (hash-partitioned across nodes), and additional columns are the **clustering key** (sorted within each partition). This gives you even distribution across nodes while preserving sort order within each node — the best of both worlds for specific query patterns.
+
+## Cross-partition queries and the scatter-gather problem
+
+The fundamental challenge of sharding is that queries not aligned with the partition key must touch all shards. In a system with 100 shards, a scatter-gather query sends the query to all 100, waits for all 100 to respond, and merges the results. Latency is determined by the slowest shard. One slow node (a "stragglers" problem) delays every cross-partition query.
+
+This is why **partition key selection drives schema design** in distributed databases. Your most common queries must align with the partition key. If they don't, you're paying for distributed infrastructure while getting single-machine performance.
+
+<SandboxExercise
+  title="Range and Hash Partition Routers"
+  instructions="Implement two partition router functions: `rangeRouter(key, partitions)` routes to the partition whose range covers the key. `hashRouter(key, numShards)` routes via hashing. Then simulate a hotspot: write 1000 records with sequential timestamps and show that range partitioning creates a hotspot while hash partitioning distributes evenly."
+  starterCode={`// Partition routing simulation
+
+function rangeRouter(key, partitions) {
+// partitions: [{ shardId, min, max }] — sorted by min
+// Return the shardId whose range covers key
+// TODO: find the partition where min <= key < max
+for (const partition of partitions) {
+if (key >= partition.min && key < partition.max) {
+return partition.shardId;
+}
+}
+// Key is beyond all ranges — return last partition
+return partitions[partitions.length - 1].shardId;
+}
+
+function hashRouter(key, numShards) {
+// Simple hash: sum char codes mod numShards (use string keys)
+const str = String(key);
+let hash = 0;
+for (let i = 0; i < str.length; i++) {
+hash = (hash \* 31 + str.charCodeAt(i)) & 0xffffffff;
+}
+return Math.abs(hash) % numShards;
+}
+
+function simulateWrites(records, routerFn, numShards, label) {
+const shardCounts = new Array(numShards).fill(0);
+for (const record of records) {
+const shardId = routerFn(record.key);
+shardCounts[shardId]++;
+}
+const max = Math.max(...shardCounts);
+const min = Math.min(...shardCounts);
+console.log(\`\\n=== \${label} ===\`);
+console.log('Writes per shard:', shardCounts);
+console.log(\`Hotspot ratio (max/min): \${(max / Math.max(min, 1)).toFixed(1)}x\`);
+console.log(max / records.length > 0.5 ? '**_ HOTSPOT DETECTED _**' : 'Distribution looks even');
+}
+
+// Generate 1000 records with sequential timestamps (simulates time-series inserts)
+const numShards = 4;
+const records = Array.from({ length: 1000 }, (_, i) => ({
+key: 1700000000 + i, // Unix timestamps, sequential
+data: \`event_\${i}\`,
+}));
+
+// Range partitions by time
+const rangePartitions = [
+{ shardId: 0, min: 0, max: 1700000250 },
+{ shardId: 1, min: 1700000250, max: 1700000500 },
+{ shardId: 2, min: 1700000500, max: 1700000750 },
+{ shardId: 3, min: 1700000750, max: Infinity },
+];
+
+simulateWrites(
+records,
+r => rangeRouter(r.key, rangePartitions),
+numShards,
+'Range Partitioning (sequential timestamps)'
+);
+
+// Hash routing — should distribute evenly
+simulateWrites(
+records,
+r => hashRouter(r.key, numShards),
+numShards,
+'Hash Partitioning (same sequential timestamps)'
+);
+
+// Demonstrate cross-partition query cost
+console.log('\\n=== Cross-partition query cost ===');
+console.log('Range query WHERE timestamp BETWEEN 1700000200 AND 1700000400:');
+const inRange = rangePartitions.filter(p => p.max > 1700000200 && p.min < 1700000400);
+console.log(\` Shards to query: [\${inRange.map(p => p.shardId).join(', ')}] (range partitioning — \${inRange.length} shard(s))\`);
+console.log(\` With hash partitioning: all \${numShards} shards must be queried (scatter-gather)\`);
+`}
+  solution={`// The starter code is a complete working solution.
+// Expected output demonstrates:
+// - Range partitioning puts all 1000 sequential writes on shard 3 (hotspot ratio ~1000x)
+// - Hash partitioning distributes ~250 writes to each shard (hotspot ratio ~1x)
+// - Range partitioning wins for range queries; hash partitioning wins for point lookups
+
+function rangeRouter(key, partitions) {
+for (const partition of partitions) {
+if (key >= partition.min && key < partition.max) return partition.shardId;
+}
+return partitions[partitions.length - 1].shardId;
+}
+
+function hashRouter(key, numShards) {
+const str = String(key);
+let hash = 0;
+for (let i = 0; i < str.length; i++) {
+hash = (hash \* 31 + str.charCodeAt(i)) & 0xffffffff;
+}
+return Math.abs(hash) % numShards;
+}
+
+// See starter code for full simulation
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A database partitions an event log by event_date using range partitioning. The application inserts events continuously with the current timestamp. What problem will occur?"
+  options={[
+    "Queries will be slow because timestamps require hash lookups",
+    "The most recent date partition will receive all new writes while older partitions sit idle — a hotspot",
+    "Range queries will fan out across all partitions unnecessarily",
+    "The partition key cannot be a timestamp in range partitioning",
+  ]}
+  answer={1}
+  explanation="Sequential timestamps mean all writes go to the partition covering 'now.' The other partitions receive zero writes. This hotspot eliminates the write-scalability benefit of sharding — you have distributed infrastructure but one partition doing all the work."
+/>
+
+<Quiz
+  question="Which type of query is most expensive in a hash-partitioned database?"
+  options={[
+    "Point lookups by partition key (WHERE user_id = 42)",
+    "Writes to a single partition key",
+    "Range queries (WHERE user_id BETWEEN 1000 AND 2000) where the range spans many partition keys",
+    "Queries that use the partition key in an equality filter",
+  ]}
+  answer={2}
+  explanation="Hash partitioning scatters related keys across different shards. A range query must be sent to all shards (scatter-gather), then results merged. Point lookups by partition key compute the hash and route to exactly one shard — very efficient."
+/>
+
+<FillBlank
+  sentence="When one partition receives disproportionately more reads or writes than others, it is called a ___ and eliminates the scaling benefit of partitioning."
+  answer="hotspot"
+  hint="Think of a single 'hot' partition that gets all the traffic"
+/>
+
+## What you learned
+
+- Partitioning splits a dataset across multiple nodes, scaling both storage capacity and throughput
+- Range partitioning assigns contiguous key ranges to shards — efficient for range queries but prone to hotspots with sequential keys
+- Hash partitioning uses a hash function to distribute writes evenly but makes range queries expensive (scatter-gather)
+- Hotspots occur when one partition receives disproportionate load — they destroy the benefit of sharding
+- Composite partitioning (partition key + clustering key) combines even distribution with sorted order within each shard
+- Partition key selection is a schema-level architectural decision that must match your most common query patterns

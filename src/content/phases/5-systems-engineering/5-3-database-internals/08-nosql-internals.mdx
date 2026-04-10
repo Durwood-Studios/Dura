@@ -1,0 +1,232 @@
+---
+title: "NoSQL Internals: Document, Key-Value, Column-Family, and Graph"
+description: "Explore the internal data models and storage strategies of the four major NoSQL database families, and learn when each is the right tool for the job."
+phase: 5
+module: "5-3-database-internals"
+order: 8
+difficulty: "medium"
+bloom: "evaluate"
+vocabulary: ["document-store", "key-value", "column-family", "graph-database", "denormalization"]
+---
+
+## Why NoSQL exists
+
+Relational databases are extraordinarily capable tools, but they make assumptions that don't always hold. They assume data fits a fixed schema. They assume joins are a primary operation. They assume you can afford to coordinate writes through a single leader. They assume you want ACID transactions.
+
+NoSQL databases challenged each of these assumptions. The term "NoSQL" is imprecise — it originally meant "No SQL" and now means "Not Only SQL." What unites these databases is that they relax some relational guarantees in exchange for something else: schema flexibility, horizontal scalability, write throughput, specialized query models, or geographic distribution.
+
+Understanding _what_ each NoSQL family relaxes and _what_ it gains in return lets you choose intelligently instead of following trends.
+
+## Key-value stores
+
+The simplest NoSQL data model: a **key-value** store is a massive distributed hash map. Keys are arbitrary byte strings (or strings); values are opaque blobs — the database doesn't interpret them. You get three operations: `get(key)`, `put(key, value)`, `delete(key)`.
+
+This simplicity is a superpower. With no schema to validate, no index to update (beyond the primary hash), and no join logic, key-value stores can sustain millions of operations per second with single-digit millisecond latency. Redis, DynamoDB (at its simplest), and Memcached are key-value stores.
+
+**Internal implementation:** Most key-value stores use one of two storage engines — a hash table (fast O(1) lookup but no ordering, no range scans) or an LSM-tree (ordered, supports range scans, write-optimized). Redis keeps all data in memory (with optional persistence), which is why it's so fast but limited by RAM.
+
+**When to use:** Caching, session storage, rate limiting, feature flags, leaderboards — anywhere you need fast single-key lookups at high throughput and don't need relationships between values.
+
+## Document stores
+
+A **document store** organizes data as documents — typically JSON or BSON objects. Unlike a key-value store, the database understands the structure of the value. You can query on any field within the document, create indexes on nested fields, and atomically update parts of a document.
+
+The killer feature of document stores is **schema flexibility**. Documents in the same collection don't need the same fields. You can add a new field to one document without altering a table schema or running a migration. This is enormously valuable in early-stage products where the data model changes frequently.
+
+**Denormalization** is a central strategy in document databases. In relational databases, you normalize data to avoid redundancy — a user's address is stored once in an `addresses` table and referenced by ID. In a document store, you often embed the address directly in the user document. This eliminates joins (the document store has no efficient join operation) at the cost of data redundancy: updating an address means updating every document that embedded it.
+
+MongoDB, Firestore, and CouchDB are document stores. Internally, MongoDB uses WiredTiger (an LSM/B-tree hybrid) and stores documents in BSON. Secondary indexes are B-trees over the indexed field, just like relational databases.
+
+**When to use:** Content management, user profiles, product catalogs, any domain with highly variable structure or where documents are the natural unit of access.
+
+## Column-family stores
+
+**Column-family** (or wide-column) stores like Cassandra and HBase organize data differently from both relational tables and document stores. Rows have a primary key, and the remaining columns can vary per row. Related columns are grouped into **column families** stored together on disk.
+
+The distinguishing feature is extreme write scalability via LSM-trees. Cassandra uses an LSM-tree storage engine with a tunable consistency model. Writes go to an in-memory memtable and a commit log, then flush to SSTables. There are no joins, no transactions across partitions, and (by default) no strict consistency — but write throughput is staggering.
+
+Column-family stores are the natural choice for time-series data, event logs, IoT sensor readings, and audit trails: massive volumes of append-only writes, queries by primary key or time range, no need for cross-row transactions.
+
+**The data modeling inversion:** In Cassandra, you design your table schema around your queries, not your domain model. If you need to query by user ID and by event type, you maintain two separate tables (or two separate partitions) — redundant copies of the data, optimized for different access patterns. This is the column-family mantra: denormalize aggressively, and think about write paths before read paths.
+
+## Graph databases
+
+**Graph databases** model data as nodes (entities) and edges (relationships) and are optimized for traversing relationships across the graph. A query like "find all friends of Alice who have purchased product X in the last 30 days" requires traversing friend edges and then filtering by purchase events — a multi-hop traversal that would require many self-joins in SQL.
+
+Neo4j (the most widely used graph database) stores nodes and edges as linked records with direct pointers between them. Traversing an edge is a pointer follow, not a lookup — O(1) per hop, independent of graph size. In SQL, each self-join in a recursive query is O(n) work. A six-hop path traversal in Neo4j might be millions of times faster than the equivalent SQL.
+
+**When to use:** Social networks, recommendation engines, fraud detection, knowledge graphs, network topology analysis — any domain where relationships are first-class and multi-hop traversal is a primary operation.
+
+**When not to use:** If you mostly access individual entities by ID and rarely traverse relationships, a graph database's traversal optimizations add overhead without benefit. Most application data is better served by relational or document stores.
+
+<SandboxExercise
+  title="Simulate a Document Store with Schema-Flexible Documents"
+  instructions="Implement a simple in-memory document store. It should support `insert(collection, doc)`, `findById(collection, id)`, `query(collection, predicate)`, and `update(collection, id, patch)`. Documents in the same collection can have different fields. Demonstrate schema flexibility with heterogeneous documents and a query that works across them."
+  starterCode={`// In-memory document store simulation
+
+class DocumentStore {
+constructor() {
+this.collections = {};
+this.nextId = 1;
+}
+
+\_getCollection(name) {
+if (!this.collections[name]) this.collections[name] = new Map();
+return this.collections[name];
+}
+
+insert(collectionName, doc) {
+const collection = this.\_getCollection(collectionName);
+const id = doc.\_id || String(this.nextId++);
+const stored = { ...doc, \_id: id };
+collection.set(id, stored);
+return stored;
+}
+
+findById(collectionName, id) {
+const collection = this.\_getCollection(collectionName);
+return collection.get(String(id)) || null;
+}
+
+query(collectionName, predicate) {
+// predicate is a function (doc) => boolean
+const collection = this.\_getCollection(collectionName);
+const results = [];
+for (const doc of collection.values()) {
+if (predicate(doc)) results.push(doc);
+}
+return results;
+}
+
+update(collectionName, id, patch) {
+// Shallow merge patch into existing document
+const collection = this.\_getCollection(collectionName);
+const existing = collection.get(String(id));
+if (!existing) return null;
+const updated = { ...existing, ...patch, \_id: existing.\_id };
+collection.set(String(id), updated);
+return updated;
+}
+
+collectionStats(collectionName) {
+const collection = this.\_getCollection(collectionName);
+const docs = Array.from(collection.values());
+const allKeys = new Set(docs.flatMap(d => Object.keys(d)));
+return {
+count: docs.length,
+uniqueFields: Array.from(allKeys),
+schemaVariants: docs.length,
+};
+}
+}
+
+// Demonstrate schema flexibility: a 'products' collection with different shapes
+const db = new DocumentStore();
+
+// Physical product
+db.insert('products', {
+name: 'Wireless Headphones',
+price: 79.99,
+category: 'electronics',
+weight_kg: 0.25,
+sku: 'WH-1000',
+});
+
+// Digital product — completely different fields
+db.insert('products', {
+name: 'JavaScript Mastery Course',
+price: 49.99,
+category: 'digital',
+downloadUrl: 'https://example.com/course/js',
+durationHours: 12,
+instructor: 'Alice Chen',
+});
+
+// Product with embedded reviews (denormalization)
+db.insert('products', {
+name: 'Standing Desk',
+price: 399.00,
+category: 'furniture',
+dimensions: { width: 140, depth: 70, heightMin: 60, heightMax: 120 },
+reviews: [
+{ rating: 5, text: 'Great quality', author: 'Bob' },
+{ rating: 4, text: 'Good value', author: 'Carol' },
+],
+});
+
+console.log('All products (any category):');
+db.query('products', () => true).forEach(p => console.log(' -', p.name, '| $' + p.price));
+
+console.log('\\nDigital products:');
+db.query('products', p => p.category === 'digital').forEach(p => console.log(' -', p.name));
+
+console.log('\\nProducts over $100:');
+db.query('products', p => p.price > 100).forEach(p => console.log(' -', p.name, '| $' + p.price));
+
+console.log('\\nSchema stats (all fields across all docs):');
+console.log(db.collectionStats('products'));
+
+// Update one field without touching others (no migration needed)
+const [desk] = db.query('products', p => p.name === 'Standing Desk');
+db.update('products', desk.\_id, { price: 349.00, onSale: true });
+console.log('\\nUpdated desk:', db.findById('products', desk.\_id));
+`}
+  solution={`// The starter code is a complete working solution.
+// The key demonstration: products with completely different fields coexist in
+// the same collection without schema migration. Queries work across all shapes.
+// This is the core value proposition of a document store over a relational table.
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A social network wants to run queries like 'friends-of-friends who are in the same city as user X.' Which database type is best suited for this?"
+  options={[
+    "Key-value store — fast single-key lookups",
+    "Document store — flexible schema for user profiles",
+    "Column-family store — high write throughput for relationship events",
+    "Graph database — traversal of multi-hop relationships is a first-class, optimized operation",
+  ]}
+  answer={3}
+  explanation="Friends-of-friends queries require traversing relationship edges multiple hops. Graph databases store edges as direct pointers, making each hop O(1). In a relational or document database, this requires recursive self-joins that become exponentially expensive as the graph depth increases."
+/>
+
+<Quiz
+  question="Denormalization in a document store (embedding related data directly in a document) has which tradeoff?"
+  options={[
+    "Queries are slower because more data must be scanned",
+    "Writes become slower because consistency must be maintained across nodes",
+    "Reads are faster (no joins needed) but updates to embedded data must touch every document that contains it",
+    "Denormalization is always preferable — document stores have no reason to normalize",
+  ]}
+  answer={2}
+  explanation="Embedding eliminates joins — you read one document and get everything you need. But if the embedded data changes (e.g., a product's price appears in millions of order documents), you must update it in every document that contains it. This is the classic denormalization tradeoff: read performance vs. update complexity."
+/>
+
+<Quiz
+  question="Why are column-family databases like Cassandra designed to avoid cross-partition transactions?"
+  options={[
+    "Because column families can only store numeric data, which doesn't need transaction semantics",
+    "Because cross-partition coordination requires network round-trips that reduce the write throughput advantage of LSM-tree storage",
+    "Because Cassandra uses a B-tree storage engine that doesn't support locking",
+    "Because all column-family databases are read-only",
+  ]}
+  answer={1}
+  explanation="Cassandra's write throughput comes from its LSM-tree engine and distributed architecture — writes go to the local memtable and immediately succeed. Adding cross-partition transactions would require coordination messages between nodes (a distributed lock or two-phase commit), adding latency and reducing the throughput advantage that is Cassandra's primary value."
+/>
+
+<FillBlank
+  sentence="Storing related data together inside a single document rather than splitting it into separate tables and using foreign keys is called ___."
+  answer="denormalization"
+  hint="The opposite of database normalization — intentionally introducing redundancy for performance"
+/>
+
+## What you learned
+
+- Key-value stores are distributed hash maps optimized for single-key access at extreme throughput and low latency
+- Document stores add schema understanding to values, enabling queries on nested fields and flexible per-document schemas
+- Denormalization — embedding related data in documents — trades update complexity for fast reads without joins
+- Column-family stores use LSM-trees and partition-key-first design to achieve extreme write throughput for time-series and event data
+- Graph databases store edges as direct pointers, making multi-hop relationship traversal O(1) per hop instead of O(n) joins
+- Every NoSQL family relaxes a specific relational assumption — choose based on which constraint you need to relax, not on hype

@@ -1,0 +1,304 @@
+---
+title: "Indexing Deep Dive"
+description: "Explore the internals of B+ trees, hash indexes, composite indexes, and covering indexes, and understand exactly how each accelerates query execution."
+phase: 5
+module: "5-3-database-internals"
+order: 2
+difficulty: "hard"
+bloom: "analyze"
+vocabulary: ["b-plus-tree", "hash-index", "composite-index", "covering-index", "index-scan"]
+---
+
+## The cost of looking things up
+
+Imagine a table with ten million rows and no index. To find the row where `user_id = 42`, the database must read every single row from disk and check the condition — a **sequential scan** that touches potentially gigabytes of data. An index is a separate data structure that trades some write overhead and storage space for dramatically faster lookups. Understanding how different index types work internally tells you which index to create for each situation.
+
+## B+ trees: the universal index structure
+
+The **B+ tree** is the data structure underlying nearly every index in every major relational database. It is a variant of the B-tree with one critical difference: all actual data values live in the **leaf nodes**, while internal nodes store only keys used for navigation.
+
+This design has a profound consequence for range scans. In a standard B-tree, values can be at any level of the tree, so a range scan must traverse up and down the tree to collect all matching values. In a B+ tree, all leaf nodes are linked in a doubly-linked list. Once the search finds the starting leaf for a range query, it can follow the leaf links horizontally to collect all matching rows without ever going back up the tree. This makes range scans — `WHERE price BETWEEN 100 AND 200`, `WHERE created_at > '2024-01-01'` — extremely efficient.
+
+**B+ tree insertion** maintains sorted order. Inserting a key finds the correct leaf, inserts it in sorted position, and splits the leaf if it overflows. The split promotes the middle key to the parent, which may itself split, cascading toward the root. In practice, splits are infrequent and the tree stays balanced automatically.
+
+**Lookup cost** is O(log_f n), where f is the branching factor (number of children per node, typically in the hundreds) and n is the number of indexed rows. For ten million rows with a branching factor of 200, the tree is only about three levels deep — meaning at most three disk reads to find any row.
+
+## Hash indexes: O(1) lookups with a catch
+
+A **hash index** computes a hash of the indexed column value and uses it as a bucket address in a hash table. Lookups are O(1) — no tree traversal, just hash the value and go to the bucket. This sounds strictly better than a B+ tree's O(log n), but hash indexes have a significant limitation: they only support equality comparisons.
+
+`WHERE user_id = 42` — hash index works perfectly.
+`WHERE user_id > 42` — hash index is useless. A hash table has no concept of ordering.
+
+In PostgreSQL, hash indexes were historically considered unreliable (they were not WAL-logged until version 10) and are rarely used in practice. For equality-heavy workloads on high-cardinality columns, a B+ tree index on a single column already performs extremely well, so the benefits of a hash index rarely justify the tradeoff.
+
+## Composite indexes: column order is everything
+
+A **composite index** covers multiple columns. The index `(last_name, first_name)` can answer queries that filter on `last_name` alone, or on both `last_name` and `first_name`. But it cannot efficiently answer queries that filter on `first_name` alone.
+
+This is because a composite index sorts rows first by the first column, then by the second within each first-column group, and so on. Think of a phone directory sorted by last name then first name. You can flip to the "S" section and find all Smiths quickly. Within the Smiths, you can find "Smith, Alice" quickly. But if you want all people named "Alice" regardless of last name, you're stuck scanning the whole directory.
+
+The **selectivity rule** says: place the most selective column (the one that eliminates the most rows) first — unless your query patterns dictate otherwise. If every query filters on `status` and sometimes also on `created_at`, the index `(status, created_at)` serves both use cases; `(created_at, status)` serves only queries that filter on `created_at`.
+
+## Covering indexes: eliminating the table fetch
+
+An **index scan** in most databases involves two steps: find the matching row's location in the index, then fetch the full row from the table (a "heap fetch"). Each heap fetch is potentially a random disk read. For a query returning many rows, these random reads can be slower than a sequential scan of the entire table.
+
+A **covering index** includes all the columns the query needs — not just the filter columns but also the select-list columns. When every needed column is in the index, the database never touches the table at all. PostgreSQL calls this an "Index Only Scan."
+
+```sql
+-- A query that needs: filter on user_id, return title and created_at
+SELECT title, created_at FROM posts WHERE user_id = 42;
+
+-- A covering index includes all three columns
+CREATE INDEX idx_posts_user_covering ON posts (user_id) INCLUDE (title, created_at);
+-- PostgreSQL will use an Index Only Scan — zero table heap reads
+```
+
+The `INCLUDE` clause (supported by PostgreSQL 11+) adds columns to the leaf level of the B+ tree without affecting the sort order. This keeps the index compact while eliminating heap fetches for common queries.
+
+## When indexes hurt
+
+Indexes are not free. Every `INSERT`, `UPDATE`, and `DELETE` must update all relevant indexes in addition to the table itself. A table with 10 indexes incurs 10x the index maintenance overhead on writes. Indexes also consume disk space and buffer cache, potentially evicting hot table data.
+
+The right number of indexes depends on your read/write ratio. For a reporting database that ingests data once and queries it constantly, many indexes are appropriate. For a write-heavy event log, keep indexes minimal.
+
+<SandboxExercise
+  title="Build an In-Memory B+ Tree"
+  instructions="Implement a simplified B+ tree with a configurable order. The tree should support `insert(key, value)` and `search(key)`. Keep all values in leaf nodes, link leaves together, and split nodes when they overflow. For simplicity, use order 3 (max 3 keys per node, split when 4 keys would be added)."
+  starterCode={`// Simplified B+ Tree — order 3 (max 3 keys per leaf, split at 4)
+// Leaf nodes: { isLeaf: true, keys: [], values: [], next: null }
+// Internal nodes: { isLeaf: false, keys: [], children: [] }
+
+class BPlusTree {
+constructor(order = 3) {
+this.order = order;
+this.root = { isLeaf: true, keys: [], values: [], next: null };
+}
+
+search(key) {
+// TODO: traverse from root to leaf, return value or null
+let node = this.root;
+while (!node.isLeaf) {
+let i = 0;
+while (i < node.keys.length && key >= node.keys[i]) i++;
+node = node.children[i];
+}
+const idx = node.keys.indexOf(key);
+return idx !== -1 ? node.values[idx] : null;
+}
+
+insert(key, value) {
+// TODO: find the correct leaf, insert in sorted order, split if overflow
+// For now this is a stub — implement it below
+const result = this.\_insertRecursive(this.root, key, value);
+if (result) {
+// Root was split — create a new root
+const newRoot = { isLeaf: false, keys: [result.promotedKey], children: [this.root, result.newNode] };
+this.root = newRoot;
+}
+}
+
+\_insertRecursive(node, key, value) {
+if (node.isLeaf) {
+// Insert in sorted order
+let i = 0;
+while (i < node.keys.length && key > node.keys[i]) i++;
+node.keys.splice(i, 0, key);
+node.values.splice(i, 0, value);
+
+      // Split if overflow
+      if (node.keys.length > this.order) {
+        return this._splitLeaf(node);
+      }
+      return null;
+    } else {
+      let i = 0;
+      while (i < node.keys.length && key >= node.keys[i]) i++;
+      const result = this._insertRecursive(node.children[i], key, value);
+      if (result) {
+        node.keys.splice(i, 0, result.promotedKey);
+        node.children.splice(i + 1, 0, result.newNode);
+        if (node.keys.length > this.order) {
+          return this._splitInternal(node);
+        }
+      }
+      return null;
+    }
+
+}
+
+\_splitLeaf(leaf) {
+const mid = Math.ceil(leaf.keys.length / 2);
+const newLeaf = { isLeaf: true, keys: leaf.keys.splice(mid), values: leaf.values.splice(mid), next: leaf.next };
+leaf.next = newLeaf;
+return { promotedKey: newLeaf.keys[0], newNode: newLeaf };
+}
+
+\_splitInternal(node) {
+const mid = Math.floor(node.keys.length / 2);
+const promotedKey = node.keys[mid];
+const newNode = { isLeaf: false, keys: node.keys.splice(mid + 1), children: node.children.splice(mid + 1) };
+node.keys.splice(mid, 1);
+return { promotedKey, newNode };
+}
+
+// Traverse all leaves in order (demonstrates linked-list property)
+rangeQuery(from, to) {
+let node = this.root;
+while (!node.isLeaf) {
+let i = 0;
+while (i < node.keys.length && from >= node.keys[i]) i++;
+node = node.children[i];
+}
+const results = [];
+while (node) {
+for (let i = 0; i < node.keys.length; i++) {
+if (node.keys[i] > to) return results;
+if (node.keys[i] >= from) results.push({ key: node.keys[i], value: node.values[i] });
+}
+node = node.next;
+}
+return results;
+}
+}
+
+// Test the B+ tree
+const tree = new BPlusTree(3);
+const entries = [15, 40, 5, 35, 25, 10, 20, 30, 45, 50];
+entries.forEach(k => tree.insert(k, \`user\_\${k}\`));
+
+console.log('Search 25:', tree.search(25)); // user_25
+console.log('Search 99:', tree.search(99)); // null
+console.log('Range 15-35:', tree.rangeQuery(15, 35)); // users 15,20,25,30,35
+`}
+  solution={`// The starter code is already a complete working solution.
+// The key insight: after insertions, the leaf linked list enables efficient range scans.
+
+class BPlusTree {
+constructor(order = 3) {
+this.order = order;
+this.root = { isLeaf: true, keys: [], values: [], next: null };
+}
+
+search(key) {
+let node = this.root;
+while (!node.isLeaf) {
+let i = 0;
+while (i < node.keys.length && key >= node.keys[i]) i++;
+node = node.children[i];
+}
+const idx = node.keys.indexOf(key);
+return idx !== -1 ? node.values[idx] : null;
+}
+
+insert(key, value) {
+const result = this.\_insertRecursive(this.root, key, value);
+if (result) {
+const newRoot = { isLeaf: false, keys: [result.promotedKey], children: [this.root, result.newNode] };
+this.root = newRoot;
+}
+}
+
+\_insertRecursive(node, key, value) {
+if (node.isLeaf) {
+let i = 0;
+while (i < node.keys.length && key > node.keys[i]) i++;
+node.keys.splice(i, 0, key);
+node.values.splice(i, 0, value);
+if (node.keys.length > this.order) return this.\_splitLeaf(node);
+return null;
+} else {
+let i = 0;
+while (i < node.keys.length && key >= node.keys[i]) i++;
+const result = this.\_insertRecursive(node.children[i], key, value);
+if (result) {
+node.keys.splice(i, 0, result.promotedKey);
+node.children.splice(i + 1, 0, result.newNode);
+if (node.keys.length > this.order) return this.\_splitInternal(node);
+}
+return null;
+}
+}
+
+\_splitLeaf(leaf) {
+const mid = Math.ceil(leaf.keys.length / 2);
+const newLeaf = { isLeaf: true, keys: leaf.keys.splice(mid), values: leaf.values.splice(mid), next: leaf.next };
+leaf.next = newLeaf;
+return { promotedKey: newLeaf.keys[0], newNode: newLeaf };
+}
+
+\_splitInternal(node) {
+const mid = Math.floor(node.keys.length / 2);
+const promotedKey = node.keys[mid];
+const newNode = { isLeaf: false, keys: node.keys.splice(mid + 1), children: node.children.splice(mid + 1) };
+node.keys.splice(mid, 1);
+return { promotedKey, newNode };
+}
+
+rangeQuery(from, to) {
+let node = this.root;
+while (!node.isLeaf) {
+let i = 0;
+while (i < node.keys.length && from >= node.keys[i]) i++;
+node = node.children[i];
+}
+const results = [];
+while (node) {
+for (let i = 0; i < node.keys.length; i++) {
+if (node.keys[i] > to) return results;
+if (node.keys[i] >= from) results.push({ key: node.keys[i], value: node.values[i] });
+}
+node = node.next;
+}
+return results;
+}
+}
+
+const tree = new BPlusTree(3);
+[15, 40, 5, 35, 25, 10, 20, 30, 45, 50].forEach(k => tree.insert(k, \`user\_\${k}\`));
+console.log('Search 25:', tree.search(25));
+console.log('Search 99:', tree.search(99));
+console.log('Range 15-35:', tree.rangeQuery(15, 35));
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="Why do B+ trees outperform standard B-trees for range queries?"
+  options={[
+    "B+ trees have a higher branching factor, so they are shallower",
+    "B+ tree leaf nodes are linked in a list, so range scans traverse leaves horizontally without going back up the tree",
+    "B+ trees store data sorted by insertion time, which matches most query patterns",
+    "B+ trees use hash functions at internal nodes to skip irrelevant subtrees",
+  ]}
+  answer={1}
+  explanation="In a B+ tree, all values live in leaf nodes, and leaves are linked in a sorted linked list. A range query finds the starting leaf with a top-down search, then follows leaf pointers horizontally to collect all keys in range — never traversing internal nodes again."
+/>
+
+<Quiz
+  question="Given a composite index on (country, city), which query can use the index efficiently?"
+  options={[
+    "WHERE city = 'Austin'",
+    "WHERE country = 'US' AND city = 'Austin'",
+    "WHERE city LIKE 'A%'",
+    "WHERE city = 'Austin' OR country = 'US'",
+  ]}
+  answer={1}
+  explanation="A composite index is sorted by its leading column first. The index (country, city) can be used when country appears in the filter — either country alone, or country + city. Filtering on city alone requires scanning the entire index because city values are interleaved across all country groups."
+/>
+
+<FillBlank
+  sentence="An index that contains all columns needed by a query — so the database never needs to access the main table — is called a ___ index."
+  answer="covering"
+  hint="It 'covers' all columns required by the query"
+/>
+
+## What you learned
+
+- B+ trees store all values in leaf nodes linked in a sorted list, making range scans highly efficient
+- Hash indexes support only equality comparisons but are O(1) — useful for exact-match lookups at very high throughput
+- Composite index column order determines which query shapes the index can serve — leading columns must appear in filters
+- Covering indexes include all columns needed by a query, enabling Index Only Scans that never touch the main table
+- Indexes trade write performance and storage for read speed; the right index count depends on your read/write ratio
