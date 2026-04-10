@@ -2076,6 +2076,434 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["deployment", "ssl", "ci-cd"],
   },
+
+  // ─── Phase 5: Systems Engineering ────────────────────────────────────────
+
+  {
+    slug: "kernel",
+    term: "Kernel",
+    aliases: ["os kernel", "linux kernel"],
+    category: "systems",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The core of an operating system — the software that manages hardware and lets programs run.",
+      intermediate:
+        "Runs in privileged CPU mode (ring 0). Manages CPU scheduling, memory mapping, device I/O, and system calls. User programs run in user space and request kernel services via system calls.",
+      advanced:
+        "Monolithic kernels (Linux) run all OS services in kernel space — fast but a bug crashes the system. Microkernels (Mach, L4) run most services in user space — more isolated but IPC overhead. Linux uses loadable kernel modules to get flexibility without full microkernel cost.",
+    },
+    seeAlso: ["process", "system-call", "virtual-memory"],
+  },
+  {
+    slug: "process",
+    term: "Process",
+    aliases: ["unix process", "os process"],
+    category: "systems",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A running program — the OS creates a process for each program you launch, giving it its own memory and CPU time.",
+      intermediate:
+        "A process has: address space (code, heap, stack), file descriptors, PID, UID/GID, and state (running, sleeping, zombie). Created via fork() + exec(). Destroyed when it exits and the parent reads its exit code.",
+      advanced:
+        "fork() uses copy-on-write — pages shared until written. Zombie processes accumulate if the parent never calls wait(). /proc/[pid]/ exposes the full process state: maps, status, file descriptors, thread list.",
+    },
+    seeAlso: ["kernel", "thread", "virtual-memory"],
+  },
+  {
+    slug: "thread",
+    term: "Thread",
+    aliases: ["pthread", "kernel thread"],
+    category: "systems",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A lightweight unit of execution within a process — multiple threads share the same memory and can run in parallel on multi-core CPUs.",
+      intermediate:
+        "Threads share heap, code, globals, and file descriptors. Each thread has its own stack and CPU registers. Cheaper to create than processes. Shared memory requires synchronization (mutexes, atomics).",
+      advanced:
+        "Linux implements threads as tasks (clone() syscall with CLONE_VM | CLONE_FILES). POSIX threads (pthreads) are the standard API. Thread-local storage (TLS) gives each thread its own copy of a variable without locking.",
+    },
+    seeAlso: ["process", "mutex", "concurrency"],
+  },
+  {
+    slug: "virtual-memory",
+    term: "Virtual Memory",
+    aliases: ["virtual address space", "paging"],
+    category: "systems",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A technique that gives each process the illusion of having its own large block of memory, even though RAM is shared and limited.",
+      intermediate:
+        "The MMU translates virtual addresses to physical addresses via a page table. Pages not in RAM trigger a page fault — the OS loads the page from disk (swap). Enables isolation, overcommitment, and memory-mapped files.",
+      advanced:
+        "x86-64 uses 4-level page tables (PML4 → PDPT → PD → PT → physical). TLB caches recent translations — a TLB miss is expensive. Huge pages (2MB/1GB) reduce TLB pressure for large allocations. mmap() maps files directly into the address space.",
+    },
+    seeAlso: ["kernel", "process", "page-fault"],
+  },
+  {
+    slug: "mutex",
+    term: "Mutex",
+    aliases: ["mutual exclusion", "lock"],
+    category: "systems",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A lock that only one thread can hold at a time — other threads wait until it's released before entering the protected section of code.",
+      intermediate:
+        "Prevents race conditions on shared data. lock() acquires (blocks if held), unlock() releases. The protected region is the critical section. Recursive mutexes allow the same thread to lock again without deadlocking itself.",
+      advanced:
+        "Kernel mutexes (futex-based on Linux) sleep in kernel when contended — low CPU waste but context-switch overhead. Spinlocks busy-wait — better when the wait is very short (< 1μs) and the CPU would waste time on a context switch.",
+    },
+    seeAlso: ["thread", "deadlock", "semaphore"],
+  },
+  {
+    slug: "deadlock",
+    term: "Deadlock",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A situation where two or more threads are stuck waiting for each other forever — like two people each holding a key the other needs.",
+      intermediate:
+        "Four conditions (all required): mutual exclusion, hold-and-wait, no preemption, circular wait. Prevention: break any one condition. Detection: build a wait-for graph and check for cycles. Recovery: kill one process.",
+      advanced:
+        "Lock ordering (always acquire locks in a fixed global order) prevents circular wait. Banker's algorithm detects unsafe states before granting resources. In practice, most systems use timeouts and retry rather than formal deadlock avoidance.",
+    },
+    seeAlso: ["mutex", "thread", "semaphore"],
+  },
+  {
+    slug: "tcp",
+    term: "TCP",
+    aliases: ["transmission control protocol"],
+    category: "networking",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A protocol that ensures data sent over the internet arrives completely, in order, and without errors — the reliable foundation under HTTP.",
+      intermediate:
+        "Connection-oriented: three-way handshake (SYN/SYN-ACK/ACK) before data. Reliability via sequence numbers and retransmission. Flow control via receiver window. Congestion control via slow start, AIMD. Teardown via FIN/FIN-ACK.",
+      advanced:
+        "TCP Fast Open reduces handshake round-trips. BBR (Bottleneck Bandwidth and RTT) congestion control maximizes throughput without loss-based signals. Head-of-line blocking occurs when a lost packet stalls the stream — HTTP/3 moves to QUIC over UDP to eliminate this.",
+    },
+    seeAlso: ["udp", "http2", "socket"],
+  },
+  {
+    slug: "udp",
+    term: "UDP",
+    aliases: ["user datagram protocol"],
+    category: "networking",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A lightweight protocol that sends data without guaranteeing delivery or order — used when speed matters more than reliability.",
+      intermediate:
+        "Connectionless: no handshake, no state. Sends datagrams independently. No retransmission, no congestion control. Applications handle loss (or tolerate it). Good for DNS queries, live video, gaming, VoIP.",
+      advanced:
+        "QUIC (used by HTTP/3) is built on UDP but adds reliability, multiplexing, and encryption in user space — getting TCP reliability without kernel TCP's HOL blocking. WebRTC uses DTLS + SRTP over UDP for real-time media.",
+    },
+    seeAlso: ["tcp", "datagram", "websocket"],
+  },
+  {
+    slug: "http2",
+    term: "HTTP/2",
+    aliases: ["http2", "h2"],
+    category: "networking",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A faster version of HTTP that can send multiple requests at once over one connection instead of one at a time.",
+      intermediate:
+        "Binary framing instead of text. Multiplexing: multiple streams over one TCP connection — no head-of-line blocking at the HTTP layer. Header compression via HPACK. Server push (deprecated in practice). Requires TLS in browsers.",
+      advanced:
+        "HTTP/2 solves application-layer HOL blocking but TCP still has transport-layer HOL blocking — a lost packet stalls all streams. HTTP/3 (QUIC) eliminates this by multiplexing over independent UDP streams. HTTP/2 prioritization (stream weight/dependency) was rarely implemented correctly by servers.",
+    },
+    seeAlso: ["tcp", "tls", "http-protocol"],
+  },
+  {
+    slug: "tls",
+    term: "TLS",
+    aliases: ["ssl", "transport layer security", "https"],
+    category: "networking",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The encryption layer that makes HTTPS secure — it scrambles data in transit so eavesdroppers can't read it.",
+      intermediate:
+        "TLS 1.3 handshake: ClientHello (ciphers, key share) → ServerHello (chosen cipher, cert, key share) → client verifies cert → both derive session keys → encrypted data flows. 1-RTT handshake (vs 2-RTT in TLS 1.2).",
+      advanced:
+        "0-RTT resumption sends data on the first packet by reusing session tickets — but is vulnerable to replay attacks. OCSP stapling lets the server include a signed cert validity proof so clients don't need a separate CA lookup. Certificate Transparency logs all issued certs publicly.",
+    },
+    seeAlso: ["tcp", "http2", "certificate"],
+  },
+  {
+    slug: "dns-resolver",
+    term: "DNS Resolver",
+    aliases: ["recursive resolver", "dns cache"],
+    category: "networking",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The server that does the work of translating a domain name into an IP address by asking a series of other servers.",
+      intermediate:
+        "Recursive resolver (your ISP or 8.8.8.8) does the full resolution: queries root → TLD → authoritative nameserver. Caches results for the record's TTL. Stub resolver (on your machine) simply forwards to the recursive resolver.",
+      advanced:
+        "DNS over HTTPS (DoH) and DNS over TLS (DoT) encrypt resolver queries to prevent ISP snooping. DNSSEC adds digital signatures to records — resolvers verify the chain of trust. Negative caching (NXDOMAIN) also caches with the SOA's negative TTL.",
+    },
+    seeAlso: ["dns", "ttl", "anycast"],
+  },
+  {
+    slug: "socket",
+    term: "Socket",
+    aliases: ["network socket", "tcp socket"],
+    category: "networking",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An endpoint for network communication — like a phone socket that lets your program send and receive data over the network.",
+      intermediate:
+        "Identified by (protocol, local IP, local port, remote IP, remote port). TCP sockets are connection-oriented (connect/accept). UDP sockets are connectionless (sendto/recvfrom). File descriptors — everything is a file in Unix.",
+      advanced:
+        "epoll (Linux) / kqueue (BSD) let a single thread monitor thousands of sockets efficiently — the basis of Node.js and Nginx's performance. SO_REUSEPORT allows multiple processes to bind the same port — used by Nginx and HAProxy for multi-process load distribution.",
+    },
+    seeAlso: ["tcp", "udp", "websocket"],
+  },
+  {
+    slug: "websocket",
+    term: "WebSocket",
+    aliases: ["websockets", "ws"],
+    category: "networking",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A protocol for full-duplex communication between a browser and server — both sides can send messages at any time without polling.",
+      intermediate:
+        "Starts as HTTP, upgraded via the Upgrade: websocket header. Persistent TCP connection. Frames are small — opcode (text/binary/ping/close) + payload length + payload. Used for chat, live dashboards, collaborative editing, gaming.",
+      advanced:
+        "WebSocket frames have a masking key (client-to-server direction) to prevent cache poisoning by proxies. At scale, WebSocket servers require sticky sessions or a pub/sub layer (Redis) so messages can be routed to the correct server holding the client's connection.",
+    },
+    seeAlso: ["socket", "tcp", "long-polling"],
+  },
+  {
+    slug: "b-tree",
+    term: "B-Tree",
+    aliases: ["b+ tree", "btree"],
+    category: "database-internals",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The data structure that most database indexes use — a sorted tree that keeps data balanced so lookups are always fast.",
+      intermediate:
+        "Self-balancing tree where each node holds multiple keys. Leaf nodes store data (B+ tree) or pointers. Nodes are sized to match disk page size (4-16KB). Supports equality, range, and prefix lookups. O(log n) insert/search/delete.",
+      advanced:
+        "B+ tree leaf nodes are linked — range scans traverse leaves without returning to the root. Fill factor controls how full pages are before a split. Write amplification: every leaf update may cascade splits up the tree. Write-ahead logging must record all structural changes.",
+    },
+    seeAlso: ["lsm-tree", "index", "storage-engine"],
+  },
+  {
+    slug: "lsm-tree",
+    term: "LSM-Tree",
+    aliases: ["log-structured merge tree", "lsm"],
+    category: "database-internals",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A storage structure optimized for high write throughput — it buffers writes in memory and periodically merges sorted files on disk.",
+      intermediate:
+        "Writes go to an in-memory memtable. When full, it's flushed as an immutable SSTable. Background compaction merges SSTables — maintaining sorted order and removing tombstones. Used by RocksDB, Cassandra, LevelDB.",
+      advanced:
+        "Write amplification: data is written multiple times during compaction. Read amplification: a read may scan multiple SSTables before finding the value (Bloom filters reduce this). Space amplification: multiple versions of the same key exist until compacted. Leveled compaction minimizes space; tiered maximizes write throughput.",
+    },
+    seeAlso: ["b-tree", "storage-engine", "wal"],
+  },
+  {
+    slug: "wal",
+    term: "Write-Ahead Log",
+    aliases: ["WAL", "write ahead log", "redo log"],
+    category: "database-internals",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A log where the database records every change before applying it — so if it crashes, it can replay the log and recover.",
+      intermediate:
+        "WAL protocol: log record must be on disk before the data page is modified. Recovery replays committed transactions from the log. Checkpoints flush dirty pages to disk and truncate old log segments. Used by Postgres, MySQL, SQLite.",
+      advanced:
+        "LSN (Log Sequence Number) monotonically orders log records. ARIES recovery algorithm: Analysis (find dirty pages and active transactions) → Redo (replay from earliest dirty page) → Undo (roll back uncommitted transactions). WAL is also the basis for logical replication — followers replay the primary's WAL.",
+    },
+    seeAlso: ["transaction", "crash-recovery", "replication"],
+  },
+  {
+    slug: "mvcc",
+    term: "MVCC",
+    aliases: ["multi-version concurrency control"],
+    category: "database-internals",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A technique that lets readers and writers work at the same time without blocking each other — by keeping multiple versions of each row.",
+      intermediate:
+        "Writers create a new row version tagged with the transaction ID. Readers see the latest version committed before their snapshot timestamp. Old versions are garbage-collected by VACUUM (Postgres) or GC (MySQL InnoDB's purge thread).",
+      advanced:
+        "Postgres stores old versions in the heap with xmin/xmax fields. InnoDB stores old versions in a separate undo log segment. MVCC enables Snapshot Isolation — transactions see a consistent point-in-time view. Write-write conflicts still require locks to detect concurrent updates to the same row.",
+    },
+    seeAlso: ["transaction", "isolation", "wal"],
+  },
+  {
+    slug: "replication",
+    term: "Database Replication",
+    aliases: ["leader-follower", "primary-replica"],
+    category: "database-internals",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Copying your database to multiple servers so you can handle more reads, survive hardware failures, and serve users from nearby locations.",
+      intermediate:
+        "Leader-follower: writes go to leader, replicated asynchronously to followers. Followers serve reads. Failover promotes a follower to leader. Multi-leader: writes accepted at multiple nodes — complex conflict resolution.",
+      advanced:
+        "Synchronous replication (wait for follower ACK) is durable but adds latency. Asynchronous is fast but risks data loss on failover. Postgres logical replication sends row-level changes (vs physical WAL). Raft/Paxos provide consensus for leader election and consistent replication.",
+    },
+    seeAlso: ["wal", "mvcc", "sharding"],
+  },
+  {
+    slug: "sharding",
+    term: "Sharding",
+    aliases: ["horizontal partitioning", "database sharding"],
+    category: "database-internals",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Splitting a database across multiple servers so each server only holds a portion of the data — enabling horizontal scaling.",
+      intermediate:
+        "Each shard holds a subset of rows determined by a shard key. Range sharding: shard by ID or timestamp range. Hash sharding: hash(key) % N gives even distribution. Cross-shard queries and transactions are expensive.",
+      advanced:
+        "Consistent hashing minimizes reshuffling when adding/removing shards. Vitess (MySQL) and Citus (Postgres) provide sharding middleware. Resharding is operationally painful — choose the shard key carefully upfront. Two-phase commit handles cross-shard transactions but degrades availability.",
+    },
+    seeAlso: ["replication", "partitioning", "hotspot"],
+  },
+  {
+    slug: "vpc",
+    term: "VPC",
+    aliases: ["virtual private cloud"],
+    category: "cloud",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Your own private network inside the cloud — isolated from other customers, with you in control of subnets, routing, and firewalls.",
+      intermediate:
+        "You define CIDR range (e.g., 10.0.0.0/16), divide into subnets (public: has internet gateway route; private: uses NAT gateway). Security groups act as instance-level firewalls. NACLs act at subnet level. VPC peering connects two VPCs.",
+      advanced:
+        "Transit Gateway connects many VPCs and on-premises networks via a central hub — replacing full-mesh peering. PrivateLink exposes a service privately without traffic crossing the internet. Flow Logs capture all VPC traffic metadata for security auditing and debugging.",
+    },
+    seeAlso: ["cdn", "terraform", "load-balancer"],
+  },
+  {
+    slug: "cdn",
+    term: "CDN",
+    aliases: ["content delivery network", "edge network"],
+    category: "cloud",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A network of servers spread around the world that cache your content close to users — so pages load faster no matter where users are.",
+      intermediate:
+        "Edge nodes cache static assets (images, JS, CSS, video). Cache-Control headers control TTL. On cache miss, the edge fetches from origin and caches the response. Also provides DDoS protection, TLS termination, and WAF.",
+      advanced:
+        "Anycast routing sends users to the nearest edge node by advertising the same IP from multiple locations. CDNs can run edge compute (Cloudflare Workers, Lambda@Edge) to personalize or transform responses without a round-trip to origin. Stale-while-revalidate serves cached content while refreshing in the background.",
+    },
+    seeAlso: ["vpc", "ssl", "load-balancer"],
+  },
+  {
+    slug: "terraform",
+    term: "Terraform",
+    aliases: ["iac", "infrastructure as code"],
+    category: "cloud",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A tool that lets you describe your cloud infrastructure in code — then automatically creates or changes it to match.",
+      intermediate:
+        "Declarative HCL (HashiCorp Configuration Language) describes desired state. `terraform plan` shows what will change. `terraform apply` makes it so. State file tracks real-world resources. Providers wrap cloud APIs (AWS, GCP, Azure).",
+      advanced:
+        "Remote state (S3 + DynamoDB lock) enables team collaboration. Terraform modules are reusable components. Workspaces manage multiple environments from one config. Drift detection finds manual changes not in state. Alternatives: Pulumi (real programming languages), CDK (AWS-specific, TypeScript/Python).",
+    },
+    seeAlso: ["vpc", "ci-cd", "deployment"],
+  },
+  {
+    slug: "slo",
+    term: "SLO",
+    aliases: ["service level objective", "sli", "sla"],
+    category: "cloud",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A target for how reliable your service should be — like 'respond to 99.9% of requests in under 200ms'.",
+      intermediate:
+        "SLI (indicator): the metric you measure (success rate, latency p99). SLO (objective): the target value (99.9% success). SLA (agreement): the contract with consequences if you breach it. Error budget: 100% - SLO — the allowed failure headroom.",
+      advanced:
+        "Error budget burn rate alerts: if you burn the monthly budget in a day, page immediately. Multiwindow, multi-burn-rate alerts reduce both false positives and detection delay. SLOs should be set from user pain thresholds, not infrastructure capabilities — what actually makes users unhappy?",
+    },
+    seeAlso: ["observability", "chaos-engineering", "reliability"],
+  },
+  {
+    slug: "observability",
+    term: "Observability",
+    aliases: ["o11y", "monitoring"],
+    category: "cloud",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The ability to understand what your system is doing from the outside — by collecting metrics, logs, and traces.",
+      intermediate:
+        "Three pillars: metrics (aggregated numbers — latency p99, error rate, saturation), logs (discrete events with context), traces (distributed request journeys spanning multiple services). Together they let you ask: is it broken? Where? Why?",
+      advanced:
+        "OpenTelemetry is the vendor-neutral standard for instrumenting applications. Exemplars link a trace ID to a metric data point — click from a histogram bucket to the exact trace that caused it. Cardinality is the enemy of metrics — high-cardinality dimensions (user IDs) belong in traces, not metric labels.",
+    },
+    seeAlso: ["slo", "opentelemetry", "tracing"],
+  },
+  {
+    slug: "opentelemetry",
+    term: "OpenTelemetry",
+    aliases: ["otel"],
+    category: "cloud",
+    phaseIds: ["5"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An open standard and set of tools for collecting metrics, logs, and traces from your application without locking into a specific vendor.",
+      intermediate:
+        "Provides SDKs for every major language, a wire protocol (OTLP), and a Collector that receives, processes, and exports telemetry to any backend (Prometheus, Jaeger, Datadog, Grafana). Instrument once, export anywhere.",
+      advanced:
+        "Auto-instrumentation agents inject tracing into frameworks (Express, Django, gRPC) without code changes. Context propagation (W3C TraceContext header) passes trace IDs across service boundaries. Resource attributes identify the source (service.name, service.version, host). Sampling reduces overhead — tail-based sampling keeps interesting traces (errors, slow requests).",
+    },
+    seeAlso: ["observability", "slo", "tracing"],
+  },
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
