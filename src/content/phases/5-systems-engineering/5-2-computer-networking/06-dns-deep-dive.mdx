@@ -1,0 +1,238 @@
+---
+title: "DNS Deep Dive"
+description: "Trace a DNS resolution from browser to root server and back, understand caching with TTLs, and learn the record types that power the modern web."
+phase: 5
+module: "5-2-computer-networking"
+order: 6
+difficulty: "medium"
+bloom: "analyze"
+vocabulary: ["dns", "resolver", "a-record", "cname", "ttl"]
+---
+
+## Why this matters
+
+DNS is the phone book of the internet — the system that translates `api.example.com` into `93.184.216.34`. It runs billions of times a day, mostly invisibly, and when it breaks, everything breaks. Production incidents caused by misconfigured DNS records, expired TTLs, or resolver timeouts are common and often catastrophic. Engineers who understand DNS at depth can diagnose incidents faster, design reliable deployments with proper record strategies, and understand the real cost of short TTLs.
+
+## How DNS resolution works
+
+When your browser needs to resolve `www.example.com`, it does not simply ask a single server. It performs recursive resolution through a hierarchy of servers:
+
+**Step 1: Local cache check** — the OS checks its DNS cache. If a record is cached and the **TTL** (Time to Live) has not expired, resolution is done immediately.
+
+**Step 2: Recursive resolver** — if not cached, the OS asks a **resolver** (your ISP's DNS server, or one you configured like `8.8.8.8`). The resolver handles the full lookup on your behalf.
+
+**Step 3: Root servers** — the resolver asks a root nameserver, "Who handles `.com`?" There are 13 logical root server addresses (A through M), distributed globally via anycast. The root server responds with the addresses of the `.com` TLD nameservers.
+
+**Step 4: TLD nameservers** — the resolver asks a `.com` TLD nameserver, "Who handles `example.com`?" It responds with the address of `example.com`'s authoritative nameservers.
+
+**Step 5: Authoritative nameserver** — the resolver asks `example.com`'s authoritative nameserver for `www.example.com` and receives the final answer: an IP address.
+
+**Step 6: Cache and return** — the resolver caches the result for the record's TTL and returns it to your browser. Every hop in this chain also caches.
+
+```
+Browser → OS Cache → Recursive Resolver → Root NS → TLD NS → Authoritative NS
+                         ↑__________________________________|
+                         Resolver caches each response
+```
+
+A full recursive resolution from scratch takes 4+ network round trips. In practice, resolvers cache heavily — TLD servers and root servers are almost always cached.
+
+## DNS record types
+
+DNS stores different kinds of records for each domain:
+
+| Record    | Purpose                                                              | Example                                            |
+| --------- | -------------------------------------------------------------------- | -------------------------------------------------- |
+| **A**     | Maps a hostname to an IPv4 address                                   | `www.example.com → 93.184.216.34`                  |
+| **AAAA**  | Maps a hostname to an IPv6 address                                   | `www.example.com → 2606:2800:21f::`                |
+| **CNAME** | Canonical name — alias to another hostname                           | `blog.example.com → example.com`                   |
+| **MX**    | Mail exchange — where to deliver email                               | `example.com → mail.example.com (priority 10)`     |
+| **TXT**   | Arbitrary text — used for SPF, DKIM, domain verification             | `"v=spf1 include:example.com ~all"`                |
+| **NS**    | Nameserver — which servers are authoritative for this zone           | `example.com → ns1.dnshosting.com`                 |
+| **SOA**   | Start of Authority — zone metadata, serial number, refresh intervals | One per zone                                       |
+| **SRV**   | Service location — port and priority for a service                   | `_http._tcp.example.com → 10 5 80 web.example.com` |
+
+**A records** are the workhorse. You can have multiple A records for the same name — the resolver returns all of them and clients typically pick one, enabling primitive load balancing (DNS round-robin).
+
+**CNAME records** create aliases but come with restrictions: you cannot have a CNAME at the zone apex (the root domain, `example.com` itself). CDNs work around this with proprietary ALIAS or ANAME record types that behave like CNAMEs but work at the apex.
+
+## TTL: the caching knob
+
+The **TTL** on a DNS record controls how long resolvers and clients may cache it (in seconds). This is the most important operational knob in DNS.
+
+**Low TTL (60–300 seconds)** — changes propagate quickly. Ideal before a planned migration or failover. Costs: more DNS queries, higher load on authoritative servers, higher latency for uncached lookups.
+
+**High TTL (3600–86400 seconds)** — changes propagate slowly (up to 24 hours). Ideal for stable records. Costs: if you need to change the record quickly (emergency failover), clients will use stale data for up to the TTL duration.
+
+**Best practice for migrations**: lower the TTL to 60–300 seconds _days before_ the change. Make the change. Wait for the old TTL to expire. Then raise the TTL back to a normal value.
+
+## DNS and anycast
+
+Major DNS providers (Cloudflare `1.1.1.1`, Google `8.8.8.8`) use **anycast** routing. The same IP address is announced from dozens of locations worldwide. The internet's routing protocols automatically direct your query to the nearest location. This provides both performance (low latency) and resilience (if one location fails, routing adapts).
+
+<SandboxExercise
+  title="Implement a Recursive DNS Resolver with Caching"
+  instructions="Implement a DNSResolver class that resolves hostnames using a simulated zone database. It should cache results with their TTLs. If a cached record has expired (compare against a 'current time' parameter), re-resolve it. Implement resolve(hostname, currentTime) which returns the IP address or null if not found."
+  starterCode={`// Simulate a DNS resolver with a cache and a zone database.
+// Zone database: maps hostname → { address, ttl }
+// Cache: maps hostname → { address, expiresAt }
+
+const zoneDatabase = {
+"www.example.com": { address: "93.184.216.34", ttl: 300 },
+"api.example.com": { address: "93.184.216.35", ttl: 60 },
+"blog.example.com": { cname: "www.example.com" }, // CNAME record
+"mail.example.com": { address: "93.184.216.36", ttl: 3600 },
+};
+
+class DNSResolver {
+constructor() {
+this.cache = {}; // hostname → { address, expiresAt }
+this.queryCount = 0;
+}
+
+resolve(hostname, currentTime) {
+// 1. Check cache — if hit and not expired, return cached address
+// 2. Look up in zoneDatabase
+// - If CNAME, recursively resolve the target
+// - If A record, cache it (expiresAt = currentTime + ttl) and return
+// 3. If not found, return null
+// Increment queryCount each time we hit the database (not the cache)
+}
+
+getCacheSize() {
+return Object.keys(this.cache).length;
+}
+}
+
+// --- tests ---
+const resolver = new DNSResolver();
+
+// First resolution — hits the database
+const ip1 = resolver.resolve("www.example.com", 0);
+console.log(ip1 === "93.184.216.34"); // true
+console.log(resolver.queryCount === 1); // true
+
+// Second resolution within TTL — hits cache
+const ip2 = resolver.resolve("www.example.com", 100);
+console.log(ip2 === "93.184.216.34"); // true
+console.log(resolver.queryCount === 1); // still 1 — served from cache
+
+// Resolution after TTL expires — hits database again
+const ip3 = resolver.resolve("www.example.com", 400);
+console.log(ip3 === "93.184.216.34"); // true
+console.log(resolver.queryCount === 2); // true — cache expired
+
+// CNAME resolution
+const ip4 = resolver.resolve("blog.example.com", 500);
+console.log(ip4 === "93.184.216.34"); // true — resolved through CNAME
+
+// Unknown hostname
+const ip5 = resolver.resolve("unknown.example.com", 500);
+console.log(ip5 === null); // true
+`}
+  solution={`const zoneDatabase = {
+"www.example.com": { address: "93.184.216.34", ttl: 300 },
+"api.example.com": { address: "93.184.216.35", ttl: 60 },
+"blog.example.com": { cname: "www.example.com" },
+"mail.example.com": { address: "93.184.216.36", ttl: 3600 },
+};
+
+class DNSResolver {
+constructor() {
+this.cache = {};
+this.queryCount = 0;
+}
+
+resolve(hostname, currentTime) {
+// Check cache
+const cached = this.cache[hostname];
+if (cached && currentTime < cached.expiresAt) {
+return cached.address;
+}
+
+    // Hit the zone database
+    const record = zoneDatabase[hostname];
+    if (!record) return null;
+
+    this.queryCount++;
+
+    // Handle CNAME: recursively resolve the target
+    if (record.cname) {
+      const resolved = this.resolve(record.cname, currentTime);
+      // Cache the CNAME resolution with a short TTL
+      if (resolved) {
+        this.cache[hostname] = { address: resolved, expiresAt: currentTime + 60 };
+      }
+      return resolved;
+    }
+
+    // Handle A record
+    this.cache[hostname] = { address: record.address, expiresAt: currentTime + record.ttl };
+    return record.address;
+
+}
+
+getCacheSize() {
+return Object.keys(this.cache).length;
+}
+}
+
+const resolver = new DNSResolver();
+
+const ip1 = resolver.resolve("www.example.com", 0);
+console.log(ip1 === "93.184.216.34");
+console.log(resolver.queryCount === 1);
+
+const ip2 = resolver.resolve("www.example.com", 100);
+console.log(ip2 === "93.184.216.34");
+console.log(resolver.queryCount === 1);
+
+const ip3 = resolver.resolve("www.example.com", 400);
+console.log(ip3 === "93.184.216.34");
+console.log(resolver.queryCount === 2);
+
+const ip4 = resolver.resolve("blog.example.com", 500);
+console.log(ip4 === "93.184.216.34");
+
+const ip5 = resolver.resolve("unknown.example.com", 500);
+console.log(ip5 === null);
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="What is the correct order of DNS resolution for a hostname not in any cache?"
+  options={[
+    "Browser → Authoritative NS → TLD NS → Root NS → Recursive Resolver",
+    "Browser → Recursive Resolver → Root NS → TLD NS → Authoritative NS",
+    "Browser → Root NS → TLD NS → Recursive Resolver → Authoritative NS",
+    "Browser → ISP → Authoritative NS → TLD NS",
+  ]}
+  answer={1}
+  explanation="The recursive resolver does the work: it first asks a root nameserver which TLD server handles the domain, then asks the TLD server which authoritative server handles the specific domain, then asks the authoritative server for the actual record."
+/>
+
+<Quiz
+  question="You are planning to migrate example.com's A record to a new IP address. The current TTL is 86400 seconds (24 hours). What should you do first, days before the migration?"
+  options={[
+    "Change the A record immediately — DNS propagates instantly",
+    "Add the new IP as a second A record alongside the old one",
+    "Lower the TTL to 60–300 seconds so changes propagate quickly when you make the switch",
+    "Delete the old record first, then add the new one after 24 hours",
+  ]}
+  answer={2}
+  explanation="Cached DNS records are served until they expire. If you change the A record while TTL is 86400, some clients will use stale data for up to 24 hours. Lower the TTL days before the migration so cached copies expire quickly after you make the change."
+/>
+
+<FillBlank
+  sentence="A DNS ___ record creates an alias from one hostname to another, allowing multiple names to point to the same address without duplicating A records."
+  answer="CNAME"
+  hint="Canonical NAME — creates an alias to another hostname"
+/>
+
+## What you learned
+
+- DNS resolution traverses a hierarchy: recursive resolver → root nameservers → TLD nameservers → authoritative nameservers, with each level caching responses for their TTL
+- Key record types include A (IPv4 address), AAAA (IPv6), CNAME (alias), MX (mail), and TXT (verification and policy metadata)
+- TTL is the most important operational knob: lower it days before migrations, keep it high for stable records, and never assume DNS changes take effect instantly

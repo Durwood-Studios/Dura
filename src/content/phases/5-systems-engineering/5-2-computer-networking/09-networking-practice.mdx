@@ -1,0 +1,251 @@
+---
+title: "Networking in Practice: Packet Capture and Traceroute"
+description: "Learn to capture and analyze real network traffic with tcpdump and Wireshark, and to diagnose routing problems with traceroute — then simulate both in JavaScript."
+phase: 5
+module: "5-2-computer-networking"
+order: 9
+difficulty: "hard"
+bloom: "evaluate"
+vocabulary: ["tcpdump", "wireshark", "traceroute", "packet-capture", "ttl"]
+---
+
+## Why this matters
+
+Theoretical networking knowledge is valuable. The ability to observe _actual_ network traffic is indispensable. When a production incident involves intermittent connection drops, unexpected latency spikes, or a suspected middlebox interfering with traffic, tools like **tcpdump**, **Wireshark**, and **traceroute** are your eyes on the wire. Every backend engineer and every SRE needs to be comfortable with these tools — not expert-level, but fluent enough to capture the right traffic, filter the noise, and identify the problem. This lesson connects the theory from previous lessons to the tools you will use in production.
+
+## tcpdump: the packet capture workhorse
+
+**tcpdump** is a command-line tool that captures packets flowing through a network interface. It runs on Linux, macOS, and most Unix systems. Because it captures raw packets, it requires root or `CAP_NET_RAW` privileges.
+
+```bash
+# Capture all traffic on eth0
+sudo tcpdump -i eth0
+
+# Capture only TCP traffic on port 443
+sudo tcpdump -i eth0 'tcp port 443'
+
+# Capture traffic to/from a specific host, save to a file
+sudo tcpdump -i eth0 -w capture.pcap host 93.184.216.34
+
+# Read a saved capture file
+sudo tcpdump -r capture.pcap
+
+# Show packet contents in ASCII (-A) or hex (-x)
+sudo tcpdump -i eth0 -A 'tcp port 80'
+
+# Limit capture to first 100 packets
+sudo tcpdump -i eth0 -c 100 'udp port 53'
+```
+
+tcpdump output shows one line per packet: timestamp, protocol, source address, destination address, flags, sequence numbers, and length. Reading TCP flags in tcpdump is essential:
+
+- `[S]` — SYN (connection initiation)
+- `[S.]` — SYN-ACK
+- `[.]` — ACK (the `.` means pure acknowledgment)
+- `[P.]` — PSH-ACK (data segment)
+- `[F.]` — FIN-ACK (connection teardown)
+- `[R]` — RST (abrupt connection reset)
+
+A clean HTTP connection in tcpdump:
+
+```
+10:21:30 IP client.54321 > server.80: Flags [S], seq 0
+10:21:30 IP server.80 > client.54321: Flags [S.], seq 0, ack 1
+10:21:30 IP client.54321 > server.80: Flags [.], ack 1
+10:21:30 IP client.54321 > server.80: Flags [P.], seq 1:78, ack 1  ← GET request
+10:21:30 IP server.80 > client.54321: Flags [P.], seq 1:512, ack 78  ← response
+10:21:30 IP client.54321 > server.80: Flags [F.], seq 78, ack 512
+10:21:30 IP server.80 > client.54321: Flags [F.], seq 512, ack 79
+```
+
+## Wireshark: GUI packet analysis
+
+**Wireshark** is the graphical counterpart to tcpdump. It reads the same `.pcap` files and adds powerful display filters, protocol dissection, stream reassembly, and statistical views. Where tcpdump is fast and scriptable, Wireshark is deep and visual.
+
+Key Wireshark features for debugging:
+
+- **Display filters** — `http.response.code == 500`, `tcp.analysis.retransmission`, `dns.qry.name == "example.com"` — these filter the view without stopping capture
+- **Follow TCP stream** — right-click any packet in a connection and select "Follow TCP Stream" to see the complete HTTP request and response as text
+- **Statistics → TCP Stream Graphs** — visualize the sawtooth congestion window pattern, identify retransmissions, measure throughput
+- **Expert Information** — Wireshark automatically flags retransmissions, out-of-order segments, duplicate ACKs, and TCP zero-window events
+
+**Capture filter** (applied before capture, uses BPF syntax, same as tcpdump): reduces what is recorded.
+**Display filter** (applied after capture, more powerful syntax): hides what you are not interested in without discarding data.
+
+## traceroute: mapping the path
+
+**traceroute** (or `tracert` on Windows) exploits the **TTL** (Time to Live) field in IP packets to discover the sequence of routers between you and a destination. Each router decrements the TTL by 1 before forwarding. When TTL reaches 0, the router discards the packet and sends back an ICMP "Time Exceeded" message — including its own IP address. By sending packets with TTL=1, then TTL=2, and so on, traceroute reveals each hop.
+
+```bash
+# Basic traceroute
+traceroute example.com
+
+# Use TCP SYN probes instead of UDP (bypasses some firewalls)
+sudo traceroute -T -p 80 example.com
+
+# Show numeric IPs, no DNS reverse lookup (faster)
+traceroute -n example.com
+```
+
+Sample traceroute output:
+
+```
+traceroute to example.com (93.184.216.34)
+ 1  192.168.1.1       1.2 ms   1.1 ms   1.0 ms   ← home router
+ 2  10.0.0.1          5.3 ms   5.1 ms   5.2 ms   ← ISP edge
+ 3  72.14.232.1      12.4 ms  12.1 ms  12.2 ms   ← backbone
+ 4  209.85.240.1     13.0 ms  13.1 ms  12.9 ms
+ 5  * * *                                         ← router drops probes (firewall)
+ 6  93.184.216.34    15.2 ms  15.1 ms  15.3 ms   ← destination
+```
+
+Reading traceroute:
+
+- **Three latency columns** — traceroute sends three probes per TTL; the values are their round-trip times
+- **`* * *`** — a router did not respond (firewall drops TTL-expired packets; the hop still forwarded traffic)
+- **Latency spikes** — a sudden jump at one hop usually indicates that hop is the bottleneck, not necessarily the router itself (ICMP responses are low-priority)
+- **High latency at all hops after a point** — confirms the bottleneck is at or near that hop
+
+## Diagnosing common problems
+
+**Packet loss** — if `ping` to a host shows intermittent losses, run a **mtr** (my traceroute — combines ping and traceroute in real time) to identify which hop is dropping packets.
+
+**High latency to a specific service** — traceroute to that service. Compare the path to a geographically similar service. Sudden jumps indicate a slow router or suboptimal routing.
+
+**Connection resets** — tcpdump shows `[R]` flags unexpectedly. This indicates a firewall, load balancer, or NAT gateway is resetting connections. Check timeout settings and keepalive configuration.
+
+**TLS handshake failures** — Wireshark can show the TLS handshake in detail. Look for the server sending a `close_notify` alert or the client receiving an unexpected certificate.
+
+<SandboxExercise
+  title="Simulate a Traceroute and Analyze the Route"
+  instructions="Implement a simulateTraceroute() function that returns an array of hops (each with an IP, latency, and whether it responded). Then implement analyzeRoute() which finds the hop with the highest latency jump, identifies silent hops (no response), and calculates total measured latency."
+  starterCode={`// Simulate a traceroute: each hop has an IP, latency (ms), and responded flag.
+// A hop with responded=false represents a router that dropped ICMP probes (the * * * case).
+
+function simulateTraceroute(destination) {
+// Return a fixed array of hops simulating a real traceroute.
+// Include at least 6 hops, one silent hop (\* \* \*), and varying latencies.
+// Each hop: { ttl: number, ip: string | null, latencyMs: number | null, responded: boolean }
+}
+
+function analyzeRoute(hops) {
+// Return an analysis object:
+// {
+// totalHops: number,
+// respondingHops: number,
+// silentHops: number,
+// totalLatencyMs: number, ← sum of latencies of responding hops
+// biggestJump: { fromHop: number, toHop: number, jumpMs: number }, ← largest latency increase between consecutive responding hops
+// bottleneckIp: string, ← IP of the hop after the biggest jump
+// }
+}
+
+// --- tests ---
+const hops = simulateTraceroute("example.com");
+console.log(hops.length >= 6); // true
+console.log(hops[0].ttl === 1); // true
+console.log(hops[hops.length - 1].ip !== null); // destination always responds
+
+const analysis = analyzeRoute(hops);
+console.log(typeof analysis.totalHops === "number"); // true
+console.log(analysis.silentHops >= 1); // true — we have at least one \* \* \*
+console.log(analysis.respondingHops + analysis.silentHops === analysis.totalHops); // true
+console.log(analysis.biggestJump.jumpMs > 0); // true
+console.log(typeof analysis.bottleneckIp === "string"); // true
+console.log(analysis.totalLatencyMs > 0); // true
+`}
+  solution={`function simulateTraceroute(destination) {
+return [
+{ ttl: 1, ip: "192.168.1.1", latencyMs: 1.2, responded: true },
+{ ttl: 2, ip: "10.0.0.1", latencyMs: 5.3, responded: true },
+{ ttl: 3, ip: "72.14.232.1", latencyMs: 12.4, responded: true },
+{ ttl: 4, ip: null, latencyMs: null, responded: false }, // silent hop
+{ ttl: 5, ip: "209.85.240.1", latencyMs: 13.1, responded: true },
+{ ttl: 6, ip: "108.170.246.1", latencyMs: 55.7, responded: true }, // big jump — bottleneck
+{ ttl: 7, ip: "93.184.216.34", latencyMs: 57.2, responded: true },
+];
+}
+
+function analyzeRoute(hops) {
+const responding = hops.filter(h => h.responded);
+const silent = hops.filter(h => !h.responded);
+const totalLatencyMs = responding.reduce((sum, h) => sum + (h.latencyMs || 0), 0);
+
+let biggestJump = { fromHop: 0, toHop: 0, jumpMs: 0 };
+let bottleneckIp = responding[0]?.ip || "unknown";
+
+// Find the biggest latency jump between consecutive responding hops
+for (let i = 1; i < responding.length; i++) {
+const jump = (responding[i].latencyMs || 0) - (responding[i - 1].latencyMs || 0);
+if (jump > biggestJump.jumpMs) {
+biggestJump = {
+fromHop: responding[i - 1].ttl,
+toHop: responding[i].ttl,
+jumpMs: jump,
+};
+bottleneckIp = responding[i].ip || "unknown";
+}
+}
+
+return {
+totalHops: hops.length,
+respondingHops: responding.length,
+silentHops: silent.length,
+totalLatencyMs,
+biggestJump,
+bottleneckIp,
+};
+}
+
+const hops = simulateTraceroute("example.com");
+console.log(hops.length >= 6);
+console.log(hops[0].ttl === 1);
+console.log(hops[hops.length - 1].ip !== null);
+
+const analysis = analyzeRoute(hops);
+console.log(typeof analysis.totalHops === "number");
+console.log(analysis.silentHops >= 1);
+console.log(analysis.respondingHops + analysis.silentHops === analysis.totalHops);
+console.log(analysis.biggestJump.jumpMs > 0);
+console.log(typeof analysis.bottleneckIp === "string");
+console.log(analysis.totalLatencyMs > 0);
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A traceroute shows latency of 5ms, 10ms, 15ms, 90ms, 92ms, 94ms for the first six hops. What does this pattern indicate?"
+  options={[
+    "The destination server is overloaded — all hops after hop 3 are slow",
+    "There is a large latency jump between hop 3 and hop 4, suggesting a slow link or geographic crossing between those hops",
+    "Hops 4-6 are all broken and not forwarding packets correctly",
+    "The traceroute is showing different paths for each probe — the results are meaningless",
+  ]}
+  answer={1}
+  explanation="Latency in traceroute is cumulative end-to-end, not per-hop. The jump from 15ms to 90ms between hop 3 and hop 4 (a 75ms increase) indicates a slow link between those two routers — likely a transatlantic or transcontinental fiber link. Hops 4-6 are fine; they add only 2ms each."
+/>
+
+<Quiz
+  question="When a tcpdump capture shows repeated [R] (RST) packets from the server immediately after the client sends data, what is the most likely explanation?"
+  options={[
+    "The client is sending data too fast and the server is flow-controlling it",
+    "A firewall, NAT gateway, or load balancer is resetting connections that exceed a timeout or match a rule",
+    "The server's TLS certificate has expired",
+    "The client is using an unsupported HTTP version",
+  ]}
+  answer={1}
+  explanation="RST packets abruptly terminate a connection without the normal FIN/ACK teardown. When they come from a server-side IP unexpectedly (especially mid-connection), the usual culprit is a stateful middlebox — firewall, NAT, or load balancer — that has expired the connection state and is sending RSTs on behalf of the server."
+/>
+
+<FillBlank
+  sentence="traceroute works by sending packets with incrementing ___ values — each router decrements this field, and when it reaches zero, the router returns an ICMP Time Exceeded message revealing its address."
+  answer="TTL"
+  hint="Time To ___ — the IP field that limits how many hops a packet can traverse"
+/>
+
+## What you learned
+
+- tcpdump captures raw packets with BPF filter expressions; reading TCP flags (S, S., ., P., F., R) lets you trace connections and spot resets or retransmissions at the protocol level
+- Wireshark adds GUI analysis, display filters, TCP stream reconstruction, and expert annotations that automatically flag retransmissions and zero-window events
+- traceroute reveals the path between two hosts by exploiting TTL; latency jumps between consecutive hops indicate slow links, while `* * *` hops are silent firewalls that still forward traffic

@@ -1,0 +1,264 @@
+---
+title: "Sockets and Real-Time Communication"
+description: "Understand TCP/UDP sockets, how WebSockets enable bidirectional communication, and how long-polling and SSE solve real-time problems over HTTP."
+phase: 5
+module: "5-2-computer-networking"
+order: 7
+difficulty: "medium"
+bloom: "apply"
+vocabulary: ["socket", "websocket", "long-polling", "sse", "bidirectional"]
+---
+
+## Why this matters
+
+The request-response model of HTTP works for most of the web — a client asks, a server answers. But a growing class of applications need something different: live stock prices, collaborative document editing, chat applications, game state updates, deployment logs streaming to your terminal. These need data to flow from server to client at any time, not just in response to a client request. Understanding sockets and the alternative patterns built on top of HTTP lets you choose the right tool for each problem rather than retrofitting the wrong one.
+
+## What is a socket?
+
+A **socket** is an endpoint for two-way network communication. In the OS model, a socket is a file descriptor — a reference that applications use to send and receive data. When you open a TCP connection, both sides get a socket. The server's socket is created by _binding_ to a port and _accepting_ incoming connections. The client's socket is created by _connecting_ to the server's address and port.
+
+A TCP socket is identified by a 4-tuple: `(src IP, src port, dst IP, dst port)`. This uniquely identifies every connection in the network. A server listening on port 443 can handle thousands of simultaneous connections because each connection has a unique source IP/port combination on the client side.
+
+UDP sockets work differently — they do not maintain connection state. You bind to a port and send or receive datagrams, each carrying the sender's address.
+
+## WebSockets: full-duplex over HTTP
+
+**WebSockets** upgrade an HTTP connection into a persistent, **bidirectional** channel. A WebSocket connection starts life as an HTTP/1.1 request with a special header:
+
+```
+GET /ws HTTP/1.1
+Host: example.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+```
+
+The server responds with `101 Switching Protocols`, and from that point on the connection is no longer HTTP. Both sides can send messages at any time — there is no request-response pattern, no waiting for the other side to finish. A WebSocket message can be a text string or binary data, and messages are framed (each has a length prefix so the receiver knows where it ends).
+
+WebSockets are ideal for: chat, collaborative editing, live dashboards, multiplayer games, financial data feeds. They require a persistent connection per client, which means connection limits and memory on the server side become operational concerns at scale.
+
+## Long-polling: fake real-time over HTTP
+
+Before WebSockets were widely supported, **long-polling** provided a workaround. The client sends a normal HTTP GET request. The server holds the response open — it does not reply until it has new data, or until a timeout expires. The client, upon receiving the response, immediately sends another request. This creates an illusion of a persistent connection.
+
+```
+Client: GET /events          Server holds request...
+                             ...new event occurs...
+                     200 OK  Server sends data, connection closes
+Client: GET /events          Client immediately reconnects
+                             (repeat)
+```
+
+Long-polling works everywhere HTTP works, which was its main advantage. Downsides: each message requires a full HTTP request/response overhead, headers are resent each time, and the server must manage many suspended request handlers. For most modern use cases, WebSockets or SSE are better.
+
+## Server-Sent Events: one-directional HTTP streaming
+
+**SSE** (Server-Sent Events) is a simpler alternative to WebSockets when you only need server-to-client data flow. The client makes one HTTP GET request, and the server holds the connection open and sends data in a specific text format:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+
+data: {"type":"price","symbol":"AAPL","value":182.50}
+
+data: {"type":"price","symbol":"GOOG","value":140.20}
+
+event: heartbeat
+data: ping
+
+```
+
+Each event is separated by a blank line. The browser's `EventSource` API automatically handles reconnection if the connection drops. SSE is simpler than WebSockets, works over HTTP/2 multiplexing (you can have many SSE streams without many connections), and benefits from standard HTTP infrastructure (proxies, load balancers, auth middleware).
+
+Use SSE when data flows only server-to-client. Use WebSockets when the client also needs to send data to the server continuously (chat, games, collaborative editing).
+
+## Choosing between the options
+
+| Pattern        | Direction       | Latency | Complexity | Best for                           |
+| -------------- | --------------- | ------- | ---------- | ---------------------------------- |
+| HTTP polling   | Pull            | High    | Low        | Infrequent updates, simple clients |
+| Long-polling   | Pull-push       | Medium  | Medium     | Legacy clients, rare updates       |
+| SSE            | Server → Client | Low     | Low        | Live feeds, logs, notifications    |
+| WebSocket      | Bidirectional   | Low     | Medium     | Chat, games, collaboration         |
+| Raw TCP socket | Bidirectional   | Lowest  | High       | Custom protocols, low-level work   |
+
+<SandboxExercise
+  title="Simulate a WebSocket Message Queue"
+  instructions="Implement a WebSocketSimulator class with send() and receive() methods. Messages sent by each side are queued. The simulator should track connection state and support an onmessage callback invoked when new messages arrive. Implement a flush() method that 'delivers' pending messages by invoking the callback."
+  starterCode={`// Simulate a bidirectional WebSocket connection with message queues.
+// Both client and server can send and receive independently.
+//
+// State machine: "CONNECTING" → "OPEN" → "CLOSING" → "CLOSED"
+
+class WebSocketSimulator {
+constructor() {
+this.state = "CONNECTING";
+this.clientToServer = []; // messages sent by client, pending delivery to server
+this.serverToClient = []; // messages sent by server, pending delivery to client
+this.onClientMessage = null; // callback when server receives a client message
+this.onServerMessage = null; // callback when client receives a server message
+}
+
+// Complete the upgrade handshake
+connect() {
+// Transition: CONNECTING → OPEN
+}
+
+// Client sends a message to the server
+clientSend(message) {
+// Validate state is OPEN, then enqueue the message
+}
+
+// Server sends a message to the client
+serverSend(message) {
+// Validate state is OPEN, then enqueue the message
+}
+
+// Deliver all pending messages by invoking the appropriate callbacks
+flush() {
+// Deliver all clientToServer messages via onClientMessage
+// Deliver all serverToClient messages via onServerMessage
+// Clear both queues after delivery
+}
+
+close() {
+this.state = "CLOSED";
+}
+}
+
+// --- tests ---
+const ws = new WebSocketSimulator();
+ws.connect();
+console.log(ws.state === "OPEN"); // true
+
+const serverReceived = [];
+const clientReceived = [];
+ws.onClientMessage = (msg) => serverReceived.push(msg);
+ws.onServerMessage = (msg) => clientReceived.push(msg);
+
+ws.clientSend("Hello from client");
+ws.clientSend("Second client message");
+ws.serverSend("Hello from server");
+
+// Messages are queued, not yet delivered
+console.log(serverReceived.length === 0); // true
+console.log(clientReceived.length === 0); // true
+
+ws.flush();
+
+console.log(serverReceived.length === 2); // true
+console.log(serverReceived[0] === "Hello from client"); // true
+console.log(clientReceived.length === 1); // true
+console.log(clientReceived[0] === "Hello from server"); // true
+
+// After flush, queues are empty
+ws.flush();
+console.log(serverReceived.length === 2); // true — no new messages
+`}
+  solution={`class WebSocketSimulator {
+constructor() {
+this.state = "CONNECTING";
+this.clientToServer = [];
+this.serverToClient = [];
+this.onClientMessage = null;
+this.onServerMessage = null;
+}
+
+connect() {
+if (this.state !== "CONNECTING") throw new Error("Already connected or closed");
+this.state = "OPEN";
+}
+
+clientSend(message) {
+if (this.state !== "OPEN") throw new Error("Cannot send — connection is " + this.state);
+this.clientToServer.push(message);
+}
+
+serverSend(message) {
+if (this.state !== "OPEN") throw new Error("Cannot send — connection is " + this.state);
+this.serverToClient.push(message);
+}
+
+flush() {
+const clientMsgs = this.clientToServer.splice(0);
+const serverMsgs = this.serverToClient.splice(0);
+for (const msg of clientMsgs) {
+if (this.onClientMessage) this.onClientMessage(msg);
+}
+for (const msg of serverMsgs) {
+if (this.onServerMessage) this.onServerMessage(msg);
+}
+}
+
+close() {
+this.state = "CLOSED";
+}
+}
+
+const ws = new WebSocketSimulator();
+ws.connect();
+console.log(ws.state === "OPEN");
+
+const serverReceived = [];
+const clientReceived = [];
+ws.onClientMessage = (msg) => serverReceived.push(msg);
+ws.onServerMessage = (msg) => clientReceived.push(msg);
+
+ws.clientSend("Hello from client");
+ws.clientSend("Second client message");
+ws.serverSend("Hello from server");
+
+console.log(serverReceived.length === 0);
+console.log(clientReceived.length === 0);
+
+ws.flush();
+
+console.log(serverReceived.length === 2);
+console.log(serverReceived[0] === "Hello from client");
+console.log(clientReceived.length === 1);
+console.log(clientReceived[0] === "Hello from server");
+
+ws.flush();
+console.log(serverReceived.length === 2);
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A developer is building a feature that streams build logs from a CI server to the browser as they are generated. The browser only needs to receive data — it does not need to send anything back. Which technology is the best fit?"
+  options={[
+    "WebSockets — they support bidirectional communication",
+    "Long-polling — it works everywhere HTTP works",
+    "Server-Sent Events — one-directional, lower complexity, works over HTTP/2",
+    "Raw TCP sockets — lowest latency for streaming data",
+  ]}
+  answer={2}
+  explanation="SSE is purpose-built for server-to-client streaming. It is simpler than WebSockets (no upgrade protocol, automatic reconnection built in), works over HTTP/2 multiplexing, and handles exactly this one-directional use case. WebSockets add bidirectional complexity you do not need here."
+/>
+
+<Quiz
+  question="What uniquely identifies a TCP connection in the network?"
+  options={[
+    "The server's IP address and port number alone",
+    "The session ID assigned during the TLS handshake",
+    "The 4-tuple: source IP, source port, destination IP, destination port",
+    "The MAC addresses of both endpoints",
+  ]}
+  answer={2}
+  explanation="A TCP connection is uniquely identified by the combination of source IP, source port, destination IP, and destination port. This is why a server on port 443 can serve thousands of simultaneous connections — each has a unique source IP/port on the client side."
+/>
+
+<FillBlank
+  sentence="WebSockets begin as an HTTP request with an Upgrade header. Once the server responds with ___ Switching Protocols, the connection becomes a full-duplex channel."
+  answer="101"
+  hint="The HTTP status code that signals a protocol upgrade"
+/>
+
+## What you learned
+
+- A socket is the OS endpoint for network communication, identified by a 4-tuple of source/destination IP and port; a server on one port handles thousands of connections because each client has a unique source port
+- WebSockets upgrade HTTP to a persistent bidirectional channel, ideal for chat, games, and collaborative tools; SSE provides simpler server-to-client streaming; long-polling is a legacy fallback
+- Choosing between WebSocket, SSE, and polling depends on directionality, connection persistence requirements, and infrastructure constraints (SSE benefits from HTTP/2 multiplexing transparently)

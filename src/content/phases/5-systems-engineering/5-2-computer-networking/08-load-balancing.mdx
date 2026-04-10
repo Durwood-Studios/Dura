@@ -1,0 +1,300 @@
+---
+title: "Load Balancing"
+description: "Understand Layer 4 vs Layer 7 load balancing, distribution algorithms, health checks, and how reverse proxies enable scalable, resilient architectures."
+phase: 5
+module: "5-2-computer-networking"
+order: 8
+difficulty: "hard"
+bloom: "evaluate"
+vocabulary: ["load-balancer", "round-robin", "health-check", "reverse-proxy", "sticky-session"]
+---
+
+## Why this matters
+
+No single server handles unlimited traffic. At some point — whether due to CPU, memory, connection count, or I/O limits — you need multiple servers. A **load balancer** is the traffic cop that distributes incoming connections across those servers, hides individual server failures from clients, and enables you to deploy and scale without downtime. Understanding load balancing algorithms and their tradeoffs is essential for designing systems that stay up under real-world conditions. When your on-call alert fires at 3am because one backend server is handling 90% of traffic, you need to know why and how to fix it.
+
+## What a load balancer does
+
+A **load balancer** sits between clients and backend servers. Clients connect to the load balancer's address — they never know how many backend servers exist or which one will handle their request. The load balancer:
+
+1. Accepts incoming connections or requests
+2. Selects a backend server using a distribution algorithm
+3. Forwards the traffic to that server
+4. Optionally maintains session state
+5. Monitors backend health and removes failed servers
+
+A **reverse proxy** does everything a load balancer does, plus more: SSL/TLS termination, caching, compression, request rewriting, and security filtering. Nginx and HAProxy are commonly deployed as both. In contrast, a _forward proxy_ sits in front of clients and mediates their access to the internet — the opposite direction.
+
+## Layer 4 vs Layer 7
+
+The most important distinction in load balancing is _which layer_ the balancer operates at:
+
+**Layer 4 (L4)** — works at the transport layer. The balancer sees source/destination IP and port numbers but not the content of the request. It forwards TCP/UDP connections without inspecting application data. This is faster (less processing per connection) but dumb — it cannot make routing decisions based on URL paths, request headers, or response content.
+
+**Layer 7 (L7)** — works at the application layer. The balancer terminates the TCP connection, reads the HTTP request, makes a routing decision based on the full request (URL, headers, cookies), then opens a new connection to the backend. This is slower (two TCP connections per request) but powerful — it can route `/api/*` to one server group and `/static/*` to another, add or strip headers, enforce rate limits, and rewrite URLs.
+
+Modern systems typically use L7 load balancing for HTTP traffic. L4 is used for non-HTTP protocols (database connections, game servers) and for performance-critical paths.
+
+## Distribution algorithms
+
+**Round-robin** — requests are distributed sequentially across all servers in order. Request 1 goes to server A, request 2 to B, request 3 to C, request 4 back to A. Simple, fair, and stateless. Works well when requests have similar cost. Breaks down when requests have wildly different execution times — a slow request on server A does not slow down server B.
+
+**Weighted round-robin** — like round-robin, but servers with more capacity receive more requests. Server A (8 cores) might receive 4 requests for every 1 that server B (2 cores) receives. Useful when backend servers have different capacities.
+
+**Least connections** — the next request goes to the server with the fewest active connections. More sophisticated than round-robin; naturally handles requests with variable duration because heavily-loaded servers receive fewer new requests. Requires the load balancer to track connection counts.
+
+**Least response time** — combines least connections with response time measurements. Prefers servers that are both lightly loaded and responding quickly. Catches a scenario where a server has few connections but is responding slowly (perhaps due to a slow database query or GC pause).
+
+**IP hash** — the source IP address is hashed to always route a given client to the same server. This is one way to implement **sticky sessions** — ensuring a client's requests always reach the same backend. Useful when backend servers maintain in-memory session state. Breaks if the server goes down; consistent hashing reduces the disruption.
+
+**Random** — select a backend at random. Surprisingly effective at scale due to the law of large numbers. The "power of two choices" variant picks two random backends and routes to the one with fewer connections — this outperforms pure round-robin in many simulations.
+
+## Health checks
+
+A **health check** is a periodic probe the load balancer sends to each backend to verify it is alive and able to serve traffic. Two types:
+
+**Active health check** — the load balancer probes the backend on a schedule (e.g., every 5 seconds). A probe might be a TCP connect, an HTTP GET to `/health`, or a more complex check that verifies database connectivity. If N consecutive probes fail, the backend is marked down and removed from rotation.
+
+**Passive health check** — the load balancer watches real traffic responses. If a backend returns 5xx errors or connection timeouts above a threshold, it is temporarily removed. Less overhead than active checks, but slower to detect failures that do not affect current requests.
+
+When a backend recovers, most load balancers slowly reintroduce it (send a fraction of traffic) before restoring it to full rotation — this protects against flapping.
+
+## Sticky sessions and their cost
+
+**Sticky sessions** (also called session persistence) route all requests from a given client to the same backend. This allows stateful backends — servers that store session data in memory. The load balancer typically uses a cookie (`Set-Cookie: SERVERID=A`) to remember which server a client was assigned to.
+
+Sticky sessions create problems at scale:
+
+- If the assigned server fails, the session is lost regardless
+- Traffic becomes uneven if some users are much more active than others
+- Scaling becomes harder (adding a server does not help existing users)
+
+The modern alternative is to store session state outside the backend (Redis, a database) so any server can handle any request. Stateless backends scale horizontally without sticky session complexity. When you see sticky sessions in a design, treat it as a flag that session state management needs rethinking.
+
+<SandboxExercise
+  title="Implement Round-Robin and Least-Connections Load Balancers"
+  instructions="Implement two load balancer classes. RoundRobinBalancer distributes requests sequentially. LeastConnectionsBalancer routes to the server with the fewest active connections, and you must call releaseConnection() when a request completes. Both should support health checks — servers marked unhealthy should be skipped."
+  starterCode={`// Simulate two load balancing algorithms.
+// Each 'server' is { id: string, connections: number, healthy: boolean }
+
+class RoundRobinBalancer {
+constructor(servers) {
+// servers: array of { id, healthy }
+// Initialize each server with 0 connections
+this.servers = servers.map(s => ({ ...s, connections: 0 }));
+this.currentIndex = 0;
+}
+
+getNext() {
+// Return the id of the next healthy server in round-robin order
+// Skip unhealthy servers
+// If no healthy servers, return null
+}
+
+markUnhealthy(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server) server.healthy = false;
+}
+
+markHealthy(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server) server.healthy = true;
+}
+}
+
+class LeastConnectionsBalancer {
+constructor(servers) {
+this.servers = servers.map(s => ({ ...s, connections: 0 }));
+}
+
+getNext() {
+// Return the id of the healthy server with the fewest active connections
+// If no healthy servers, return null
+}
+
+acquireConnection(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server) server.connections++;
+}
+
+releaseConnection(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server && server.connections > 0) server.connections--;
+}
+
+markUnhealthy(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server) server.healthy = false;
+}
+}
+
+// --- tests: RoundRobin ---
+const rrb = new RoundRobinBalancer([
+{ id: "A", healthy: true },
+{ id: "B", healthy: true },
+{ id: "C", healthy: true },
+]);
+
+console.log(rrb.getNext() === "A"); // true
+console.log(rrb.getNext() === "B"); // true
+console.log(rrb.getNext() === "C"); // true
+console.log(rrb.getNext() === "A"); // true — wraps around
+
+rrb.markUnhealthy("B");
+console.log(rrb.getNext() === "C"); // true — skips B
+console.log(rrb.getNext() === "A"); // true
+
+// --- tests: LeastConnections ---
+const lcb = new LeastConnectionsBalancer([
+{ id: "X", healthy: true },
+{ id: "Y", healthy: true },
+]);
+
+lcb.acquireConnection("X");
+lcb.acquireConnection("X");
+lcb.acquireConnection("X"); // X has 3 connections
+
+console.log(lcb.getNext() === "Y"); // true — Y has fewer connections
+lcb.acquireConnection("Y");
+lcb.acquireConnection("Y"); // Y has 2 connections, X has 3
+
+console.log(lcb.getNext() === "Y"); // true — Y still fewer
+lcb.releaseConnection("X");
+lcb.releaseConnection("X");
+lcb.releaseConnection("X"); // X back to 0
+
+console.log(lcb.getNext() === "X"); // true — X now fewest
+`}
+  solution={`class RoundRobinBalancer {
+constructor(servers) {
+this.servers = servers.map(s => ({ ...s, connections: 0 }));
+this.currentIndex = 0;
+}
+
+getNext() {
+const healthyServers = this.servers.filter(s => s.healthy);
+if (healthyServers.length === 0) return null;
+// Wrap currentIndex within healthy server list
+const index = this.currentIndex % healthyServers.length;
+this.currentIndex = (this.currentIndex + 1) % healthyServers.length;
+return healthyServers[index].id;
+}
+
+markUnhealthy(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server) server.healthy = false;
+}
+
+markHealthy(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server) server.healthy = true;
+}
+}
+
+class LeastConnectionsBalancer {
+constructor(servers) {
+this.servers = servers.map(s => ({ ...s, connections: 0 }));
+}
+
+getNext() {
+const healthyServers = this.servers.filter(s => s.healthy);
+if (healthyServers.length === 0) return null;
+let best = healthyServers[0];
+for (const server of healthyServers) {
+if (server.connections < best.connections) {
+best = server;
+}
+}
+return best.id;
+}
+
+acquireConnection(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server) server.connections++;
+}
+
+releaseConnection(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server && server.connections > 0) server.connections--;
+}
+
+markUnhealthy(serverId) {
+const server = this.servers.find(s => s.id === serverId);
+if (server) server.healthy = false;
+}
+}
+
+const rrb = new RoundRobinBalancer([
+{ id: "A", healthy: true },
+{ id: "B", healthy: true },
+{ id: "C", healthy: true },
+]);
+
+console.log(rrb.getNext() === "A");
+console.log(rrb.getNext() === "B");
+console.log(rrb.getNext() === "C");
+console.log(rrb.getNext() === "A");
+
+rrb.markUnhealthy("B");
+console.log(rrb.getNext() === "C");
+console.log(rrb.getNext() === "A");
+
+const lcb = new LeastConnectionsBalancer([
+{ id: "X", healthy: true },
+{ id: "Y", healthy: true },
+]);
+
+lcb.acquireConnection("X");
+lcb.acquireConnection("X");
+lcb.acquireConnection("X");
+
+console.log(lcb.getNext() === "Y");
+lcb.acquireConnection("Y");
+lcb.acquireConnection("Y");
+
+console.log(lcb.getNext() === "Y");
+lcb.releaseConnection("X");
+lcb.releaseConnection("X");
+lcb.releaseConnection("X");
+
+console.log(lcb.getNext() === "X");
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A system uses round-robin load balancing with three backends. Requests arrive at a rate of 100/s but vary in processing time from 10ms to 2000ms. One server consistently has 10x more active connections than the others. What is the most likely cause and best fix?"
+  options={[
+    "The server with more connections is misconfigured — restart it",
+    "Round-robin ignores connection count, so slow requests pile up on whichever server they were assigned to. Switch to least-connections balancing.",
+    "Sticky sessions are enabled and pointing most traffic to one server",
+    "The network link to that server is faster, attracting more traffic",
+  ]}
+  answer={1}
+  explanation="Round-robin distributes requests sequentially without regard to how long they take. A server that receives a slow request will accumulate connections while other servers finish theirs and become idle. Least-connections balancing naturally routes new requests to the least-loaded server, solving this."
+/>
+
+<Quiz
+  question="Why are sticky sessions considered an antipattern in modern horizontally-scaled systems?"
+  options={[
+    "Sticky sessions use too much CPU on the load balancer",
+    "Sticky sessions require TLS termination at the backend server",
+    "They create uneven traffic distribution and mean session state is lost if the assigned server fails — stateless backends with external session storage are more resilient",
+    "Sticky sessions do not work with HTTP/2",
+  ]}
+  answer={2}
+  explanation="Sticky sessions couple a user's session to a specific server. If that server fails, the session is lost. If some users are far more active than others, traffic becomes uneven. The correct solution is to store session state in an external store (Redis, database) so any backend can handle any request."
+/>
+
+<FillBlank
+  sentence="A load balancer performs a periodic ___ to each backend server to verify it is alive and capable of serving traffic before routing requests to it."
+  answer="health check"
+  hint="Two words: the mechanism that detects and removes failed backends from rotation"
+/>
+
+## What you learned
+
+- Layer 4 load balancers operate at the TCP/UDP level (fast but protocol-blind); Layer 7 balancers read HTTP requests and can route based on URL, headers, and cookies (slower but powerful)
+- Round-robin is simple and stateless; least-connections is more adaptive for variable-duration requests; IP hash enables sticky sessions but at the cost of resilience and even distribution
+- Health checks detect failed backends and remove them from rotation; sticky sessions are an antipattern to avoid by making backends stateless with external session storage

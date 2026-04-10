@@ -1,0 +1,206 @@
+---
+title: "TCP Deep Dive"
+description: "Explore how TCP guarantees reliable, ordered delivery through the three-way handshake, sequence numbers, flow control, and congestion control."
+phase: 5
+module: "5-2-computer-networking"
+order: 2
+difficulty: "medium"
+bloom: "analyze"
+vocabulary: ["tcp", "handshake", "sequence-number", "flow-control", "congestion-control"]
+---
+
+## Why this matters
+
+TCP is the backbone of the reliable internet. Every HTTP request, database query, SSH session, and API call depends on TCP to deliver data completely and in order, even though the underlying network makes no such guarantees. Understanding TCP deeply changes how you think about performance: why does a connection to a distant server feel slow even on fast hardware? Why does a dropped packet cause a cascade of slowdowns? Why does "retry with exponential backoff" appear in virtually every distributed systems design? The answers are in TCP's internals.
+
+## What TCP guarantees
+
+The **TCP** (Transmission Control Protocol) sits at Layer 4 and provides four guarantees over the unreliable IP layer below it:
+
+1. **Reliable delivery** — every byte sent is acknowledged; lost segments are retransmitted
+2. **Ordered delivery** — bytes arrive in the order they were sent, regardless of how packets were reordered in transit
+3. **Error detection** — a checksum covers every segment; corrupted data is discarded and retransmitted
+4. **Flow control** — the sender never overwhelms the receiver's buffer
+
+These guarantees come at a cost: TCP requires setup (the handshake), teardown (FIN/ACK exchange), and ongoing overhead (acknowledgments, timers). That cost is worth paying for most applications. For others, it is not — which is why UDP exists.
+
+## The three-way handshake
+
+Before any data flows, TCP performs a **handshake** to synchronize both sides. This establishes the connection and exchanges initial **sequence numbers** — the counters that both sides use to track how many bytes have been sent and received.
+
+```
+Client                          Server
+  |                               |
+  |  -- SYN (seq=x) ----------->  |   Client picks random initial seq x
+  |                               |
+  |  <-- SYN-ACK (seq=y,ack=x+1) |   Server picks random initial seq y
+  |                               |   Server acknowledges client's seq
+  |  -- ACK (ack=y+1) ----------> |   Client acknowledges server's seq
+  |                               |
+  |  =====  DATA FLOWS  ========  |
+```
+
+The exchange takes **1.5 round trips** before data can flow. On a transcontinental connection with 100ms RTT (round-trip time), that is 150ms of mandatory delay before a single byte of application data moves. This is why connection reuse (HTTP keep-alive, HTTP/2 multiplexing) matters enormously for performance.
+
+## Sequence numbers and acknowledgments
+
+Every byte in a TCP stream is numbered. The **sequence number** in a segment's header indicates the position of the first byte in that segment's payload. The **acknowledgment number** tells the sender: "I've received everything up through byte N-1; send me byte N next."
+
+This mechanism enables the receiver to detect gaps. If segments arrive out of order (which IP can do), TCP buffers them and reassembles them correctly before delivering to the application. If a segment is lost entirely, the absence of an acknowledgment triggers retransmission after a timeout.
+
+## Flow control: the receive window
+
+The receiver has a finite buffer. **Flow control** prevents the sender from overwhelming it. The receiver advertises a **receive window** (rwnd) in every ACK — the number of bytes it can currently accept. The sender must not have more than rwnd bytes of unacknowledged data in flight at any time.
+
+```
+Receiver buffer: [####....] → rwnd = 4 bytes available
+Sender: "I can only have 4 bytes in flight until more ACKs arrive"
+```
+
+When an application reads data from the buffer slowly (a slow disk write, a blocking operation), the window shrinks. If it reaches zero, the sender stops entirely and polls until the window reopens. A receiver that cannot drain its buffer fast enough is a common performance bottleneck.
+
+## Congestion control: protecting the network
+
+Flow control protects the receiver. **Congestion control** protects the network itself. The network between sender and receiver may have routers with limited queue sizes. If the sender floods the network, routers drop packets — and dropped packets trigger retransmissions, making congestion worse.
+
+TCP uses a **congestion window** (cwnd) to limit how much data is in flight network-wide. It works in phases:
+
+**Slow start** — begin with a small cwnd (1-10 MSS) and double it every RTT. Despite the name, this phase grows fast (exponentially).
+
+**Congestion avoidance** — once cwnd reaches a threshold (ssthresh), grow linearly (one MSS per RTT) to probe for more bandwidth without causing drops.
+
+**Loss detection** — when a segment is lost (timeout or duplicate ACKs), cut cwnd significantly and return to congestion avoidance. This is the "sawtooth" pattern visible in TCP throughput graphs.
+
+Modern variants like CUBIC and BBR use different algorithms to probe bandwidth more aggressively while still being fair to competing flows.
+
+<SandboxExercise
+  title="TCP Handshake State Machine"
+  instructions="Implement a TCPConnection class with methods to simulate the three-way handshake. The connect() method should advance the state from CLOSED → SYN_SENT → ESTABLISHED. The receiveServerSynAck() method simulates receiving the server's SYN-ACK. Check that sequence numbers are tracked correctly."
+  starterCode={`// Simulate the TCP three-way handshake as a state machine.
+// States: "CLOSED" | "SYN_SENT" | "SYN_RECEIVED" | "ESTABLISHED"
+// Sequence numbers start at the values provided to the constructor.
+
+class TCPConnection {
+constructor(initialSeq) {
+this.state = "CLOSED";
+this.seq = initialSeq; // our current sequence number
+this.ack = 0; // next byte we expect from peer
+this.peerSeq = null; // peer's sequence number (learned during handshake)
+}
+
+// Step 1: client sends SYN
+sendSYN() {
+// Transition: CLOSED → SYN_SENT
+// Return the SYN segment object: { type, seq }
+}
+
+// Step 2: client receives SYN-ACK from server
+receiveSYNACK(synAckSegment) {
+// synAckSegment = { type: "SYN-ACK", seq: serverSeq, ack: clientSeq+1 }
+// Validate the ack matches our seq+1
+// Update peerSeq, update our ack
+// Transition: SYN_SENT → ESTABLISHED (after sending ACK)
+// Return the ACK segment: { type, seq, ack }
+}
+
+isEstablished() {
+return this.state === "ESTABLISHED";
+}
+}
+
+// --- tests ---
+const client = new TCPConnection(1000);
+const syn = client.sendSYN();
+console.log(syn.type === "SYN"); // true
+console.log(syn.seq === 1000); // true
+console.log(client.state === "SYN_SENT"); // true
+
+const synAck = { type: "SYN-ACK", seq: 5000, ack: 1001 };
+const ack = client.receiveSYNACK(synAck);
+console.log(ack.type === "ACK"); // true
+console.log(ack.ack === 5001); // true — we ack the server's seq+1
+console.log(client.isEstablished()); // true
+`}
+  solution={`class TCPConnection {
+constructor(initialSeq) {
+this.state = "CLOSED";
+this.seq = initialSeq;
+this.ack = 0;
+this.peerSeq = null;
+}
+
+sendSYN() {
+if (this.state !== "CLOSED") throw new Error("Can only send SYN from CLOSED state");
+this.state = "SYN_SENT";
+// SYN occupies one sequence number
+return { type: "SYN", seq: this.seq };
+}
+
+receiveSYNACK(synAckSegment) {
+if (this.state !== "SYN_SENT") throw new Error("Unexpected SYN-ACK");
+if (synAckSegment.ack !== this.seq + 1) {
+throw new Error("ACK number mismatch — expected " + (this.seq + 1));
+}
+this.peerSeq = synAckSegment.seq;
+this.ack = synAckSegment.seq + 1; // we will ack the server's SYN
+this.seq = synAckSegment.ack; // our next seq is what server acknowledged
+this.state = "ESTABLISHED";
+return { type: "ACK", seq: this.seq, ack: this.ack };
+}
+
+isEstablished() {
+return this.state === "ESTABLISHED";
+}
+}
+
+const client = new TCPConnection(1000);
+const syn = client.sendSYN();
+console.log(syn.type === "SYN");
+console.log(syn.seq === 1000);
+console.log(client.state === "SYN_SENT");
+
+const synAck = { type: "SYN-ACK", seq: 5000, ack: 1001 };
+const ack = client.receiveSYNACK(synAck);
+console.log(ack.type === "ACK");
+console.log(ack.ack === 5001);
+console.log(client.isEstablished());
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="Why does TCP's three-way handshake require 1.5 round trips before data can flow?"
+  options={[
+    "TCP must negotiate compression settings first",
+    "The client sends SYN, the server responds with SYN-ACK, and the client sends ACK — the final ACK and first data could theoretically travel together but the connection must be established first",
+    "TCP sends three test packets to measure latency before transmitting",
+    "The operating system needs time to allocate a socket buffer",
+  ]}
+  answer={1}
+  explanation="The handshake takes SYN → SYN-ACK → ACK. That is one full RTT (SYN + SYN-ACK) plus a half RTT (the final ACK). Data can travel with the final ACK in some implementations (TCP Fast Open), but the classic handshake requires the full sequence first."
+/>
+
+<Quiz
+  question="What happens to TCP's congestion window when a packet loss is detected via a timeout?"
+  options={[
+    "The window is set to zero and the connection closes",
+    "The window is halved and slow start begins again from 1",
+    "The window doubles to retransmit faster",
+    "Nothing — TCP retransmits without changing the window",
+  ]}
+  answer={1}
+  explanation="A timeout signals severe congestion. TCP resets cwnd to 1 MSS (maximum segment size) and sets ssthresh to half the current cwnd, then restarts slow start. Duplicate ACKs trigger a less severe response (fast retransmit/fast recovery)."
+/>
+
+<FillBlank
+  sentence="TCP uses ___ numbers to track every byte in the stream and detect gaps or reordering."
+  answer="sequence"
+  hint="Each byte in a TCP stream has a unique positional ___"
+/>
+
+## What you learned
+
+- TCP guarantees reliable, ordered, error-checked, flow-controlled delivery by adding mechanisms on top of unreliable IP
+- The three-way handshake (SYN → SYN-ACK → ACK) synchronizes sequence numbers and costs at least one round-trip before data flows
+- Flow control uses a receive window to prevent overwhelming the receiver's buffer; congestion control uses a congestion window to prevent overwhelming the network itself
