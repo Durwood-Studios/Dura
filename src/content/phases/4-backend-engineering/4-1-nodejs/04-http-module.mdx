@@ -1,0 +1,306 @@
+---
+title: "The HTTP Module"
+description: "Build an HTTP server from scratch to understand what frameworks like Express do under the hood."
+phase: 4
+module: "4-1-nodejs"
+order: 4
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - http-module
+  - request
+  - response
+  - routing
+  - request-body
+---
+
+## Why this matters
+
+Express, Fastify, Hono, and every other Node.js web framework sit on top of Node's built-in `http` module. Understanding what the `http` module does — and why it's verbose — makes you appreciate what frameworks provide and equips you to debug framework behavior at the layer beneath. When Express middleware does something unexpected, you'll know exactly where in the HTTP lifecycle to look.
+
+## Creating an HTTP server
+
+```javascript
+const http = require("http");
+
+const server = http.createServer((req, res) => {
+  // req = IncomingMessage (the request)
+  // res = ServerResponse (what we send back)
+
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Hello, world!");
+});
+
+server.listen(3000, () => {
+  console.log("Server running at http://localhost:3000");
+});
+```
+
+`http.createServer` returns a `Server` object. The callback you pass is the **request listener** — it fires for every incoming HTTP request. `server.listen` binds to a port and starts accepting connections.
+
+## Reading the request
+
+The `req` object (an `IncomingMessage` instance) contains everything about the incoming request:
+
+```javascript
+const server = http.createServer((req, res) => {
+  console.log(req.method); // "GET", "POST", "PUT", "DELETE"
+  console.log(req.url); // "/users?page=2" — includes query string
+  console.log(req.headers); // { host: 'localhost:3000', 'content-type': 'application/json', ... }
+
+  // Parse URL parts using the WHATWG URL API
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  console.log(url.pathname); // "/users"
+  console.log(url.searchParams.get("page")); // "2"
+
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("OK");
+});
+```
+
+Always use `new URL(req.url, base)` to parse the URL — it handles edge cases that manual string splitting misses.
+
+## Reading the request body
+
+This is where the `http` module becomes inconvenient. The request body arrives as a **stream of chunks**, not as a ready-to-use string. You must collect and assemble the chunks yourself:
+
+```javascript
+const http = require("http");
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/users") {
+    // Collect all chunks into a string
+    let body = "";
+
+    req.on("data", (chunk) => {
+      body += chunk.toString();
+    });
+
+    req.on("end", () => {
+      try {
+        const data = JSON.parse(body);
+        console.log("Received:", data);
+
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: 1, ...data }));
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON" }));
+      }
+    });
+
+    req.on("error", (error) => {
+      console.error("Request body error:", error);
+      res.writeHead(500);
+      res.end();
+    });
+  }
+});
+```
+
+Express's `express.json()` middleware does exactly this body-collecting work — then attaches the parsed result to `req.body` so you never have to write this boilerplate yourself.
+
+## Writing the response
+
+```javascript
+// Set status code and headers
+res.writeHead(200, {
+  "Content-Type": "application/json",
+  "X-Request-Id": "abc123",
+});
+
+// Send the body and close the connection
+res.end(JSON.stringify({ message: "success" }));
+
+// Alternative: set status and headers separately
+res.statusCode = 404;
+res.setHeader("Content-Type", "application/json");
+res.end(JSON.stringify({ error: "Not found" }));
+```
+
+`res.end()` sends the response body and signals that the response is complete. You must call it — if you forget, the client hangs waiting forever. `res.write()` sends a chunk without ending the response, useful for streaming data.
+
+## Routing by hand
+
+Without a framework, routing is just `if/else` on the URL and method:
+
+```javascript
+const http = require("http");
+
+const users = [
+  { id: 1, name: "Alice" },
+  { id: 2, name: "Bob" },
+];
+
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  res.setHeader("Content-Type", "application/json");
+
+  if (req.method === "GET" && url.pathname === "/users") {
+    res.writeHead(200);
+    res.end(JSON.stringify(users));
+  } else if (req.method === "GET" && url.pathname.startsWith("/users/")) {
+    const id = parseInt(url.pathname.split("/")[2]);
+    const user = users.find((u) => u.id === id);
+
+    if (user) {
+      res.writeHead(200);
+      res.end(JSON.stringify(user));
+    } else {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: "User not found" }));
+    }
+  } else {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Route not found" }));
+  }
+});
+
+server.listen(3000);
+```
+
+You can see immediately why this does not scale. Add 20 routes and this file becomes unreadable. Add URL parameters, middleware, and error handling, and it becomes unmaintainable. This is the problem Express solves.
+
+## HTTPS
+
+The `https` module has an identical API but requires a TLS certificate:
+
+```javascript
+const https = require("https");
+const fs = require("fs");
+
+const options = {
+  key: fs.readFileSync("./server.key"), // Private key
+  cert: fs.readFileSync("./server.cert"), // Certificate
+};
+
+const server = https.createServer(options, (req, res) => {
+  res.writeHead(200);
+  res.end("Secure Hello!");
+});
+
+server.listen(443);
+```
+
+For local development, generate a self-signed certificate with `openssl`. For production, use Let's Encrypt (free) or your cloud provider's managed certificates. Never expose HTTP in production for an API that handles user data — browsers and API clients will flag the insecure connection.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a simple HTTP router without a framework.
+// createRouter() returns an object with:
+//   get(path, handler)  — registers a GET handler
+//   post(path, handler) — registers a POST handler
+//   handle(method, path, body) — dispatches to the matching handler
+// Handlers receive { method, path, body, params } and return { status, body }
+// Support path params: /users/:id → params.id
+
+function createRouter() {
+const routes = [];
+
+function addRoute(method, pattern, handler) {
+// Convert /users/:id into a regex and capture group names
+const paramNames = [];
+const regexStr = pattern.replace(/:([a-z]+)/g, (\_, name) => {
+paramNames.push(name);
+return "([^/]+)";
+});
+const regex = new RegExp("^" + regexStr + "$");
+routes.push({ method, regex, paramNames, handler });
+}
+
+function get(path, handler) {
+addRoute("GET", path, handler);
+}
+
+function post(path, handler) {
+addRoute("POST", path, handler);
+}
+
+function handle(method, path, body = null) {
+for (const route of routes) {
+if (route.method !== method) continue;
+const match = path.match(route.regex);
+if (!match) continue;
+
+      const params = {};
+      route.paramNames.forEach((name, i) => {
+        params[name] = match[i + 1];
+      });
+
+      return route.handler({ method, path, body, params });
+    }
+    return { status: 404, body: { error: "Not found" } };
+
+}
+
+return { get, post, handle };
+}
+
+// Test the router
+const router = createRouter();
+const users = [{ id: "1", name: "Alice" }, { id: "2", name: "Bob" }];
+
+router.get("/users", () => ({ status: 200, body: users }));
+router.get("/users/:id", ({ params }) => {
+const user = users.find((u) => u.id === params.id);
+return user
+? { status: 200, body: user }
+: { status: 404, body: { error: "Not found" } };
+});
+router.post("/users", ({ body }) => ({
+status: 201,
+body: { id: "3", ...body },
+}));
+
+console.log(router.handle("GET", "/users"));
+console.log(router.handle("GET", "/users/1"));
+console.log(router.handle("GET", "/users/99"));
+console.log(router.handle("POST", "/users", { name: "Carol" }));
+console.log(router.handle("DELETE", "/users/1")); // 404`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why does reading the request body in Node's http module require collecting stream chunks?"
+  options={[
+    "Node's http module only supports GET requests natively",
+    "The body arrives as a stream of chunks over the network, not as a complete string",
+    "JSON parsing requires streaming",
+    "It is a security restriction to prevent large payloads",
+  ]}
+  answer={1}
+  explanation="HTTP request bodies are transmitted over a network connection in chunks. Node exposes this as a readable stream, and you must listen for 'data' events and assemble them. Express's body-parser middleware does this for you."
+/>
+
+<Quiz
+  question="What happens if you never call res.end() in a request handler?"
+  options={[
+    "Node throws an error and closes the connection",
+    "The response is sent with an empty body automatically",
+    "The client connection hangs open until it times out",
+    "Node restarts the server automatically",
+  ]}
+  answer={2}
+  explanation="res.end() signals that the response is complete. Without it, Node keeps the connection open and the client waits indefinitely — a common source of hanging requests in new Node applications."
+/>
+
+<FillBlank
+  question="The ___ object in a Node.js HTTP request handler contains the URL, method, and headers of the incoming request."
+  answer="req"
+/>
+
+## What you learned
+
+- `http.createServer` takes a request listener callback that fires for every request — `req` holds request data, `res` is used to send the response
+- Request bodies arrive as a stream of chunks that must be collected before parsing
+- Routing by hand with if/else shows why frameworks like Express exist — they handle body parsing, routing, and middleware so you don't have to

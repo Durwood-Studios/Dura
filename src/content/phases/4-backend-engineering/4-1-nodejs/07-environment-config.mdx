@@ -1,0 +1,315 @@
+---
+title: "Environment and Configuration"
+description: "Manage secrets and config with process.env, .env files, and environment-aware config patterns."
+phase: 4
+module: "4-1-nodejs"
+order: 7
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - environment-variable
+  - dotenv
+  - nodejs
+  - config-management
+  - twelve-factor
+---
+
+## Why this matters
+
+Every application has configuration that changes between environments: a development database on your laptop, a staging database for testing, a production database serving real users. Hard-coding these values into source code is a security disaster — secrets get committed to Git, shared with every developer who clones the repo, and end up in breach notifications. The 12-factor app methodology (the industry standard for cloud-native apps) says config belongs in the environment, not the code.
+
+## process.env
+
+Node.js exposes environment variables as strings on the `process.env` object:
+
+```javascript
+console.log(process.env.NODE_ENV); // "production"
+console.log(process.env.DATABASE_URL); // "postgres://user:pass@host/db"
+console.log(process.env.PORT); // "3000" (always a string)
+console.log(process.env.MISSING_VAR); // undefined (not an error, just undefined)
+```
+
+Every value in `process.env` is a string. If you need a number, parse it:
+
+```javascript
+const port = parseInt(process.env.PORT, 10) || 3000;
+const maxRetries = Number(process.env.MAX_RETRIES) || 3;
+const isDebug = process.env.DEBUG === "true"; // Booleans require explicit comparison
+```
+
+Environment variables are set in the shell before starting your process:
+
+```bash
+DATABASE_URL=postgres://localhost/myapp PORT=8080 node src/index.js
+# or export them first
+export NODE_ENV=production
+node src/index.js
+```
+
+## .env files and dotenv
+
+Typing environment variables in the shell every time is tedious. The `dotenv` library reads a `.env` file and loads variables into `process.env` at startup:
+
+```bash
+# .env — local development values
+DATABASE_URL=postgres://localhost:5432/myapp_dev
+JWT_SECRET=local-development-secret-not-for-production
+PORT=3000
+DEBUG=true
+REDIS_URL=redis://localhost:6379
+```
+
+```javascript
+// Load at the very top of your entry point, before any other imports
+require("dotenv").config();
+// or with ESM:
+// import "dotenv/config";
+
+const app = require("./app");
+app.listen(process.env.PORT);
+```
+
+Node.js v20.6+ has built-in `.env` support without dotenv:
+
+```bash
+node --env-file=.env src/index.js
+```
+
+## What to commit and what not to commit
+
+This rule is absolute:
+
+| File              | Commit?    | Why                                 |
+| ----------------- | ---------- | ----------------------------------- |
+| `.env`            | **Never**  | Contains real secrets               |
+| `.env.local`      | **Never**  | Developer-specific overrides        |
+| `.env.production` | **Never**  | Production secrets                  |
+| `.env.test`       | Sometimes  | Only if it contains no real secrets |
+| `.env.example`    | **Always** | Template for onboarding             |
+
+`.env.example` is a file you commit that shows the shape of configuration without real values:
+
+```bash
+# .env.example — commit this
+DATABASE_URL=postgres://user:password@host:5432/database
+JWT_SECRET=your-jwt-secret-here
+PORT=3000
+REDIS_URL=redis://localhost:6379
+STRIPE_SECRET_KEY=sk_test_your_key_here
+```
+
+New developers copy this file, fill in their values, and start working. It documents required config without leaking secrets.
+
+## The config module pattern
+
+Spreading `process.env.X` calls throughout your codebase makes refactoring painful and validation impossible. Instead, create a single config module that reads, validates, and provides defaults:
+
+```javascript
+// src/config.js
+function requireEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+const config = {
+  env: process.env.NODE_ENV || "development",
+  port: parseInt(process.env.PORT, 10) || 3000,
+
+  db: {
+    url: requireEnv("DATABASE_URL"),
+    poolSize: parseInt(process.env.DB_POOL_SIZE, 10) || 10,
+  },
+
+  auth: {
+    jwtSecret: requireEnv("JWT_SECRET"),
+    jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
+  },
+
+  redis: {
+    url: process.env.REDIS_URL || "redis://localhost:6379",
+  },
+
+  isProduction: process.env.NODE_ENV === "production",
+  isDevelopment: process.env.NODE_ENV === "development",
+  isTest: process.env.NODE_ENV === "test",
+};
+
+module.exports = config;
+```
+
+```javascript
+// Anywhere in the app
+const config = require("./config");
+console.log(config.db.url); // postgres://...
+console.log(config.port); // 3000
+console.log(config.isProduction); // false
+```
+
+Benefits of this pattern:
+
+- **Fail fast** — if `DATABASE_URL` is missing, the process crashes at startup with a clear message, not 20 minutes later with a cryptic database error
+- **Type coercion** — numbers are numbers, booleans are booleans, not strings
+- **Single source of truth** — changing an env var name requires updating one file
+
+## NODE_ENV
+
+`NODE_ENV` is a convention (not a built-in) that signals which environment the app is running in:
+
+```javascript
+if (config.isDevelopment) {
+  // Enable verbose logging, detailed stack traces
+  app.use(morgan("dev"));
+}
+
+if (config.isProduction) {
+  // Enable rate limiting, compression, security headers
+  app.use(helmet());
+  app.use(compression());
+}
+
+if (config.isTest) {
+  // Use in-memory database, disable external API calls
+}
+```
+
+Common `NODE_ENV` values: `development`, `production`, `test`, `staging`. Many libraries (Express, React) check `NODE_ENV` and change their behavior accordingly — Express disables detailed error messages in production, for example.
+
+## The 12-factor app principle for config
+
+The [12-factor app](https://12factor.net/config) methodology (a foundational document for cloud-native software) states: **store config in the environment**. Config is everything that varies between deploys — dev, staging, production. Config should never appear in code or version control.
+
+Practical implications:
+
+- Secrets (API keys, database passwords) must never be in Git, even in private repos
+- The same codebase should run in any environment by changing only environment variables
+- Config should be passed in through the environment, not through config files packaged inside the container image
+
+This is why cloud platforms (Heroku, Railway, Render, AWS, Vercel) have environment variable configuration in their dashboards — they implement the 12-factor pattern.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement createConfig(envVars, schema) — a configuration loader with validation.
+// envVars: flat object simulating process.env (all values are strings)
+// schema: { key: { required: boolean, default?: any, type: 'string'|'number'|'boolean' } }
+// Returns validated config object, or throws with a list of all missing required vars.
+
+function createConfig(envVars, schema) {
+const errors = [];
+const config = {};
+
+for (const [key, rules] of Object.entries(schema)) {
+const raw = envVars[key];
+
+    if (raw === undefined || raw === "") {
+      if (rules.required && rules.default === undefined) {
+        errors.push(\`Missing required variable: \${key}\`);
+        continue;
+      }
+      config[key] = rules.default;
+      continue;
+    }
+
+    // Type coercion
+    if (rules.type === "number") {
+      const parsed = Number(raw);
+      if (isNaN(parsed)) {
+        errors.push(\`Invalid number for \${key}: "\${raw}"\`);
+        continue;
+      }
+      config[key] = parsed;
+    } else if (rules.type === "boolean") {
+      config[key] = raw === "true" || raw === "1";
+    } else {
+      config[key] = raw; // string
+    }
+
+}
+
+if (errors.length > 0) {
+throw new Error("Configuration errors:\\n" + errors.join("\\n"));
+}
+
+return config;
+}
+
+// Simulate process.env
+const envVars = {
+PORT: "8080",
+DATABASE_URL: "postgres://localhost/myapp",
+DEBUG: "true",
+// JWT_SECRET is intentionally missing
+};
+
+const schema = {
+PORT: { required: false, default: 3000, type: "number" },
+DATABASE_URL: { required: true, type: "string" },
+JWT_SECRET: { required: true, type: "string" },
+DEBUG: { required: false, default: false, type: "boolean" },
+MAX_RETRIES: { required: false, default: 3, type: "number" },
+};
+
+try {
+const config = createConfig(envVars, schema);
+console.log("Config loaded:", config);
+} catch (e) {
+console.error(e.message);
+// "Configuration errors:\\nMissing required variable: JWT_SECRET"
+}
+
+// Now with all required vars present
+const config2 = createConfig(
+{ ...envVars, JWT_SECRET: "my-secret-key" },
+schema
+);
+console.log("PORT (number):", config2.PORT, typeof config2.PORT); // 8080 number
+console.log("DEBUG (boolean):", config2.DEBUG, typeof config2.DEBUG); // true boolean
+console.log("MAX_RETRIES (default):", config2.MAX_RETRIES); // 3`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should you always commit a .env.example file but never commit a .env file?"
+  options={[
+    ".env files are too large for Git",
+    ".env.example documents required configuration without real secrets; .env contains actual credentials that must never enter version control",
+    ".env files are only used on Linux",
+    "Git automatically ignores .env files",
+  ]}
+  answer={1}
+  explanation=".env.example serves as living documentation of what environment variables the app needs. The actual .env with real passwords, API keys, and secrets must be in .gitignore to prevent them from being committed, shared, or leaked."
+/>
+
+<Quiz
+  question="Why does the config module pattern validate required env vars at startup instead of when they are first used?"
+  options={[
+    "It is required for the dotenv library to work",
+    "Failing fast at startup gives a clear error message; failing when a variable is first used could be minutes into the app's runtime with a cryptic error",
+    "It makes the app run faster",
+    "It is required by the 12-factor methodology",
+  ]}
+  answer={1}
+  explanation="Fail fast means if DATABASE_URL is missing, the process exits immediately with 'Missing required variable: DATABASE_URL'. Without this, the app starts successfully, then crashes 5 minutes later when the first database query fails with a confusing connection error."
+/>
+
+<FillBlank
+  question="All values in process.env are ___, so number and boolean environment variables must be explicitly converted."
+  answer="strings"
+/>
+
+## What you learned
+
+- `process.env` provides environment variables as strings — always parse numbers and booleans explicitly
+- The dotenv library loads `.env` files into `process.env` at startup; Node.js v20.6+ has this built in with `--env-file`
+- A single config module that validates and type-coerces environment variables at startup makes configuration reliable and self-documenting

@@ -1,0 +1,337 @@
+---
+title: "Error Handling in Node.js"
+description: "Catch async errors properly, handle uncaught rejections, and implement graceful shutdown."
+phase: 4
+module: "4-1-nodejs"
+order: 6
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - error-handling
+  - unhandled-rejection
+  - graceful-shutdown
+  - sigterm
+  - custom-error
+---
+
+## Why this matters
+
+Unhandled errors in Node.js can crash your server, silently corrupt data, or leave database connections open indefinitely. In the browser, an uncaught error is contained to the tab. In Node.js, it can take down the entire process serving thousands of users. Production-grade Node applications handle errors at every layer — async functions, process-level safety nets, and graceful shutdown — so that failures are recoverable and observable rather than catastrophic and silent.
+
+## Async error handling with async/await
+
+The most common Node.js error handling bug looks like this:
+
+```javascript
+// WRONG — error from fetchUser is an unhandled rejection
+async function loadDashboard(userId) {
+  const user = fetchUser(userId); // missing await — this is a Promise, not a user
+  const posts = await fetchPosts(user.id); // TypeError: Cannot read property 'id' of undefined
+}
+```
+
+With `async/await`, `try/catch` works exactly like synchronous error handling:
+
+```javascript
+async function loadDashboard(userId) {
+  try {
+    const user = await fetchUser(userId);
+    const posts = await fetchPosts(user.id);
+    return { user, posts };
+  } catch (error) {
+    // Catches both fetchUser and fetchPosts rejections
+    console.error("Dashboard load failed:", error.message);
+    throw error; // Re-throw so the caller knows something went wrong
+  }
+}
+```
+
+If an `async` function throws or returns a rejected promise without a `try/catch`, the error becomes an **unhandled promise rejection**.
+
+## Unhandled rejections
+
+Node.js v15+ exits the process on unhandled rejections (exit code 1), just like uncaught exceptions. Older versions logged a warning and continued — which was worse because the application kept running in a partially broken state.
+
+Set up a safety net:
+
+```javascript
+process.on("unhandledRejection", (reason, promise) => {
+  // Log the error with enough context to debug it
+  console.error("Unhandled promise rejection:", reason);
+  console.error("At promise:", promise);
+
+  // Exit after logging — a process in an unknown state is dangerous
+  process.exit(1);
+});
+```
+
+This is a last resort, not a primary error handling strategy. If you see this handler fire, it means an error escaped your async error handling — fix the source, not just the symptom.
+
+## Uncaught exceptions
+
+Synchronous throws that escape all try/catch blocks trigger `uncaughtException`:
+
+```javascript
+process.on("uncaughtException", (error) => {
+  console.error("FATAL: Uncaught exception", error);
+  // Always exit after this — the application state is unknown
+  process.exit(1);
+});
+```
+
+The Node.js documentation is explicit: **never** try to resume normal operation after `uncaughtException`. The process is in an undefined state. Log, then exit.
+
+## Custom error classes
+
+Custom error classes let you distinguish between different failure types programmatically:
+
+```javascript
+class AppError extends Error {
+  constructor(message, statusCode = 500, code = "INTERNAL_ERROR") {
+    super(message);
+    this.name = "AppError";
+    this.statusCode = statusCode;
+    this.code = code;
+    // Maintain proper stack trace in V8
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+class NotFoundError extends AppError {
+  constructor(resource, id) {
+    super(`${resource} with id ${id} not found`, 404, "NOT_FOUND");
+    this.name = "NotFoundError";
+  }
+}
+
+class ValidationError extends AppError {
+  constructor(field, message) {
+    super(`Validation failed for ${field}: ${message}`, 400, "VALIDATION_ERROR");
+    this.name = "ValidationError";
+    this.field = field;
+  }
+}
+
+// Usage in a route handler
+async function getUser(id) {
+  const user = await db.findUser(id);
+  if (!user) throw new NotFoundError("User", id);
+  return user;
+}
+
+// In your error-handling middleware
+function errorHandler(error, req, res, next) {
+  if (error instanceof AppError) {
+    return res.status(error.statusCode).json({
+      error: error.code,
+      message: error.message,
+    });
+  }
+  // Unknown error — don't expose internals
+  console.error("Unexpected error:", error);
+  res.status(500).json({ error: "INTERNAL_ERROR", message: "Something went wrong" });
+}
+```
+
+## Graceful shutdown
+
+When your process receives a shutdown signal (from a deployment, a `kubectl delete pod`, or Ctrl+C), a graceful shutdown means:
+
+1. Stop accepting new connections
+2. Finish processing in-flight requests
+3. Close database connections and other resources
+4. Exit with code 0
+
+```javascript
+const http = require("http");
+
+const server = http.createServer(app);
+server.listen(3000);
+
+// Track active connections for graceful drain
+let isShuttingDown = false;
+
+function shutdown(signal) {
+  console.log(`Received ${signal}, starting graceful shutdown`);
+  isShuttingDown = true;
+
+  // Stop accepting new connections
+  server.close(async () => {
+    console.log("HTTP server closed");
+
+    try {
+      // Close database pool, message queue connections, etc.
+      await db.pool.end();
+      await redisClient.quit();
+      console.log("Resources closed, exiting");
+      process.exit(0);
+    } catch (error) {
+      console.error("Error during shutdown:", error);
+      process.exit(1);
+    }
+  });
+
+  // Force exit after 30 seconds if graceful shutdown hangs
+  setTimeout(() => {
+    console.error("Graceful shutdown timeout, forcing exit");
+    process.exit(1);
+  }, 30_000);
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM")); // Kubernetes, Docker stop
+process.on("SIGINT", () => shutdown("SIGINT")); // Ctrl+C in terminal
+```
+
+SIGTERM is the standard signal for "please shut down cleanly." Kubernetes sends SIGTERM, waits 30 seconds (configurable), then sends SIGKILL (which cannot be caught). Your shutdown logic must finish within that window.
+
+## Error propagation patterns
+
+Two patterns dominate Node.js error handling. The first is throwing from async functions and catching at the boundary:
+
+```javascript
+// Business logic throws
+async function createUser(data) {
+  if (!data.email) throw new ValidationError("email", "is required");
+  if (await userExists(data.email)) throw new AppError("Email already taken", 409, "CONFLICT");
+  return db.insert("users", data);
+}
+
+// Route handler catches and converts to HTTP response
+router.post("/users", async (req, res, next) => {
+  try {
+    const user = await createUser(req.body);
+    res.status(201).json(user);
+  } catch (error) {
+    next(error); // Pass to error-handling middleware
+  }
+});
+```
+
+The second pattern returns result objects instead of throwing — useful when errors are expected and not exceptional:
+
+```javascript
+async function findUser(id) {
+  try {
+    const user = await db.query("SELECT * FROM users WHERE id = $1", [id]);
+    return { ok: true, value: user };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+const result = await findUser(id);
+if (!result.ok) {
+  return res.status(404).json({ error: "User not found" });
+}
+// result.value is the user
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement createErrorHandler() that returns structured error handling utilities.
+// try(fn)       — runs fn(), returns {ok: true, value} or {ok: false, error}
+// tryAsync(fn)  — same but fn is async (returns a Promise)
+// Both catch errors and never throw.
+
+function createErrorHandler() {
+function trySync(fn) {
+try {
+const value = fn();
+return { ok: true, value };
+} catch (error) {
+return { ok: false, error };
+}
+}
+
+async function tryAsync(fn) {
+try {
+const value = await fn();
+return { ok: true, value };
+} catch (error) {
+return { ok: false, error };
+}
+}
+
+return { try: trySync, tryAsync };
+}
+
+const handler = createErrorHandler();
+
+// Test 1: successful sync operation
+const r1 = handler.try(() => JSON.parse('{"name":"Alice"}'));
+console.log("Parse success:", r1.ok, r1.value); // true, {name: "Alice"}
+
+// Test 2: failed sync operation
+const r2 = handler.try(() => JSON.parse("not json"));
+console.log("Parse failure:", r2.ok, r2.error.message); // false, "Unexpected token..."
+
+// Test 3: successful async operation
+const r3 = await handler.tryAsync(async () => {
+return new Promise((resolve) => setTimeout(() => resolve(42), 0));
+});
+console.log("Async success:", r3.ok, r3.value); // true, 42
+
+// Test 4: failed async operation
+const r4 = await handler.tryAsync(async () => {
+throw new Error("Database connection failed");
+});
+console.log("Async failure:", r4.ok, r4.error.message); // false, "Database..."
+
+// Chain calls — no try/catch blocks needed at call sites
+async function pipeline() {
+const step1 = await handler.tryAsync(async () => ({ data: [1, 2, 3] }));
+if (!step1.ok) return console.error("Step 1 failed:", step1.error.message);
+
+const step2 = handler.try(() => step1.value.data.map((x) => x \* 2));
+if (!step2.ok) return console.error("Step 2 failed:", step2.error.message);
+
+console.log("Pipeline result:", step2.value); // [2, 4, 6]
+}
+
+pipeline();`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What should you do after handling an uncaughtException in Node.js?"
+  options={[
+    "Continue normal operation — the error has been handled",
+    "Restart just the failed function",
+    "Exit the process — the application state is undefined after an uncaught exception",
+    "Emit an event to notify other parts of the app",
+  ]}
+  answer={2}
+  explanation="The Node.js documentation is explicit: do not try to resume after uncaughtException. The process may be in a corrupted state. Log the error and exit so a process manager can restart a clean instance."
+/>
+
+<Quiz
+  question="What is the difference between SIGTERM and SIGKILL?"
+  options={[
+    "SIGTERM stops the process immediately; SIGKILL allows cleanup",
+    "SIGTERM can be caught and handled for graceful shutdown; SIGKILL cannot be caught and terminates immediately",
+    "They are identical signals with different names",
+    "SIGKILL only works on Linux, SIGTERM is cross-platform",
+  ]}
+  answer={1}
+  explanation="SIGTERM is a polite request to terminate that your process can catch, handle, and respond to with cleanup code. SIGKILL is immediate and cannot be caught or ignored — the OS terminates the process instantly."
+/>
+
+<FillBlank
+  question="Node.js v15+ exits the process on ___ promise rejections, where a rejected promise has no .catch() or try/catch handler."
+  answer="unhandled"
+/>
+
+## What you learned
+
+- `try/catch` with `async/await` catches promise rejections — always `await` async calls inside a try block
+- Set up `process.on('unhandledRejection')` and `process.on('uncaughtException')` as last-resort safety nets that log and exit
+- Custom error classes (extending `Error`) let you attach status codes and error codes for structured HTTP responses

@@ -1,0 +1,364 @@
+---
+title: "Node.js Project: CLI File Processor"
+description: "Build a CLI tool that reads files, transforms data, writes output, and handles errors gracefully."
+phase: 4
+module: "4-1-nodejs"
+order: 9
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - cli
+  - process-argv
+  - exit-code
+  - shebang
+  - csv-parsing
+---
+
+## Why this matters
+
+CLI tools are one of Node.js's strongest use cases — they are fast to start, easy to distribute, and integrate naturally with shell scripts and build pipelines. Every developer uses dozens of Node-based CLIs daily: npm, ESLint, TypeScript's `tsc`, Prettier, Vite. Building one from scratch ties together everything you have learned about Node.js: filesystem access, process APIs, error handling, and testable pure functions. The architectural pattern you see here — separate I/O from pure transformation — applies equally to REST APIs and serverless functions.
+
+## Project overview
+
+We are building a CSV processor CLI that:
+
+1. Reads a CSV file specified on the command line
+2. Filters rows by a field value
+3. Groups remaining rows by a column
+4. Aggregates a numeric column per group
+5. Writes the result as JSON to an output file
+
+```bash
+node process-csv.js --input sales.csv --filter region=west --group product --sum revenue --output report.json
+```
+
+## Parsing CLI arguments
+
+Node.js exposes command-line arguments as `process.argv` — an array where index 0 is the `node` executable path, index 1 is the script path, and index 2 onwards are your arguments:
+
+```javascript
+// node process-csv.js --input sales.csv --output report.json
+console.log(process.argv);
+// ['/usr/local/bin/node', '/app/process-csv.js', '--input', 'sales.csv', '--output', 'report.json']
+```
+
+Parse them manually:
+
+```javascript
+function parseArgs(argv) {
+  const args = {};
+  const rawArgs = argv.slice(2); // Skip node and script path
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    if (rawArgs[i].startsWith("--")) {
+      const key = rawArgs[i].slice(2); // Strip leading --
+      const value = rawArgs[i + 1]; // Next element is the value
+      args[key] = value;
+      i++; // Skip the value on the next iteration
+    }
+  }
+
+  return args;
+}
+```
+
+For production CLIs, use a library like `commander` or `yargs` — they handle edge cases, generate help text, and validate required arguments. But understanding the raw `process.argv` mechanism first means you are not dependent on the library.
+
+## Reading and writing files
+
+```javascript
+const fs = require("fs/promises");
+const path = require("path");
+
+async function readInputFile(filePath) {
+  const absolutePath = path.resolve(filePath);
+  try {
+    return await fs.readFile(absolutePath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(`Input file not found: ${absolutePath}`);
+    }
+    throw error;
+  }
+}
+
+async function writeOutputFile(filePath, data) {
+  const absolutePath = path.resolve(filePath);
+  const directory = path.dirname(absolutePath);
+  await fs.mkdir(directory, { recursive: true }); // Create parent dirs if needed
+  await fs.writeFile(absolutePath, JSON.stringify(data, null, 2), "utf8");
+}
+```
+
+## Parsing CSV
+
+CSV (comma-separated values) is simpler than it looks — until you hit quoted fields with commas inside them. For this project we use a basic parser that handles the common case:
+
+```javascript
+function parseCSV(text) {
+  const lines = text.trim().split("\n");
+  if (lines.length === 0) return [];
+
+  const headers = lines[0].split(",").map((h) => h.trim());
+
+  return lines.slice(1).map((line) => {
+    const values = line.split(",").map((v) => v.trim());
+    const row = {};
+    headers.forEach((header, i) => {
+      row[header] = values[i] ?? "";
+    });
+    return row;
+  });
+}
+```
+
+For production CSV with quoted fields, embedded newlines, and different delimiters, use the `csv-parse` library. Never write your own production CSV parser — the edge cases are numerous and tested libraries handle them all.
+
+## The pure transformation function
+
+The most important architectural decision: the core data transformation is a **pure function** with no I/O. It takes data in, returns data out, and has no side effects. This makes it trivially testable.
+
+```javascript
+function processRecords(records, { filterField, filterValue, groupBy, sumField }) {
+  // Step 1: Filter
+  const filtered = filterField
+    ? records.filter((row) => row[filterField] === filterValue)
+    : records;
+
+  // Step 2: Group and aggregate
+  const groups = {};
+  for (const row of filtered) {
+    const key = row[groupBy] ?? "unknown";
+    const value = parseFloat(row[sumField]) || 0;
+    groups[key] = (groups[key] || 0) + value;
+  }
+
+  return groups;
+}
+```
+
+This function is deterministic, has no I/O, and can be unit tested without touching the filesystem:
+
+```javascript
+const records = [
+  { region: "west", product: "Widget", revenue: "100" },
+  { region: "west", product: "Gadget", revenue: "200" },
+  { region: "east", product: "Widget", revenue: "150" },
+];
+
+const result = processRecords(records, {
+  filterField: "region",
+  filterValue: "west",
+  groupBy: "product",
+  sumField: "revenue",
+});
+// { Widget: 100, Gadget: 200 }
+```
+
+## Wiring it together and handling errors
+
+```javascript
+async function main() {
+  const args = parseArgs(process.argv);
+
+  if (!args.input || !args.output) {
+    console.error("Usage: node process-csv.js --input <file> --output <file>");
+    console.error("       --filter <field>=<value> --group <field> --sum <field>");
+    process.exit(1); // Exit code 1 signals failure
+  }
+
+  let filterField, filterValue;
+  if (args.filter) {
+    [filterField, filterValue] = args.filter.split("=");
+  }
+
+  try {
+    const csvText = await readInputFile(args.input);
+    const records = parseCSV(csvText);
+
+    // Progress logging to stderr (not stdout — keeps stdout clean for piping)
+    console.error(`Loaded ${records.length} records`);
+
+    const result = processRecords(records, {
+      filterField,
+      filterValue,
+      groupBy: args.group,
+      sumField: args.sum,
+    });
+
+    await writeOutputFile(args.output, result);
+    console.error(`Written to ${args.output}`);
+    process.exit(0); // Exit code 0 signals success
+  } catch (error) {
+    console.error("Error:", error.message);
+    process.exit(1);
+  }
+}
+
+main();
+```
+
+## Making it executable
+
+To run as `./process-csv.js` instead of `node process-csv.js`, add a shebang line:
+
+```javascript
+#!/usr/bin/env node
+// ^ This tells the OS to use node from PATH to execute this file
+
+const { parseArgs, parseCSV, processRecords } = require("./lib");
+// ... rest of the script
+```
+
+Then make it executable:
+
+```bash
+chmod +x process-csv.js
+
+# Now you can run it directly
+./process-csv.js --input data.csv --output result.json
+```
+
+The shebang `#!/usr/bin/env node` is the standard approach — it finds `node` on the user's PATH rather than hardcoding the path (`/usr/local/bin/node` would break on systems with nvm or different installations).
+
+## Exit codes
+
+Exit codes communicate success or failure to the shell and CI systems:
+
+| Code  | Meaning                             |
+| ----- | ----------------------------------- |
+| `0`   | Success                             |
+| `1`   | General error                       |
+| `2`   | Misuse of command (wrong arguments) |
+| `126` | Permission denied                   |
+| `127` | Command not found                   |
+
+Shell scripts and CI pipelines check exit codes. `process.exit(1)` causes `npm run` to fail, which stops a CI pipeline. This is the correct behavior — a failed tool should fail loudly.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement the core data transformation from the CLI project.
+// processRecords(csvText, options) where options is:
+//   { filterField, filterValue, groupBy, outputField }
+// Parse the CSV (header row + data rows),
+// filter rows where filterField === filterValue (skip if filterField is falsy),
+// group by groupBy column,
+// sum the outputField column per group,
+// return { groupValue: total }
+
+function parseCSV(text) {
+const lines = text.trim().split("\\n");
+if (lines.length < 2) return [];
+const headers = lines[0].split(",").map((h) => h.trim());
+return lines.slice(1).map((line) => {
+const values = line.split(",").map((v) => v.trim());
+const row = {};
+headers.forEach((header, i) => { row[header] = values[i] ?? ""; });
+return row;
+});
+}
+
+function processRecords(csvText, options) {
+const { filterField, filterValue, groupBy, outputField } = options;
+const records = parseCSV(csvText);
+
+// Filter step
+const filtered = filterField
+? records.filter((row) => row[filterField] === filterValue)
+: records;
+
+// Group and sum step
+const result = {};
+for (const row of filtered) {
+const key = row[groupBy] ?? "unknown";
+const value = parseFloat(row[outputField]) || 0;
+result[key] = (result[key] || 0) + value;
+}
+
+return result;
+}
+
+// Test data simulating a sales CSV file
+const csvText = \`region,product,revenue,quantity
+west,Widget,100,5
+west,Gadget,200,8
+east,Widget,150,6
+west,Widget,75,3
+east,Gadget,300,12
+north,Widget,50,2\`;
+
+// Test 1: Filter west region, group by product, sum revenue
+const result1 = processRecords(csvText, {
+filterField: "region",
+filterValue: "west",
+groupBy: "product",
+outputField: "revenue",
+});
+console.log("West revenue by product:", result1);
+// { Widget: 175, Gadget: 200 }
+
+// Test 2: No filter, group by region, sum revenue
+const result2 = processRecords(csvText, {
+filterField: null,
+filterValue: null,
+groupBy: "region",
+outputField: "revenue",
+});
+console.log("Revenue by region:", result2);
+// { west: 375, east: 450, north: 50 }
+
+// Test 3: Filter east region, group by product, sum quantity
+const result3 = processRecords(csvText, {
+filterField: "region",
+filterValue: "east",
+groupBy: "product",
+outputField: "quantity",
+});
+console.log("East quantity by product:", result3);
+// { Widget: 6, Gadget: 12 }`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why does this project log progress messages to stderr instead of stdout?"
+  options={[
+    "stderr is faster than stdout in Node.js",
+    "Keeping stdout clean allows the output to be piped to other programs; stderr is for human-readable status, stdout is for machine-readable data",
+    "stdout can only be used for error messages",
+    "It is a Node.js security requirement",
+  ]}
+  answer={1}
+  explanation="In Unix pipelines, stdout flows to the next command (node process.js | jq '.Widget') while stderr goes to the terminal. If progress logs went to stdout, they would corrupt the data being piped. console.error() writes to stderr."
+/>
+
+<Quiz
+  question="What is the purpose of the shebang line #!/usr/bin/env node at the top of a CLI script?"
+  options={[
+    "It is a JavaScript comment explaining what the file does",
+    "It tells the operating system to use node from the PATH to execute this file, enabling it to run without the 'node' prefix",
+    "It imports the Node.js runtime into the file",
+    "It sets the file permissions to executable",
+  ]}
+  answer={1}
+  explanation="The shebang (#!) is a Unix instruction for which interpreter to use. /usr/bin/env node finds node on the user's PATH, which works regardless of where node is installed — important for nvm users whose node lives in a non-standard location."
+/>
+
+<FillBlank
+  question="process.exit(_) signals success to the shell and CI systems, while process.exit(1) signals failure."
+  answer="0"
+/>
+
+## What you learned
+
+- `process.argv` exposes CLI arguments as an array; `process.argv.slice(2)` gives your actual flags and values
+- Exit code `0` signals success, `1` signals failure — CI systems and shell scripts depend on these codes
+- Separating pure data transformation functions from I/O makes code testable without touching the filesystem

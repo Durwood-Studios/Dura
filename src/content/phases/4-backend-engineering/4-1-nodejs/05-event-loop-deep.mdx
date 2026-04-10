@@ -1,0 +1,285 @@
+---
+title: "The Event Loop: Deep Dive"
+description: "Microtasks, macrotasks, setImmediate, and process.nextTick — the order that determines when your code runs."
+phase: 4
+module: "4-1-nodejs"
+order: 5
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - microtask
+  - macrotask
+  - setImmediate
+  - nextTick
+  - call-stack
+  - event-queue
+---
+
+## Why this matters
+
+Interview questions about the event loop are famous for a reason: the execution order of async callbacks surprises most developers until they internalize the mechanics. More importantly, production bugs caused by incorrect async ordering are subtle and hard to reproduce. Understanding exactly when `process.nextTick`, `Promise.then`, `setImmediate`, and `setTimeout` fire is what separates developers who can reason about async systems from those who guess and hope.
+
+## The full execution order
+
+Here is a complete Node.js execution order. Read it, then we will explain each layer.
+
+```
+1. Synchronous code (call stack)
+2. process.nextTick callbacks
+3. Promise microtask queue (.then, .catch, .finally, await)
+4. I/O callbacks (fs, net, etc.)
+5. setImmediate callbacks
+6. setTimeout / setInterval callbacks (phase-dependent)
+7. Close callbacks
+```
+
+Let's prove it with code:
+
+```javascript
+console.log("1. sync start");
+
+setTimeout(() => console.log("6. setTimeout"), 0);
+
+setImmediate(() => console.log("5. setImmediate"));
+
+Promise.resolve().then(() => console.log("3. promise microtask"));
+
+process.nextTick(() => console.log("2. nextTick"));
+
+console.log("1b. sync end");
+
+// Output order:
+// 1. sync start
+// 1b. sync end
+// 2. nextTick
+// 3. promise microtask
+// 5. setImmediate
+// 6. setTimeout
+```
+
+## process.nextTick
+
+`process.nextTick` is not actually part of the event loop — it fires after the current operation completes, before the event loop continues. It runs before Promise microtasks.
+
+```javascript
+process.nextTick(() => {
+  console.log("nextTick callback");
+});
+
+Promise.resolve().then(() => {
+  console.log("Promise callback");
+});
+
+// Output:
+// nextTick callback
+// Promise callback
+```
+
+Use `process.nextTick` when you need something to run after the current synchronous code but before any I/O. A common use case: emitting an event in a constructor where listeners haven't been attached yet.
+
+```javascript
+class DataLoader extends EventEmitter {
+  constructor(data) {
+    super();
+    // Without nextTick, 'ready' fires before any listener can be attached
+    process.nextTick(() => this.emit("ready", data));
+  }
+}
+
+const loader = new DataLoader([1, 2, 3]);
+loader.on("ready", (data) => console.log("Data ready:", data)); // fires correctly
+```
+
+**Warning: starving the event loop.** If your `nextTick` callback adds another `nextTick`, and that one adds another, Node.js will never process I/O — the nextTick queue drains completely before moving on:
+
+```javascript
+// DO NOT DO THIS — starves I/O
+function infinite() {
+  process.nextTick(infinite);
+}
+infinite(); // Node spins here forever, no file reads or network calls will ever fire
+```
+
+## Promise microtasks
+
+Promise `.then`, `.catch`, `.finally`, and `await` continuations are **microtasks**. They run after `process.nextTick` but before the next event loop phase. Multiple microtasks drain completely before moving to I/O:
+
+```javascript
+Promise.resolve()
+  .then(() => {
+    console.log("microtask 1");
+    return Promise.resolve();
+  })
+  .then(() => console.log("microtask 2"))
+  .then(() => console.log("microtask 3"));
+
+setImmediate(() => console.log("setImmediate"));
+
+// Output:
+// microtask 1
+// microtask 2
+// microtask 3
+// setImmediate
+```
+
+All three microtasks run before `setImmediate`, even though they were scheduled before `setImmediate` was called.
+
+## setImmediate vs setTimeout(fn, 0)
+
+Both are macrotasks, but they fire at different points in the event loop:
+
+- `setImmediate` fires in the **check phase**, after I/O callbacks
+- `setTimeout(fn, 0)` fires in the **timers phase**, which comes before I/O
+
+When called from I/O context (inside a `fs.readFile` callback, for example), `setImmediate` always fires before `setTimeout(fn, 0)`:
+
+```javascript
+const fs = require("fs");
+
+fs.readFile("./package.json", () => {
+  // Inside I/O callback — we are in the I/O phase
+  setTimeout(() => console.log("setTimeout"), 0);
+  setImmediate(() => console.log("setImmediate"));
+
+  // Output is always:
+  // setImmediate
+  // setTimeout
+});
+```
+
+When called from the main module (not from inside a callback), the order is **non-deterministic** — it depends on how long the timer initialization takes:
+
+```javascript
+// Top-level — order not guaranteed
+setTimeout(() => console.log("setTimeout"), 0);
+setImmediate(() => console.log("setImmediate"));
+// Sometimes: setImmediate then setTimeout
+// Sometimes: setTimeout then setImmediate
+```
+
+This non-determinism trips up many developers. The safe rule: if you need to run something after I/O, use `setImmediate`. If you need a delay measured in real time, use `setTimeout`.
+
+## Worker threads for CPU-bound work
+
+When you have a genuinely CPU-intensive task — generating a PDF, parsing a huge JSON blob, running a compression algorithm — you must move it off the main thread:
+
+```javascript
+const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
+
+if (isMainThread) {
+  // Main thread creates a worker
+  const worker = new Worker(__filename, {
+    workerData: { numbers: [1, 2, 3, 4, 5] },
+  });
+
+  worker.on("message", (result) => {
+    console.log("Sum:", result); // doesn't block the main thread
+  });
+} else {
+  // Worker thread does the computation
+  const sum = workerData.numbers.reduce((a, b) => a + b, 0);
+  parentPort.postMessage(sum);
+}
+```
+
+Workers have their own event loop and their own V8 instance. They communicate with the main thread via message passing. They do not share memory by default (you can opt into shared memory with `SharedArrayBuffer`).
+
+## The call stack and heap
+
+The **call stack** tracks which function is currently executing. When you call a function, it pushes a frame. When it returns, the frame pops. If the stack grows too deep (infinite recursion), you get `RangeError: Maximum call stack size exceeded`.
+
+The **heap** is where objects are allocated. V8's garbage collector periodically finds objects with no remaining references and frees them. Memory leaks in Node.js happen when objects stay referenced (often in closures or global caches) longer than needed.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate task ordering across execution phases.
+// runEventLoop(tasks) takes an array of tasks:
+//   { type: 'sync' | 'nextTick' | 'microtask' | 'macrotask', label }
+// Return the array of labels in the order they would execute.
+// Rule: sync → nextTick → microtasks → macrotask → nextTick → microtasks → ...
+
+function runEventLoop(tasks) {
+const syncs = tasks.filter((t) => t.type === "sync");
+const nextTicks = tasks.filter((t) => t.type === "nextTick");
+const microtasks = tasks.filter((t) => t.type === "microtask");
+const macrotasks = tasks.filter((t) => t.type === "macrotask");
+
+const result = [];
+
+// 1. All synchronous tasks run first
+syncs.forEach((t) => result.push(t.label));
+
+// 2. nextTick queue drains
+nextTicks.forEach((t) => result.push(t.label));
+
+// 3. Microtask queue drains
+microtasks.forEach((t) => result.push(t.label));
+
+// 4. Macrotasks (one per loop tick, with micro/nextTick between)
+// For this simulation, we run them in sequence
+macrotasks.forEach((t) => result.push(t.label));
+
+return result;
+}
+
+const tasks = [
+{ type: "macrotask", label: "setTimeout callback" },
+{ type: "sync", label: "console.log sync" },
+{ type: "microtask", label: "Promise.then" },
+{ type: "nextTick", label: "process.nextTick" },
+{ type: "macrotask", label: "setImmediate" },
+{ type: "sync", label: "more sync code" },
+];
+
+const order = runEventLoop(tasks);
+console.log("Execution order:");
+order.forEach((label, i) => console.log(\` \${i + 1}. \${label}\`));
+
+// Expected:
+// 1. console.log sync
+// 2. more sync code
+// 3. process.nextTick
+// 4. Promise.then
+// 5. setTimeout callback
+// 6. setImmediate`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the correct execution order for this code?\n\nconsole.log('A');\nsetTimeout(() => console.log('B'), 0);\nPromise.resolve().then(() => console.log('C'));\nprocess.nextTick(() => console.log('D'));\nconsole.log('E');"
+  options={["A, B, C, D, E", "A, E, D, C, B", "A, E, B, C, D", "A, E, C, D, B"]}
+  answer={1}
+  explanation="Synchronous first (A, E), then process.nextTick (D), then Promise microtask (C), then macrotask setTimeout (B). Order: A, E, D, C, B."
+/>
+
+<Quiz
+  question="When is the order of setImmediate vs setTimeout(fn, 0) guaranteed?"
+  options={[
+    "Always — setImmediate always fires first",
+    "Always — setTimeout always fires first",
+    "Only when called from within an I/O callback — setImmediate will always fire first there",
+    "Never — the order is always non-deterministic",
+  ]}
+  answer={2}
+  explanation="From within an I/O callback, we are already in the I/O phase, so the check phase (setImmediate) comes before the timers phase (setTimeout) in the next loop iteration. At the top level, the order depends on system timer resolution and is non-deterministic."
+/>
+
+<FillBlank
+  question="process.___ callbacks run after current synchronous code but before Promise microtasks."
+  answer="nextTick"
+/>
+
+## What you learned
+
+- Execution order: synchronous → `process.nextTick` → Promise microtasks → I/O → `setImmediate` → `setTimeout`
+- `process.nextTick` fires before Promise microtasks and can starve I/O if used in a recursive loop
+- `setImmediate` fires reliably after I/O callbacks; `setTimeout(fn, 0)` order vs `setImmediate` is non-deterministic at the top level
