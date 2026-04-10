@@ -1,0 +1,319 @@
+---
+title: "API Error Handling"
+description: "Global error handlers, custom error classes, and consistent error responses across your entire API."
+phase: 4
+module: "4-2-rest-apis-express"
+order: 7
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - error-handling
+  - custom-error
+  - status-code
+  - operational-error
+  - global-handler
+---
+
+## Why this matters
+
+Without a deliberate error handling strategy, your API will leak stack traces in production, return HTML error pages instead of JSON, send 500 for every failure including ones that are clearly the client's fault, and make debugging nightmarish for every developer who integrates with you. Every error your API sends is a message to a developer. That message should be clear, actionable, machine-readable, and consistent — regardless of where in the codebase the error originated.
+
+## Two categories of errors
+
+The most important distinction in API error handling is between **operational errors** and **programmer errors**:
+
+**Operational errors** are expected failures that happen in a correctly-written program. The request body is missing a required field. A user tries to access a resource that does not exist. A payment fails because the card is expired. These are not bugs. They are known failure modes. Handle them explicitly and return the appropriate 4xx response with a helpful message.
+
+**Programmer errors** are bugs. A `TypeError: Cannot read property 'id' of undefined`. An unhandled promise rejection. A logic error that causes an infinite loop. These should not happen in production, but they will. Catch them with a global handler, log them with full context for debugging, and return a 500 with a generic message. Never expose the error details — stack traces and internal variable states are a gift to attackers.
+
+```javascript
+// Operational error — handle explicitly, return 4xx
+if (!req.body.email) {
+  return res.status(400).json({ error: "Email is required" });
+}
+
+// Programmer error — let it bubble to the global handler
+// (do not try/catch this — you want it logged and investigated)
+const user = users.find((u) => u.id === req.user.userId);
+// If users is undefined, this throws TypeError → 500 → log it → fix the bug
+```
+
+## Custom error class
+
+A custom error class lets you attach an HTTP status code and application-specific context to any error, then centralize the response logic in one place:
+
+```javascript
+// src/utils/AppError.ts
+export class AppError extends Error {
+  readonly statusCode: number;
+  readonly isOperational: boolean;
+
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.statusCode = statusCode;
+    this.isOperational = true; // Marks this as a known, handled error type
+    // Maintains proper stack trace (V8-specific)
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+// Convenient factory functions for common errors
+export const notFound = (resource: string) =>
+  new AppError(`${resource} not found`, 404);
+
+export const badRequest = (message: string) =>
+  new AppError(message, 400);
+
+export const forbidden = (message = 'Forbidden') =>
+  new AppError(message, 403);
+
+export const conflict = (message: string) =>
+  new AppError(message, 409);
+```
+
+Now anywhere in the codebase you can `throw new AppError('User not found', 404)` or `throw notFound('User')` and the global handler will produce the right response.
+
+## The global error handler
+
+Express's four-argument middleware intercepts every error passed to `next(error)` or thrown in async handlers (with proper async wrapping):
+
+```javascript
+// Must be the LAST middleware registered in app.js / server.js
+app.use((err, req, res, next) => {
+  // Log everything — even operational errors deserve a log entry
+  // In production, use a structured logger (winston, pino)
+  console.error({
+    message: err.message,
+    statusCode: err.statusCode,
+    path: req.path,
+    method: req.method,
+    // Only include stack trace for programmer errors
+    stack: err.isOperational ? undefined : err.stack,
+  });
+
+  // Operational errors: use the AppError's status and message
+  if (err.isOperational) {
+    return res.status(err.statusCode).json({
+      error: err.message,
+    });
+  }
+
+  // Programmer errors: never expose internals
+  res.status(500).json({
+    error: "Something went wrong. Please try again later.",
+  });
+});
+```
+
+## Async route handlers and catchAsync
+
+Express does not automatically catch errors from async functions — unhandled promise rejections crash the process or get silently swallowed. Wrap every async handler:
+
+```javascript
+// Wraps an async function and forwards any rejected promise to next()
+function catchAsync(fn) {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+// Usage — clean route handlers with no try/catch boilerplate
+router.get(
+  "/users/:id",
+  catchAsync(async (req, res) => {
+    const user = await User.findById(req.params.id);
+    if (!user) throw notFound("User");
+    res.json(user);
+  })
+);
+
+// Without catchAsync, you need try/catch everywhere:
+router.get("/users/:id", async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) throw notFound("User");
+    res.json(user);
+  } catch (err) {
+    next(err); // Must manually forward to the global handler
+  }
+});
+```
+
+`catchAsync` is a tiny utility that eliminates the try/catch boilerplate from every async route handler.
+
+## HTTP error map
+
+```
+400 Bad Request          — Malformed request syntax, invalid input, missing required fields
+401 Unauthorized         — Not authenticated (confusingly named)
+403 Forbidden            — Authenticated but not permitted
+404 Not Found            — Resource does not exist at this URL
+405 Method Not Allowed   — Method not supported (e.g., DELETE on a read-only resource)
+409 Conflict             — Duplicate resource or state conflict (e.g., email already taken)
+410 Gone                 — Resource existed but was permanently deleted
+422 Unprocessable Entity — Syntactically valid but semantically wrong input
+429 Too Many Requests    — Rate limit exceeded
+500 Internal Server Error — Unhandled exception (our fault)
+502 Bad Gateway          — Upstream service failed
+503 Service Unavailable  — Server overloaded or in maintenance
+```
+
+Always return the most specific applicable code. 400 for everything is as unhelpful as 500 for everything.
+
+## Consistent error response format
+
+Define one error shape and use it everywhere:
+
+```json
+{
+  "error": "User not found",
+  "code": "NOT_FOUND",
+  "details": []
+}
+```
+
+Or with validation errors:
+
+```json
+{
+  "error": "Validation failed",
+  "code": "VALIDATION_ERROR",
+  "details": [
+    { "field": "email", "message": "Invalid email address" },
+    { "field": "age", "message": "Must be at least 18" }
+  ]
+}
+```
+
+The `code` field is a machine-readable identifier that lets clients handle specific errors without parsing the human-readable message (which you might change). Consistency matters: if some endpoints return `{ "error": "..." }` and others return `{ "message": "..." }`, clients must special-case every endpoint.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement an error handling pipeline — like Express's middleware chain.
+// createErrorPipeline(handlers) runs each handler in order.
+// Each handler: (err, req, res) => response | null
+//   - Return { status, body } to handle the error
+//   - Return null to pass to the next handler
+
+function createErrorPipeline(handlers) {
+return function handle(err, req) {
+const res = { \_status: 500, \_body: null };
+
+    for (const handler of handlers) {
+      const result = handler(err, req, res);
+      if (result !== null && result !== undefined) {
+        return result;
+      }
+    }
+    // No handler matched — default 500
+    return { status: 500, body: { error: "Something went wrong" } };
+
+};
+}
+
+// Not-found handler
+function notFoundHandler(err, req, res) {
+if (err.code === "NOT_FOUND") {
+return { status: 404, body: { error: err.message, code: "NOT_FOUND" } };
+}
+return null; // pass to next
+}
+
+// Validation error handler
+function validationErrorHandler(err, req, res) {
+if (err.code === "VALIDATION_ERROR") {
+return {
+status: 400,
+body: {
+error: "Validation failed",
+code: "VALIDATION_ERROR",
+details: err.details || []
+}
+};
+}
+return null;
+}
+
+// Auth error handler
+function authErrorHandler(err, req, res) {
+if (err.code === "UNAUTHORIZED") return { status: 401, body: { error: err.message, code: "UNAUTHORIZED" } };
+if (err.code === "FORBIDDEN") return { status: 403, body: { error: err.message, code: "FORBIDDEN" } };
+return null;
+}
+
+// Default/catch-all handler — never returns null
+function defaultErrorHandler(err, req, res) {
+// Don't expose internals
+console.error("Unhandled error:", err.message);
+return { status: 500, body: { error: "Something went wrong. Please try again later." } };
+}
+
+const pipeline = createErrorPipeline([
+notFoundHandler,
+validationErrorHandler,
+authErrorHandler,
+defaultErrorHandler
+]);
+
+const req = { method: "GET", path: "/users/42" };
+
+const errors = [
+{ code: "NOT_FOUND", message: "User not found" },
+{ code: "VALIDATION_ERROR", message: "Invalid input", details: [{ field: "email", message: "Invalid" }] },
+{ code: "UNAUTHORIZED", message: "Token expired" },
+{ code: "FORBIDDEN", message: "You do not own this resource" },
+{ message: "Cannot read property 'id' of undefined" } // programmer error
+];
+
+for (const err of errors) {
+const result = pipeline(err, req);
+console.log(\`[\${result.status}] \${JSON.stringify(result.body)}\`);
+}`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Where must Express's error-handling middleware (err, req, res, next) be registered?"
+  options={[
+    "Before all other middleware, so it runs first",
+    "After all routes and normal middleware, as the last middleware registered",
+    "In a separate file — it cannot be in the main app.js",
+    "It must be inside each route handler",
+  ]}
+  answer={1}
+  explanation="Express's error-handling middleware must be the last thing registered. It intercepts errors passed to next(err) from anywhere in the pipeline. If registered before routes, errors from those routes will not reach it."
+/>
+
+<Quiz
+  question="Should you include stack traces in production error responses?"
+  options={[
+    "Yes — they help developers debug integration problems",
+    "Only for 500 errors",
+    "No — stack traces expose internal implementation details that attackers can exploit",
+    "Only if the client sends an X-Debug header",
+  ]}
+  answer={2}
+  explanation="Stack traces reveal file paths, function names, variable values, and library versions — information that attackers use to plan targeted exploits. Always log stack traces server-side for debugging, but return only a generic message to the client in production."
+/>
+
+<FillBlank
+  question="The catchAsync wrapper forwards any rejected promise to Express's error pipeline by calling ___."
+  answer="next(err)"
+/>
+
+## What you learned
+
+- Operational errors are expected failures (return 4xx); programmer errors are bugs (log and return 500).
+- A custom `AppError` class attaches a status code to any error and marks it as operational.
+- The global error handler `(err, req, res, next)` must be registered last and is the single place that formats all error responses.
+- `catchAsync` eliminates try/catch boilerplate from async route handlers by forwarding rejections to `next()`.
+- Consistent error response shapes with machine-readable `code` fields make APIs far easier to consume.

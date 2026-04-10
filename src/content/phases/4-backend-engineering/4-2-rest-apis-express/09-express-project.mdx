@@ -1,0 +1,434 @@
+---
+title: "Express Project: Bookshelf API"
+description: "Build a complete bookshelf REST API with authentication, authorization, and validation."
+phase: 4
+module: "4-2-rest-apis-express"
+order: 9
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - project-architecture
+  - bookshelf-api
+  - crud
+  - authentication
+  - authorization
+---
+
+## Why this matters
+
+Individual concepts are easy to learn in isolation. Building a complete system is where the real learning happens — where concepts interact, where decisions you make in one layer affect choices in another, and where you discover what "clean" actually means when you have to fit fifteen things together. This project is your first complete REST API: routing, middleware, validation, authentication, authorization, error handling, and a coherent folder structure. Everything from the previous eight lessons comes together here. The patterns you establish now will be the patterns you repeat on every future backend project.
+
+## Project architecture
+
+A well-organized Express project separates concerns across folders:
+
+```
+src/
+├── app.js              # Express app configuration (middleware + routes)
+├── server.js           # HTTP server entry point (calls app.listen)
+├── routes/
+│   ├── auth.js         # POST /auth/register, POST /auth/login
+│   └── books.js        # CRUD endpoints for /books
+├── middleware/
+│   ├── auth.js         # requireAuth, requireOwner middleware
+│   └── validate.js     # validateBody, validateQuery factories
+├── models/
+│   └── books.js        # In-memory store + business logic
+├── schemas/
+│   ├── auth.js         # Zod schemas for register/login inputs
+│   └── books.js        # Zod schemas for book inputs
+└── utils/
+    ├── AppError.js     # Custom error class + factory functions
+    └── catchAsync.js   # Async handler wrapper
+```
+
+`app.js` configures middleware and mounts routers. `server.js` creates the HTTP server. Separating them makes it easy to start the app in tests without binding a port.
+
+## The book resource
+
+The `Book` schema used throughout the API:
+
+```typescript
+interface Book {
+  id: number;
+  title: string;
+  author: string;
+  isbn?: string; // Optional — not all books have ISBNs handy
+  userId: number; // The user who added the book
+  createdAt: string; // ISO 8601 timestamp
+  updatedAt?: string;
+}
+```
+
+Validation rules enforced by Zod:
+
+- `title`: required, 1–500 characters
+- `author`: required, 1–200 characters
+- `isbn`: optional, must match `^\d{13}$` if provided
+- `userId`: set server-side from `req.user` — never accepted from the client
+
+## Auth endpoints
+
+```javascript
+// POST /auth/register
+// Body: { email, password }
+// Validates: email format, password min 8 chars
+// Hashes password with bcrypt (12 rounds)
+// Returns 201 { userId, email, token }
+
+// POST /auth/login
+// Body: { email, password }
+// Finds user, compares password hash
+// Returns 200 { token } or 401
+
+// POST /auth/logout
+// (Stateless JWT — client discards the token)
+// Returns 204
+```
+
+The complete register handler:
+
+```javascript
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import { z } from "zod";
+import { AppError } from "../utils/AppError.js";
+import catchAsync from "../utils/catchAsync.js";
+import { users } from "../models/users.js";
+
+const RegisterSchema = z.object({
+  email: z.string().email("Invalid email address"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+});
+
+export const register = catchAsync(async (req, res) => {
+  const { email, password } = RegisterSchema.parse(req.body);
+
+  const existing = users.findByEmail(email);
+  if (existing) {
+    throw new AppError("An account with this email already exists", 409);
+  }
+
+  const hashedPassword = await bcrypt.hash(password, 12);
+  const user = users.create({ email, hashedPassword });
+
+  const token = jwt.sign(
+    { userId: user.id, email: user.email, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: "15m" }
+  );
+
+  res.status(201).json({ userId: user.id, email: user.email, token });
+});
+```
+
+## Books endpoints
+
+```javascript
+// Public
+GET  /books           — list (with ?author=, ?page=, ?limit= query params)
+GET  /books/:id       — get one
+
+// Protected (auth required)
+POST /books           — create (userId set from req.user, not body)
+
+// Protected + ownership (auth + must own the book)
+PUT    /books/:id     — full replacement
+PATCH  /books/:id     — partial update
+DELETE /books/:id     — delete
+```
+
+The router wires this together:
+
+```javascript
+import { Router } from "express";
+import { requireAuth } from "../middleware/auth.js";
+import { requireOwner } from "../middleware/auth.js";
+import { validateBody, validateQuery } from "../middleware/validate.js";
+import { CreateBookSchema, UpdateBookSchema, ListBooksQuerySchema } from "../schemas/books.js";
+import { getBookOwner } from "../models/books.js";
+import * as handlers from "./books.handlers.js";
+
+const router = Router();
+
+router.get("/", validateQuery(ListBooksQuerySchema), handlers.listBooks);
+router.get("/:id", handlers.getBook);
+
+router.post("/", requireAuth, validateBody(CreateBookSchema), handlers.createBook);
+
+router.put(
+  "/:id",
+  requireAuth,
+  requireOwner(getBookOwner),
+  validateBody(CreateBookSchema),
+  handlers.replaceBook
+);
+
+router.patch(
+  "/:id",
+  requireAuth,
+  requireOwner(getBookOwner),
+  validateBody(UpdateBookSchema),
+  handlers.updateBook
+);
+
+router.delete("/:id", requireAuth, requireOwner(getBookOwner), handlers.deleteBook);
+
+export default router;
+```
+
+## Testing with curl
+
+Once the server is running on port 3000:
+
+```bash
+# Register
+curl -X POST http://localhost:3000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"password123"}'
+
+# Save the token from the response, then:
+
+# Create a book
+curl -X POST http://localhost:3000/books \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Clean Code","author":"Robert Martin"}'
+
+# List all books
+curl http://localhost:3000/books
+
+# Get one book
+curl http://localhost:3000/books/1
+
+# Update price (partial)
+curl -X PATCH http://localhost:3000/books/1 \
+  -H "Authorization: Bearer <your-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"isbn":"9780132350884"}'
+
+# Delete
+curl -X DELETE http://localhost:3000/books/1 \
+  -H "Authorization: Bearer <your-token>"
+
+# Try to delete another user's book — expect 403
+curl -X DELETE http://localhost:3000/books/2 \
+  -H "Authorization: Bearer <your-token>"
+```
+
+## What comes next
+
+The Bookshelf API is architecturally complete but uses an in-memory store. Replacing it with a real database requires changing only the model layer — the routes, middleware, validation, and error handling stay exactly as they are. In the next module you will connect this same API structure to a real PostgreSQL database via Supabase.
+
+Other natural extensions from here:
+
+- Rate limiting (`express-rate-limit`) to prevent abuse
+- Request logging (`morgan` or `pino-http`) for structured logs
+- CORS configuration (`cors` package) for browser clients
+- Helmet.js for security headers
+- API key authentication for service-to-service calls
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement the core bookshelf model layer — pure logic, no Express.
+// createBookshelf() returns an object with all CRUD operations.
+// Enforces: ownership, validation, and descriptive error codes.
+
+function createBookshelf() {
+const books = new Map();
+let nextId = 1;
+
+function validate(data, requireAll = true) {
+const errors = [];
+if (requireAll || data.title !== undefined) {
+if (!data.title || typeof data.title !== "string" || data.title.trim().length === 0) {
+errors.push({ field: "title", message: "Title is required and must be a non-empty string" });
+} else if (data.title.length > 500) {
+errors.push({ field: "title", message: "Title must be 500 characters or fewer" });
+}
+}
+if (requireAll || data.author !== undefined) {
+if (!data.author || typeof data.author !== "string" || data.author.trim().length === 0) {
+errors.push({ field: "author", message: "Author is required and must be a non-empty string" });
+}
+}
+if (data.isbn !== undefined && data.isbn !== null) {
+if (!/^\\d{13}$/.test(data.isbn)) {
+errors.push({ field: "isbn", message: "ISBN must be exactly 13 digits" });
+}
+}
+if (errors.length > 0) {
+const err = new Error("Validation failed");
+err.code = "VALIDATION_ERROR";
+err.details = errors;
+throw err;
+}
+}
+
+function assertOwner(book, userId) {
+if (book.userId !== userId) {
+const err = new Error("You do not own this book");
+err.code = "FORBIDDEN";
+throw err;
+}
+}
+
+function assertExists(id) {
+const book = books.get(id);
+if (!book) {
+const err = new Error(\`Book \${id} not found\`);
+err.code = "NOT_FOUND";
+throw err;
+}
+return book;
+}
+
+return {
+addBook(userId, data) {
+validate(data, true);
+const book = {
+id: nextId++,
+title: data.title.trim(),
+author: data.author.trim(),
+isbn: data.isbn || null,
+userId,
+createdAt: new Date().toISOString()
+};
+books.set(book.id, book);
+return book;
+},
+
+    getBook(id) {
+      return assertExists(id);
+    },
+
+    listBooks(filter = {}) {
+      let results = Array.from(books.values());
+      if (filter.author) {
+        results = results.filter(b =>
+          b.author.toLowerCase().includes(filter.author.toLowerCase())
+        );
+      }
+      if (filter.userId) {
+        results = results.filter(b => b.userId === filter.userId);
+      }
+      return results;
+    },
+
+    updateBook(id, userId, patch) {
+      const existing = assertExists(id);
+      assertOwner(existing, userId);
+      validate(patch, false); // Only validate provided fields
+      const updated = {
+        ...existing,
+        ...patch,
+        id: existing.id,
+        userId: existing.userId,
+        updatedAt: new Date().toISOString()
+      };
+      books.set(id, updated);
+      return updated;
+    },
+
+    deleteBook(id, userId) {
+      const existing = assertExists(id);
+      assertOwner(existing, userId);
+      books.delete(id);
+      return true;
+    }
+
+};
+}
+
+// Demo: full bookshelf lifecycle
+const shelf = createBookshelf();
+
+console.log("=== Register two users ===");
+const alice = "user-alice";
+const bob = "user-bob";
+
+console.log("\\n=== Alice adds books ===");
+const b1 = shelf.addBook(alice, { title: "Clean Code", author: "Robert Martin" });
+const b2 = shelf.addBook(alice, { title: "The Pragmatic Programmer", author: "Hunt & Thomas", isbn: "9780201616224" });
+console.log("Alice's books:", shelf.listBooks({ userId: alice }).map(b => b.title));
+
+console.log("\\n=== Bob adds a book ===");
+const b3 = shelf.addBook(bob, { title: "Designing Data-Intensive Applications", author: "Martin Kleppmann" });
+console.log("All books:", shelf.listBooks().map(b => b.title));
+
+console.log("\\n=== Alice updates her own book ===");
+const updated = shelf.updateBook(b1.id, alice, { isbn: "9780132350884" });
+console.log("Updated:", updated.title, "ISBN:", updated.isbn);
+
+console.log("\\n=== Bob tries to delete Alice's book (should fail) ===");
+try {
+shelf.deleteBook(b1.id, bob);
+} catch (err) {
+console.log(\`[\${err.code}] \${err.message}\`);
+}
+
+console.log("\\n=== Validation errors ===");
+try {
+shelf.addBook(alice, { title: "", author: "Someone", isbn: "not-a-valid-isbn" });
+} catch (err) {
+console.log(\`[\${err.code}]\`, err.details.map(d => \`\${d.field}: \${d.message}\`).join("; "));
+}
+
+console.log("\\n=== Alice deletes her own book ===");
+shelf.deleteBook(b2.id, alice);
+console.log("Alice's remaining books:", shelf.listBooks({ userId: alice }).map(b => b.title));
+
+console.log("\\n=== Not found ===");
+try {
+shelf.getBook(999);
+} catch (err) {
+console.log(\`[\${err.code}] \${err.message}\`);
+}`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why is the server.js (HTTP listener) kept separate from app.js (Express configuration)?"
+  options={[
+    "Express requires this separation to work correctly",
+    "It lets you import and test the app without binding a port, and makes the server startup configurable",
+    "server.js is for production; app.js is for development",
+    "It improves performance by splitting work across two files",
+  ]}
+  answer={1}
+  explanation="Separating app.js (Express app with all middleware and routes) from server.js (the call to app.listen()) means tests can import app and make HTTP assertions without a real TCP port. It also makes it easy to change the port, add HTTPS, or run multiple servers from the same app."
+/>
+
+<Quiz
+  question="In the bookshelf API, why is the userId set from req.user on the server side, rather than accepted from the request body?"
+  options={[
+    "The body cannot contain integer values",
+    "Accepting userId from the client would let any user claim to be any other user when creating books",
+    "Express does not support reading userId from req.body",
+    "It is a performance optimization to avoid parsing the body twice",
+  ]}
+  answer={1}
+  explanation="If the API accepted userId from the client body, any authenticated user could send userId: 'otherUser' and create books attributed to someone else. Server-side attribution (using the verified identity from the JWT) is the only secure approach."
+/>
+
+<FillBlank
+  question="The middleware order on a protected route is: requireAuth → ___ → validateBody → handler."
+  answer="requireOwner"
+/>
+
+## What you learned
+
+- A complete REST API separates concerns across routes/, middleware/, models/, schemas/, and utils/ folders.
+- Auth routes (register/login) and resource routes (CRUD) are mounted separately in app.js.
+- The userId always comes from `req.user` (the verified JWT), never from the client request body.
+- Middleware composes cleanly: `requireAuth → requireOwner → validateBody → handler` gives you security, ownership, and validation in sequence.
+- The in-memory model layer is a complete, testable module — swap it for a database adapter without touching the routes.

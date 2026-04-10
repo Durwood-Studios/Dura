@@ -1,0 +1,349 @@
+---
+title: "Input Validation"
+description: "Validate and sanitize every untrusted input with Zod — return clear errors, never trust req.body."
+phase: 4
+module: "4-2-rest-apis-express"
+order: 4
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - zod
+  - validation
+  - sanitization
+  - schema
+  - request-validation
+  - 400-error
+---
+
+## Why this matters
+
+Every piece of data your API receives from the outside world is untrusted. A user submitting a form, another developer calling your API, or an automated script probing for weaknesses — none of them are sending exactly what your code expects. Without validation, a missing field causes a null pointer exception deep inside your logic. A string where you expected a number produces silent calculation errors. Malicious input can corrupt your database or compromise other users' data. Validation is not optional defensive programming — it is the boundary between your controlled system and the unpredictable outside world.
+
+## Validation vs sanitization
+
+These two concepts are related but distinct:
+
+**Validation** asks: "Is this input acceptable?" It checks types, required fields, ranges, formats, and constraints. If the input fails validation, you reject it with a clear error. You never proceed with invalid data.
+
+**Sanitization** asks: "Can I make this input safe?" It transforms input before using it — trimming whitespace, normalizing email addresses to lowercase, stripping HTML tags from a comment field. Sanitization is not a substitute for validation; it is a complement to it.
+
+```
+User sends: { email: "  Alice@Example.COM  ", age: -5 }
+
+Sanitize first:  { email: "alice@example.com", age: -5 }
+Validate after:  email ✓ (valid format), age ✗ (must be ≥ 0) → reject
+```
+
+Always sanitize before validating. You do not want to reject `"  alice@example.com  "` when the real issue is just trailing whitespace.
+
+## Zod schemas
+
+Zod is a TypeScript-first schema validation library. You define what valid data looks like, then call `.parse()` or `.safeParse()` to check real data against that definition.
+
+```javascript
+import { z } from "zod";
+
+// Define what a valid product looks like
+const ProductSchema = z.object({
+  name: z.string().min(1, "Name is required").max(200),
+  price: z.number().positive("Price must be positive"),
+  category: z.enum(["electronics", "clothing", "books", "other"]),
+  description: z.string().max(2000).optional(),
+  tags: z.array(z.string()).max(10).default([]),
+});
+
+// .parse() throws a ZodError if validation fails
+try {
+  const product = ProductSchema.parse(req.body);
+  // product is fully typed and validated
+} catch (err) {
+  // err.errors is an array of { path, message } objects
+}
+
+// .safeParse() returns { success, data } or { success: false, error }
+const result = ProductSchema.safeParse(req.body);
+if (!result.success) {
+  return res.status(400).json({
+    error: "Validation failed",
+    details: result.error.errors.map((e) => ({
+      field: e.path.join("."),
+      message: e.message,
+    })),
+  });
+}
+const product = result.data; // Typed, validated, safe to use
+```
+
+Use `.safeParse()` in Express route handlers. It does not throw, so you control the error response format without a try/catch.
+
+## Common Zod primitives
+
+```javascript
+// Strings
+z.string(); // any string
+z.string().min(1); // non-empty
+z.string().email(); // valid email format
+z.string().url(); // valid URL
+z.string().uuid(); // valid UUID
+z.string().regex(/^[A-Z]{2,3}$/); // custom pattern
+
+// Numbers
+z.number(); // any number
+z.number().int(); // integers only
+z.number().min(0).max(100); // bounded range
+z.number().positive(); // > 0
+
+// Coercion (useful for query params — they arrive as strings)
+z.coerce.number().int().min(1); // "42" → 42
+z.coerce.boolean(); // "true" → true
+
+// Collections
+z.array(z.string()); // array of strings
+z.array(z.string()).nonempty(); // at least one item
+z.enum(["a", "b", "c"]); // one of these values
+z.object({ key: z.string() }); // object with schema
+z.record(z.number()); // object with any keys, number values
+
+// Optional and nullable
+z.string().optional(); // string | undefined
+z.string().nullable(); // string | null
+z.string().nullish(); // string | null | undefined
+z.string().default("fallback"); // use 'fallback' if undefined
+```
+
+## Validation middleware factory
+
+Rather than repeating safeParse logic in every route, create a reusable middleware factory:
+
+```javascript
+function validateBody(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: result.error.errors.map((e) => ({
+          field: e.path.join("."),
+          message: e.message,
+        })),
+      });
+    }
+    req.body = result.data; // Replace with validated + coerced data
+    next();
+  };
+}
+
+function validateQuery(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.query);
+    if (!result.success) {
+      return res.status(400).json({
+        error: "Invalid query parameters",
+        details: result.error.errors.map((e) => ({
+          field: e.path.join("."),
+          message: e.message,
+        })),
+      });
+    }
+    req.query = result.data;
+    next();
+  };
+}
+
+// Usage
+const CreateProductSchema = z.object({
+  name: z.string().min(1).max(200),
+  price: z.number().positive(),
+});
+
+const ListQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+router.post("/", validateBody(CreateProductSchema), (req, res) => {
+  // req.body is guaranteed valid here
+  const product = createProduct(req.body);
+  res.status(201).json(product);
+});
+
+router.get("/", validateQuery(ListQuerySchema), (req, res) => {
+  // req.query.page and req.query.limit are numbers, not strings
+  const { page, limit } = req.query;
+  res.json(getProducts({ page, limit }));
+});
+```
+
+The middleware pattern keeps validation separate from business logic. Routes stay clean; schemas live next to their routes or in a dedicated `schemas/` directory.
+
+## Returning clear validation errors
+
+Bad error responses make APIs painful to integrate with. Good error responses tell the client exactly what to fix:
+
+```json
+// Bad — tells the client nothing actionable
+{ "error": "Invalid input" }
+
+// Good — field-level detail
+{
+  "error": "Validation failed",
+  "details": [
+    { "field": "email", "message": "Invalid email address" },
+    { "field": "price", "message": "Number must be greater than 0" },
+    { "field": "category", "message": "Invalid enum value. Expected 'electronics' | 'clothing' | 'books'" }
+  ]
+}
+```
+
+Always return all validation errors at once, not just the first one. Making the client fix errors one at a time is a terrible experience when a form has five invalid fields.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a schema validation system without any external libraries.
+// createSchema(rules) returns a validate(data) function.
+// Rules shape: { fieldName: { type, required?, min?, max?, pattern? } }
+// validate(data) returns: { valid: boolean, errors: { [field]: string[] }, data: any }
+
+function createSchema(rules) {
+return function validate(data) {
+const errors = {};
+const out = {};
+
+    for (const [field, rule] of Object.entries(rules)) {
+      const value = data[field];
+      const fieldErrors = [];
+
+      // Required check
+      if (rule.required && (value === undefined || value === null || value === "")) {
+        fieldErrors.push("This field is required");
+      }
+
+      if (value !== undefined && value !== null && value !== "") {
+        // Type check
+        if (rule.type === "string" && typeof value !== "string") {
+          fieldErrors.push(\`Expected string, got \${typeof value}\`);
+        } else if (rule.type === "number") {
+          const num = Number(value);
+          if (isNaN(num)) {
+            fieldErrors.push(\`Expected number, got "\${value}"\`);
+          } else {
+            // Range checks (only for numbers)
+            if (rule.min !== undefined && num < rule.min) {
+              fieldErrors.push(\`Must be at least \${rule.min}\`);
+            }
+            if (rule.max !== undefined && num > rule.max) {
+              fieldErrors.push(\`Must be at most \${rule.max}\`);
+            }
+            out[field] = num;
+          }
+        }
+
+        if (rule.type === "string" && typeof value === "string") {
+          // String length checks
+          if (rule.min !== undefined && value.length < rule.min) {
+            fieldErrors.push(\`Must be at least \${rule.min} characters\`);
+          }
+          if (rule.max !== undefined && value.length > rule.max) {
+            fieldErrors.push(\`Must be at most \${rule.max} characters\`);
+          }
+          // Pattern check
+          if (rule.pattern && !rule.pattern.test(value)) {
+            fieldErrors.push(\`Does not match required format\`);
+          }
+          if (fieldErrors.length === 0) out[field] = value;
+        }
+
+        if (rule.type === "enum") {
+          if (!rule.values.includes(value)) {
+            fieldErrors.push(\`Must be one of: \${rule.values.join(", ")}\`);
+          } else {
+            out[field] = value;
+          }
+        }
+      }
+
+      if (fieldErrors.length > 0) errors[field] = fieldErrors;
+    }
+
+    return {
+      valid: Object.keys(errors).length === 0,
+      errors,
+      data: Object.keys(errors).length === 0 ? out : null
+    };
+
+};
+}
+
+// Define a product schema
+const validateProduct = createSchema({
+name: { type: "string", required: true, min: 1, max: 100 },
+price: { type: "number", required: true, min: 0 },
+category: { type: "enum", required: true, values: ["books", "electronics", "clothing"] },
+sku: { type: "string", required: false, pattern: /^[A-Z]{2}-\\d{4}$/ }
+});
+
+const tests = [
+{ name: "Valid product", data: { name: "Laptop", price: 999, category: "electronics", sku: "EL-1234" } },
+{ name: "Missing name", data: { price: 10, category: "books" } },
+{ name: "Negative price", data: { name: "Shirt", price: -5, category: "clothing" } },
+{ name: "Bad category", data: { name: "Novel", price: 15, category: "food" } },
+{ name: "Bad SKU pattern", data: { name: "Tablet", price: 499, category: "electronics", sku: "bad-sku" } },
+];
+
+for (const { name, data } of tests) {
+const result = validateProduct(data);
+console.log(\`[\${name}] valid=\${result.valid}\`);
+if (!result.valid) {
+for (const [field, msgs] of Object.entries(result.errors)) {
+console.log(\` \${field}: \${msgs.join("; ")}\`);
+}
+}
+}`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the difference between validation and sanitization?"
+  options={[
+    "Validation transforms input; sanitization rejects it",
+    "They are synonyms — both mean checking input",
+    "Validation rejects unacceptable input; sanitization transforms input to a safe form",
+    "Sanitization is only needed for SQL queries",
+  ]}
+  answer={2}
+  explanation="Validation checks whether input meets requirements and rejects it if not. Sanitization transforms input — trimming whitespace, normalizing case, stripping dangerous characters. You typically sanitize first, then validate the cleaned input."
+/>
+
+<Quiz
+  question="Why should you use Zod's safeParse() instead of parse() in Express route handlers?"
+  options={[
+    "safeParse() is faster than parse()",
+    "safeParse() returns a result object instead of throwing, letting you control the error response format",
+    "parse() does not work with objects",
+    "safeParse() validates query strings; parse() only validates bodies",
+  ]}
+  answer={1}
+  explanation="parse() throws a ZodError on invalid input. In an Express handler, an uncaught exception reaches the global error middleware, which may not format the error the way you want. safeParse() returns { success, data } or { success: false, error }, giving you full control over the 400 response."
+/>
+
+<FillBlank
+  question="A Zod schema method that turns the string '42' into the number 42 is z.___.number()."
+  answer="coerce"
+/>
+
+## What you learned
+
+- Every piece of data arriving from outside your API is untrusted and must be validated before use.
+- Validation rejects unacceptable input; sanitization transforms input — sanitize first, then validate.
+- Zod schemas describe valid data shapes; `.safeParse()` returns a result object instead of throwing.
+- A `validateBody(schema)` middleware factory keeps validation out of route handlers and makes schemas reusable.
+- Return all validation errors at once with field-level detail — one error at a time is a bad developer experience.

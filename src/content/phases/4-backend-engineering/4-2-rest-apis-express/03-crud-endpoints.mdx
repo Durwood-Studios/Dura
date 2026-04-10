@@ -1,0 +1,325 @@
+---
+title: "CRUD Endpoints"
+description: "Build the complete Create, Read, Update, Delete API for a resource — the backbone of every backend."
+phase: 4
+module: "4-2-rest-apis-express"
+order: 3
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - crud
+  - route-params
+  - query-string
+  - rest
+  - location-header
+---
+
+## Why this matters
+
+CRUD — Create, Read, Update, Delete — maps directly to the four fundamental operations any data store performs. Every API you will build, whether for a social network, an e-commerce platform, or an internal tool, is some variation of CRUD. Mastering the pattern once means you can scaffold the data layer for any new resource in minutes. Knowing which HTTP method maps to which operation, which status codes are correct, and how to structure the response format saves you from bikeshedding these decisions on every project.
+
+## The standard CRUD route map
+
+For any resource (let's use `products` as the example), REST defines a consistent set of endpoints:
+
+| Method | Path          | Operation         | Success Code |
+| ------ | ------------- | ----------------- | ------------ |
+| GET    | /products     | List all products | 200          |
+| POST   | /products     | Create a product  | 201          |
+| GET    | /products/:id | Get one product   | 200          |
+| PUT    | /products/:id | Replace a product | 200          |
+| PATCH  | /products/:id | Partial update    | 200          |
+| DELETE | /products/:id | Delete a product  | 204          |
+
+This table is the same for every resource. Users, orders, posts, invoices — same shape, different noun. Internalize this and you will never guess at API design again.
+
+## Building the endpoints in Express
+
+Here is the complete CRUD implementation with an in-memory store:
+
+```javascript
+import express from "express";
+const router = express.Router();
+
+// In-memory store — replace with a database later
+const products = new Map();
+let nextId = 1;
+
+// GET /products — list with optional filtering
+router.get("/", (req, res) => {
+  const { category, minPrice } = req.query;
+  let results = Array.from(products.values());
+
+  if (category) {
+    results = results.filter((p) => p.category === category);
+  }
+  if (minPrice) {
+    results = results.filter((p) => p.price >= Number(minPrice));
+  }
+
+  res.json(results);
+});
+
+// POST /products — create
+router.post("/", (req, res) => {
+  const { name, price, category } = req.body;
+
+  if (!name || price === undefined) {
+    return res.status(400).json({ error: "name and price are required" });
+  }
+
+  const product = { id: nextId++, name, price, category, createdAt: new Date() };
+  products.set(product.id, product);
+
+  // 201 Created + Location header pointing to the new resource
+  res.status(201).set("Location", `/products/${product.id}`).json(product);
+});
+
+// GET /products/:id — get one
+router.get("/:id", (req, res) => {
+  const product = products.get(Number(req.params.id));
+  if (!product) {
+    return res.status(404).json({ error: "Product not found" });
+  }
+  res.json(product);
+});
+
+// PUT /products/:id — full replacement
+router.put("/:id", (req, res) => {
+  const id = Number(req.params.id);
+  if (!products.has(id)) {
+    return res.status(404).json({ error: "Product not found" });
+  }
+  const { name, price, category } = req.body;
+  if (!name || price === undefined) {
+    return res.status(400).json({ error: "name and price are required for PUT" });
+  }
+  const updated = { id, name, price, category, updatedAt: new Date() };
+  products.set(id, updated);
+  res.json(updated);
+});
+
+// PATCH /products/:id — partial update
+router.patch("/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const existing = products.get(id);
+  if (!existing) {
+    return res.status(404).json({ error: "Product not found" });
+  }
+  // Merge only the fields provided in the request body
+  const updated = { ...existing, ...req.body, id, updatedAt: new Date() };
+  products.set(id, updated);
+  res.json(updated);
+});
+
+// DELETE /products/:id — remove
+router.delete("/:id", (req, res) => {
+  const id = Number(req.params.id);
+  if (!products.has(id)) {
+    return res.status(404).json({ error: "Product not found" });
+  }
+  products.delete(id);
+  res.status(204).send(); // No body for 204
+});
+
+export default router;
+```
+
+## PUT vs PATCH
+
+These two are frequently confused. The difference is intentional:
+
+**PUT** is a full replacement. If the current resource is `{id: 1, name: "Widget", price: 9.99, category: "tools"}` and you PUT `{name: "Widget Pro", price: 14.99}`, the result is `{id: 1, name: "Widget Pro", price: 14.99}` — category is gone. The client must send the complete desired state.
+
+**PATCH** is a partial update. If you PATCH `{price: 14.99}`, the result is `{id: 1, name: "Widget", price: 14.99, category: "tools"}` — only price changed. The client sends only the fields to modify.
+
+In practice, most modern APIs use PATCH for "update" operations because clients rarely need to replace the entire resource state. PUT is still useful for upserts (create-or-replace semantics) and when you want to force clients to send all required fields.
+
+## Query strings for filtering and pagination
+
+The list endpoint (`GET /products`) becomes much more useful with filtering and pagination via query strings:
+
+```javascript
+router.get("/", (req, res) => {
+  const { category, page = "1", limit = "20", sort = "createdAt", order = "desc" } = req.query;
+
+  let results = Array.from(products.values());
+
+  // Filter
+  if (category) {
+    results = results.filter((p) => p.category === category);
+  }
+
+  // Sort
+  results.sort((a, b) => {
+    const aVal = a[sort];
+    const bVal = b[sort];
+    return order === "desc" ? (aVal < bVal ? 1 : -1) : aVal > bVal ? 1 : -1;
+  });
+
+  // Paginate
+  const pageNum = Math.max(1, parseInt(page, 10));
+  const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
+  const start = (pageNum - 1) * limitNum;
+  const paginated = results.slice(start, start + limitNum);
+
+  res.json({
+    data: paginated,
+    pagination: {
+      total: results.length,
+      page: pageNum,
+      limit: limitNum,
+      pages: Math.ceil(results.length / limitNum),
+    },
+  });
+});
+```
+
+Always cap `limit` at a reasonable maximum (100 here). Never let clients request unbounded lists — a single request for all 10 million records will take down the server.
+
+## The Location header
+
+When a POST creates a resource, include a `Location` header pointing to the new resource. This is part of the HTTP spec and lets clients immediately navigate to the created resource without knowing its ID in advance:
+
+```
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: /products/42
+
+{"id": 42, "name": "Widget", ...}
+```
+
+In Express: `res.status(201).set('Location', \`/products/${id}\`).json(product)`.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a complete in-memory CRUD store.
+// createStore(idField) returns an object with all five CRUD operations.
+
+function createStore(idField = "id") {
+const store = new Map();
+let nextId = 1;
+
+function create(data) {
+if (!data || typeof data !== "object") {
+throw new Error("VALIDATION_ERROR: data must be an object");
+}
+const id = nextId++;
+const record = { [idField]: id, ...data, createdAt: new Date().toISOString() };
+store.set(id, record);
+return record;
+}
+
+function findAll(filter = {}) {
+let results = Array.from(store.values());
+for (const [key, value] of Object.entries(filter)) {
+results = results.filter(r => r[key] === value);
+}
+return results;
+}
+
+function findById(id) {
+const record = store.get(Number(id));
+if (!record) throw new Error(\`NOT_FOUND: No record with \${idField}=\${id}\`);
+return record;
+}
+
+function update(id, patch) {
+const existing = findById(id); // throws NOT_FOUND if missing
+const updated = { ...existing, ...patch, [idField]: existing[idField], updatedAt: new Date().toISOString() };
+store.set(existing[idField], updated);
+return updated;
+}
+
+function replace(id, data) {
+const existing = findById(id); // throws NOT_FOUND if missing
+const replaced = { [idField]: existing[idField], ...data, updatedAt: new Date().toISOString() };
+store.set(existing[idField], replaced);
+return replaced;
+}
+
+function del(id) {
+const existing = findById(id); // throws NOT_FOUND if missing
+store.delete(existing[idField]);
+return true;
+}
+
+return { create, findAll, findById, update, replace, delete: del };
+}
+
+// Demo: full lifecycle
+const books = createStore("id");
+
+console.log("--- Create ---");
+const b1 = books.create({ title: "Clean Code", author: "Robert Martin", price: 35 });
+const b2 = books.create({ title: "The Pragmatic Programmer", author: "Hunt & Thomas", price: 40 });
+console.log("Created:", b1);
+console.log("Created:", b2);
+
+console.log("\\n--- Find all ---");
+console.log(books.findAll());
+
+console.log("\\n--- Find by ID ---");
+console.log(books.findById(1));
+
+console.log("\\n--- Partial update (PATCH equivalent) ---");
+const updated = books.update(1, { price: 29.99 });
+console.log("Updated:", updated);
+
+console.log("\\n--- Full replacement (PUT equivalent) ---");
+const replaced = books.replace(2, { title: "Pragmatic Programmer 20th Ed", author: "Hunt & Thomas", price: 45 });
+console.log("Replaced:", replaced);
+
+console.log("\\n--- Delete ---");
+books.delete(1);
+console.log("After delete, all books:", books.findAll());
+
+console.log("\\n--- Not found error ---");
+try {
+books.findById(1);
+} catch (err) {
+console.log("Error caught:", err.message);
+}`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the correct HTTP status code for a successful DELETE operation?"
+  options={["200 OK", "201 Created", "204 No Content", "404 Not Found"]}
+  answer={2}
+  explanation="204 No Content is the correct response for a successful DELETE. It signals success without returning a body, since the resource no longer exists and there is nothing useful to return."
+/>
+
+<Quiz
+  question="What is the difference between PUT and PATCH?"
+  options={[
+    "PUT is for creating resources; PATCH is for updating them",
+    "PUT replaces the entire resource; PATCH applies partial changes only",
+    "They are interchangeable — use whichever you prefer",
+    "PATCH is deprecated in HTTP/2",
+  ]}
+  answer={1}
+  explanation="PUT sends the complete desired state of the resource, replacing everything. PATCH sends only the fields to modify, merging with the existing state. Using PUT when you mean PATCH can silently delete fields the client did not include."
+/>
+
+<FillBlank
+  question="When a POST creates a new resource, the response should include a ___ header with the URL of the new resource."
+  answer="Location"
+/>
+
+## What you learned
+
+- The CRUD route map is the same for every resource: GET/POST on the collection, GET/PUT/PATCH/DELETE on individual items.
+- POST returns 201 Created with a Location header; DELETE returns 204 No Content with no body; GET and PATCH return 200.
+- PUT replaces the entire resource; PATCH applies partial changes only.
+- Query strings handle filtering, sorting, and pagination on list endpoints — always cap the page size.
+- An in-memory Map or array is a valid prototype store; swap it for a real database without changing the route code.
