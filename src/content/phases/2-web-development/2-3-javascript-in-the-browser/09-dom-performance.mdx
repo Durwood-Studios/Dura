@@ -1,0 +1,254 @@
+---
+title: "DOM Performance"
+description: "Understand reflows and repaints, batch DOM writes, and use requestAnimationFrame for smooth animations."
+phase: 2
+module: "2-3-javascript-in-the-browser"
+order: 9
+estimatedMinutes: 10
+difficulty: "intermediate"
+standards:
+  cs2023: ["WS-1"]
+  swebok: ["Software Construction"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - reflow
+  - repaint
+  - requestAnimationFrame
+  - document-fragment
+  - layout-thrashing
+---
+
+## Why this matters
+
+You can write correct DOM code that is also brutally slow. A loop that reads and writes DOM properties alternately can bring a modern browser to its knees. Understanding what happens inside the browser when you manipulate the DOM — and why some patterns are expensive — is what separates code that ships smoothly at 60 frames per second from code that stutters and freezes.
+
+## The browser rendering pipeline
+
+Every time the browser displays a frame on screen, it runs through a sequence of steps:
+
+1. **JavaScript** — Run event handlers and scripts
+2. **Style** — Recalculate which CSS rules apply to which elements
+3. **Layout** — Calculate the size and position of every element (reflow)
+4. **Paint** — Fill in pixels for each element (repaint)
+5. **Composite** — Combine layers and send to the GPU
+
+**Reflow** (also called layout) is the most expensive step. When you change something that affects geometry — an element's width, height, margin, padding, position, or font size — the browser must recalculate the layout of that element and potentially every element around it.
+
+**Repaint** happens when you change something visual that doesn't affect layout — background color, text color, border color, box-shadow. It's cheaper than reflow, but still work.
+
+**Compositing** is the cheapest — it happens when only `transform` or `opacity` changes. The browser can hand this off to the GPU.
+
+```css
+/* These trigger reflow (most expensive) */
+width, height, margin, padding, top, left, font-size, display
+
+/* These trigger repaint only (cheaper) */
+color, background-color, border-color, box-shadow
+
+/* These trigger compositing only (cheapest) */
+transform, opacity
+```
+
+This is why `transform: translateX(100px)` is the right way to animate movement — not `left: 100px`.
+
+## Layout thrashing
+
+Layout thrashing happens when your code alternates between reading and writing layout properties, forcing the browser to recalculate layout after every write.
+
+```javascript
+// BAD — causes layout thrashing
+const items = document.querySelectorAll(".item");
+items.forEach((item) => {
+  const height = item.offsetHeight; // READ — forces layout calculation
+  item.style.height = height * 2 + "px"; // WRITE — invalidates layout
+  // Next iteration: READ again — forces layout AGAIN because we just wrote
+});
+```
+
+The browser is forced to recalculate layout `items.length` times instead of once. With 100 items, that's 100 forced layouts in a row.
+
+The fix: **separate all reads from all writes**. Read everything first. Then write everything.
+
+```javascript
+// GOOD — reads first, then writes
+const items = document.querySelectorAll(".item");
+const heights = Array.from(items).map((item) => item.offsetHeight); // All reads
+items.forEach((item, i) => {
+  item.style.height = heights[i] * 2 + "px"; // All writes
+});
+```
+
+Properties that trigger layout when read include: `offsetWidth`, `offsetHeight`, `offsetTop`, `offsetLeft`, `scrollTop`, `scrollHeight`, `clientWidth`, `clientHeight`, `getBoundingClientRect()`.
+
+## requestAnimationFrame
+
+`requestAnimationFrame` (rAF) schedules a callback to run just before the browser draws the next frame. This aligns your DOM writes with the browser's rendering cycle, preventing dropped frames.
+
+```javascript
+// BAD — runs immediately, possibly mid-frame
+element.style.transform = `translateX(${x}px)`;
+
+// GOOD — runs at the right time in the rendering pipeline
+requestAnimationFrame(() => {
+  element.style.transform = `translateX(${x}px)`;
+});
+```
+
+For animation loops, rAF replaces `setInterval`:
+
+```javascript
+let x = 0;
+
+function animate() {
+  x += 2;
+  element.style.transform = `translateX(${x}px)`;
+
+  if (x < 400) {
+    requestAnimationFrame(animate); // Schedule the next frame
+  }
+}
+
+requestAnimationFrame(animate); // Start the loop
+```
+
+rAF automatically throttles to the display refresh rate (60Hz, 120Hz, etc.) and pauses when the tab is hidden — unlike `setInterval`, which keeps firing.
+
+To cancel a scheduled frame:
+
+```javascript
+const frameId = requestAnimationFrame(animate);
+cancelAnimationFrame(frameId);
+```
+
+## DocumentFragment for bulk inserts
+
+Every `appendChild` call that adds to the live DOM potentially triggers a reflow. When inserting many elements, build them in a `DocumentFragment` first — an off-screen container — then attach the whole thing in one operation.
+
+```javascript
+// BAD — triggers reflow for each of the 100 items
+const list = document.querySelector("#list");
+items.forEach((item) => {
+  const li = document.createElement("li");
+  li.textContent = item.name;
+  list.appendChild(li); // 100 reflows
+});
+
+// GOOD — one reflow at the end
+const fragment = document.createDocumentFragment();
+items.forEach((item) => {
+  const li = document.createElement("li");
+  li.textContent = item.name;
+  fragment.appendChild(li); // Off-screen, no reflow
+});
+list.appendChild(fragment); // One reflow, one DOM mutation
+```
+
+## Measuring with performance.now()
+
+Before optimizing, measure. `performance.now()` gives a high-resolution timestamp in milliseconds:
+
+```javascript
+const start = performance.now();
+doExpensiveOperation();
+const end = performance.now();
+console.log(`Operation took ${end - start}ms`);
+```
+
+The browser DevTools Performance panel is more powerful — it records a timeline of scripting, rendering, and painting, and flags long tasks (anything over 50ms that blocks the main thread).
+
+## Virtual scrolling for large lists
+
+Rendering a 10,000-item list in the DOM is slow regardless of how clean your code is. Virtual scrolling renders only the items currently visible in the viewport — typically 20-30 — and swaps them as the user scrolls.
+
+Libraries like `react-virtual`, `@tanstack/virtual`, and `clusterize.js` implement this. The concept:
+
+1. Measure the viewport and item heights
+2. Calculate which items are in view based on `scrollTop`
+3. Only render those items, with padding above and below to preserve the scroll bar position
+
+You won't often implement virtual scrolling from scratch, but knowing it exists and when to reach for it (lists over ~500 items) is important.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate the "read then write" batch pattern.
+// batchUpdates(readFns, writeFns) should:
+//   - Call all readFns first (in order), collecting their return values
+//   - Then call all writeFns in order, passing the array of read results
+//   - Return an execution log showing the order operations ran
+
+function batchUpdates(readFns, writeFns) {
+const executionLog = [];
+const readResults = [];
+
+// Run all reads first
+for (const readFn of readFns) {
+const result = readFn();
+readResults.push(result);
+executionLog.push("read");
+}
+
+// Then run all writes, passing in what we read
+for (const writeFn of writeFns) {
+writeFn(readResults);
+executionLog.push("write");
+}
+
+return executionLog;
+}
+
+// Simulate the DOM: heights are "read" and doubled values are "written"
+const domHeights = [100, 200, 150];
+const writtenHeights = [];
+
+const readFns = domHeights.map((h) => () => h); // Simulate offsetHeight reads
+const writeFns = [
+(results) => results.forEach((h) => writtenHeights.push(h * 2)),
+];
+
+const log = batchUpdates(readFns, writeFns);
+
+// All reads happen before all writes
+console.log(log[0] === "read"); // true
+console.log(log[1] === "read"); // true
+console.log(log[2] === "read"); // true
+console.log(log[3] === "write"); // true
+console.log(writtenHeights[0] === 200); // true
+console.log(writtenHeights[1] === 400); // true
+console.log(writtenHeights[2] === 300); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Which CSS property change is cheapest to animate because it only triggers compositing?"
+  options={["height", "margin-top", "transform", "font-size"]}
+  answer={2}
+  explanation="transform (and opacity) only trigger compositing — the GPU handles them without the browser recalculating layout or repainting pixels. height and margin-top trigger a full reflow. Animate with transform whenever possible."
+/>
+
+<Quiz
+  question="What is layout thrashing?"
+  options={[
+    "Adding too many elements to the DOM at once",
+    "Alternating reads and writes of layout properties, forcing repeated reflow calculations",
+    "Using too many CSS animations simultaneously",
+    "Loading a page with too many images",
+  ]}
+  answer={1}
+  explanation="Layout thrashing occurs when JavaScript reads a layout property (like offsetHeight), then writes one (like style.height), then reads again — forcing the browser to recalculate layout after each write. Batch all reads before all writes to avoid it."
+/>
+
+<FillBlank
+  question="To schedule a DOM write to run just before the browser draws the next frame, use ______()."
+  answer="requestAnimationFrame"
+/>
+
+## What you learned
+
+- The browser rendering pipeline runs JavaScript → style → layout (reflow) → paint (repaint) → composite; `transform` and `opacity` are cheapest because they skip reflow and repaint
+- Layout thrashing — alternating reads and writes of layout properties — forces the browser to recalculate layout repeatedly; the fix is to batch all reads before all writes
+- `requestAnimationFrame` aligns DOM writes with the browser's rendering cycle for smooth animation, and `DocumentFragment` batches bulk DOM insertions into a single reflow

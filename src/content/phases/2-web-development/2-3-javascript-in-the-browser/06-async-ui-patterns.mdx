@@ -1,0 +1,293 @@
+---
+title: "Async UI Patterns"
+description: "Show loading states, handle errors gracefully, and keep users informed while data loads."
+phase: 2
+module: "2-3-javascript-in-the-browser"
+order: 6
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["WS-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - loading-state
+  - optimistic-update
+  - debounce
+  - race-condition
+  - skeleton-ui
+---
+
+## Why this matters
+
+Async code introduces time — and during that time, the user is watching. A page that silently freezes for three seconds loses trust instantly. Getting async UI right is the difference between an app that feels professional and one that feels broken. The patterns here — loading states, error recovery, debounce, optimistic updates — are the vocabulary of production-quality interfaces.
+
+## The three states of every async operation
+
+Every operation that involves a network request or delay has three possible states. Your UI must handle all three explicitly:
+
+- **Idle** — No operation in progress (initial state or after completion)
+- **Loading** — Operation in progress; user is waiting
+- **Error** — Operation failed; user needs to know and needs a path forward
+
+```javascript
+let state = "idle"; // "idle" | "loading" | "error"
+let data = null;
+let errorMessage = null;
+
+async function loadData() {
+  state = "loading";
+  render();
+
+  try {
+    data = await apiFetch("/api/items");
+    state = "idle";
+  } catch (error) {
+    state = "error";
+    errorMessage = error.message;
+  }
+
+  render();
+}
+
+function render() {
+  if (state === "loading") showSpinner();
+  else if (state === "error") showError(errorMessage);
+  else if (data) showContent(data);
+  else showEmptyState();
+}
+```
+
+Always call `render()` after state changes, not in the middle of transitions.
+
+## Loading states
+
+A loading state should tell the user something is happening and give them a sense of what's coming.
+
+**Spinner** — good for short waits where you don't know the structure of what's loading:
+
+```javascript
+function showSpinner() {
+  container.innerHTML = `<div class="spinner" aria-label="Loading…"></div>`;
+}
+```
+
+**Skeleton UI** — placeholder elements in the shape of the content that will appear. Reduces perceived wait time significantly because the layout doesn't jump:
+
+```javascript
+function showSkeleton() {
+  container.innerHTML = `
+    <div class="skeleton-card">
+      <div class="skeleton skeleton-title"></div>
+      <div class="skeleton skeleton-body"></div>
+      <div class="skeleton skeleton-body skeleton-body--short"></div>
+    </div>
+  `;
+}
+```
+
+**Disabled button during submission** — prevents double-submits:
+
+```javascript
+async function handleSubmit() {
+  submitButton.disabled = true;
+  submitButton.textContent = "Saving…";
+
+  try {
+    await saveData(formData);
+    submitButton.textContent = "Saved!";
+  } catch {
+    submitButton.textContent = "Try again";
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+```
+
+## Error states
+
+An error state must give users three things: what went wrong, whether it was their fault, and what they can do. "An error occurred" is not helpful. "Couldn't load your posts — check your connection and try again." is.
+
+```javascript
+function showError(message, onRetry) {
+  container.innerHTML = `
+    <div class="error-state" role="alert">
+      <p>${message}</p>
+      <button id="retry-btn">Try again</button>
+    </div>
+  `;
+  document.querySelector("#retry-btn").addEventListener("click", onRetry);
+}
+```
+
+Note the `role="alert"` — screen readers will announce this immediately.
+
+## Optimistic updates
+
+An optimistic update changes the UI before the server confirms success, then rolls back if the request fails. This makes the app feel instant even on slow connections.
+
+```javascript
+async function toggleLike(postId) {
+  // Optimistically update the UI now
+  const wasLiked = post.liked;
+  post.liked = !wasLiked;
+  post.likeCount += wasLiked ? -1 : 1;
+  renderPost(post);
+
+  try {
+    // Confirm with the server in the background
+    await apiFetch(`/api/posts/${postId}/like`, { method: "POST" });
+  } catch {
+    // Rollback if the server rejected it
+    post.liked = wasLiked;
+    post.likeCount += wasLiked ? 1 : -1;
+    renderPost(post);
+    showToast("Couldn't update — please try again.");
+  }
+}
+```
+
+Optimistic updates are appropriate when failure is rare and reversible. Don't use them for destructive actions (deleting data) or payments.
+
+## Debouncing
+
+When a user types in a search box, you don't want to fire a network request on every single keystroke. Debouncing delays the call until the user pauses.
+
+```javascript
+function debounce(fn, delayMs) {
+  let timerId = null;
+
+  return function (...args) {
+    // Cancel the previous scheduled call
+    clearTimeout(timerId);
+
+    // Schedule a new call after the delay
+    timerId = setTimeout(() => {
+      fn(...args);
+    }, delayMs);
+  };
+}
+
+const search = debounce(async (query) => {
+  const results = await apiFetch(`/api/search?q=${query}`);
+  renderResults(results);
+}, 300); // 300ms after the last keystroke
+
+searchInput.addEventListener("input", (event) => {
+  search(event.target.value);
+});
+```
+
+With a 300ms debounce, a user typing "javascript" at normal speed triggers one request instead of ten.
+
+## Race conditions
+
+A race condition happens when two async operations compete and the wrong one wins. The classic case: user types "cat", request fires. They then type "cats", another request fires. If the "cats" response arrives first and "cat" arrives second, the UI shows "cat" results for a "cats" query.
+
+The fix is to cancel the previous request before starting a new one:
+
+```javascript
+let searchController = null;
+
+const search = debounce(async (query) => {
+  if (searchController) searchController.abort();
+  searchController = new AbortController();
+
+  try {
+    const results = await apiFetch(`/api/search?q=${query}`, {
+      signal: searchController.signal,
+    });
+    renderResults(results);
+  } catch (error) {
+    if (error.name !== "AbortError") showError(error.message);
+  }
+}, 300);
+```
+
+Debounce reduces the number of requests; AbortController prevents stale results from appearing.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement debounce without real timers.
+// Use a counter-based simulation: each call increments a callId.
+// A call only "executes" if its callId is still the latest when checked.
+
+function debounce(fn, delay) {
+// In real code: use setTimeout/clearTimeout
+// Here: track the latest call ID to simulate the same behavior
+let latestCallId = 0;
+
+return function (...args) {
+latestCallId++;
+const thisCallId = latestCallId;
+
+    // Simulate delay: only call fn if no newer call has happened
+    // For testing purposes, call fn synchronously but only if
+    // thisCallId === latestCallId at the time of execution.
+    // (In production, this would be wrapped in setTimeout)
+    if (thisCallId === latestCallId) {
+      fn(...args);
+    }
+
+};
+}
+
+const log = [];
+const debouncedLog = debounce((val) => log.push(val), 300);
+
+// Rapid calls — only the latest should execute
+debouncedLog("a");
+debouncedLog("b");
+debouncedLog("c");
+
+console.log(log.length === 1); // true — only one call got through
+console.log(log[0] === "c"); // true — the last one wins
+
+// Reset and try a single call
+const log2 = [];
+const debouncedLog2 = debounce((val) => log2.push(val), 300);
+debouncedLog2("hello");
+console.log(log2.length === 1); // true
+console.log(log2[0] === "hello"); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is an optimistic update?"
+  options={[
+    "A UI change that only happens after the server confirms success",
+    "A UI change applied immediately, with a rollback if the server rejects it",
+    "A technique to skip the loading state",
+    "A way to prefetch data before the user requests it",
+  ]}
+  answer={1}
+  explanation="Optimistic updates apply the change to the UI immediately so the interaction feels instant, then roll back if the server returns an error. They're ideal for low-risk actions like likes and toggles."
+/>
+
+<Quiz
+  question="Why does debouncing a search input reduce race conditions?"
+  options={[
+    "It cancels all previous requests",
+    "It reduces how many requests are sent, lowering the chance of out-of-order responses",
+    "It makes fetch requests synchronous",
+    "It automatically sorts results by relevance",
+  ]}
+  answer={1}
+  explanation="Debouncing delays execution until the user pauses, so fewer requests fire in total. Fewer requests means fewer opportunities for responses to arrive out of order. AbortController is needed to fully eliminate race conditions."
+/>
+
+<FillBlank
+  question="The UI pattern that shows placeholder elements shaped like the incoming content during loading is called ______ UI."
+  answer="skeleton"
+/>
+
+## What you learned
+
+- Every async operation has three states — idle, loading, error — and your UI needs to handle all three explicitly with meaningful feedback, not silence
+- Optimistic updates apply the change immediately and roll back on failure; debouncing delays execution until the user pauses to reduce unnecessary requests
+- Race conditions occur when slow responses arrive after faster ones have already rendered — combine debounce with AbortController to prevent stale data from winning
