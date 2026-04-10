@@ -1,0 +1,200 @@
+---
+title: "Infrastructure as Code: Terraform and Declarative State"
+description: "Learn why infrastructure as code exists, how Terraform's declarative model and state files work, and how to reason about plan and apply cycles."
+phase: 5
+module: "5-4-cloud-infrastructure"
+order: 5
+difficulty: "medium"
+bloom: "apply"
+vocabulary: ["terraform", "declarative", "state-file", "plan", "apply"]
+---
+
+# Infrastructure as Code: Terraform and Declarative State
+
+In the early days of cloud computing, teams managed infrastructure the same way they had always managed physical servers: by logging into consoles, clicking through wizards, and running ad-hoc commands. This approach worked at small scale. As systems grew — hundreds of servers, multiple environments, dozens of team members — it became a disaster. No one could answer "what is actually deployed right now?" without clicking through every screen. Environments drifted. Changes weren't tracked. Disaster recovery meant rebuilding from memory and runbooks that were three years out of date.
+
+**Infrastructure as Code (IaC)** solves these problems by describing infrastructure in version-controlled text files. If it's not in code, it doesn't exist.
+
+## Declarative vs. Imperative
+
+There are two approaches to expressing infrastructure in code.
+
+**Imperative** IaC tells the system _how_ to achieve a result — a sequence of steps. Bash scripts and Ansible playbooks are often imperative: "first run this command, then install that package, then start this service." Imperative approaches are familiar to developers but fragile: if the script fails partway through, you may be in a partially-configured state. Running the script again might fail because some steps have already been completed.
+
+**Declarative** IaC tells the system _what_ you want — the desired end state — and lets the tool figure out how to get there. **Terraform** is the dominant example. You write configuration describing the resources you want to exist: three EC2 instances of type `t3.medium`, a VPC with a specific CIDR, an RDS database with a given configuration. Terraform compares that desired state to what actually exists and computes the changes needed.
+
+The declarative model has three major advantages. First, idempotency: applying the same configuration multiple times produces the same result. Second, drift detection: if someone manually changes infrastructure, Terraform detects the discrepancy. Third, team collaboration: the configuration is the single source of truth, and reviewing a pull request against it is reviewing the actual infrastructure change.
+
+## The State File
+
+Terraform maintains a **state file** — a JSON record of everything Terraform manages and how it maps to actual cloud resources. The state file is Terraform's memory. It knows that the EC2 instance with ID `i-0a1b2c3d4e5f` corresponds to the `aws_instance.web_server` resource in your configuration.
+
+The state file is critical and must be handled carefully. It often contains sensitive information (database passwords, certificate private keys) so it must be stored encrypted. It must be stored remotely (in S3, Terraform Cloud, or a similar backend) so that multiple team members share the same state — if two engineers have different local state files, they will make conflicting changes. Remote state with locking (preventing two simultaneous applies) is standard practice.
+
+What happens if the state file is lost? Terraform loses its knowledge of what it manages. It cannot compute diffs against existing resources; it sees an empty state and tries to create everything from scratch — potentially creating duplicate infrastructure alongside existing resources. State file backups are not optional.
+
+## Plan and Apply
+
+Terraform's workflow has two key steps: **plan** and **apply**.
+
+During `terraform plan`, Terraform reads the configuration, reads the state file, queries the cloud provider for current resource attributes, and computes a diff. The output is a human-readable list of changes: resources to be created (`+`), modified (`~`), or destroyed (`-`). Destructive changes (anything marked `-`) deserve careful review — deleting a database, even accidentally, is a serious event.
+
+During `terraform apply`, Terraform executes the plan by calling the cloud provider's APIs in the correct order (respecting dependencies between resources). It updates the state file as each resource is created or modified.
+
+This plan/apply separation is powerful for teams. A proposed infrastructure change can be reviewed as a plan diff in a pull request — just like reviewing code changes — before anyone is allowed to apply it. Automated pipelines can run `plan` on every PR and require human approval before `apply` runs against production.
+
+## Why IaC Changes Everything
+
+Once your infrastructure is in code, you gain a set of capabilities that are otherwise impossible. Every infrastructure change is a commit with an author, a timestamp, and a rationale in the commit message. Rolling back a bad infrastructure change is as simple as reverting a commit and re-applying. A new environment (staging, a QA environment for a specific feature) can be created by running `terraform apply` against a new workspace — ten minutes instead of days of manual work.
+
+The discipline of IaC is simple: if you make a change in the cloud console that isn't reflected in your Terraform configuration, you've created drift. The next `apply` may undo your manual change. The rule is: all infrastructure goes through code, always.
+
+<SandboxExercise
+  title="Terraform-Style State Differ"
+  instructions="Implement a `terraformPlan` function that compares a desired config (what you want) against a current state (what exists). Output a plan listing resources to add (`+`), modify (`~`), or destroy (`-`). Resources in config but not state should be added. Resources in state but not config should be destroyed. Resources in both should be modified if any attribute differs."
+  starterCode={`// Simulate terraform plan: diff desired config vs current state
+
+function terraformPlan(desiredConfig, currentState) {
+// desiredConfig: { [resourceId]: { type, attributes } }
+// currentState: { [resourceId]: { type, attributes } }
+// Return: { toAdd: [], toModify: [], toDestroy: [], summary: string }
+
+const toAdd = [];
+const toModify = [];
+const toDestroy = [];
+
+// TODO: find resources in desiredConfig but not in currentState → toAdd
+// TODO: find resources in currentState but not in desiredConfig → toDestroy
+// TODO: find resources in both → compare attributes → toModify if different
+
+const summary = \`Plan: \${toAdd.length} to add, \${toModify.length} to change, \${toDestroy.length} to destroy.\`;
+return { toAdd, toModify, toDestroy, summary };
+}
+
+const desiredConfig = {
+"aws_instance.web": {
+type: "aws_instance",
+attributes: { instance_type: "t3.medium", ami: "ami-12345" }
+},
+"aws_instance.worker": {
+type: "aws_instance",
+attributes: { instance_type: "t3.small", ami: "ami-12345" }
+},
+"aws_s3_bucket.assets": {
+type: "aws_s3_bucket",
+attributes: { bucket: "my-app-assets", versioning: true }
+}
+};
+
+const currentState = {
+"aws_instance.web": {
+type: "aws_instance",
+attributes: { instance_type: "t3.small", ami: "ami-12345" } // different instance_type!
+},
+"aws_rds_instance.db": {
+type: "aws_rds_instance",
+attributes: { instance_class: "db.t3.micro", engine: "postgres" }
+}
+};
+
+const plan = terraformPlan(desiredConfig, currentState);
+console.log(plan.summary);
+console.log("To Add:", plan.toAdd);
+console.log("To Modify:", plan.toModify);
+console.log("To Destroy:", plan.toDestroy);
+`}
+  solution={`function terraformPlan(desiredConfig, currentState) {
+const toAdd = [];
+const toModify = [];
+const toDestroy = [];
+
+for (const [id, desired] of Object.entries(desiredConfig)) {
+if (!currentState[id]) {
+toAdd.push({ id, type: desired.type, attributes: desired.attributes });
+} else {
+const current = currentState[id];
+const diffs = {};
+for (const [key, val] of Object.entries(desired.attributes)) {
+if (current.attributes[key] !== val) {
+diffs[key] = { from: current.attributes[key], to: val };
+}
+}
+if (Object.keys(diffs).length > 0) {
+toModify.push({ id, type: desired.type, changes: diffs });
+}
+}
+}
+
+for (const [id, current] of Object.entries(currentState)) {
+if (!desiredConfig[id]) {
+toDestroy.push({ id, type: current.type });
+}
+}
+
+const summary = \`Plan: \${toAdd.length} to add, \${toModify.length} to change, \${toDestroy.length} to destroy.\`;
+return { toAdd, toModify, toDestroy, summary };
+}
+
+const desiredConfig = {
+"aws_instance.web": {
+type: "aws_instance",
+attributes: { instance_type: "t3.medium", ami: "ami-12345" }
+},
+"aws_instance.worker": {
+type: "aws_instance",
+attributes: { instance_type: "t3.small", ami: "ami-12345" }
+},
+"aws_s3_bucket.assets": {
+type: "aws_s3_bucket",
+attributes: { bucket: "my-app-assets", versioning: true }
+}
+};
+
+const currentState = {
+"aws_instance.web": {
+type: "aws_instance",
+attributes: { instance_type: "t3.small", ami: "ami-12345" }
+},
+"aws_rds_instance.db": {
+type: "aws_rds_instance",
+attributes: { instance_class: "db.t3.micro", engine: "postgres" }
+}
+};
+
+const plan = terraformPlan(desiredConfig, currentState);
+console.log(plan.summary);
+console.log("To Add:", plan.toAdd);
+console.log("To Modify:", plan.toModify);
+console.log("To Destroy:", plan.toDestroy);
+`}
+/>
+
+<Quiz
+  question="An engineer makes a change to an EC2 instance type by clicking in the AWS console, without updating the Terraform configuration. What will happen the next time someone runs `terraform apply`?"
+  options={[
+    "Terraform will detect the manual change and update the configuration file automatically",
+    "Terraform will leave the instance unchanged because it can detect manual modifications",
+    "Terraform will compare the configuration to its state file, detect a discrepancy, and revert the instance to the instance type specified in the configuration",
+    "Terraform will crash because the state file no longer matches reality",
+  ]}
+  answer={2}
+  explanation="Terraform's source of truth is the configuration file. When it runs, it compares the desired configuration to both the state file and the actual resource's current attributes. If the actual instance type differs from what the configuration specifies, Terraform will compute a plan to modify the instance type back to the configured value. This is why all infrastructure changes must go through the configuration — manual changes will be overwritten."
+/>
+
+<Quiz
+  question="Why must Terraform's state file be stored remotely (e.g., in S3) for a team environment, rather than locally on each engineer's machine?"
+  options={[
+    "Local state files are unencrypted and would expose secrets",
+    "Remote storage is required by Terraform's licensing",
+    "Each engineer's local state file would reflect only their own changes, causing conflicting apply operations that could destroy or duplicate infrastructure",
+    "Local state files cannot store resource metadata",
+  ]}
+  answer={2}
+  explanation="If every engineer has a separate local state file, each file represents a different view of what Terraform manages. When engineer A applies from their local state, they might create resources that engineer B's local state doesn't know about — and when B applies, they might try to create duplicates or destroy A's resources. Remote state ensures the entire team shares one consistent view, and state locking prevents two applies from running simultaneously."
+/>
+
+<FillBlank
+  sentence="In Terraform's workflow, the ___ step computes a diff between desired configuration and current state, showing exactly which resources will be created, modified, or destroyed before any changes are made."
+  answer="plan"
+  hint="It comes before 'apply' and is used for review."
+/>

@@ -1,0 +1,225 @@
+---
+title: "Systems Capstone: Design, Capacity, and Tradeoffs"
+description: "Apply everything from this module to design a complete cloud system — translating requirements into architecture, making explicit tradeoffs, and using back-of-envelope math to validate capacity decisions."
+phase: 5
+module: "5-4-cloud-infrastructure"
+order: 8
+difficulty: "hard"
+bloom: "evaluate"
+vocabulary: ["system-design", "capacity-planning", "tradeoff", "back-of-envelope", "scalability"]
+---
+
+# Systems Capstone: Design, Capacity, and Tradeoffs
+
+Every system design interview, every architecture review, every technical planning meeting involves the same core skill: translating a vague requirement into a concrete set of decisions, then defending those decisions with math and reasoning. This capstone brings together everything from the module — compute, storage, networking, IaC, observability, and reliability — and applies it to the most valuable engineering skill you can develop: designing systems from first principles.
+
+## The Process of System Design
+
+Good system design is not about memorizing patterns. It is a structured process of turning ambiguous requirements into specific, defensible decisions.
+
+**Step 1: Requirements**. Before designing anything, extract explicit requirements. Functional requirements describe what the system does: "users can upload photos, which are processed and made available for download." Non-functional requirements describe how it must behave: "support 10,000 concurrent users, with photo processing completing in under 5 seconds, with 99.9% availability." Never design before you have numbers.
+
+**Step 2: Identify the bottleneck**. Most systems have one dominant constraint — usually read throughput, write throughput, storage, or computation. Identify it first. Building a highly available stateless compute tier is wasted effort if the bottleneck is database write throughput.
+
+**Step 3: Back-of-envelope math**. Before drawing boxes on a whiteboard, do the arithmetic. How many requests per second does the system need to handle? How much storage does it need? What bandwidth does it consume? Rough numbers — within an order of magnitude — are good enough to invalidate bad ideas before you invest in them.
+
+**Step 4: Make tradeoffs explicit**. Every architectural decision trades one thing for another. SQL trades flexibility for consistency. A CDN trades data freshness for latency. Microservices trade deployment independence for operational complexity. The job of an architect is not to find the perfect solution — it is to understand the tradeoffs and choose the right point on each axis for the given context.
+
+## Back-of-Envelope Estimation
+
+The numbers that matter most:
+
+- A commodity server can handle roughly 100,000 simple requests per second, or 10,000 complex ones
+- A database read takes 1ms (in-memory) to 10ms (disk), a write takes 5-20ms
+- SSDs can sustain roughly 50,000 random IOPS; HDDs about 100-200
+- A 10Gbps network link can carry roughly 1.25 GB/s
+- A typical web application request generates 1-10KB of data
+- Latency between regions: ~60ms US East to US West, ~80ms US to Europe, ~150ms US to Asia
+
+These numbers let you reason quickly. 100,000 users each making 1 request per minute = 1,667 requests/second. One server can comfortably handle that. 100,000 users each uploading a 5MB photo per hour = 138 MB/s of write bandwidth — that needs more careful thought.
+
+## Common Architectural Patterns
+
+**Horizontal scaling** means adding more instances rather than bigger instances. It requires the application tier to be stateless (no session data stored in memory), which is why session data lives in Redis or a database and not in the application process. Stateless services scale trivially; stateful services require careful sharding or partitioning.
+
+**Caching** is the most powerful single lever for scaling reads. A cache between the application and the database can absorb 90%+ of read traffic for many workloads, dramatically reducing database load. But caching introduces complexity: cache invalidation (ensuring stale data is updated when the source changes) is one of the hardest problems in distributed systems.
+
+**Read replicas** allow a database to serve reads from multiple database servers, each receiving a copy of writes from the primary. Reads scale horizontally; writes remain bottlenecked at the primary. This is the right architecture when reads dominate — which is true of most content-serving systems.
+
+**Asynchronous processing** decouples slow or resource-intensive work from the user-facing request path. Instead of making a user wait while their photo is processed, you accept the upload, enqueue a processing job, and return immediately. A worker service processes the queue asynchronously. This pattern dramatically improves user-facing response time and allows independent scaling of the processing tier.
+
+**Multi-region deployment** serves users from the region closest to them, reducing geographic latency. It also provides disaster recovery: if an entire region fails, traffic can route to another. Multi-region is expensive and complex — data replication across regions introduces consistency challenges — and is justified only when you have users distributed globally and high availability requirements.
+
+## Making Tradeoffs
+
+The essence of system design is choosing your constraints. You cannot have all of: low cost, low latency, high throughput, high availability, strong consistency, and operational simplicity. Pick the ones that matter most for your use case.
+
+A social media feed prioritizes low latency and high availability over strong consistency — it's acceptable for different users to momentarily see slightly different feed states. A banking transaction system prioritizes strong consistency and durability over low latency — it's never acceptable to lose a financial record, and users will wait a second for their transaction to commit.
+
+**Scalability** is not just "will it handle more traffic?" It is a spectrum: linear scalability means doubling capacity exactly doubles throughput (rare and beautiful). Sublinear scalability is more common — there are always some shared resources that become bottlenecks. Understanding where your architecture will stop scaling before you hit that wall is what separates reactive firefighting from proactive engineering.
+
+<SandboxExercise
+  title="Capacity Planner"
+  instructions="Implement a `CapacityPlanner` that takes a system specification — requests per second, average response time in milliseconds, average request size in KB, and retention period in days — and calculates: required replicas (using Little's Law), storage needed (in GB), and required bandwidth (in Mbps). Also flag whether the design is within a single server's capability or needs horizontal scaling."
+  starterCode={`// Capacity planner using back-of-envelope calculations
+// Little's Law: N = λ × W
+//   N = concurrent requests in system
+//   λ = arrival rate (requests/sec)
+//   W = average time in system (seconds)
+
+const SERVER_LIMITS = {
+maxConcurrentRequests: 1000, // concurrent requests a single server handles
+maxBandwidthMbps: 1000, // 1Gbps network card
+maxStorageGB: 2000, // 2TB storage per node
+};
+
+function capacityPlan(spec) {
+// spec = {
+// requestsPerSec: number,
+// avgResponseTimeMs: number,
+// avgRequestSizeKB: number,
+// retentionDays: number,
+// replicationFactor: number // copies of each byte stored
+// }
+//
+// TODO: calculate:
+// 1. concurrentRequests = requestsPerSec _ (avgResponseTimeMs / 1000)
+// (Little's Law: requests in flight at steady state)
+//
+// 2. requiredReplicas = ceil(concurrentRequests / SERVER_LIMITS.maxConcurrentRequests)
+// (minimum servers to handle concurrency load, at least 1)
+//
+// 3. bandwidthMbps = requestsPerSec _ avgRequestSizeKB _ 8 / 1000
+// (KB/s to Mbps: multiply KB by 8 bits, divide by 1000)
+// Add 20% overhead for headers/protocol
+//
+// 4. storageGB = requestsPerSec _ avgRequestSizeKB _ 86400 _ retentionDays
+// _ replicationFactor / (1024 _ 1024)
+// (KB → GB: divide by 1024\*1024)
+//
+// 5. needsHorizontalScaling = requiredReplicas > 1
+//
+// Return all computed values plus a human-readable summary
+
+return {};
+}
+
+// Example: a photo-sharing service
+const plan = capacityPlan({
+requestsPerSec: 5000,
+avgResponseTimeMs: 200,
+avgRequestSizeKB: 50,
+retentionDays: 365,
+replicationFactor: 3,
+});
+
+console.log("=== Capacity Plan ===");
+console.log("Concurrent requests (Little's Law):", plan.concurrentRequests);
+console.log("Required replicas:", plan.requiredReplicas);
+console.log("Bandwidth needed:", plan.bandwidthMbps.toFixed(1), "Mbps");
+console.log("Storage needed:", plan.storageGB.toFixed(1), "GB");
+console.log("Needs horizontal scaling:", plan.needsHorizontalScaling);
+console.log("Summary:", plan.summary);
+`}
+  solution={`const SERVER_LIMITS = {
+maxConcurrentRequests: 1000,
+maxBandwidthMbps: 1000,
+maxStorageGB: 2000,
+};
+
+function capacityPlan(spec) {
+const {
+requestsPerSec,
+avgResponseTimeMs,
+avgRequestSizeKB,
+retentionDays,
+replicationFactor
+} = spec;
+
+// Little's Law: N = λ × W
+const concurrentRequests = requestsPerSec \* (avgResponseTimeMs / 1000);
+
+// Minimum servers to handle concurrency
+const requiredReplicas = Math.max(1, Math.ceil(concurrentRequests / SERVER_LIMITS.maxConcurrentRequests));
+
+// Bandwidth: KB/s → Mbps, with 20% overhead
+const rawBandwidthMbps = (requestsPerSec _ avgRequestSizeKB _ 8) / 1000;
+const bandwidthMbps = rawBandwidthMbps \* 1.2;
+
+// Storage: total bytes stored over retention window, converted to GB
+const storageGB = (requestsPerSec _ avgRequestSizeKB _ 86400 _ retentionDays _ replicationFactor)
+/ (1024 \* 1024);
+
+const needsHorizontalScaling = requiredReplicas > 1;
+
+const bottlenecks = [];
+if (bandwidthMbps > SERVER_LIMITS.maxBandwidthMbps) bottlenecks.push("bandwidth");
+if (storageGB > SERVER_LIMITS.maxStorageGB \* requiredReplicas) bottlenecks.push("storage");
+
+const summary = [
+\`At \${requestsPerSec} req/s with \${avgResponseTimeMs}ms response time:\`,
+\` → \${concurrentRequests} concurrent requests → \${requiredReplicas} replica(s) needed\`,
+\` → \${bandwidthMbps.toFixed(1)} Mbps network bandwidth required\`,
+\` → \${storageGB.toFixed(1)} GB storage for \${retentionDays}-day retention (×\${replicationFactor} replication)\`,
+needsHorizontalScaling ? " → Horizontal scaling REQUIRED" : " → Single server is sufficient",
+bottlenecks.length > 0 ? \` → Bottlenecks: \${bottlenecks.join(", ")}\` : " → No capacity bottlenecks detected"
+].join("\\n");
+
+return {
+concurrentRequests,
+requiredReplicas,
+bandwidthMbps,
+storageGB,
+needsHorizontalScaling,
+bottlenecks,
+summary
+};
+}
+
+const plan = capacityPlan({
+requestsPerSec: 5000,
+avgResponseTimeMs: 200,
+avgRequestSizeKB: 50,
+retentionDays: 365,
+replicationFactor: 3,
+});
+
+console.log("=== Capacity Plan ===");
+console.log("Concurrent requests (Little's Law):", plan.concurrentRequests);
+console.log("Required replicas:", plan.requiredReplicas);
+console.log("Bandwidth needed:", plan.bandwidthMbps.toFixed(1), "Mbps");
+console.log("Storage needed:", plan.storageGB.toFixed(1), "GB");
+console.log("Needs horizontal scaling:", plan.needsHorizontalScaling);
+console.log("Summary:", plan.summary);
+`}
+/>
+
+<Quiz
+  question="A system needs to handle 2,000 requests per second, each taking an average of 500ms to process. Using Little's Law (N = λ × W), how many concurrent requests must the system support at steady state?"
+  options={[
+    "2,000 — because that's the arrival rate",
+    "4,000 — because 2,000 × 2",
+    "1,000 — because 2,000 × 0.5 seconds",
+    "500 — because 2,000 requests divided by 4",
+  ]}
+  answer={2}
+  explanation="Little's Law: N = λ × W, where N is average number of requests in the system, λ is arrival rate (2,000/s), and W is average time in the system (0.5 seconds). N = 2,000 × 0.5 = 1,000 concurrent requests. This tells you how many requests are in flight simultaneously — and therefore how much concurrency capacity (threads, connection slots, event loop bandwidth) you need to provision."
+/>
+
+<Quiz
+  question="You're designing a global API service. Your primary concern is that users in Tokyo and London experience similar low latency. Which architectural decision most directly addresses this?"
+  options={[
+    "Increasing the CPU capacity of the single US-based server",
+    "Switching from PostgreSQL to a NoSQL database",
+    "Deploying the application to multiple regions (US, EU, Asia) with geolocation-based routing",
+    "Adding a CDN for static asset caching",
+  ]}
+  answer={2}
+  explanation="Geographic latency is dominated by the speed of light — a round trip from Tokyo to Virginia takes ~150ms before your application even runs. Multi-region deployment places compute near users, reducing geographic latency to single-digit or low-double-digit milliseconds. CDNs help for static assets but not for dynamic API responses. Database choice does not affect network routing latency."
+/>
+
+<FillBlank
+  sentence="Little's Law states that the average number of concurrent requests in a system equals the arrival rate multiplied by the average ___ per request."
+  answer="time"
+  hint="N = λ × W, where W is the average ___ a request spends in the system."
+/>
