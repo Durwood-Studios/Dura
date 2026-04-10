@@ -1,0 +1,340 @@
+---
+title: "Volumes and Persistent Data"
+description: "Persist database data, share files between containers, and understand when to use named volumes vs bind mounts."
+phase: 4
+module: "4-4-docker-containers"
+order: 6
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - named-volume
+  - bind-mount
+  - persistent-data
+  - docker-volume
+  - tmpfs
+---
+
+## Why this matters
+
+Containers are ephemeral by design — when a container is removed, everything written to its filesystem disappears. This is great for reproducibility and bad for databases. Understanding when and how to persist data is the difference between a stateless API container (should be ephemeral) and a PostgreSQL container (must never lose its data).
+
+## The ephemeral container problem
+
+A container's writable layer exists only as long as the container exists:
+
+```bash
+# Write a file inside a container
+docker run --name test nginx bash -c "echo hello > /data/file.txt"
+
+# Remove the container
+docker rm test
+
+# Start a new container from the same image — the file is gone
+docker run --name test nginx bash -c "cat /data/file.txt"
+# cat: /data/file.txt: No such file or directory
+```
+
+This is intentional. It means containers are stateless, replaceable, and predictable. The consequence: anything stateful — databases, uploaded files, generated reports — needs to live outside the container's writable layer.
+
+## Named volumes
+
+Docker-managed storage that persists beyond the lifecycle of any individual container. Docker decides where the data lives on the host (usually `/var/lib/docker/volumes/` on Linux); you refer to it by name.
+
+```bash
+# Create a named volume
+docker volume create postgres_data
+
+# Mount it when running a container
+docker run \
+  -v postgres_data:/var/lib/postgresql/data \
+  postgres:16-alpine
+
+# List volumes
+docker volume ls
+
+# Inspect a volume (shows where Docker stored it)
+docker volume inspect postgres_data
+
+# Remove a volume (permanent — data is gone)
+docker volume rm postgres_data
+```
+
+In Compose:
+
+```yaml
+services:
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # named volume
+
+volumes:
+  postgres_data: # Docker manages this
+```
+
+Named volumes are the right choice for databases and anything you want to persist across container restarts and removals.
+
+## Bind mounts
+
+A bind mount maps a directory from the **host filesystem** into the container. The container sees the host directory as if it were part of its own filesystem.
+
+```bash
+# Mount the current directory into /app in the container
+docker run -v "$(pwd)":/app node:20-alpine
+
+# Mount a specific host path (read-only)
+docker run -v /host/configs:/app/configs:ro nginx
+```
+
+In Compose:
+
+```yaml
+services:
+  api:
+    volumes:
+      - .:/app # bind mount: current dir → /app
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+```
+
+Bind mounts are the right choice for **development hot reload** — changes to source files on your host are immediately visible inside the container without rebuilding the image.
+
+**Bind mount vs named volume:**
+
+|             | Named Volume                   | Bind Mount                           |
+| ----------- | ------------------------------ | ------------------------------------ |
+| Location    | Docker manages                 | You specify the host path            |
+| Use case    | Databases, persistent app data | Dev hot reload, config injection     |
+| Portability | Portable (Docker handles path) | Host-path dependent                  |
+| Performance | Better on Linux                | May be slower on macOS (VM overhead) |
+
+## tmpfs mounts
+
+Memory-only storage. The data is never written to disk and disappears when the container stops. Useful for secrets and temporary files that shouldn't persist:
+
+```bash
+docker run --tmpfs /tmp:size=100m myapp
+```
+
+In Compose:
+
+```yaml
+services:
+  api:
+    tmpfs:
+      - /tmp
+```
+
+## Backup and restore
+
+```bash
+# Backup: run a temporary container that reads the volume and tars it
+docker run --rm \
+  -v postgres_data:/data \
+  -v "$(pwd)":/backup \
+  alpine tar czf /backup/postgres_backup.tar.gz /data
+
+# Restore: extract the archive back into the volume
+docker run --rm \
+  -v postgres_data:/data \
+  -v "$(pwd)":/backup \
+  alpine tar xzf /backup/postgres_backup.tar.gz -C /
+```
+
+The pattern: mount the volume and a host directory into a temporary Alpine container, use standard Unix tools to copy data in or out.
+
+## The node_modules volume trick
+
+A common development problem: you mount your source directory with a bind mount for hot reload, but the bind mount overwrites the `node_modules` that were installed inside the container — leaving you with either the host's modules (wrong platform binaries on macOS → Linux) or no modules at all.
+
+The fix: mount an anonymous or named volume at `node_modules` so Docker uses that volume instead of the bind mount's version:
+
+```yaml
+services:
+  api:
+    volumes:
+      - .:/app # bind mount: source code from host
+      - node_modules:/app/node_modules # volume: WINS over bind mount at this path
+```
+
+Docker's mount layering rule: a more specific mount point takes precedence over a less specific one. The `node_modules` volume is a more specific path than the `.:/app` bind mount, so it wins for that subdirectory.
+
+## Volume permissions
+
+A common gotcha: the user inside the container may not match the owner of the volume's data. If you run as non-root (e.g., `USER node`), the volume directory might be owned by root.
+
+```dockerfile
+# Fix: ensure the directory is owned by the app user
+RUN mkdir -p /app/data && chown -R node:node /app/data
+USER node
+```
+
+Or handle it in the Compose file:
+
+```yaml
+services:
+  db:
+    image: postgres:16-alpine
+    user: "1000:1000" # run as this UID:GID
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate a Docker volume system
+// Named volumes persist data across container "restarts"
+// Two containers mounting the same volume share data
+
+function createVolumeManager() {
+const volumes = {}; // volumeName → { data: { path: content } }
+const mounts = {}; // "containerName:mountPath" → volumeName
+
+return {
+createVolume(name) {
+if (!volumes[name]) {
+volumes[name] = { data: {} };
+}
+return { ok: true, volume: name };
+},
+
+    mount(volumeName, containerName, mountPath) {
+      if (!volumes[volumeName]) {
+        return { ok: false, error: \`Volume '\${volumeName}' does not exist\` };
+      }
+      const key = \`\${containerName}:\${mountPath}\`;
+      mounts[key] = volumeName;
+      return { ok: true };
+    },
+
+    _resolveVolume(containerName, mountPath) {
+      // Find which volume is mounted at or above this path
+      // More specific mount paths take precedence
+      let bestMatch = null;
+      let bestMatchLength = -1;
+
+      for (const [key, volName] of Object.entries(mounts)) {
+        const [cName, mPath] = key.split(':');
+        if (cName === containerName && mountPath.startsWith(mPath)) {
+          if (mPath.length > bestMatchLength) {
+            bestMatch = volName;
+            bestMatchLength = mPath.length;
+          }
+        }
+      }
+      return bestMatch;
+    },
+
+    write(containerName, mountPath, filename, data) {
+      const volName = this._resolveVolume(containerName, mountPath);
+      if (!volName) {
+        return { ok: false, error: \`No volume mounted at \${mountPath} in \${containerName}\` };
+      }
+      const fullPath = mountPath + '/' + filename;
+      volumes[volName].data[fullPath] = data;
+      return { ok: true, writtenTo: volName };
+    },
+
+    read(containerName, mountPath, filename) {
+      const volName = this._resolveVolume(containerName, mountPath);
+      if (!volName) {
+        return { ok: false, error: \`No volume mounted at \${mountPath} in \${containerName}\` };
+      }
+      const fullPath = mountPath + '/' + filename;
+      const content = volumes[volName].data[fullPath];
+      if (content === undefined) {
+        return { ok: false, error: \`File not found: \${fullPath}\` };
+      }
+      return { ok: true, content };
+    },
+
+    listVolumes() {
+      return Object.keys(volumes).map(name => ({
+        name,
+        files: Object.keys(volumes[name].data),
+      }));
+    },
+
+};
+}
+
+const vm = createVolumeManager();
+
+// Create volumes
+vm.createVolume('postgres_data');
+vm.createVolume('node_modules');
+
+// Mount postgres_data into a db container
+vm.mount('postgres_data', 'db_container_1', '/var/lib/postgresql/data');
+
+// Write some data (simulating postgres writing its data files)
+vm.write('db_container_1', '/var/lib/postgresql/data', 'PG_VERSION', '16');
+vm.write('db_container_1', '/var/lib/postgresql/data', 'base/16384/pg_class', '<table data>');
+
+console.log('=== db_container_1 writes data ===');
+console.log('PG_VERSION:', vm.read('db_container_1', '/var/lib/postgresql/data', 'PG_VERSION'));
+
+// Simulate container restart: same volume, new container
+vm.mount('postgres_data', 'db_container_2', '/var/lib/postgresql/data');
+
+console.log('\\n=== db_container_2 (after restart) reads same volume ===');
+console.log('PG_VERSION:', vm.read('db_container_2', '/var/lib/postgresql/data', 'PG_VERSION'));
+console.log('pg_class:', vm.read('db_container_2', '/var/lib/postgresql/data', 'base/16384/pg_class'));
+
+// Show the node_modules trick: bind mount at /app, volume at /app/node_modules
+vm.createVolume('app_source'); // simulate bind mount as another volume for demo
+vm.mount('app_source', 'api', '/app');
+vm.mount('node_modules', 'api', '/app/node_modules');
+
+vm.write('api', '/app', 'index.js', 'console.log("hello")');
+vm.write('api', '/app/node_modules', 'express/index.js', 'module.exports = express');
+
+console.log('\\n=== node_modules volume trick ===');
+console.log('Read /app/index.js (from bind mount):', vm.read('api', '/app', 'index.js'));
+console.log('Read /app/node_modules/express (from volume):', vm.read('api', '/app/node_modules', 'express/index.js'));
+
+console.log('\\n=== Volume state ===');
+vm.listVolumes().forEach(v => {
+console.log(\` \${v.name}: [\${v.files.join(', ')}]\`);
+});`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="You remove a container that had a named volume mounted. What happens to the data in the volume?"
+  options={[
+    "The data is deleted with the container",
+    "The data persists — the volume outlives the container",
+    "The data is moved to a backup volume automatically",
+    "The data is only preserved if you use `docker rm --keep-volumes`",
+  ]}
+  answer={1}
+  explanation="Named volumes have their own lifecycle, independent of containers. Removing a container does not remove its volumes. The data persists until you explicitly run `docker volume rm` or `docker compose down -v`."
+/>
+
+<Quiz
+  question="A bind mount is the best choice for persisting a PostgreSQL database in production."
+  options={["True", "False"]}
+  answer={1}
+  explanation="Named volumes are the better choice for databases. They're managed by Docker, portable, and don't depend on a specific host path. Bind mounts are ideal for development (hot reload) where you want the container to see host filesystem changes in real time."
+/>
+
+<FillBlank
+  question="A ___ mount maps a directory from the host filesystem directly into the container, making it ideal for development hot reload."
+  answer="bind"
+/>
+
+## What you learned
+
+- Containers are ephemeral — data written to the container layer is lost when the container is removed
+- Named volumes persist beyond container lifecycle, are Docker-managed, and are best for databases
+- Bind mounts map host directories into containers — ideal for development hot reload
+- tmpfs mounts are memory-only — data disappears when the container stops, suitable for secrets and temp files
+- The node_modules volume trick prevents bind mounts from overwriting container-installed modules
+- Volume ownership and permissions can cause issues when running containers as non-root users

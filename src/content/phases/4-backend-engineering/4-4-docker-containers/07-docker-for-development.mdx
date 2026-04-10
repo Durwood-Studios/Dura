@@ -1,0 +1,328 @@
+---
+title: "Docker for Development"
+description: "Hot reload, debugging in containers, and dev containers that give every team member the same environment."
+phase: 4
+module: "4-4-docker-containers"
+order: 7
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - dev-containers
+  - hot-reload
+  - bind-mount
+  - devcontainer-json
+  - debugging
+---
+
+## Why this matters
+
+"It works on my machine" is solved by containers — but only if your development environment also runs in a container. A containerized dev environment means every developer on your team starts from zero and gets an identical setup in minutes, regardless of their OS. No more "install these 12 things before you can run the project."
+
+## Hot reload with bind mounts
+
+The core development pattern: run your application in a container, but mount your source code from the host using a bind mount. File changes on your laptop instantly appear inside the container — no rebuild needed.
+
+```yaml
+# docker-compose.yml
+services:
+  api:
+    build:
+      context: .
+      target: dev # target a development stage in the Dockerfile
+    ports:
+      - "3000:3000"
+      - "9229:9229" # Node.js inspector port for debugging
+    volumes:
+      - .:/app # bind mount: your source code
+      - node_modules:/app/node_modules # preserve container's node_modules
+    environment:
+      - NODE_ENV=development
+
+volumes:
+  node_modules:
+```
+
+```dockerfile
+# Dockerfile — development stage
+FROM node:20-alpine AS dev
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci                    # install all deps (including devDependencies)
+# Don't COPY source — bind mount provides it at runtime
+CMD ["npx", "nodemon", "--watch", "src", "src/index.js"]
+
+# Production stage (separate)
+FROM node:20-alpine AS production
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --only=production
+COPY src/ ./src/
+CMD ["node", "src/index.js"]
+```
+
+Nodemon watches for file changes and restarts the process — because the source is bind-mounted, it sees your edits the moment you save.
+
+## Debugging Node.js inside a container
+
+Node.js has a built-in inspector that exposes a debugging protocol on port 9229. You can attach VS Code's debugger to a process running inside a container.
+
+```dockerfile
+# Add --inspect flag for debugging
+CMD ["node", "--inspect=0.0.0.0:9229", "src/index.js"]
+# 0.0.0.0 is required — 127.0.0.1 would bind to the container's loopback, not the host
+```
+
+```yaml
+# docker-compose.override.yml (dev only)
+services:
+  api:
+    ports:
+      - "9229:9229"
+```
+
+Then in VS Code's `launch.json`:
+
+```json
+{
+  "type": "node",
+  "request": "attach",
+  "name": "Attach to Docker",
+  "port": 9229,
+  "restart": true,
+  "localRoot": "${workspaceFolder}/src",
+  "remoteRoot": "/app/src"
+}
+```
+
+The `localRoot`/`remoteRoot` mapping tells VS Code how to translate file paths between your host and the container — breakpoints set on your host map to the correct file inside the container.
+
+## VS Code Dev Containers
+
+Dev Containers take the concept further: instead of just running your app in a container, your entire development environment runs inside the container. VS Code connects to it remotely — your editor runs locally, but the file system, terminal, debugger, and language server all run inside the container.
+
+Create `.devcontainer/devcontainer.json`:
+
+```json
+{
+  "name": "Dura API Dev",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "api",
+  "workspaceFolder": "/app",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode"
+      }
+    }
+  },
+  "postCreateCommand": "npm ci",
+  "remoteUser": "node"
+}
+```
+
+The benefits:
+
+- No "install Node, npm, git, etc." in your project README
+- New team members get a working environment in one click (VS Code → "Reopen in Container")
+- CI can use the same container image — dev/CI/prod parity
+- Extensions and settings are consistent across the team
+
+## The docker-compose.override.yml pattern
+
+Keep your base `docker-compose.yml` production-suitable (or at least clean). Use `docker-compose.override.yml` for dev-specific config that should never go to production:
+
+```yaml
+# docker-compose.override.yml (git-ignored or committed — your call)
+services:
+  api:
+    build:
+      target: dev # use the dev stage
+    volumes:
+      - .:/app # bind mount source
+      - node_modules:/app/node_modules
+    environment:
+      - DEBUG=express:*
+    ports:
+      - "9229:9229" # debugger
+
+  mailhog: # local email catcher
+    image: mailhog/mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+```
+
+Docker Compose automatically applies `docker-compose.override.yml` when you run `docker compose up`. In CI, you run `docker compose -f docker-compose.yml up -d` to skip the override.
+
+## Common development patterns
+
+**Initializing the database:**
+
+```yaml
+services:
+  db-init:
+    image: postgres:16-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    command: psql -h db -U postgres -f /migrations/001_init.sql
+    volumes:
+      - ./migrations:/migrations
+    profiles: ["init"] # only runs when explicitly requested
+```
+
+```bash
+docker compose --profile init up db-init
+```
+
+**Running tests in a container:**
+
+```bash
+# Run tests once and exit
+docker compose run --rm api npm test
+
+# Run tests and get the exit code for CI
+docker compose run --rm api npm test; echo "Exit: $?"
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate the node_modules volume trick for dev containers
+// Source files come from the bind mount (host filesystem)
+// node_modules comes from the named volume (container-installed)
+
+function createDevContainer(sourceFiles, nodeModules) {
+// sourceFiles: object simulating bind-mounted host source code
+// nodeModules: object simulating the named volume contents
+
+// Mount resolution: more specific path wins
+// /app/node_modules (named volume) takes precedence over /app (bind mount)
+const BIND_MOUNT_PATH = '/app';
+const NODE_MODULES_PATH = '/app/node_modules';
+
+function getFile(path) {
+// If path is under node_modules, use the volume
+if (path.startsWith(NODE_MODULES_PATH + '/')) {
+const relPath = path.slice(NODE_MODULES_PATH.length + 1);
+if (relPath in nodeModules) {
+return { source: 'node_modules_volume', content: nodeModules[relPath] };
+}
+return { source: 'node_modules_volume', error: 'Module not found: ' + path };
+}
+
+    // Otherwise, use the bind mount (host source)
+    if (path.startsWith(BIND_MOUNT_PATH + '/')) {
+      const relPath = path.slice(BIND_MOUNT_PATH.length + 1);
+      if (relPath in sourceFiles) {
+        return { source: 'bind_mount', content: sourceFiles[relPath] };
+      }
+      return { source: 'bind_mount', error: 'File not found: ' + path };
+    }
+
+    return { error: 'Path not in any mount: ' + path };
+
+}
+
+function editSourceFile(relPath, newContent) {
+// Simulates developer editing a file on the host — immediately visible in container
+sourceFiles[relPath] = newContent;
+return { ok: true, message: \`Hot reload: \${relPath} updated\` };
+}
+
+return { getFile, editSourceFile };
+}
+
+// Initial host source files (what's on the developer's machine)
+const hostSource = {
+'index.js': 'const express = require("express"); const app = express(); app.listen(3000);',
+'routes/users.js': 'module.exports = (app) => app.get("/users", (req, res) => res.json([]));',
+'package.json': '{ "name": "api", "version": "1.0.0" }',
+};
+
+// node_modules installed inside the container (different from host's node_modules)
+const containerNodeModules = {
+'express/index.js': '// Express 4.18.2 — compiled for linux/amd64',
+'express/package.json': '{ "name": "express", "version": "4.18.2", "os": ["linux"] }',
+};
+
+const devContainer = createDevContainer(hostSource, containerNodeModules);
+
+console.log('=== Reading files inside the dev container ===\\n');
+
+// Source files come from bind mount (host)
+console.log('GET /app/index.js:');
+console.log(devContainer.getFile('/app/index.js'));
+
+// node_modules come from the named volume (container-installed)
+console.log('\\nGET /app/node_modules/express/index.js:');
+console.log(devContainer.getFile('/app/node_modules/express/index.js'));
+
+// Hot reload: developer edits a file on their machine
+console.log('\\n=== Developer edits index.js on host ===');
+const editResult = devContainer.editSourceFile('index.js', 'const express = require("express"); const app = express(); app.get("/health", (req,res) => res.json({ok:true})); app.listen(3000);');
+console.log(editResult);
+
+// Container immediately sees the updated file (no rebuild)
+console.log('\\nGET /app/index.js after edit:');
+console.log(devContainer.getFile('/app/index.js'));
+
+// Express is still the linux-compiled version — not overwritten by bind mount
+console.log('\\nGET /app/node_modules/express/package.json (still volume version):');
+console.log(devContainer.getFile('/app/node_modules/express/package.json'));
+
+// File that doesn't exist in either location
+console.log('\\nGET /app/node_modules/lodash (not installed):');
+console.log(devContainer.getFile('/app/node_modules/lodash/index.js'));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why must the Node.js debug inspector bind to `0.0.0.0` instead of `127.0.0.1` inside a Docker container?"
+  options={[
+    "0.0.0.0 is required for Node.js to enable the inspector",
+    "127.0.0.1 binds to the container's loopback — not accessible from outside the container. 0.0.0.0 makes it reachable from the host.",
+    "0.0.0.0 is faster than 127.0.0.1 for debugging",
+    "The Docker daemon requires 0.0.0.0 for port forwarding to work",
+  ]}
+  answer={1}
+  explanation="Each container has its own loopback (127.0.0.1). If Node binds to 127.0.0.1 inside the container, the debugger is only reachable from within that container — not from VS Code on the host. Binding to 0.0.0.0 makes it listen on all network interfaces, which combined with -p 9229:9229, makes it reachable from the host."
+/>
+
+<Quiz
+  question="The `docker-compose.override.yml` file must be explicitly passed with `-f` for Docker Compose to use it."
+  options={["True", "False"]}
+  answer={1}
+  explanation="Docker Compose automatically detects and merges `docker-compose.override.yml` when you run `docker compose up` without any `-f` flags. To skip the override (e.g., in CI), you must explicitly specify only the base file: `docker compose -f docker-compose.yml up`."
+/>
+
+<FillBlank
+  question="VS Code Dev Containers use a ___ file to configure the development container, extensions, and post-create commands."
+  answer="devcontainer.json"
+/>
+
+## What you learned
+
+- Bind mounts + Nodemon enable hot reload: save a file on the host, the running container process restarts automatically
+- The node_modules volume prevents bind mounts from overwriting container-installed (Linux-compiled) modules
+- Node.js debugging in containers requires `--inspect=0.0.0.0:9229` and port mapping
+- VS Code Dev Containers run the entire dev environment inside the container — consistent tooling for every team member
+- `docker-compose.override.yml` isolates dev-only config; CI skips it by passing `-f docker-compose.yml` explicitly
+- `docker compose run --rm api npm test` runs one-off commands without leaving behind stopped containers

@@ -1,0 +1,304 @@
+---
+title: "Building Docker Images"
+description: "Write a Dockerfile, understand layer caching, and use multi-stage builds to shrink production images."
+phase: 4
+module: "4-4-docker-containers"
+order: 3
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - dockerfile
+  - layer-caching
+  - multi-stage-build
+  - dockerignore
+  - base-image
+---
+
+## Why this matters
+
+Knowing how to run existing images is useful. Knowing how to build your own is essential — it's how you package your application so it runs anywhere. A well-written Dockerfile keeps builds fast (via layer caching) and keeps images small (via multi-stage builds), which directly affects how quickly your team can iterate and deploy.
+
+## Dockerfile instructions
+
+A Dockerfile is a text file — a sequence of instructions Docker executes in order to build an image layer by layer.
+
+```dockerfile
+# Base image — always the first instruction
+FROM node:20-alpine
+
+# Set the working directory for subsequent instructions
+WORKDIR /app
+
+# Copy dependency manifests first (for caching — explained below)
+COPY package.json package-lock.json ./
+
+# Run a shell command — this creates a new layer
+RUN npm ci --only=production
+
+# Copy the rest of your source code
+COPY src/ ./src/
+
+# Declare the port the app listens on (documentation only — does not publish it)
+EXPOSE 3000
+
+# Build-time variable (not available at runtime unless also set in ENV)
+ARG NODE_ENV=production
+
+# Environment variable available at runtime
+ENV NODE_ENV=production
+
+# The default command to run when the container starts
+CMD ["node", "src/index.js"]
+```
+
+**`CMD` vs `ENTRYPOINT`**
+
+`CMD` sets the default command — it can be overridden at `docker run` time:
+
+```bash
+docker run myapp node src/debug.js   # overrides CMD
+```
+
+`ENTRYPOINT` sets the executable that always runs. You'd use it when the container is meant to be treated like a specific command:
+
+```dockerfile
+ENTRYPOINT ["node"]
+CMD ["src/index.js"]    # default argument to node
+```
+
+```bash
+docker run myapp src/other.js   # runs: node src/other.js
+```
+
+## Understanding layer caching
+
+Every Dockerfile instruction creates an immutable **layer**. Docker caches layers — if the instruction and its inputs haven't changed, Docker reuses the cached layer instead of re-running it. This makes rebuilds fast.
+
+The catch: **cache invalidation is sequential**. If layer N is invalidated, every layer after N must also be rebuilt.
+
+```dockerfile
+# BAD ordering — npm install runs every time any source file changes
+FROM node:20-alpine
+WORKDIR /app
+COPY . .                    # layer 2: any file change → invalidates
+RUN npm ci                  # layer 3: always rebuilds — slow!
+CMD ["node", "index.js"]
+
+# GOOD ordering — npm install only runs when package.json changes
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./  # layer 2: rarely changes
+RUN npm ci                              # layer 3: cached unless deps change
+COPY . .                               # layer 4: source changes → only this rebuilds
+CMD ["node", "index.js"]
+```
+
+In the good ordering, a typical edit-rebuild cycle only reruns layers 4+. The slow `npm ci` step is cached and takes milliseconds.
+
+## The .dockerignore file
+
+`.dockerignore` works like `.gitignore`. It tells Docker what to exclude from the **build context** — the directory sent to the daemon when you run `docker build`.
+
+```
+# .dockerignore
+node_modules      # don't overwrite the container's node_modules
+.env              # never include secrets in an image
+.git              # large and unnecessary
+.next             # build artifacts from the host (use multi-stage instead)
+coverage          # test artifacts
+*.log
+```
+
+Without `.dockerignore`, your `COPY . .` instruction would send `node_modules` (hundreds of MB) to the daemon and potentially overwrite the modules installed inside the container.
+
+## Multi-stage builds
+
+A single Dockerfile can have multiple `FROM` instructions — each starts a new **stage**. You can selectively copy artifacts from one stage to the next, leaving behind everything you don't need in production.
+
+```dockerfile
+# ─── Stage 1: Build ────────────────────────────────────────────
+FROM node:20 AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci                             # installs dev dependencies too
+COPY . .
+RUN npm run build                      # compiles TypeScript, bundles, etc.
+
+# ─── Stage 2: Production runtime ───────────────────────────────
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+# Create a non-root user for security
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
+# Copy ONLY what's needed from the builder stage
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package.json .
+COPY --from=builder /app/node_modules ./node_modules
+
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+The final image is built from the lean `node:20-alpine` base and contains only the compiled output and production dependencies — no TypeScript compiler, no test frameworks, no source maps.
+
+**Size comparison:**
+
+| Base image                  | Approx size |
+| --------------------------- | ----------- |
+| `node:20`                   | ~1.1 GB     |
+| `node:20-alpine`            | ~180 MB     |
+| Multi-stage (alpine runner) | ~80–150 MB  |
+| Google Distroless           | ~50–100 MB  |
+
+## Building and tagging
+
+```bash
+# Build using the Dockerfile in the current directory
+docker build -t myapp:1.0 .
+
+# Build a specific stage only (useful for debugging)
+docker build --target builder -t myapp:debug .
+
+# Build with a build argument
+docker build --build-arg NODE_ENV=staging -t myapp:staging .
+
+# Tag an existing image with a new name
+docker tag myapp:1.0 ghcr.io/myorg/myapp:1.0
+
+# Push to a registry
+docker push ghcr.io/myorg/myapp:1.0
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate Dockerfile layer caching
+// Each instruction is { type, content }
+// If cache[content] exists, the layer is reused; otherwise a new ID is generated
+
+function buildImage(instructions, cache = {}) {
+const newCache = { ...cache };
+const layers = [];
+let cacheHit = true; // track whether we're still hitting the cache
+
+for (const instruction of instructions) {
+const cacheKey = \`\${instruction.type}:\${instruction.content}\`;
+
+    if (cacheHit && newCache[cacheKey]) {
+      // Cache hit — reuse existing layer
+      layers.push({
+        type: instruction.type,
+        layerId: newCache[cacheKey],
+        source: 'CACHE',
+      });
+    } else {
+      // Cache miss — build a new layer
+      // Once one layer misses, all subsequent layers also miss
+      cacheHit = false;
+      const newLayerId = 'sha256:' + Math.random().toString(36).slice(2, 10);
+      newCache[cacheKey] = newLayerId;
+      layers.push({
+        type: instruction.type,
+        layerId: newLayerId,
+        source: 'BUILD',
+      });
+    }
+
+}
+
+return { layers, updatedCache: newCache };
+}
+
+// ── BAD ordering: source first, then npm install ──
+const badInstructions = [
+{ type: 'FROM', content: 'node:20-alpine' },
+{ type: 'WORKDIR', content: '/app' },
+{ type: 'COPY', content: '. .' }, // source code (changes often)
+{ type: 'RUN', content: 'npm ci' }, // always re-runs after COPY
+{ type: 'CMD', content: 'node index.js' },
+];
+
+// ── GOOD ordering: package.json first ──
+const goodInstructions = [
+{ type: 'FROM', content: 'node:20-alpine' },
+{ type: 'WORKDIR', content: '/app' },
+{ type: 'COPY', content: 'package.json package-lock.json ./' }, // rarely changes
+{ type: 'RUN', content: 'npm ci' }, // cached!
+{ type: 'COPY', content: '. .' }, // source code
+{ type: 'CMD', content: 'node index.js' },
+];
+
+console.log('=== First build (cold cache) ===');
+const firstBuild = buildImage(goodInstructions, {});
+firstBuild.layers.forEach(l => console.log(\` \${l.source.padEnd(6)} \${l.type}: \${l.layerId}\`));
+
+// Simulate changing source code (COPY . . changes), deps unchanged
+const changedSourceInstructions = goodInstructions.map(ins =>
+ins.content === '. .'
+? { ...ins, content: '. . [modified: src/index.js changed]' }
+: ins
+);
+
+console.log('\\n=== Second build (source changed, deps same) ===');
+const secondBuild = buildImage(changedSourceInstructions, firstBuild.updatedCache);
+secondBuild.layers.forEach(l => console.log(\` \${l.source.padEnd(6)} \${l.type}: \${l.layerId}\`));
+
+console.log('\\n Notice: FROM/WORKDIR/COPY package.json/RUN npm ci are all CACHE hits!');
+console.log(' Only the COPY . . and CMD layers are rebuilt.');
+
+// Show what happens with BAD ordering
+const firstBadBuild = buildImage(badInstructions, {});
+const changedSourceBad = badInstructions.map(ins =>
+ins.content === '. .'
+? { ...ins, content: '. . [modified]' }
+: ins
+);
+console.log('\\n=== BAD ordering — source changed ===');
+const secondBadBuild = buildImage(changedSourceBad, firstBadBuild.updatedCache);
+secondBadBuild.layers.forEach(l => console.log(\` \${l.source.padEnd(6)} \${l.type}: \${l.layerId}\`));
+console.log('\\n Notice: npm ci ALSO rebuilds because COPY . . comes before it!');`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should you COPY package.json before COPY . . in a Dockerfile?"
+  options={[
+    "package.json must be parsed before source code",
+    "Layer caching: if package.json hasn't changed, npm install is skipped on rebuild",
+    "Docker requires package.json to exist before other files",
+    "npm ci only works when package.json is in the root layer",
+  ]}
+  answer={1}
+  explanation="Docker caches layers in order. If you copy source code first, any file change invalidates the layer — and npm install (the next layer) must re-run. Copying package.json first lets the npm install layer be cached as long as dependencies haven't changed."
+/>
+
+<Quiz
+  question="A multi-stage Dockerfile build results in a final image that contains files from all stages."
+  options={["True", "False"]}
+  answer={1}
+  explanation="Only files explicitly copied with COPY --from=stagename are included in the final image. Intermediate stages (the builder) are used during the build process but discarded — they don't add to the final image size."
+/>
+
+<FillBlank
+  question="The ___ file tells Docker which files to exclude from the build context, similar to .gitignore."
+  answer=".dockerignore"
+/>
+
+## What you learned
+
+- Dockerfile instructions (`FROM`, `COPY`, `RUN`, `CMD`, `EXPOSE`, `ENV`, `ARG`, `USER`) each create a layer
+- Docker caches layers — once a layer changes, all subsequent layers rebuild
+- Cache-friendly ordering: copy dependency manifests first, install, then copy source
+- `.dockerignore` prevents large or sensitive files from entering the build context
+- Multi-stage builds separate the build environment from the runtime environment, producing much smaller production images
+- `node:20-alpine` is roughly 6x smaller than `node:20`; a well-tuned multi-stage build can be even smaller

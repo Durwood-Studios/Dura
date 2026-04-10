@@ -1,0 +1,363 @@
+---
+title: "Docker Compose"
+description: "Orchestrate multi-container apps — web server, database, and cache — with a single YAML file."
+phase: 4
+module: "4-4-docker-containers"
+order: 4
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - docker-compose
+  - services
+  - depends-on
+  - network
+  - volume
+  - compose-file
+---
+
+## Why this matters
+
+Real applications aren't just one container. Your API needs a database, maybe a Redis cache, maybe an email service for development. Running these by hand with `docker run` on separate terminals is painful. Docker Compose lets you define the entire stack in one YAML file and start everything with a single command.
+
+## The docker-compose.yml structure
+
+A Compose file describes your application's services, networks, and volumes. Here's a typical web app stack:
+
+```yaml
+# docker-compose.yml
+services:
+  api:
+    build: . # build from Dockerfile in current dir
+    ports:
+      - "3000:3000" # HOST:CONTAINER
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgres://postgres:secret@db:5432/myapp
+    depends_on:
+      db:
+        condition: service_healthy # wait for healthcheck, not just startup
+    volumes:
+      - .:/app # bind mount source for hot reload
+      - node_modules:/app/node_modules # named volume prevents bind from wiping modules
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: myapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # persist db between restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data: # Docker manages this volume
+  node_modules:
+```
+
+## Key Compose commands
+
+```bash
+# Start all services (detached — runs in background)
+docker compose up -d
+
+# Start and rebuild images first
+docker compose up -d --build
+
+# Stop and remove containers (data in named volumes is preserved)
+docker compose down
+
+# Stop AND remove volumes (wipes the database!)
+docker compose down -v
+
+# View logs for all services
+docker compose logs -f
+
+# View logs for one service
+docker compose logs -f api
+
+# Run a command in a running service
+docker compose exec api bash
+docker compose exec db psql -U postgres myapp
+
+# Rebuild a single service without restarting others
+docker compose up -d --build api
+
+# Scale a service (run 3 API instances)
+docker compose up -d --scale api=3
+```
+
+## How depends_on works
+
+`depends_on` controls **start order** — but the naive version only waits for the container to start, not for the service inside to be ready. A database container starts in seconds, but PostgreSQL takes a moment to initialize. Without a health check, your API might crash on startup trying to connect to a not-yet-ready database.
+
+```yaml
+# Naive — waits for container start, not db readiness
+depends_on:
+  - db
+
+# Better — waits for the health check to pass
+depends_on:
+  db:
+    condition: service_healthy
+```
+
+Health check conditions:
+
+- `service_started` — container is running (default)
+- `service_healthy` — health check has passed
+- `service_completed_successfully` — container exited with code 0 (for init jobs)
+
+## Networking between services
+
+All services in a Compose file share a default network. Docker's internal DNS lets containers reach each other **by service name**:
+
+```yaml
+services:
+  api:
+    environment:
+      # "db" is the service name — resolves to the db container's IP
+      DATABASE_URL: postgres://postgres:secret@db:5432/myapp
+      REDIS_URL: redis://redis:6379
+  db:
+    image: postgres:16-alpine
+  redis:
+    image: redis:7-alpine
+```
+
+No IP addresses needed. The service name is the hostname. This is why the `DATABASE_URL` in the example above has `@db:5432` — `db` resolves to the database container on the internal network.
+
+## Environment variables and overrides
+
+For secrets and environment-specific config, use an env file:
+
+```yaml
+services:
+  api:
+    env_file:
+      - .env # loaded from disk, not baked into the image
+```
+
+For dev-specific overrides, create `docker-compose.override.yml`. Docker Compose automatically merges it:
+
+```yaml
+# docker-compose.override.yml (only for local dev — don't commit secrets)
+services:
+  api:
+    volumes:
+      - .:/app
+    environment:
+      - DEBUG=true
+```
+
+## Compose profiles
+
+Profiles let you start only a subset of services:
+
+```yaml
+services:
+  api:
+    # no profile — always starts
+  db:
+    # no profile — always starts
+  mailhog:
+    image: mailhog/mailhog
+    profiles: ["dev"] # only starts when --profile dev is passed
+  adminer:
+    image: adminer
+    profiles: ["dev", "debug"]
+```
+
+```bash
+docker compose --profile dev up -d    # starts api, db, mailhog
+docker compose up -d                  # starts only api, db
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a Compose-like orchestrator with dependency ordering
+// Topological sort ensures services start after their dependencies
+
+function createCompose(config) {
+// config = { services: { name: { image, env, ports, dependsOn: [] } } }
+const state = {};
+
+// Initialize all services as stopped
+for (const name of Object.keys(config.services)) {
+state[name] = { status: 'stopped', startedAt: null };
+}
+
+function topoSort(services) {
+const visited = new Set();
+const result = [];
+
+    function visit(name) {
+      if (visited.has(name)) return;
+      visited.add(name);
+      const deps = services[name].dependsOn || [];
+      for (const dep of deps) {
+        visit(dep);
+      }
+      result.push(name);
+    }
+
+    for (const name of Object.keys(services)) {
+      visit(name);
+    }
+
+    return result;
+
+}
+
+return {
+up() {
+const startOrder = topoSort(config.services);
+const log = [];
+
+      for (const name of startOrder) {
+        const svc = config.services[name];
+        const deps = svc.dependsOn || [];
+
+        // Verify all dependencies are already running
+        for (const dep of deps) {
+          if (state[dep].status !== 'running') {
+            log.push(\`ERROR: \${name} depends on \${dep}, but \${dep} is not running\`);
+            return { ok: false, log };
+          }
+        }
+
+        state[name] = { status: 'running', startedAt: new Date().toISOString() };
+        log.push(\`Starting \${name} (\${svc.image || 'build'})... done\`);
+      }
+
+      return { ok: true, log };
+    },
+
+    down() {
+      const log = [];
+      // Stop in reverse order
+      const names = Object.keys(config.services).reverse();
+      for (const name of names) {
+        state[name] = { status: 'stopped', startedAt: null };
+        log.push(\`Stopping \${name}... done\`);
+      }
+      return { ok: true, log };
+    },
+
+    status() {
+      return Object.fromEntries(
+        Object.entries(state).map(([name, s]) => [name, s.status])
+      );
+    },
+
+};
+}
+
+// Define a three-service stack
+const compose = createCompose({
+services: {
+redis: {
+image: 'redis:7-alpine',
+ports: ['6379:6379'],
+dependsOn: [],
+},
+db: {
+image: 'postgres:16-alpine',
+env: { POSTGRES_PASSWORD: 'secret' },
+ports: ['5432:5432'],
+dependsOn: [],
+},
+api: {
+image: null, // built from Dockerfile
+ports: ['3000:3000'],
+env: { DATABASE_URL: 'postgres://postgres:secret@db:5432/myapp' },
+dependsOn: ['db', 'redis'], // must start after db and redis
+},
+},
+});
+
+console.log('=== docker compose up -d ===');
+const upResult = compose.up();
+upResult.log.forEach(line => console.log(' ', line));
+
+console.log('\\nService status after up:');
+console.log(compose.status());
+
+console.log('\\n=== docker compose down ===');
+const downResult = compose.down();
+downResult.log.forEach(line => console.log(' ', line));
+
+console.log('\\nService status after down:');
+console.log(compose.status());
+
+// Show that dependency order is enforced
+console.log('\\n=== What happens if api has no dependencies to start with? ===');
+const badCompose = createCompose({
+services: {
+api: {
+image: 'myapp',
+dependsOn: ['db'], // db listed but not defined — shows error handling
+},
+db: {
+image: 'postgres:16-alpine',
+dependsOn: [],
+},
+},
+});
+// Start only db first to show api can start after
+const partialResult = badCompose.up();
+partialResult.log.forEach(line => console.log(' ', line));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="When using `depends_on` with `condition: service_healthy`, when does the dependent service start?"
+  options={[
+    "Immediately when the dependency container starts",
+    "After the dependency's health check has passed",
+    "After a fixed 30-second delay",
+    "Only if the dependency container exits successfully",
+  ]}
+  answer={1}
+  explanation="The `service_healthy` condition makes Docker Compose wait until the dependency's HEALTHCHECK instruction reports healthy. This is much safer than the default `service_started`, which only waits for the container process to begin — not for the service inside to be ready."
+/>
+
+<Quiz
+  question="Services in the same Docker Compose file can reach each other using the service name as a hostname."
+  options={["True", "False"]}
+  answer={0}
+  explanation="Docker Compose creates a shared network for all services. Docker's internal DNS resolves service names to container IPs, so the 'api' service can connect to 'db:5432' without knowing the IP address."
+/>
+
+<FillBlank
+  question="The `docker compose ___` command stops and removes containers but preserves data in named volumes."
+  answer="down"
+/>
+
+## What you learned
+
+- Docker Compose defines multi-container stacks in a single YAML file with services, networks, and volumes
+- `docker compose up -d` starts everything; `docker compose down` stops it cleanly
+- `depends_on` with `condition: service_healthy` is safer than the default — it waits for readiness, not just container startup
+- Services on the same Compose network reach each other by service name via Docker's internal DNS
+- `docker-compose.override.yml` adds dev-specific config without modifying the base file
+- Compose profiles let you conditionally start services like dev tools and mail catchers

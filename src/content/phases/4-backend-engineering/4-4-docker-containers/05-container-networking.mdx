@@ -1,0 +1,296 @@
+---
+title: "Container Networking"
+description: "Port mapping, bridge networks, and service discovery — how containers talk to each other and the outside world."
+phase: 4
+module: "4-4-docker-containers"
+order: 5
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "understand"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - bridge-network
+  - port-mapping
+  - service-discovery
+  - dns-resolution
+  - container-networking
+---
+
+## Why this matters
+
+Most container problems that aren't "my code is broken" are networking problems. Understanding how containers find each other, why a port binding fails, and how to isolate database containers from public exposure will save you hours of debugging and is essential for building secure multi-service architectures.
+
+## Docker network types
+
+Docker provides several network drivers, each with different isolation characteristics:
+
+**Bridge (default)** — creates a private internal network. Containers on the same bridge can communicate; they're isolated from containers on other bridges. Each Compose project gets its own bridge network automatically.
+
+**Host** — the container shares the host machine's network namespace directly. No port mapping needed — a server on port 3000 in the container is accessible on port 3000 of the host. Linux-only; not available on Docker Desktop for macOS/Windows. Used for performance-critical apps where the overhead of NAT matters.
+
+**None** — completely disables networking. The container has no network interfaces except loopback. Used for batch jobs that don't need network access.
+
+```bash
+# List networks
+docker network ls
+
+# Create a custom bridge network
+docker network create my-network
+
+# Inspect a network (shows connected containers and their IPs)
+docker network inspect my-network
+
+# Connect a running container to a network
+docker network connect my-network my-container
+
+# Disconnect
+docker network disconnect my-network my-container
+```
+
+## Port mapping in depth
+
+Containers have their own network namespace — their ports are invisible to the host unless you explicitly map them.
+
+```
+Host machine (your laptop or server)
+┌─────────────────────────────────────────┐
+│  localhost:3000  ──────────────────────┐│
+│  localhost:5432  ─────────────────┐   ││
+│                                   │   ││
+│  ┌──────────────────┐  ┌──────────┴───┴┤
+│  │  db container    │  │  api container│
+│  │  port 5432       │  │  port 3000    │
+│  └──────────────────┘  └───────────────┤
+│      (bridge network — containers       │
+│       can reach each other directly)   │
+└─────────────────────────────────────────┘
+```
+
+```bash
+# Map host port 3000 to container port 3000
+docker run -p 3000:3000 myapp
+
+# Map to a different host port (useful if 5432 is already in use locally)
+docker run -p 5433:5432 postgres
+
+# Bind only to localhost — not accessible from LAN
+docker run -p 127.0.0.1:5432:5432 postgres
+
+# Expose all ports the image declares (Docker chooses random host ports)
+docker run -P myapp
+```
+
+**Security note:** By default, `-p 0.0.0.0:PORT:PORT` binds on all network interfaces — your container is accessible from other machines on the same network. For databases and internal services, bind explicitly to `127.0.0.1`.
+
+## Container-to-container communication
+
+Containers on the same network communicate directly — no port mapping needed. Docker runs an internal DNS server that resolves container names (and service names in Compose) to IP addresses.
+
+```
+api container                    db container
+┌─────────────┐                  ┌─────────────┐
+│             │  direct network  │             │
+│  connects → │ ───────────────► │  :5432      │
+│  to "db"    │  (no host port   │             │
+│             │   mapping needed)│             │
+└─────────────┘                  └─────────────┘
+     both on: my-app_default bridge network
+```
+
+This is why Compose service names work as hostnames: `DATABASE_URL=postgres://postgres:secret@db:5432/myapp`. The `db` resolves via Docker DNS to the container's internal IP.
+
+## Multi-network isolation
+
+In production architectures, you often want a frontend that's public-facing, a backend that's only reachable from the frontend, and a database that's only reachable from the backend.
+
+```yaml
+# docker-compose.yml
+networks:
+  public: # frontend can be accessed from outside
+  private: # backend + db — not exposed to host
+
+services:
+  frontend:
+    image: nginx
+    ports:
+      - "80:80"
+    networks:
+      - public
+      - private # can reach the api
+
+  api:
+    build: .
+    networks:
+      - private # reachable from frontend, NOT from host directly
+
+  db:
+    image: postgres:16-alpine
+    networks:
+      - private # only reachable from api — not from frontend or host
+    # No ports: mapping — db is not accessible from the host machine
+```
+
+This is defense in depth: even if an attacker gets into the frontend container, they can't directly reach the database — only the api can.
+
+## DNS resolution and aliases
+
+Docker's internal DNS resolves service names to container IPs. You can also add network aliases:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    networks:
+      private:
+        aliases:
+          - database # now reachable as either "postgres" or "database"
+```
+
+Aliases are useful when migrating: you can temporarily have both the old name and the new name resolve to the same container.
+
+## Diagnosing networking issues
+
+```bash
+# Check if a container can reach another (runs curl inside the container)
+docker exec api curl -s http://db:5432
+
+# DNS lookup from inside a container
+docker exec api nslookup db
+
+# See a container's network config
+docker inspect api | python3 -m json.tool | grep -A 20 Networks
+
+# View iptables rules Docker created (Linux only)
+docker network inspect bridge
+
+# Test port connectivity
+docker exec api nc -zv db 5432
+```
+
+The most common networking mistake is trying to use `localhost` from inside a container to reach another container — `localhost` inside a container refers to the container itself, not the host machine. Use the service name instead.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate Docker container networking with DNS-style service discovery
+
+function createNetwork(name) {
+const members = {}; // containerName → ip
+
+return {
+name,
+connect(containerName, ip) {
+members[containerName] = ip;
+},
+disconnect(containerName) {
+delete members[containerName];
+},
+resolve(hostname) {
+// Docker's internal DNS: look up by container/service name
+return members[hostname] || null;
+},
+list() {
+return { ...members };
+},
+};
+}
+
+function canReach(fromContainer, toContainer, networks) {
+// Two containers can reach each other if they share at least one network
+for (const network of Object.values(networks)) {
+const members = network.list();
+if (fromContainer in members && toContainer in members) {
+return { canReach: true, viaNetwork: network.name };
+}
+}
+return { canReach: false };
+}
+
+// Set up a three-tier architecture
+const publicNet = createNetwork('myapp_public');
+const privateNet = createNetwork('myapp_private');
+
+// frontend is on BOTH networks (bridges public and private)
+publicNet.connect('frontend', '172.18.0.2');
+privateNet.connect('frontend', '10.0.0.2');
+
+// api is only on private
+privateNet.connect('api', '10.0.0.3');
+
+// db is only on private
+privateNet.connect('db', '10.0.0.4');
+
+// Simulate an external request hitting port 80 → frontend
+console.log('=== Network topology ===');
+console.log('Public network:', publicNet.list());
+console.log('Private network:', privateNet.list());
+
+// Resolve service names (like Docker DNS)
+console.log('\\n=== Service discovery (DNS resolution) ===');
+console.log('frontend resolves on public:', publicNet.resolve('frontend'));
+console.log('api resolves on private:', privateNet.resolve('api'));
+console.log('db resolves on private:', privateNet.resolve('db'));
+console.log('db resolves on public:', publicNet.resolve('db'), '(null = not on this network)');
+
+// Can containers reach each other?
+const allNetworks = { publicNet, privateNet };
+console.log('\\n=== Reachability checks ===');
+
+const checks = [
+['frontend', 'api'],
+['api', 'db'],
+['frontend', 'db'], // should NOT be able to reach directly
+['db', 'api'],
+];
+
+for (const [from, to] of checks) {
+const result = canReach(from, to, allNetworks);
+const icon = result.canReach ? 'YES' : 'NO ';
+const via = result.canReach ? \`(via \${result.viaNetwork})\` : '(no shared network)';
+console.log(\` \${from.padEnd(10)} → \${to.padEnd(10)}: \${icon} \${via}\`);
+}
+
+console.log('\\n=== Security outcome ===');
+console.log('The db is not accessible from the public network or host — only from api.');
+console.log('Even if frontend is compromised, it cannot connect directly to db.');`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="A container tries to connect to 'localhost:5432' to reach the database. Why does this fail?"
+  options={[
+    "PostgreSQL doesn't support localhost connections",
+    "localhost inside a container refers to the container itself, not the host machine",
+    "Docker blocks all localhost connections by default",
+    "The port mapping is missing",
+  ]}
+  answer={1}
+  explanation="Each container has its own network namespace. Inside a container, localhost refers to the container's loopback interface — not the host machine and not other containers. To reach the database container, use the service name (e.g., 'db:5432')."
+/>
+
+<Quiz
+  question="In a multi-network Compose setup, a database container with no `ports:` mapping and only connected to a private network can be accessed from the host machine."
+  options={["True", "False"]}
+  answer={1}
+  explanation="Without a `ports:` mapping, the container's ports are not published to the host. And if the container is only on a private internal network, nothing outside that network (including the host) can connect to it directly — only other containers on the same private network."
+/>
+
+<FillBlank
+  question="Docker's internal ___ server resolves service names to container IP addresses within a Compose network."
+  answer="DNS"
+/>
+
+## What you learned
+
+- Docker network types: bridge (isolated, default), host (shared kernel network, Linux-only), none (no networking)
+- Port mapping uses `-p HOST:CONTAINER` syntax; binding to `127.0.0.1` limits access to localhost only
+- Containers on the same network communicate by service name — no port mapping needed
+- Docker's internal DNS resolves service names to container IPs automatically
+- Multi-network setups isolate tiers: frontend on public+private, api on private, db on private with no port mapping
+- Never use `localhost` inside a container to mean another container — use the service name

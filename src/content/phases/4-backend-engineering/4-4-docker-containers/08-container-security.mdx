@@ -1,0 +1,355 @@
+---
+title: "Container Security"
+description: "Run as non-root, scan images for vulnerabilities, and manage secrets without baking them into images."
+phase: 4
+module: "4-4-docker-containers"
+order: 8
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - container-security
+  - non-root-user
+  - image-scanning
+  - secrets-management
+  - least-privilege
+---
+
+## Why this matters
+
+Containers provide isolation, but they're not a security silver bullet. A misconfigured container can expose secrets in an image layer, run processes with unnecessary root privileges, or contain packages with known CVEs. Security is built in — not added later. These practices are standard at any professional team.
+
+## The principle of least privilege
+
+Containers run as root by default. That means if your application process is compromised — through a remote code execution vulnerability, for example — the attacker has root inside the container. On Linux without additional hardening, root in a container can sometimes escape to root on the host.
+
+The fix is simple: create a non-root user in your Dockerfile.
+
+```dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+# node:20-alpine already includes a 'node' user (UID 1000)
+# For other base images, create one explicitly:
+# RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+COPY package.json package-lock.json ./
+RUN npm ci --only=production
+
+COPY src/ ./src/
+
+# Ensure the app directory is owned by the node user
+RUN chown -R node:node /app
+
+# Switch to non-root user
+USER node
+
+EXPOSE 3000
+CMD ["node", "src/index.js"]
+```
+
+The `node:20-alpine` base image already includes a `node` user with UID 1000. Using it is a one-line change (`USER node`) with significant security benefit.
+
+## Read-only filesystems
+
+If your app doesn't need to write to disk, remove that ability entirely:
+
+```bash
+docker run --read-only myapp
+# If the app writes to /tmp, allow it with tmpfs:
+docker run --read-only --tmpfs /tmp:size=50m myapp
+```
+
+In Compose:
+
+```yaml
+services:
+  api:
+    read_only: true
+    tmpfs:
+      - /tmp
+```
+
+A read-only filesystem means malware can't be written to the container's filesystem even if an attacker gains code execution. Combined with a non-root user, your attack surface shrinks dramatically.
+
+## Secrets management
+
+Never put secrets in a Dockerfile or image. They persist in image layers even if you delete them in a later layer:
+
+```dockerfile
+# WRONG — this secret is baked into layer 2 forever
+FROM node:20-alpine
+ENV DATABASE_PASSWORD=supersecret    # visible in docker inspect, docker history
+RUN echo "secret" > /app/.env
+RUN rm /app/.env                     # too late — layer 2 still has it
+```
+
+**Safe patterns:**
+
+```bash
+# Pass secrets at runtime via -e (not baked into the image)
+docker run -e DATABASE_URL="postgres://..." myapp
+
+# From a file (contents not visible in docker ps or inspect)
+docker run --env-file .env myapp
+
+# Docker secrets (Swarm mode — production)
+docker secret create db_password db_password.txt
+```
+
+In Compose for development, use an env_file:
+
+```yaml
+services:
+  api:
+    env_file:
+      - .env # .env is gitignored — secrets stay off the image
+```
+
+For production, secrets come from a secrets manager (AWS Secrets Manager, HashiCorp Vault, GCP Secret Manager) and are injected as environment variables at deploy time — never stored in the image.
+
+## Image scanning
+
+Images can contain packages with known CVEs (Common Vulnerabilities and Exposures). Scan regularly.
+
+```bash
+# Docker Scout (built into Docker Desktop)
+docker scout cves myapp:1.0
+
+# Trivy (open source, widely used in CI)
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  aquasec/trivy:latest image myapp:1.0
+
+# Trivy in CI (GitHub Actions example)
+# - uses: aquasecurity/trivy-action@master
+#   with:
+#     image-ref: myapp:${{ github.sha }}
+#     exit-code: '1'          # fail the build if HIGH or CRITICAL CVEs found
+#     severity: 'HIGH,CRITICAL'
+```
+
+The most impactful thing you can do to reduce CVEs: use a minimal base image. Fewer packages means fewer vulnerabilities.
+
+| Base image               | Approximate CVE count |
+| ------------------------ | --------------------- |
+| `node:20` (Debian-based) | 50–200+               |
+| `node:20-alpine`         | 10–30                 |
+| Distroless (Google)      | 0–5                   |
+| Chainguard               | Near zero             |
+
+## Capability dropping
+
+Linux capabilities are fine-grained permissions beyond the root/non-root binary. By default, Docker grants a subset of capabilities. You can remove all and add back only what you need:
+
+```bash
+# Drop all capabilities, add back only the ability to bind to ports < 1024
+docker run \
+  --cap-drop ALL \
+  --cap-add NET_BIND_SERVICE \
+  nginx
+```
+
+In Compose:
+
+```yaml
+services:
+  api:
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE # only if you bind to port 80 or 443
+```
+
+If your app runs on a port above 1024 (like 3000) as a non-root user, you can drop ALL capabilities without adding any back.
+
+## Security checklist
+
+Before shipping a containerized application:
+
+```
+[ ] Non-root user (USER instruction in Dockerfile)
+[ ] Read-only filesystem where possible (--read-only)
+[ ] No secrets in ENV, COPY, or any image layer
+[ ] Secrets come from runtime environment variables or secrets manager
+[ ] Base image pinned to a specific version (not :latest)
+[ ] Image scanned with Trivy or Docker Scout
+[ ] .dockerignore excludes .env, .git, node_modules
+[ ] Capabilities dropped to minimum required set
+[ ] No debug/inspector ports exposed in production
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Dockerfile security auditor
+// Checks an array of Dockerfile instructions for common security issues
+
+function auditDockerfile(instructions) {
+const issues = [];
+let hasUserInstruction = false;
+
+// Check for patterns that indicate secrets in ENV values
+const secretKeywords = ['PASSWORD', 'SECRET', 'KEY', 'TOKEN', 'PRIVATE', 'CREDENTIAL'];
+
+for (const instruction of instructions) {
+const { type, value } = instruction;
+
+    // Check for non-root USER instruction
+    if (type === 'USER') {
+      const user = value.trim().toLowerCase();
+      if (user !== 'root' && user !== '0') {
+        hasUserInstruction = true;
+      }
+    }
+
+    // Check for secrets in ENV instructions
+    if (type === 'ENV') {
+      for (const keyword of secretKeywords) {
+        if (value.toUpperCase().includes(keyword)) {
+          issues.push({
+            severity: 'high',
+            message: \`Possible secret in ENV: "\${value.split('=')[0]}" — never bake secrets into images\`,
+          });
+          break;
+        }
+      }
+    }
+
+    // Check for :latest tag in FROM
+    if (type === 'FROM') {
+      if (value.includes(':latest') || (!value.includes(':') && !value.includes(' AS '))) {
+        const imageName = value.split(' ')[0];
+        if (!imageName.includes(':')) {
+          issues.push({
+            severity: 'medium',
+            message: \`FROM \${imageName} uses no tag — pin to a specific version for reproducibility\`,
+          });
+        } else if (value.includes(':latest')) {
+          issues.push({
+            severity: 'medium',
+            message: \`FROM uses :latest tag — pin to a specific version like node:20.11.0-alpine\`,
+          });
+        }
+      }
+    }
+
+    // Check for apt-get without --no-install-recommends
+    if (type === 'RUN' && value.includes('apt-get install') && !value.includes('--no-install-recommends')) {
+      issues.push({
+        severity: 'low',
+        message: \`apt-get install without --no-install-recommends installs unnecessary packages, increasing image size and attack surface\`,
+      });
+    }
+
+    // Check for curl | bash (supply chain risk)
+    if (type === 'RUN' && (value.includes('curl') || value.includes('wget')) && value.includes('| bash')) {
+      issues.push({
+        severity: 'high',
+        message: \`Piping curl/wget to bash is a supply chain attack risk — download, verify, then execute separately\`,
+      });
+    }
+
+}
+
+// Missing USER instruction is high severity
+if (!hasUserInstruction) {
+issues.push({
+severity: 'high',
+message: 'No non-root USER instruction — container runs as root by default',
+});
+}
+
+const bySeverity = { high: [], medium: [], low: [] };
+for (const issue of issues) {
+bySeverity[issue.severity].push(issue.message);
+}
+
+return { totalIssues: issues.length, issues: bySeverity };
+}
+
+// ── Insecure Dockerfile ──
+const insecureDockerfile = [
+{ type: 'FROM', value: 'node:latest' },
+{ type: 'WORKDIR', value: '/app' },
+{ type: 'COPY', value: '. .' },
+{ type: 'RUN', value: 'apt-get install -y curl git' },
+{ type: 'ENV', value: 'DATABASE_PASSWORD=supersecret123' },
+{ type: 'ENV', value: 'API_KEY=sk-1234567890abcdef' },
+{ type: 'RUN', value: 'curl https://install.example.com | bash' },
+{ type: 'CMD', value: 'node index.js' },
+// No USER instruction
+];
+
+// ── Secure Dockerfile ──
+const secureDockerfile = [
+{ type: 'FROM', value: 'node:20.11.0-alpine AS runner' },
+{ type: 'WORKDIR', value: '/app' },
+{ type: 'COPY', value: 'package.json package-lock.json ./' },
+{ type: 'RUN', value: 'npm ci --only=production' },
+{ type: 'COPY', value: 'src/ ./src/' },
+{ type: 'RUN', value: 'chown -R node:node /app' },
+{ type: 'USER', value: 'node' },
+{ type: 'CMD', value: 'node src/index.js' },
+];
+
+console.log('=== Insecure Dockerfile Audit ===');
+const insecureResult = auditDockerfile(insecureDockerfile);
+console.log(\`Total issues: \${insecureResult.totalIssues}\`);
+console.log('HIGH:');
+insecureResult.issues.high.forEach(m => console.log(' [HIGH]', m));
+console.log('MEDIUM:');
+insecureResult.issues.medium.forEach(m => console.log(' [MED] ', m));
+console.log('LOW:');
+insecureResult.issues.low.forEach(m => console.log(' [LOW] ', m));
+
+console.log('\\n=== Secure Dockerfile Audit ===');
+const secureResult = auditDockerfile(secureDockerfile);
+console.log(\`Total issues: \${secureResult.totalIssues}\`);
+if (secureResult.totalIssues === 0) {
+console.log('No issues found — this Dockerfile follows security best practices.');
+}`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="You delete a secret from a Dockerfile layer using `RUN rm /app/.env` in a later layer. Is the secret now safe?"
+  options={[
+    "Yes — it was removed from the final image",
+    "No — the secret persists in the earlier layer and can be viewed with `docker history`",
+    "Yes — Docker squashes layers on build",
+    "No — but only if you use `--squash` flag when building",
+  ]}
+  answer={1}
+  explanation="Docker images are immutable layers. Even if you delete a file in a later RUN instruction, the file still exists in the earlier layer and is accessible via `docker history` or by running a container with the intermediate image. Never put secrets in Dockerfile instructions — pass them at runtime."
+/>
+
+<Quiz
+  question="Dropping all Linux capabilities (`--cap-drop ALL`) from a container prevents it from making any system calls."
+  options={["True", "False"]}
+  answer={1}
+  explanation="Capabilities and system calls (syscalls) are separate mechanisms. `--cap-drop ALL` removes granted capabilities (like `NET_ADMIN`, `SYS_PTRACE`) but the container can still make normal syscalls. For deeper restriction, you'd also use a seccomp profile. But dropping capabilities is still a meaningful security improvement."
+/>
+
+<FillBlank
+  question="The ___ principle means giving a process only the permissions it needs and nothing more — for containers this means running as non-root."
+  answer="least privilege"
+/>
+
+## What you learned
+
+- Containers run as root by default — add `USER node` (or another non-root user) to every production Dockerfile
+- Read-only filesystems prevent malware from writing itself to the container even during an active exploit
+- Secrets must never appear in `ENV`, `COPY`, or `RUN` instructions — they persist in image layers permanently
+- Pass secrets at runtime via environment variables, `--env-file`, or a secrets manager
+- Image scanning (Trivy, Docker Scout) finds CVEs in base images and installed packages — automate it in CI
+- Minimal base images (Alpine, Distroless) have dramatically fewer CVEs than full Debian/Ubuntu-based images
+- Dropping Linux capabilities reduces the blast radius of a compromised container

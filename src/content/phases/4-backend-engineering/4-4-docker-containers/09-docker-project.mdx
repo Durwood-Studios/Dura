@@ -1,0 +1,391 @@
+---
+title: "Docker Project: Containerize Your API"
+description: "Package the Express API and PostgreSQL from prior modules into a production-ready Docker Compose stack."
+phase: 4
+module: "4-4-docker-containers"
+order: 9
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - docker-project
+  - multi-stage-build
+  - health-check
+  - compose-stack
+  - production-ready
+---
+
+## Why this matters
+
+Everything in this module comes together here: a multi-stage Dockerfile, a Compose stack with dependency ordering, health checks, volumes, environment configuration, and security best practices. This is the pattern you'll use to containerize every backend project — and the output is something you can actually deploy.
+
+## What we're building
+
+A production-ready Compose stack with two services:
+
+- **`api`** — the Express/Node.js bookshelf API from Module 4-2, containerized with a multi-stage Dockerfile
+- **`db`** — PostgreSQL 16, with a named volume so data survives restarts
+
+The api waits for the db to be healthy before starting. Both services communicate over a private internal network. The database is not exposed to the host. The API runs as a non-root user.
+
+## Step 1: The Dockerfile
+
+```dockerfile
+# ─── Stage 1: Install dependencies ─────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --only=production
+
+# ─── Stage 2: Production runner ─────────────────────────────────
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+# Security: run as non-root
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+# Copy production deps from stage 1
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy source
+COPY src/ ./src/
+
+# Ownership before switching user
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
+EXPOSE 3000
+
+# Health check: Docker calls this to determine container health status
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+CMD ["node", "src/index.js"]
+```
+
+The `HEALTHCHECK` instruction tells Docker how to verify the container is actually serving traffic — not just running. Other containers using `condition: service_healthy` won't start until this passes.
+
+Your Express app needs a `/health` route:
+
+```typescript
+// src/routes/health.ts
+import { Router } from "express";
+import { pool } from "../db";
+
+const router = Router();
+
+router.get("/health", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ ok: true, db: "connected" });
+  } catch (err) {
+    res.status(503).json({ ok: false, db: "disconnected" });
+  }
+});
+
+export default router;
+```
+
+## Step 2: The .dockerignore
+
+```
+node_modules
+.env
+.env.*
+.git
+.gitignore
+*.log
+coverage
+.nyc_output
+dist
+README.md
+docker-compose*.yml
+.devcontainer
+```
+
+## Step 3: The docker-compose.yml
+
+```yaml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://bookshelf:${DB_PASSWORD}@db:5432/bookshelf
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: bookshelf
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: bookshelf
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d # auto-runs on first start
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bookshelf -d bookshelf"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - internal
+    # No 'ports:' — db is not accessible from the host
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+```
+
+Note: `${DB_PASSWORD}` is read from a `.env` file by Compose — never hardcoded.
+
+```bash
+# .env (gitignored)
+DB_PASSWORD=change_me_in_production
+```
+
+## Step 4: Database migrations
+
+PostgreSQL's official image runs any `.sql` or `.sh` files in `/docker-entrypoint-initdb.d/` on first startup:
+
+```sql
+-- migrations/001_init.sql
+CREATE TABLE IF NOT EXISTS books (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  author TEXT NOT NULL,
+  year INTEGER,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+This only runs when the volume is empty (first launch). For subsequent schema changes, use a migration tool.
+
+## Step 5: Running the stack
+
+```bash
+# Build and start everything
+docker compose up -d --build
+
+# Follow startup logs
+docker compose logs -f
+
+# Verify both services are healthy
+docker compose ps
+
+# Test the API
+curl http://localhost:3000/health
+curl http://localhost:3000/books
+curl -X POST http://localhost:3000/books \
+  -H "Content-Type: application/json" \
+  -d '{"title": "The Pragmatic Programmer", "author": "Hunt & Thomas", "year": 2019}'
+
+# Verify data persists after restart
+docker compose restart
+curl http://localhost:3000/books    # data still there
+
+# Clean up (data preserved)
+docker compose down
+
+# Clean up including data
+docker compose down -v
+```
+
+## What production adds
+
+This Compose stack is a solid development and staging setup. For true production, you'd add:
+
+- **Orchestration**: Kubernetes or Docker Swarm for multi-host scaling and self-healing
+- **Secrets management**: Inject `DB_PASSWORD` from AWS Secrets Manager or Vault — not from a `.env` file
+- **Image registry**: Push the built image to ECR or GHCR; production pulls from there, not from source
+- **TLS termination**: A reverse proxy (nginx or Traefik) in front of the API handles HTTPS
+- **Logging**: Forward container logs to Datadog, CloudWatch, or an ELK stack
+- **Resource limits**: Set `--memory` and `--cpus` limits to prevent one service from starving others
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate a Compose health-check based startup sequencer
+// Services must wait for their dependencies to become healthy
+
+function createHealthChecker(services) {
+// services: { name: { healthCheck: () => boolean, dependsOn: string[] } }
+const state = {};
+
+for (const name of Object.keys(services)) {
+state[name] = { status: 'starting', ready: false, startedAt: Date.now() };
+}
+
+// Poll a single service until healthy or timeout
+function waitForReady(serviceName, timeoutMs = 5000) {
+const service = services[serviceName];
+if (!service) {
+return Promise.resolve({ ready: false, elapsed: 0, error: 'Unknown service' });
+}
+
+    const start = Date.now();
+
+    return new Promise((resolve) => {
+      let attempts = 0;
+
+      function check() {
+        const elapsed = Date.now() - start;
+
+        if (elapsed >= timeoutMs) {
+          state[serviceName].status = 'unhealthy';
+          resolve({ ready: false, elapsed, attempts });
+          return;
+        }
+
+        attempts++;
+        const healthy = service.healthCheck();
+
+        if (healthy) {
+          state[serviceName].status = 'healthy';
+          state[serviceName].ready = true;
+          resolve({ ready: true, elapsed, attempts });
+        } else {
+          // Poll again after 50ms (simulating real 500ms polling at 10x speed)
+          setTimeout(check, 50);
+        }
+      }
+
+      check();
+    });
+
+}
+
+// Start services in dependency order, waiting for health at each step
+async function startAll() {
+const log = [];
+
+    // Build startup order using topological sort
+    const visited = new Set();
+    const order = [];
+
+    function visit(name) {
+      if (visited.has(name)) return;
+      visited.add(name);
+      for (const dep of (services[name].dependsOn || [])) {
+        visit(dep);
+      }
+      order.push(name);
+    }
+
+    for (const name of Object.keys(services)) visit(name);
+
+    for (const name of order) {
+      log.push(\`Starting \${name}...\`);
+      const result = await waitForReady(name, 3000);
+
+      if (!result.ready) {
+        log.push(\`FAILED: \${name} did not become healthy within timeout (\${result.elapsed}ms, \${result.attempts} attempts)\`);
+        return { ok: false, log };
+      }
+
+      log.push(\`  \${name} is healthy (after \${result.elapsed}ms, \${result.attempts} checks)\`);
+    }
+
+    return { ok: true, log };
+
+}
+
+return { waitForReady, startAll, getState: () => ({ ...state }) };
+}
+
+// Simulate db being slow to start, then becoming healthy
+let dbStartTime = Date.now();
+let apiStartTime = null;
+
+const services = {
+db: {
+dependsOn: [],
+healthCheck() {
+// db becomes healthy after 200ms (simulating pg_isready)
+return Date.now() - dbStartTime > 200;
+},
+},
+api: {
+dependsOn: ['db'],
+healthCheck() {
+// api only starts timing once it's been attempted
+if (!apiStartTime) apiStartTime = Date.now();
+// api becomes healthy 100ms after its health check starts
+return Date.now() - apiStartTime > 100;
+},
+},
+};
+
+const checker = createHealthChecker(services);
+
+console.log('=== Starting Compose stack with health checks ===\\n');
+
+checker.startAll().then(result => {
+result.log.forEach(line => console.log(line));
+console.log('\\nFinal state:');
+const finalState = checker.getState();
+for (const [name, s] of Object.entries(finalState)) {
+console.log(\` \${name}: \${s.status}\`);
+}
+console.log('\\nStack started successfully:', result.ok);
+console.log('\\nKey insight: api did NOT start until db was healthy.');
+console.log('This is what depends_on + condition: service_healthy does in real Docker Compose.');
+});`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In the docker-compose.yml, the `db` service has no `ports:` mapping. What does this mean?"
+  options={[
+    "The db container will not start",
+    "The db is only accessible by the api service on the internal network — not from the host machine or internet",
+    "Docker will automatically assign a random port",
+    "The db cannot communicate with the api service",
+  ]}
+  answer={1}
+  explanation="Without a `ports:` mapping, the container's port is not published to the host. Services on the same Docker network can still reach each other using the service name and the container's internal port — so `api` can connect to `db:5432` over the internal network. This is the correct production pattern for databases."
+/>
+
+<Quiz
+  question="PostgreSQL's official Docker image will re-run the migration SQL files in `/docker-entrypoint-initdb.d/` every time the container starts."
+  options={["True", "False"]}
+  answer={1}
+  explanation="The init scripts only run when the data directory is empty — typically on first start when the named volume has just been created. On subsequent starts, PostgreSQL finds existing data files and skips initialization. This means the migration is idempotent from the container's perspective, but you should still write migrations that are safe to re-run."
+/>
+
+<FillBlank
+  question="The Dockerfile ___ instruction defines a command Docker runs periodically to check whether the container is functioning correctly."
+  answer="HEALTHCHECK"
+/>
+
+## What you learned
+
+- A multi-stage Dockerfile separates build tools from the production runtime, creating smaller and more secure images
+- The `HEALTHCHECK` instruction lets Docker know when a container is truly ready — not just started
+- PostgreSQL's `/docker-entrypoint-initdb.d/` runs migration SQL on first launch when the volume is empty
+- `depends_on` with `condition: service_healthy` ensures the API only starts after the database is ready
+- The database has no `ports:` mapping — it's only reachable from the API over the internal Compose network
+- For production, add orchestration (Kubernetes), a secrets manager, TLS termination, centralized logging, and resource limits
