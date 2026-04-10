@@ -1,0 +1,254 @@
+---
+title: "File Systems: How Data Persists"
+description: "Understand how file systems organize data on disk using inodes, directories, and journaling, and what distinguishes modern file systems like ext4 and btrfs."
+phase: 5
+module: "5-1-operating-systems"
+order: 7
+difficulty: "medium"
+bloom: "analyze"
+vocabulary: ["inode", "directory", "hard-link", "journaling", "file-descriptor"]
+---
+
+# File Systems: How Data Persists
+
+When you save a file and reboot your machine, the file is still there. This feels obvious — but making data persist reliably across power failures, crashes, and decades is one of the most carefully engineered problems in systems design. The file system is the OS subsystem responsible for this persistence.
+
+A file system imposes structure on the raw bytes of a storage device. Without a file system, a disk is just a sequence of numbered sectors with no meaning. With a file system, those sectors become files, directories, permissions, timestamps, and a navigable hierarchy. The file system is the map that makes the raw territory of storage navigable.
+
+## What a "File" Really Is
+
+At the hardware level, a disk doesn't know what a file is. It knows about logical block addresses — numbered chunks of bytes (typically 512 bytes to 4096 bytes each). A file is the file system's abstraction over one or more of these blocks.
+
+Every file has two separate components that are often conflated:
+
+1. **Metadata** — the file's properties: its size, permissions, owner, timestamps (created, modified, accessed), the type (regular file, directory, symbolic link), and — crucially — the locations of its data blocks on disk.
+
+2. **Data** — the actual contents of the file.
+
+These two components are stored separately. The metadata lives in a data structure called an **inode**. The data lives in data blocks on disk, pointed to by the inode.
+
+## Inodes: The Identity of a File
+
+An **inode** (index node) is a fixed-size data structure that stores everything about a file except its name and its data. An inode contains:
+
+- File type (regular, directory, symlink, socket, pipe, device)
+- Permissions (read/write/execute for owner, group, and others)
+- Owner user ID and group ID
+- File size in bytes
+- Number of hard links pointing to this inode
+- Timestamps: `atime` (last accessed), `mtime` (last modified), `ctime` (inode last changed)
+- Pointers to data blocks on disk
+
+On ext4, a typical inode directly stores 12 block pointers (direct blocks), plus pointers to indirect blocks (a block full of block pointers), double-indirect blocks, and triple-indirect blocks. This structure allows files to be very large while keeping small files efficient.
+
+Every file on the system has a unique **inode number** within its file system. The inode number is the file's true identity — not its name. Names are just human-readable labels attached to inodes by the directory system.
+
+## Directories: Mapping Names to Inodes
+
+A **directory** is a special type of file whose contents are a list of entries — each entry being a (name, inode number) pair. A directory doesn't store file data; it stores mappings from file names to inode numbers.
+
+When you access a file at path `/home/dustin/notes.txt`, the kernel performs a series of directory lookups:
+
+1. Start at inode 2 (the root inode, always inode 2 on ext4)
+2. Look up "home" in the root directory — find its inode number
+3. Look up "dustin" in that directory — find its inode number
+4. Look up "notes.txt" in that directory — find the file's inode number
+5. Read the file's inode to get its permissions, size, and block locations
+6. Read the data blocks
+
+This process is called **pathname resolution**. The kernel traverses the directory tree one component at a time until it reaches the target inode.
+
+## Hard Links: Multiple Names, One File
+
+A **hard link** is simply an additional directory entry that points to the same inode. If you create a hard link from `notes.txt` to `backup.txt`, both names point to the same inode. There is no "original" and no "copy" — they are two names for the exact same data.
+
+The inode stores a **link count** — the number of directory entries pointing to it. When you delete a file (technically, you're removing a directory entry — `unlink()`), the link count decrements. The data and inode are only freed when the link count reaches zero and no process has the file open.
+
+This is why deleting a file while another process has it open doesn't immediately free its disk space — the file's data persists until all processes close it (file descriptors are also counted as references) and all directory entries are removed.
+
+## File Descriptors: The Process's View of Files
+
+When a process opens a file, the kernel allocates a **file descriptor** — a small non-negative integer (0, 1, 2, ...) that acts as the process's handle to that file. File descriptor 0 is stdin, 1 is stdout, 2 is stderr by convention.
+
+Internally, the kernel maintains a per-process file descriptor table. Each entry points to a kernel-managed "open file description" struct that tracks the current read/write position, the access mode (read-only, write-only, read-write), and status flags. Multiple file descriptors (even in different processes) can point to the same open file description — this is what happens when you `dup()` a file descriptor or inherit it across a `fork()`.
+
+## Journaling: Surviving Crashes
+
+Writing data to disk is not instantaneous. A single file write might require updating the inode (with new size and mtime), writing data blocks, and updating free space bitmaps — multiple separate disk writes. If power fails midway through, the disk can be left in an inconsistent state.
+
+**Journaling** (also called write-ahead logging) solves this by writing a log of intended changes before actually making them. The journal entry describes the upcoming operation completely. If the system crashes mid-write, the journal can be replayed on reboot to either complete or roll back the incomplete operation, leaving the file system consistent.
+
+Journaling can cover metadata only (faster, but data blocks might be incomplete) or both metadata and data (safer, but slower). ext4 defaults to metadata-only journaling, which is the common compromise.
+
+## ext4 vs. btrfs: Different Design Philosophies
+
+**ext4** (Fourth Extended Filesystem) is the default on most Linux distributions. It's a mature, battle-tested evolution of the classic Unix file system design. It uses journaling for crash consistency, has excellent performance for typical workloads, and is extremely well-tested. Its weakness: no built-in checksumming, no built-in snapshot support, and limited ability to fix corruption after the fact.
+
+**btrfs** (B-tree File System) takes a copy-on-write approach. Rather than overwriting data in place, btrfs writes new versions to new locations and then atomically updates the tree. This makes snapshots instant and cheap (you just reference the existing tree), enables built-in checksumming (data corruption is detected), and allows per-file compression. The trade-off: more complex, historically less stable for certain workloads, and with some overhead for write-heavy workloads.
+
+<SandboxExercise
+  title="Inode Table Simulator"
+  instructions="Build a simplified inode-based file system simulator. Implement a `FileSystem` class that maintains an inode table and a root directory. Support: `create(path, content)` — allocates a new inode, stores content, adds the filename to the directory; `stat(path)` — returns inode metadata (size, links, permissions, mtime); `link(existingPath, newPath)` — creates a hard link (same inode, second directory entry); `unlink(path)` — removes a directory entry and decrements the link count, freeing the inode when count reaches 0; and `read(path)` — returns file content."
+  starterCode={`class FileSystem {
+  constructor() {
+    this.inodes = new Map();    // inodeNum -> { content, size, links, mtime, permissions }
+    this.directory = new Map(); // path -> inodeNum
+    this.nextInode = 1;
+  }
+
+\_allocateInode(content, permissions = "rw-r--r--") {
+// TODO: create and store an inode, return its number
+}
+
+create(path, content) {
+// TODO: allocate inode, add directory entry
+}
+
+stat(path) {
+// TODO: return inode metadata for the file at path
+}
+
+link(existingPath, newPath) {
+// TODO: create a new directory entry pointing to the same inode, increment link count
+}
+
+unlink(path) {
+// TODO: remove directory entry, decrement link count, free inode if count reaches 0
+}
+
+read(path) {
+// TODO: return the file's content
+}
+}
+
+const fs = new FileSystem();
+
+fs.create("/notes.txt", "Hello, world!");
+fs.create("/data.log", "ERROR: something failed");
+
+console.log(fs.stat("/notes.txt"));
+console.log(fs.read("/notes.txt"));
+
+fs.link("/notes.txt", "/backup.txt");
+console.log("After hard link:", fs.stat("/notes.txt")); // links should be 2
+
+fs.unlink("/notes.txt");
+console.log("After unlink /notes.txt:", fs.stat("/backup.txt")); // still accessible, links=1
+
+fs.unlink("/backup.txt"); // now inode should be freed
+`}
+  solution={`class FileSystem {
+constructor() {
+this.inodes = new Map();
+this.directory = new Map();
+this.nextInode = 1;
+}
+
+\_allocateInode(content, permissions = "rw-r--r--") {
+const num = this.nextInode++;
+this.inodes.set(num, {
+num,
+content,
+size: content.length,
+links: 1,
+permissions,
+mtime: new Date().toISOString(),
+});
+return num;
+}
+
+create(path, content) {
+if (this.directory.has(path)) {
+throw new Error(\`EEXIST: file already exists: \${path}\`);
+}
+const inodeNum = this.\_allocateInode(content);
+this.directory.set(path, inodeNum);
+console.log(\`Created \${path} -> inode \${inodeNum}\`);
+}
+
+\_getInode(path) {
+const num = this.directory.get(path);
+if (num === undefined) throw new Error(\`ENOENT: no such file: \${path}\`);
+return this.inodes.get(num);
+}
+
+stat(path) {
+const inode = this.\_getInode(path);
+const { content: \_c, ...meta } = inode;
+return meta;
+}
+
+link(existingPath, newPath) {
+const num = this.directory.get(existingPath);
+if (num === undefined) throw new Error(\`ENOENT: \${existingPath}\`);
+if (this.directory.has(newPath)) throw new Error(\`EEXIST: \${newPath}\`);
+this.directory.set(newPath, num);
+this.inodes.get(num).links++;
+console.log(\`Linked \${newPath} -> inode \${num} (links now \${this.inodes.get(num).links})\`);
+}
+
+unlink(path) {
+const num = this.directory.get(path);
+if (num === undefined) throw new Error(\`ENOENT: \${path}\`);
+this.directory.delete(path);
+const inode = this.inodes.get(num);
+inode.links--;
+console.log(\`Unlinked \${path} (inode \${num} links now \${inode.links})\`);
+if (inode.links === 0) {
+this.inodes.delete(num);
+console.log(\` -> inode \${num} freed (no more links)\`);
+}
+}
+
+read(path) {
+return this.\_getInode(path).content;
+}
+}
+
+const fs = new FileSystem();
+
+fs.create("/notes.txt", "Hello, world!");
+fs.create("/data.log", "ERROR: something failed");
+
+console.log(fs.stat("/notes.txt"));
+console.log("Content:", fs.read("/notes.txt"));
+
+fs.link("/notes.txt", "/backup.txt");
+console.log("After hard link:", fs.stat("/notes.txt"));
+
+fs.unlink("/notes.txt");
+console.log("After unlink /notes.txt:", fs.stat("/backup.txt"));
+
+fs.unlink("/backup.txt");
+`}
+/>
+
+<Quiz
+  question="Why does deleting a file while another process has it open not immediately free its disk space on Linux?"
+  options={[
+    "Linux delays all disk operations by 30 seconds to allow for undo",
+    "The file system keeps a backup copy of every deleted file for 24 hours",
+    "The inode and data blocks are only freed when the link count reaches zero AND no process has it open — open file descriptors are also references",
+    "Only the system administrator can truly free disk space; regular users only mark files for deletion",
+  ]}
+  answer={2}
+  explanation="The inode tracks both hard links (directory entries) and open file descriptors as references. Even with link count 0, the inode persists until the last open file descriptor is closed. This is why log rotation can unlink a log file while a running process continues writing to it — the file's space is only freed when that process closes or exits."
+/>
+
+<Quiz
+  question="What distinguishes an inode from a directory entry?"
+  options={[
+    "Inodes store the file name; directory entries store the file content",
+    "Inodes store metadata (size, permissions, block pointers) without names; directory entries map human-readable names to inode numbers",
+    "Inodes are used for directories; directory entries are used for regular files",
+    "Inodes are temporary; directory entries are the permanent record of a file",
+  ]}
+  answer={1}
+  explanation="An inode stores all metadata about a file — size, permissions, timestamps, data block locations — but intentionally excludes the filename. The filename lives in the directory, which is simply a table mapping names to inode numbers. This separation is what enables hard links: multiple names can all point to the same inode."
+/>
+
+<FillBlank
+  sentence="A ___ is a second directory entry that points to the same inode as an existing file, so both names share the same data and metadata."
+  answer="hard link"
+  hint="It's a ___ link — not a symbolic link, but a direct reference to the inode."
+/>

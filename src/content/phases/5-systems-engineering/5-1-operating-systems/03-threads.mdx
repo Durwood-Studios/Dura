@@ -1,0 +1,208 @@
+---
+title: "Threads, Concurrency, and Race Conditions"
+description: "Learn how threads enable parallelism within a process, why shared state is dangerous, and how mutexes prevent race conditions."
+phase: 5
+module: "5-1-operating-systems"
+order: 3
+difficulty: "medium"
+bloom: "analyze"
+vocabulary: ["thread", "concurrency", "race-condition", "mutex", "shared-memory"]
+---
+
+# Threads, Concurrency, and Race Conditions
+
+Processes give every program its own isolated execution environment — its own memory, its own file descriptors, its own identity. But sometimes isolation is the problem. What if you want multiple parts of the same program to run simultaneously and share data efficiently?
+
+That's what **threads** are for. A thread is a unit of execution that lives inside a process. Every process starts with one thread (the main thread), but it can create additional threads that share the process's memory space and run concurrently. Threads within the same process can read and write the same data directly — there's no copying, no inter-process communication protocol, no message passing overhead.
+
+This power comes with a sharp edge: if multiple threads modify the same data at the same time without coordination, the results are unpredictable. Understanding this problem — and how to solve it — is one of the most important skills in systems programming.
+
+## Threads vs. Processes: What's Shared
+
+When a process forks, the child gets its own **copy** of the parent's memory. Changes the child makes don't affect the parent's memory, and vice versa. Processes communicate through explicit channels: pipes, sockets, shared memory segments, or files.
+
+Threads are fundamentally different. All threads within a process share:
+
+- The **heap** — dynamically allocated memory
+- **Global variables** — any module-level or static data
+- **File descriptors** — open files, sockets, pipes
+- **Code segments** — all threads run the same program code
+
+Each thread has its own:
+
+- **Stack** — local variables and function call frames are private per thread
+- **CPU registers and program counter** — each thread has its own execution position
+- **Thread ID (TID)** — a unique identifier within the process
+
+Because heap memory is shared, threads can pass data to each other simply by writing to the same variable. This is called **shared memory** communication, and it is dramatically faster than inter-process communication. It is also dramatically more dangerous.
+
+## Concurrency and the Illusion of Simultaneity
+
+On a single-core machine, true parallelism is impossible — only one thread can execute at a time. But the OS scheduler rapidly switches between threads, giving each a brief slice of CPU time. This creates the illusion of simultaneous execution, called **concurrency**.
+
+On a multi-core machine, threads can achieve true parallelism: multiple threads run on separate CPU cores simultaneously. This is where the speedup from threading actually comes from — but it's also where race conditions become most severe, because operations that might have been naturally serialized on a single core can now genuinely overlap.
+
+## Race Conditions: When Timing Is Everything
+
+A **race condition** occurs when the correctness of a program depends on the relative timing or ordering of events in multiple threads. The outcome is non-deterministic — it depends on how the OS happens to schedule the threads, which can vary between runs.
+
+Consider a classic example: two threads both want to increment a shared counter. In high-level code, `counter++` looks like a single operation. But at the machine level, it's three separate operations:
+
+1. **Read** the current value of `counter` from memory into a register
+2. **Increment** the value in the register
+3. **Write** the new value back to memory
+
+If two threads execute these three steps without coordination, their operations can interleave in destructive ways. Thread A reads the value (say, 5). Thread B also reads the value (5). Thread A writes 6. Thread B also writes 6. The counter should be 7, but it's 6 — one increment was silently lost.
+
+The portion of code that accesses shared data is called the **critical section**. The race condition occurs when multiple threads are in the critical section at the same time.
+
+## Mutexes: Enforcing Exclusivity
+
+A **mutex** (short for "mutual exclusion lock") is a synchronization primitive that ensures only one thread can be in the critical section at a time. Before entering the critical section, a thread acquires the mutex. If another thread already holds it, the acquiring thread blocks — it waits — until the mutex is released.
+
+The basic protocol looks like this:
+
+1. Thread calls `mutex.lock()` — if another thread holds it, block; otherwise, acquire it
+2. Thread executes its critical section (reads/writes shared data)
+3. Thread calls `mutex.unlock()` — releases the mutex, potentially unblocking a waiting thread
+
+A mutex serializes access to shared data. Only one thread can hold a given mutex at a time, so the read-increment-write sequence for the counter happens atomically from the perspective of other threads — they can't interleave with it.
+
+Mutexes are not free. Every lock/unlock pair has overhead, and excessive locking can eliminate the performance benefit of threading entirely. Good concurrent programming minimizes the time spent inside critical sections, holding locks only as long as strictly necessary.
+
+## Deadlock: The Danger of Multiple Locks
+
+When code uses multiple mutexes, a deadlock can occur: Thread A holds mutex 1 and waits for mutex 2. Thread B holds mutex 2 and waits for mutex 1. Both threads wait forever — the program is frozen, with no cycle to break the standoff.
+
+Avoiding deadlock requires careful design: always acquire multiple locks in a consistent order across all threads, use timeout-based locking, or redesign to use fewer locks.
+
+<SandboxExercise
+  title="Simulating a Race Condition (and Fixing It)"
+  instructions="We'll simulate thread interleaving using JavaScript generators. The `unsafeIncrement` function simulates a read-modify-write that can be interrupted between steps. Run the simulation to see the race condition, then implement a `Mutex` class with `lock()` and `unlock()` methods to fix it. The simulation manually interleaves two 'threads' step by step."
+  starterCode={`// Simulated shared state
+const shared = { counter: 0 };
+
+// Simulates read-modify-write as 3 separate steps (can be interleaved)
+function\* unsafeIncrement(name) {
+const localValue = shared.counter; // step 1: read
+yield \`\${name} read: \${localValue}\`;
+const newValue = localValue + 1; // step 2: compute
+yield \`\${name} computed: \${newValue}\`;
+shared.counter = newValue; // step 3: write
+yield \`\${name} wrote: \${newValue}\`;
+}
+
+// Interleave two generators step-by-step (simulates scheduler)
+function interleave(genA, genB) {
+let a = genA.next();
+let b = genB.next();
+while (!a.done || !b.done) {
+if (!a.done) { console.log(a.value); a = genA.next(); }
+if (!b.done) { console.log(b.value); b = genB.next(); }
+}
+}
+
+// Run without protection — expect a race condition
+shared.counter = 0;
+console.log("--- Without mutex ---");
+interleave(unsafeIncrement("ThreadA"), unsafeIncrement("ThreadB"));
+console.log("Final counter:", shared.counter, "(expected 2)");
+
+// TODO: Implement a Mutex class and a safeIncrement generator that uses it
+`}
+  solution={`const shared = { counter: 0 };
+
+function\* unsafeIncrement(name) {
+const localValue = shared.counter;
+yield \`\${name} read: \${localValue}\`;
+const newValue = localValue + 1;
+yield \`\${name} computed: \${newValue}\`;
+shared.counter = newValue;
+yield \`\${name} wrote: \${newValue}\`;
+}
+
+function interleave(genA, genB) {
+let a = genA.next();
+let b = genB.next();
+while (!a.done || !b.done) {
+if (!a.done) { console.log(a.value); a = genA.next(); }
+if (!b.done) { console.log(b.value); b = genB.next(); }
+}
+}
+
+shared.counter = 0;
+console.log("--- Without mutex (race condition) ---");
+interleave(unsafeIncrement("ThreadA"), unsafeIncrement("ThreadB"));
+console.log("Final counter:", shared.counter, "(expected 2 — likely got 1)\\n");
+
+// Mutex: tracks whether the lock is held and queues waiters
+class Mutex {
+constructor() {
+this.locked = false;
+this.queue = [];
+}
+
+// Returns a generator that blocks until the lock is free
+\*lock(name) {
+while (this.locked) {
+yield \`\${name} waiting for mutex...\`;
+}
+this.locked = true;
+yield \`\${name} acquired mutex\`;
+}
+
+unlock(name) {
+this.locked = false;
+console.log(\`\${name} released mutex\`);
+}
+}
+
+const mutex = new Mutex();
+
+function* safeIncrement(name) {
+yield* mutex.lock(name); // acquire lock
+const localValue = shared.counter;
+yield \`\${name} read: \${localValue}\`;
+const newValue = localValue + 1;
+yield \`\${name} computed: \${newValue}\`;
+shared.counter = newValue;
+yield \`\${name} wrote: \${newValue}\`;
+mutex.unlock(name); // release lock
+}
+
+shared.counter = 0;
+console.log("--- With mutex (safe) ---");
+interleave(safeIncrement("ThreadA"), safeIncrement("ThreadB"));
+console.log("Final counter:", shared.counter, "(expected 2)");
+`}
+/>
+
+<Quiz
+  question="Why is `counter++` not thread-safe, even though it looks like a single operation?"
+  options={[
+    "JavaScript's `++` operator is slower than addition, introducing timing gaps",
+    "At the machine level, it compiles to separate read, increment, and write instructions that can be interleaved between threads",
+    "The `++` operator acquires a lock internally, which can cause deadlocks",
+    "Threads cannot access integer variables directly — they need to use shared memory buffers",
+  ]}
+  answer={1}
+  explanation="Even though `counter++` looks atomic in source code, CPUs execute it as at least three distinct operations: load the value, add 1, store it back. The OS scheduler can interrupt a thread between any of these steps, allowing another thread to read a stale value."
+/>
+
+<Quiz
+  question="What is a deadlock?"
+  options={[
+    "A condition where a thread runs too fast and overwrites data before others can read it",
+    "A situation where two or more threads each hold a lock the other needs, so all are stuck waiting forever",
+    "An OS feature that kills threads holding mutexes for too long",
+    "A race condition that only occurs on multi-core processors",
+  ]}
+  answer={1}
+  explanation="Deadlock occurs when Thread A holds mutex 1 and waits for mutex 2, while Thread B holds mutex 2 and waits for mutex 1. Neither can proceed, and neither will release what it holds — the program freezes."
+/>
+
+<FillBlank
+  sentence="The portion of code that reads or writes shared data — and must not be executed by more than one thread at a time — is called the ___."
+  answer="critical section"
+  hint="It's the 'critical' area where concurrent access causes races."
+/>

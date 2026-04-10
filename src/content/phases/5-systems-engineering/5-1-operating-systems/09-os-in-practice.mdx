@@ -1,0 +1,252 @@
+---
+title: "OS in Practice: Reading Linux Internals"
+description: "Apply everything you've learned by exploring /proc, tracing system calls with strace, and building tools that expose what your programs are actually doing at the OS level."
+phase: 5
+module: "5-1-operating-systems"
+order: 9
+difficulty: "hard"
+bloom: "evaluate"
+vocabulary: ["proc-filesystem", "strace", "system-call-trace", "/proc/pid", "lsof"]
+---
+
+# OS in Practice: Reading Linux Internals
+
+You've learned what the OS does — kernel mode, system calls, processes, threads, memory management, file systems, I/O. Now it's time to apply that knowledge to read a running system. A skilled systems engineer doesn't just understand OS concepts theoretically; they can observe a running system and explain exactly what's happening beneath the surface.
+
+Linux exposes an extraordinary amount of its internal state through two main inspection surfaces: the `/proc` filesystem and the `strace` system call tracer. These are not debugging hacks — they are production tools used daily by engineers diagnosing performance problems, investigating hangs, and understanding the behavior of software they didn't write.
+
+## The /proc Filesystem: The OS's Self-Report
+
+**/proc** is a virtual filesystem — it doesn't exist on disk. When you read a file in `/proc`, the kernel generates the content on the fly, translating live kernel data structures into text. Writing to certain `/proc` files can configure kernel behavior at runtime.
+
+The most useful subtree for process inspection is `/proc/<pid>/`, where `<pid>` is a process's numeric ID. The files inside describe everything about that process:
+
+**`/proc/<pid>/status`** — Human-readable summary: name, state (R/S/Z/T), PID, PPID, thread count, memory usage (VmRSS for physical RAM used, VmSize for virtual address space size), and signal masks.
+
+**`/proc/<pid>/maps`** — The process's complete virtual memory map. Every mapped region is listed with its virtual address range, permissions (r/w/x and private/shared), offset, device, inode, and the file or segment name. You can see where the code lives, the heap, the stack, and every shared library that's been loaded.
+
+**`/proc/<pid>/fd/`** — A directory containing symbolic links named after file descriptor numbers. Each link points to the actual file, socket, pipe, or device the descriptor refers to. This is exactly what `lsof` reads to list open files.
+
+**`/proc/<pid>/cmdline`** — The command line that started the process, with arguments separated by null bytes.
+
+**`/proc/<pid>/environ`** — The environment variables the process was started with (not the current ones — the initial snapshot).
+
+**`/proc/<pid>/net/`** — Network statistics specific to the process's network namespace.
+
+Beyond per-process information, `/proc` exposes system-wide state:
+
+- `/proc/cpuinfo` — every CPU core's model, speed, and feature flags
+- `/proc/meminfo` — total, free, cached, buffered memory, swap usage
+- `/proc/loadavg` — the 1/5/15-minute load averages and current running/total process counts
+- `/proc/net/tcp` — all TCP connections in the system with local/remote addresses and state
+- `/proc/sys/` — a writable tree of kernel tunable parameters (like `net.ipv4.ip_forward`, `vm.swappiness`)
+
+## The strace Tool: Seeing Every System Call
+
+**strace** is a tool that intercepts and logs every system call a process makes. It works by using the `ptrace` system call — the same mechanism debuggers like gdb use to inspect and control other processes.
+
+Running `strace ls /tmp` on a Linux machine produces a stream of output like:
+
+```
+execve("/usr/bin/ls", ["ls", "/tmp"], ...) = 0
+access("/etc/ld.so.preload", R_OK) = -1 ENOENT
+openat(AT_FDCWD, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3
+fstat(3, {st_mode=S_IFREG|0644, st_size=89341, ...}) = 0
+mmap(NULL, 89341, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f...
+close(3) = 0
+...
+getdents64(3, ...) = 128
+write(1, "file1.txt  file2.txt\n", 21) = 21
+```
+
+Each line shows the system call name, its arguments, and its return value. You can immediately see: what files were opened, what memory was mapped, what was written to stdout. An entire mental model of the program's behavior becomes visible.
+
+Useful strace options:
+
+- `-e trace=openat,read,write` — filter to specific syscalls
+- `-p <pid>` — attach to a running process without restarting it
+- `-c` — count syscalls and show a summary with counts and time spent
+- `-f` — follow forks (trace child processes too)
+- `-o file.log` — write output to a file
+
+## lsof: Everything That's Open
+
+**lsof** (list open files) reads `/proc/*/fd/` and formats it into a human-readable table. Every file, socket, pipe, and device that every process on the system has open is listed.
+
+Useful lsof invocations:
+
+- `lsof /path/to/file` — which process has this file open? (Essential when you can't delete a file because "it's in use")
+- `lsof -p <pid>` — all open files for one process
+- `lsof -i :8080` — which process is listening on port 8080?
+- `lsof -u username` — all files opened by a user's processes
+- `lsof -nP -i TCP` — all TCP connections, no hostname/port resolution
+
+## Connecting the Theory to the Practice
+
+Everything you've learned in this module now has a concrete observable face:
+
+- **Processes and PIDs** → `ls /proc/` lists every running process's PID
+- **Process state** → `/proc/<pid>/status` shows the current state
+- **Virtual memory** → `/proc/<pid>/maps` shows the complete virtual address space
+- **File descriptors** → `/proc/<pid>/fd/` lists every open descriptor
+- **System calls** → `strace` makes every kernel crossing visible
+- **Open files/sockets** → `lsof` synthesizes file descriptor data system-wide
+
+A skilled engineer reading a performance problem doesn't guess — they `strace` the slow process and see exactly which system calls are taking time. They run `strace -c` to get a count and find that 95% of time is spent in `read()` syscalls, trace that to a missing buffer, fix it, and the program runs 100x faster.
+
+Understanding OS internals isn't academic. It is the difference between debugging with a flashlight and debugging in the dark.
+
+<SandboxExercise
+  title="strace-Style Function Call Logger"
+  instructions="Build a `strace`-like wrapper in JavaScript. Implement a `traceify(obj, name)` function that takes any object and wraps all of its methods to log calls with arguments and return values — simulating what strace does at the OS level. Also implement a `getSummary()` function that returns a count and total calls per method name. Then create a mock 'filesystem' object and traceify it, calling several methods to see the trace log."
+  starterCode={`const callLog = [];
+
+function traceify(obj, name) {
+// TODO: wrap every method on obj so that:
+// - before calling the original, push an entry to callLog: { obj: name, method, args }
+// - call the original method
+// - record the return value in the log entry
+// - console.log a strace-like line, e.g.: open("/etc/hosts", "r") = 3
+// - return the result
+return obj;
+}
+
+function getSummary() {
+// TODO: return an object mapping method name -> { count, calls }
+}
+
+// Mock filesystem object to trace
+const mockFS = {
+open(path, flags) {
+return Math.floor(Math.random() \* 900) + 3;
+},
+read(fd, length) {
+return \`[data: \${length} bytes from fd \${fd}]\`;
+},
+write(fd, content) {
+return content.length;
+},
+close(fd) {
+return 0;
+},
+};
+
+const tracedFS = traceify(mockFS, "fs");
+
+// Run some operations
+const fd1 = tracedFS.open("/etc/passwd", "r");
+tracedFS.read(fd1, 512);
+const fd2 = tracedFS.open("/var/log/syslog", "r");
+tracedFS.read(fd2, 1024);
+tracedFS.read(fd2, 1024);
+tracedFS.write(1, "Hello from traced write");
+tracedFS.close(fd1);
+tracedFS.close(fd2);
+
+console.log("\\n--- strace summary ---");
+console.log(getSummary());
+`}
+  solution={`const callLog = [];
+
+function traceify(obj, name) {
+const wrapped = {};
+for (const key of Object.keys(obj)) {
+if (typeof obj[key] !== "function") {
+wrapped[key] = obj[key];
+continue;
+}
+const original = obj[key].bind(obj);
+wrapped[key] = function(...args) {
+const entry = { obj: name, method: key, args, result: undefined };
+callLog.push(entry);
+
+      const result = original(...args);
+      entry.result = result;
+
+      // Format like strace: methodname(arg1, arg2, ...) = result
+      const argStr = args.map(a => JSON.stringify(a)).join(", ");
+      const resultStr = typeof result === "string" ? \`"\${result}"\` : String(result);
+      console.log(\`\${key}(\${argStr}) = \${resultStr}\`);
+
+      return result;
+    };
+
+}
+return wrapped;
+}
+
+function getSummary() {
+const summary = {};
+for (const entry of callLog) {
+if (!summary[entry.method]) {
+summary[entry.method] = { count: 0, calls: [] };
+}
+summary[entry.method].count++;
+summary[entry.method].calls.push({ args: entry.args, result: entry.result });
+}
+return summary;
+}
+
+const mockFS = {
+open(path, flags) {
+return Math.floor(Math.random() \* 900) + 3;
+},
+read(fd, length) {
+return \`[data: \${length} bytes from fd \${fd}]\`;
+},
+write(fd, content) {
+return content.length;
+},
+close(fd) {
+return 0;
+},
+};
+
+const tracedFS = traceify(mockFS, "fs");
+
+const fd1 = tracedFS.open("/etc/passwd", "r");
+tracedFS.read(fd1, 512);
+const fd2 = tracedFS.open("/var/log/syslog", "r");
+tracedFS.read(fd2, 1024);
+tracedFS.read(fd2, 1024);
+tracedFS.write(1, "Hello from traced write");
+tracedFS.close(fd1);
+tracedFS.close(fd2);
+
+console.log("\\n--- strace summary ---");
+const summary = getSummary();
+for (const [method, data] of Object.entries(summary)) {
+console.log(\` \${method.padEnd(8)} called \${data.count}x\`);
+}
+`}
+/>
+
+<Quiz
+  question="A process appears to be stuck, consuming no CPU but also not progressing. Which command best helps you determine what system call it's blocked on?"
+  options={[
+    "ps aux — it shows the CPU usage and state of all processes",
+    "strace -p <pid> — attaches to the running process and shows what system call it's currently waiting in",
+    "lsof -p <pid> — lists all open files so you can see which file caused the problem",
+    "cat /proc/<pid>/cmdline — shows the original command which reveals what it does",
+  ]}
+  answer={1}
+  explanation="`strace -p <pid>` attaches to a running process without restarting it and traces all subsequent system calls. A stuck process is typically blocked inside a syscall (read() waiting for data, wait() waiting for a child, futex() waiting for a lock). strace will show exactly which call it's stuck in, giving you the precise information to diagnose the hang."
+/>
+
+<Quiz
+  question="An engineer can't delete a large log file because another process has it open. After deleting it, disk space doesn't free up. Which tool identifies which process is holding it open?"
+  options={[
+    "strace, because it can show what system calls the file is making",
+    "cat /proc/sys/fs/file-max, because it shows the maximum open file limit",
+    "lsof /path/to/logfile, because it lists every process that has that file open",
+    "df -h, because it shows which filesystem the file belongs to",
+  ]}
+  answer={2}
+  explanation="`lsof /path/to/logfile` reads `/proc/*/fd/` for every process and finds all file descriptors pointing to that file, including processes that have the file open even after its directory entry was removed. Once you know the PID, you can either wait for it to close the file or send it a signal to reopen a new log."
+/>
+
+<FillBlank
+  sentence="The ___ filesystem is a virtual filesystem in Linux that the kernel populates on the fly, exposing live internal state like process status, memory maps, and network connections as readable files."
+  answer="/proc"
+  hint="It's a virtual path starting with a forward slash — the 'proc' filesystem."
+/>

@@ -1,0 +1,222 @@
+---
+title: "Synchronization: Mutexes, Semaphores, and Deadlock"
+description: "Go deep on synchronization primitives — how semaphores work, how to model producer-consumer systems, and how to reason about deadlock."
+phase: 5
+module: "5-1-operating-systems"
+order: 6
+difficulty: "medium"
+bloom: "evaluate"
+vocabulary: ["mutex", "semaphore", "deadlock", "critical-section", "producer-consumer"]
+---
+
+# Synchronization: Mutexes, Semaphores, and Deadlock
+
+Concurrency would be simple if every thread had its own private data and never communicated. But real systems share resources: a database connection pool, a buffer of network packets, a print queue, a shared cache. Controlling access to these shared resources correctly — without deadlock, without starvation, without data corruption — is one of the hardest problems in systems programming.
+
+This lesson goes deeper than the mutex introduction from the threads lesson. You'll understand the full synchronization toolkit that OS designers provide and learn to reason precisely about correctness.
+
+## Recap: What Mutexes Guarantee
+
+A **mutex** (mutual exclusion lock) is the simplest synchronization primitive. It guarantees that at most one thread holds the lock at any given time. A thread that tries to acquire an already-held mutex blocks until the holder releases it.
+
+Mutexes are appropriate when you need to protect a **critical section** — a block of code where shared data is read or modified. The invariant is simple: only the thread holding the mutex can be executing that critical section.
+
+What mutexes don't tell you: anything about how many threads should be allowed through, or whether a resource is available. For those questions, you need semaphores.
+
+## Semaphores: Counting Permits
+
+A **semaphore** is a synchronization primitive with an integer counter. It supports two atomic operations:
+
+- **acquire()** (also called `wait`, `P`, or `down`): Decrements the counter. If the counter would go below zero, the thread blocks until another thread increments it.
+- **release()** (also called `signal`, `V`, or `up`): Increments the counter. If any threads are blocked waiting, one is woken up.
+
+A **binary semaphore** (counter initialized to 1) behaves exactly like a mutex — only one thread can acquire it at a time.
+
+A **counting semaphore** (counter initialized to N) allows up to N threads to proceed simultaneously. This makes semaphores ideal for managing pools of resources: a database connection pool with 10 connections, a thread pool with a fixed number of workers, or a bounded buffer.
+
+The key insight: the semaphore counter represents **how many units of a resource are currently available**. Acquiring decrements (one fewer available), releasing increments (one more available).
+
+## The Producer-Consumer Problem
+
+The **producer-consumer** problem (also called the bounded buffer problem) is a classic synchronization scenario:
+
+- **Producers** create data and add it to a shared buffer
+- **Consumers** remove data from the buffer and process it
+- The buffer has a maximum capacity — producers must wait when it's full
+- Consumers must wait when it's empty
+
+This pattern appears everywhere: web servers buffering incoming requests, audio systems buffering decoded samples, OS kernels buffering network packets, log pipelines buffering messages.
+
+The challenge is coordinating producers and consumers so that:
+
+1. No data is lost (producers don't overwrite unread items)
+2. No phantom reads occur (consumers don't read from an empty buffer)
+3. The buffer's internal data structures are protected from concurrent modification
+
+A correct solution requires **three** synchronization objects:
+
+- A semaphore `empty` initialized to buffer capacity — tracks available empty slots
+- A semaphore `full` initialized to 0 — tracks available filled slots
+- A mutex protecting the buffer's internal structure
+
+**Producer:** acquire `empty` (wait for a free slot), acquire mutex, add item, release mutex, release `full` (signal that a new item is available).
+
+**Consumer:** acquire `full` (wait for an item), acquire mutex, remove item, release mutex, release `empty` (signal that a slot is free).
+
+This pattern is elegant: producers and consumers automatically block when they need to, and wake up precisely when their condition is satisfied.
+
+## Deadlock: Formal Analysis
+
+A deadlock requires four conditions to hold simultaneously (Coffman conditions):
+
+1. **Mutual exclusion** — resources cannot be shared; only one thread can hold a resource at a time
+2. **Hold and wait** — a thread holds at least one resource while waiting for another
+3. **No preemption** — the OS cannot forcibly take a resource from a thread; it must be released voluntarily
+4. **Circular wait** — there is a cycle of threads where each waits for a resource held by the next
+
+Eliminating any one of these four conditions prevents deadlock entirely. In practice:
+
+- Eliminating hold-and-wait: Require threads to acquire all locks atomically upfront. Impractical in general but works in specific scenarios.
+- Eliminating circular wait: Enforce a global ordering on all locks. All threads must acquire locks in the same order. If Thread A always acquires lock 1 before lock 2, and Thread B does the same, no cycle can form.
+- Eliminating no-preemption: Use try-lock with timeout. If a thread can't acquire a lock within a deadline, it releases all held locks and retries later. Risk: livelock (threads keep retrying without progress).
+
+Real systems also use deadlock detection: periodically build a resource allocation graph and check for cycles. If a cycle exists, terminate one thread in the cycle to break it.
+
+## Livelock: The Zombie of Concurrency Bugs
+
+Related to deadlock but distinct: livelock occurs when threads are not blocked, but cannot make progress because they keep reacting to each other. Imagine two people in a hallway stepping aside to let each other pass — but always in the same direction. They're both "active" but neither gets through.
+
+Livelock typically occurs with retry-based strategies where all threads retry at the same rate and keep colliding. The fix is randomized backoff — each thread waits a random amount of time before retrying, which staggers their attempts.
+
+<SandboxExercise
+  title="Semaphore with Acquire and Release"
+  instructions="Implement a `Semaphore` class that simulates a counting semaphore. Since JavaScript is single-threaded, use a queue of pending callbacks to simulate blocking. The `acquire(callback)` method should either call the callback immediately (if permits > 0) or queue it. The `release()` method increments permits and dequeues one waiting callback if any. Then use two semaphores to simulate the producer-consumer problem with a bounded buffer of size 3."
+  starterCode={`class Semaphore {
+  constructor(initialValue) {
+    this.value = initialValue;
+    this.waitQueue = [];
+  }
+
+acquire(callback) {
+// TODO: if value > 0, decrement and call callback immediately
+// otherwise, push callback to waitQueue
+}
+
+release() {
+// TODO: if waitQueue has waiters, dequeue one and call it
+// otherwise, increment value
+}
+}
+
+// Bounded buffer simulation
+const BUFFER_SIZE = 3;
+const buffer = [];
+const empty = new Semaphore(BUFFER_SIZE); // slots available
+const full = new Semaphore(0); // items available
+
+function produce(item) {
+empty.acquire(() => {
+buffer.push(item);
+console.log(\`Produced: \${item} | buffer: [\${buffer}]\`);
+full.release();
+});
+}
+
+function consume() {
+full.acquire(() => {
+const item = buffer.shift();
+console.log(\`Consumed: \${item} | buffer: [\${buffer}]\`);
+empty.release();
+});
+}
+
+// Produce 4 items into a buffer of size 3
+produce("A"); produce("B"); produce("C"); produce("D"); // D should wait
+consume(); // free a slot — D can now enter
+consume();
+`}
+  solution={`class Semaphore {
+constructor(initialValue) {
+this.value = initialValue;
+this.waitQueue = [];
+}
+
+acquire(callback) {
+if (this.value > 0) {
+this.value--;
+callback();
+} else {
+this.waitQueue.push(callback);
+}
+}
+
+release() {
+if (this.waitQueue.length > 0) {
+const next = this.waitQueue.shift();
+next(); // give the permit directly to the waiter
+} else {
+this.value++;
+}
+}
+}
+
+const BUFFER_SIZE = 3;
+const buffer = [];
+const empty = new Semaphore(BUFFER_SIZE);
+const full = new Semaphore(0);
+
+function produce(item) {
+console.log(\`Attempting to produce: \${item}\`);
+empty.acquire(() => {
+buffer.push(item);
+console.log(\` -> Produced: \${item} | buffer: [\${buffer}] | empty permits left: \${empty.value}\`);
+full.release();
+});
+}
+
+function consume() {
+console.log(\`Attempting to consume\`);
+full.acquire(() => {
+const item = buffer.shift();
+console.log(\` -> Consumed: \${item} | buffer: [\${buffer}] | full permits left: \${full.value}\`);
+empty.release();
+});
+}
+
+produce("A"); produce("B"); produce("C");
+produce("D"); // buffer is full — D queues in empty.waitQueue
+console.log("\\n-- consuming to unblock D --\\n");
+consume(); // releases an empty slot, D's callback fires
+consume();
+`}
+/>
+
+<Quiz
+  question="A database connection pool has 10 connections. Which synchronization primitive is best suited to control access so at most 10 threads use connections simultaneously?"
+  options={[
+    "A mutex, because it prevents concurrent access to the pool",
+    "A counting semaphore initialized to 10, because it allows up to 10 threads to proceed and blocks the rest",
+    "A binary semaphore initialized to 1, because only one thread should access the database at a time",
+    "No synchronization is needed since the database handles concurrent connections internally",
+  ]}
+  answer={1}
+  explanation="A counting semaphore initialized to 10 tracks how many connections are available. Each thread that acquires a connection decrements the counter. When the counter hits 0, additional threads block. When a thread releases a connection, the counter increments and one waiting thread is unblocked."
+/>
+
+<Quiz
+  question="Which of the four Coffman conditions is the most practical to eliminate to prevent deadlock in a large system?"
+  options={[
+    "Mutual exclusion — allow shared access to all resources to remove the need for locking",
+    "Hold and wait — require threads to acquire all locks upfront atomically before doing any work",
+    "Circular wait — enforce a consistent global ordering on all lock acquisitions across all threads",
+    "No preemption — have the OS automatically revoke locks from any thread that has held them too long",
+  ]}
+  answer={2}
+  explanation="Enforcing a consistent global lock ordering (e.g., always acquire lock A before lock B) is practical and widely used. It eliminates circular wait without requiring threads to know upfront what locks they'll need, and without introducing preemption complexity."
+/>
+
+<FillBlank
+  sentence="In the producer-consumer pattern, producers wait on the ___ semaphore before adding to the buffer, which tracks how many empty slots are available."
+  answer="empty"
+  hint="It counts how many ___ slots are left in the buffer."
+/>

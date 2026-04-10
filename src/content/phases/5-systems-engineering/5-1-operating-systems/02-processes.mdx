@@ -1,0 +1,190 @@
+---
+title: "Processes: Programs in Motion"
+description: "Understand how the OS gives every running program its own isolated execution environment, tracks it in a process table, and manages its lifecycle."
+phase: 5
+module: "5-1-operating-systems"
+order: 2
+difficulty: "medium"
+bloom: "apply"
+vocabulary: ["process", "pid", "fork", "exec", "process-table"]
+---
+
+# Processes: Programs in Motion
+
+A program is a static artifact — a file sitting on disk containing instructions. A **process** is what happens when the operating system loads that program into memory and starts running it. The distinction matters enormously: a single program can spawn dozens of processes simultaneously, and every process gets its own isolated slice of the system's resources.
+
+When you open two terminal windows and run `python3 script.py` in each, you have two separate processes, each with its own memory, its own file descriptors, and its own execution state — even though they're running identical code. This isolation is one of the fundamental guarantees of modern operating systems.
+
+## Anatomy of a Process
+
+Every process has several key attributes maintained by the kernel:
+
+**Process ID (PID):** A unique integer that identifies the process. The init or systemd process — the first process spawned at boot — is always PID 1. Every other process on the system has a higher PID. PIDs are reused after processes exit, but only after enough other PIDs have been allocated to prevent ambiguity.
+
+**Parent Process ID (PPID):** Every process (except PID 1) was created by another process. The creating process is the parent, and its PID is recorded as the child's PPID. This forms a tree of processes rooted at PID 1 — the entire running state of the system is this tree.
+
+**State:** A process is not always actively running. At any moment, a process is in one of several states:
+
+- **Running** — currently executing on a CPU core
+- **Ready (Runnable)** — able to run, but waiting for CPU time
+- **Sleeping (Blocked/Waiting)** — waiting for I/O, a signal, or a timer; cannot run until the event occurs
+- **Zombie** — the process has exited, but its parent hasn't yet read its exit status; the entry remains in the process table until the parent calls `wait()`
+- **Stopped** — paused, usually by a signal like SIGSTOP
+
+**Memory map:** The process's virtual address space, including its code, stack, heap, and any shared libraries.
+
+**Open file descriptors:** References to all files, sockets, and pipes the process currently has open.
+
+## The Process Table
+
+The kernel maintains a data structure called the **process table** (sometimes called the task list on Linux). Every process on the system has an entry in this table containing all of its metadata: PID, PPID, state, memory maps, CPU registers, open files, and more.
+
+On Linux, you can peek at a simplified version of this information via `/proc`. Each running process has a directory at `/proc/<pid>/` containing files that expose the process's state, memory maps, open file descriptors, environment variables, and much more.
+
+When you run `ps aux` or `top` in a terminal, those tools are reading from the process table (via `/proc` on Linux) and formatting the output for human consumption. The data is live — it changes as processes start, run, and exit.
+
+## How Processes Are Born: fork and exec
+
+In Unix-like systems, there are exactly two ways a new process comes into existence: the system is booted (creating PID 1), or an existing process calls `fork()`.
+
+**fork()** creates an almost-exact copy of the calling process. The new process (the child) gets its own copy of the parent's memory, its own PID, and starts executing at the exact same point in the code as the parent — but with `fork()` returning a different value in each. In the parent, `fork()` returns the child's PID. In the child, `fork()` returns 0. This difference is how both processes know who they are.
+
+**exec()** (actually a family of calls like `execl`, `execv`, `execvp`) replaces the current process's memory image with a new program. The process keeps its PID and file descriptors, but its code, stack, heap, and data segments are replaced entirely with the new program's contents.
+
+Together, fork + exec is how shells run commands. When you type `ls` at a shell prompt, the shell forks itself, and the child process calls `exec("ls")`. The shell (parent) waits for the child to complete, then prints a new prompt.
+
+## Zombie Processes and the Wait Protocol
+
+When a process exits, it doesn't immediately vanish. It transitions to the zombie state — its code and memory are freed, but its entry in the process table remains so the parent can read its exit code. The parent retrieves this exit code by calling `wait()`, and only then is the zombie entry removed.
+
+If a parent exits before its children, those children become orphans. The kernel re-parents them to PID 1, which periodically calls `wait()` to reap them. If a parent never calls `wait()` on its exited children, those zombies accumulate in the process table — they don't consume CPU or memory, but they do consume process table slots, which are a finite resource.
+
+<SandboxExercise
+  title="Simulated Process Table"
+  instructions="Build a simple process table manager in JavaScript. Implement a `ProcessTable` class with methods: `spawn(name, ppid)` — creates a new process entry with a unique PID and state 'running'; `sleep(pid)` — transitions a process to 'sleeping'; `exit(pid)` — transitions a process to 'zombie'; `reap(pid)` — removes a zombie process (simulates parent calling wait()); and `list()` — prints all current entries."
+  starterCode={`class ProcessTable {
+  constructor() {
+    this.table = new Map();
+    this.nextPid = 1;
+  }
+
+spawn(name, ppid = 0) {
+// TODO: create a process entry with pid, name, ppid, state: 'running'
+}
+
+sleep(pid) {
+// TODO: set state to 'sleeping'
+}
+
+exit(pid) {
+// TODO: set state to 'zombie'
+}
+
+reap(pid) {
+// TODO: remove zombie entry (if it's a zombie)
+}
+
+list() {
+// TODO: print all entries
+}
+}
+
+const pt = new ProcessTable();
+const init = pt.spawn("init");
+const shell = pt.spawn("bash", init);
+const ls = pt.spawn("ls", shell);
+
+pt.list();
+pt.sleep(shell);
+pt.exit(ls);
+pt.list();
+pt.reap(ls);
+pt.list();
+`}
+  solution={`class ProcessTable {
+constructor() {
+this.table = new Map();
+this.nextPid = 1;
+}
+
+spawn(name, ppid = 0) {
+const pid = this.nextPid++;
+this.table.set(pid, { pid, name, ppid, state: "running" });
+console.log(\`Spawned: \${name} (pid=\${pid}, ppid=\${ppid})\`);
+return pid;
+}
+
+sleep(pid) {
+const proc = this.table.get(pid);
+if (!proc) return console.log(\`sleep: pid \${pid} not found\`);
+proc.state = "sleeping";
+console.log(\`PID \${pid} (\${proc.name}) -> sleeping\`);
+}
+
+exit(pid) {
+const proc = this.table.get(pid);
+if (!proc) return console.log(\`exit: pid \${pid} not found\`);
+proc.state = "zombie";
+console.log(\`PID \${pid} (\${proc.name}) -> zombie (awaiting reap)\`);
+}
+
+reap(pid) {
+const proc = this.table.get(pid);
+if (!proc) return console.log(\`reap: pid \${pid} not found\`);
+if (proc.state !== "zombie") return console.log(\`reap: pid \${pid} is not a zombie\`);
+this.table.delete(pid);
+console.log(\`Reaped zombie PID \${pid} (\${proc.name})\`);
+}
+
+list() {
+console.log("\\n--- Process Table ---");
+for (const [, proc] of this.table) {
+console.log(\` PID \${proc.pid} | \${proc.name.padEnd(10)} | ppid=\${proc.ppid} | \${proc.state}\`);
+}
+console.log("---------------------\\n");
+}
+}
+
+const pt = new ProcessTable();
+const init = pt.spawn("init");
+const shell = pt.spawn("bash", init);
+const ls = pt.spawn("ls", shell);
+
+pt.list();
+pt.sleep(shell);
+pt.exit(ls);
+pt.list();
+pt.reap(ls);
+pt.list();
+`}
+/>
+
+<Quiz
+  question="When a Unix shell runs a command like `ls`, what sequence of operations does it use?"
+  options={[
+    "It replaces itself with the `ls` process using exec(), then restarts after `ls` exits",
+    "It creates a new process with fork(), then the child replaces itself with `ls` using exec()",
+    "It sends a message to the kernel asking it to run `ls` directly",
+    "It runs `ls` in a separate thread within its own process",
+  ]}
+  answer={1}
+  explanation="The shell forks a copy of itself (creating a child process), then the child calls exec('ls') to replace its memory image with the ls program. The parent shell waits for the child to finish using wait(), then prints a new prompt."
+/>
+
+<Quiz
+  question="What is a zombie process?"
+  options={[
+    "A process consuming 100% CPU and making the system unresponsive",
+    "A process that has exited but whose entry remains in the process table because the parent hasn't called wait()",
+    "A process running malicious code in the background",
+    "A process stuck in an infinite loop that cannot be killed",
+  ]}
+  answer={1}
+  explanation="A zombie process has already finished executing — its memory is freed — but the kernel keeps its process table entry until the parent reads its exit code via wait(). Once the parent calls wait(), the entry is removed and the process is fully gone."
+/>
+
+<FillBlank
+  sentence="Every process on a Unix system (except PID 1) has a ___ that identifies which process created it."
+  answer="PPID"
+  hint="Parent ___ ID — the PID of the creating process."
+/>

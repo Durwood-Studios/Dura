@@ -1,0 +1,197 @@
+---
+title: "I/O and Devices: How the OS Talks to Hardware"
+description: "Examine how interrupts, DMA, and I/O scheduling let the OS manage device communication efficiently without wasting CPU cycles on waiting."
+phase: 5
+module: "5-1-operating-systems"
+order: 8
+difficulty: "hard"
+bloom: "evaluate"
+vocabulary: ["interrupt", "dma", "io-scheduler", "buffer", "device-driver"]
+---
+
+# I/O and Devices: How the OS Talks to Hardware
+
+Every keystroke you type, every byte you read from disk, every packet that arrives over the network — each of these events involves the CPU communicating with a hardware device. The naive approach would be for the CPU to sit in a loop, constantly checking whether a device has data ready. This is called **polling**, and while it works, it wastes enormous amounts of CPU time that could be spent on actual computation.
+
+Modern operating systems use a much smarter approach, built around three key mechanisms: **interrupts**, **DMA**, and **I/O scheduling**. Together, they allow the CPU to initiate I/O operations and then go do other useful work while the hardware handles the slow parts — returning to deal with the result only when it's ready.
+
+## Device Drivers: The Translation Layer
+
+Hardware devices — disk controllers, network cards, USB controllers, graphics cards — each have their own protocols, register layouts, and command vocabularies. A kernel that hard-coded support for every possible piece of hardware would be unmaintainable and would require a full OS update every time a new device was released.
+
+**Device drivers** solve this by encapsulating all device-specific knowledge into a separate kernel module. A driver exposes a standard interface (read, write, open, close, ioctl) to the rest of the kernel, while internally translating those requests into whatever the specific hardware requires. When a new GPU ships, NVIDIA writes a driver that speaks the kernel's standard interface. The rest of the OS never changes.
+
+Drivers run in kernel space because they need direct hardware access. This is why a buggy or malicious driver can crash the entire system — it runs with full kernel privileges.
+
+## Interrupts: Asynchronous Notification from Hardware
+
+The fundamental mechanism for asynchronous hardware communication is the **interrupt**. When a hardware device completes an operation or needs attention, it sends an electrical signal on a dedicated wire to the CPU's interrupt controller. The interrupt controller signals the CPU to pause its current execution and jump to a specific handler function called an **Interrupt Service Routine (ISR)** or interrupt handler.
+
+The interrupt handling sequence:
+
+1. Hardware sends an interrupt signal with an interrupt number
+2. The CPU finishes its current instruction and saves its register state (current execution context)
+3. The CPU looks up the interrupt number in the **Interrupt Descriptor Table (IDT)** to find the handler address
+4. The handler runs — typically very briefly, doing only what must be done immediately (acknowledge the hardware, copy data to a kernel buffer, schedule further processing)
+5. The CPU restores the saved register state and resumes whatever was interrupted
+
+Interrupt handlers must be fast. They run with other interrupts potentially disabled, and any delay directly impacts system responsiveness. For this reason, modern kernels use a split model: the interrupt handler does minimal work ("top half"), and defers the rest to a kernel task that runs with interrupts re-enabled ("bottom half" or "softirq").
+
+Different devices use different interrupt numbers. A keyboard interrupt fires when a key is pressed. A disk interrupt fires when a read or write completes. A network card interrupt fires when a packet arrives. The kernel can distinguish all of these because each device is assigned (or negotiates) a unique **IRQ** (Interrupt Request line) number.
+
+## Polling vs. Interrupts: When Polling Wins
+
+For very high-throughput scenarios — a 100 Gbps network card receiving millions of packets per second — interrupts can actually be counterproductive. The overhead of handling a separate interrupt for each packet (context switch overhead, IDT lookup, handler execution) can exceed the useful work done per packet.
+
+In these cases, high-performance drivers switch to **polling**: after receiving the first interrupt, the driver temporarily disables interrupts for that device and loops checking for new data. This is the basis of DPDK (Data Plane Development Kit) and similar high-performance networking frameworks. The trade-off is that polling burns a CPU core continuously — acceptable only when the device is always busy.
+
+Modern network drivers often use **adaptive interrupts**: switch between interrupt mode (when traffic is light) and polling mode (when traffic is heavy) based on current load.
+
+## Direct Memory Access (DMA)
+
+When a disk controller has data ready to deliver to the CPU, the naive approach is for the CPU to read it register-by-register — one word at a time — from the device. For a 4 KB block of data, this requires thousands of individual CPU operations. Worse, the CPU must be involved for every single word transfer.
+
+**Direct Memory Access (DMA)** solves this. The CPU programs a dedicated hardware unit (the DMA controller) with the source address (device buffer), destination address (a region of RAM), and transfer size. Then the CPU walks away. The DMA controller handles the entire data transfer directly between the device and RAM, without involving the CPU at all. When the transfer completes, the DMA controller fires an interrupt to notify the CPU.
+
+For large I/O operations — reading a multi-megabyte file, receiving a large network packet — DMA is transformative. The CPU initiates the operation, immediately goes back to doing other work, and returns only to process the completed result. The effective throughput of I/O operations increases dramatically.
+
+## I/O Scheduling: Ordering Disk Requests
+
+A mechanical hard disk drive (HDD) has a physical read/write head that moves across the disk's surface. The time to access data depends on where the head currently is and where the data lives. Moving the head from one track to another takes milliseconds — enormously slow compared to CPU operations.
+
+If ten processes simultaneously request data from ten different locations on the disk, the OS could service those requests in any order. Naive FIFO ordering might cause the head to thrash back and forth across the disk. An **I/O scheduler** reorders requests to minimize head movement.
+
+The classic **elevator algorithm** (SCAN) works like an elevator: the head moves in one direction, servicing all requests in that direction, then reverses. This minimizes total head movement. Modern schedulers like the Linux **CFQ** (Completely Fair Queuing) also account for process priorities, ensuring interactive processes (which need low latency) aren't starved by bulk transfers.
+
+For SSDs — which have no moving parts and can access any location in approximately equal time — traditional seek-time optimization is irrelevant. SSD-optimized schedulers (like the Linux **mq-deadline** or **none** scheduler) focus on different goals: parallelizing requests across the SSD's multiple internal channels, respecting command queueing depth limits, and avoiding write amplification.
+
+## Buffering: Smoothing Out I/O
+
+Because device speeds vary enormously — RAM is nanoseconds, SSD is microseconds, HDD is milliseconds, network is milliseconds-to-seconds — the OS uses **buffers** to smooth out these differences.
+
+The **page cache** is the most important buffer in Linux. All file reads go through the page cache: the kernel reads pages from disk into RAM-based cache, and subsequent reads from the same data are served from RAM without touching the disk. Writes may also go to the page cache first (write-back caching), with actual disk writes deferred and batched. This is why `sync()` or `fsync()` exists — to force deferred writes to actually reach the disk.
+
+<SandboxExercise
+  title="I/O Request Queue with Priority Scheduling"
+  instructions="Simulate an I/O request queue that prioritizes requests by type. Implement an `IOScheduler` class with an `enqueue(request)` method and a `processNext()` method. Requests have a `type` ('interactive', 'bulk', 'background'), a `device` (disk sector number, for reordering), and a `description`. Priority order: interactive > bulk > background. Within the same priority, sort by device sector number (elevator algorithm — process lower sectors before higher). Log each processed request."
+  starterCode={`const PRIORITY = { interactive: 0, bulk: 1, background: 2 };
+
+class IOScheduler {
+constructor() {
+this.queue = [];
+}
+
+enqueue(request) {
+// TODO: add request to queue
+// request shape: { type, sector, description }
+}
+
+processNext() {
+// TODO: sort by (priority, sector), dequeue and process the best request
+// return the processed request or null if empty
+}
+
+processAll() {
+let req;
+while ((req = this.processNext()) !== null) {
+// processNext handles logging
+}
+}
+}
+
+const scheduler = new IOScheduler();
+
+// Simulate mixed I/O workload
+scheduler.enqueue({ type: "background", sector: 100, description: "defrag sector 100" });
+scheduler.enqueue({ type: "bulk", sector: 50, description: "write log file sector 50" });
+scheduler.enqueue({ type: "interactive", sector: 200, description: "user file open sector 200" });
+scheduler.enqueue({ type: "bulk", sector: 30, description: "write log file sector 30" });
+scheduler.enqueue({ type: "interactive", sector: 10, description: "keyboard buffer sector 10" });
+scheduler.enqueue({ type: "background", sector: 80, description: "defrag sector 80" });
+
+scheduler.processAll();
+`}
+  solution={`const PRIORITY = { interactive: 0, bulk: 1, background: 2 };
+
+class IOScheduler {
+constructor() {
+this.queue = [];
+this.processed = 0;
+}
+
+enqueue(request) {
+this.queue.push(request);
+console.log(\`Enqueued: [\${request.type}] \${request.description} (sector \${request.sector})\`);
+}
+
+processNext() {
+if (this.queue.length === 0) return null;
+
+    // Sort by priority first, then by sector (elevator algorithm)
+    this.queue.sort((a, b) => {
+      const prioDiff = PRIORITY[a.type] - PRIORITY[b.type];
+      if (prioDiff !== 0) return prioDiff;
+      return a.sector - b.sector;
+    });
+
+    const req = this.queue.shift();
+    this.processed++;
+    console.log(
+      \`[#\${String(this.processed).padStart(2)}] Processed [\${req.type.padEnd(11)}] sector \${String(req.sector).padStart(4)}: \${req.description}\`
+    );
+    return req;
+
+}
+
+processAll() {
+console.log("\\n--- Starting I/O scheduling ---\\n");
+let req;
+while ((req = this.processNext()) !== null) {
+// continue
+}
+console.log(\`\\nAll \${this.processed} requests processed.\`);
+}
+}
+
+const scheduler = new IOScheduler();
+
+scheduler.enqueue({ type: "background", sector: 100, description: "defrag sector 100" });
+scheduler.enqueue({ type: "bulk", sector: 50, description: "write log file sector 50" });
+scheduler.enqueue({ type: "interactive", sector: 200, description: "user file open sector 200" });
+scheduler.enqueue({ type: "bulk", sector: 30, description: "write log file sector 30" });
+scheduler.enqueue({ type: "interactive", sector: 10, description: "keyboard buffer sector 10" });
+scheduler.enqueue({ type: "background", sector: 80, description: "defrag sector 80" });
+
+scheduler.processAll();
+`}
+/>
+
+<Quiz
+  question="Why might a high-throughput network driver switch from interrupt mode to polling mode when packet rates are very high?"
+  options={[
+    "Polling is always faster than interrupts for all hardware devices",
+    "At very high packet rates, the overhead of handling a separate interrupt per packet exceeds the useful work done — polling eliminates that overhead",
+    "Network cards cannot fire interrupts at rates above 1000 per second",
+    "Interrupts are reserved for keyboard and mouse input on high-performance systems",
+  ]}
+  answer={1}
+  explanation="At millions of packets per second, each interrupt requires saving/restoring CPU state, IDT lookups, and handler execution — overhead that can exceed the cost of processing the packet itself. Polling burns a dedicated CPU core but eliminates all interrupt overhead, allowing the CPU to process each packet with minimal per-packet cost."
+/>
+
+<Quiz
+  question="What is the main benefit of DMA compared to having the CPU transfer data from a device to memory directly?"
+  options={[
+    "DMA transfers data faster than RAM can accept it, enabling higher throughput",
+    "DMA allows the CPU to initiate a transfer and then do other work, while the DMA controller handles the actual data movement without CPU involvement",
+    "DMA bypasses the page cache, ensuring data is always fresh from disk",
+    "DMA eliminates the need for device drivers by providing a universal hardware interface",
+  ]}
+  answer={1}
+  explanation="With DMA, the CPU programs the DMA controller with source, destination, and length, then resumes doing useful work. The DMA controller handles the entire transfer between the device and RAM independently. Only when the transfer completes does the DMA controller fire an interrupt to notify the CPU."
+/>
+
+<FillBlank
+  sentence="The Linux page cache is a ___ that holds recently read file pages in RAM, so subsequent reads to the same data are served from memory rather than disk."
+  answer="buffer"
+  hint="It temporarily stores data between two components that operate at different speeds."
+/>
