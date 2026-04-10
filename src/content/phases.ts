@@ -195,19 +195,51 @@ export const PHASES: Phase[] = [
     lessonCount: 45,
     order: 4,
     modules: [
-      mod("4", 1, "apis", "APIs", "REST, GraphQL, design, versioning.", 55, 9),
-      mod("4", 2, "databases", "Databases", "SQL, NoSQL, modeling, queries, indexes.", 60, 9),
       mod(
         "4",
-        3,
-        "auth-and-security",
-        "Auth and Security",
-        "Sessions, JWTs, OWASP, secrets.",
+        1,
+        "nodejs",
+        "Node.js Fundamentals",
+        "Runtime, event loop, modules, fs, testing.",
         55,
         9
       ),
-      mod("4", 4, "queues-and-jobs", "Queues and Jobs", "Async work, retries, idempotency.", 50, 9),
-      mod("4", 5, "deployment", "Deployment", "Containers, CI/CD, observability.", 55, 9),
+      mod(
+        "4",
+        2,
+        "rest-apis-express",
+        "REST APIs with Express",
+        "Routing, middleware, auth, validation, docs.",
+        60,
+        9
+      ),
+      mod(
+        "4",
+        3,
+        "postgresql",
+        "PostgreSQL",
+        "SQL, joins, schema design, transactions, indexing.",
+        55,
+        9
+      ),
+      mod(
+        "4",
+        4,
+        "docker-containers",
+        "Docker and Containers",
+        "Images, Dockerfile, Compose, networking, security.",
+        50,
+        9
+      ),
+      mod(
+        "4",
+        5,
+        "deployment-devops",
+        "Deployment and DevOps",
+        "CI/CD, PaaS, monitoring, DNS, scaling.",
+        55,
+        9
+      ),
     ],
   },
   {
