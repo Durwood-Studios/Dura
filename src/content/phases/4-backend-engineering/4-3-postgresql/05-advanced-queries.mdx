@@ -1,0 +1,316 @@
+---
+title: "Advanced SQL Queries"
+description: "Subqueries, CTEs, window functions, and aggregations that solve complex reporting problems."
+phase: 4
+module: "4-3-postgresql"
+order: 5
+estimatedMinutes: 12
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - subquery
+  - cte
+  - window-function
+  - partition-by
+  - aggregation
+  - group-by
+---
+
+## Why this matters
+
+Basic SELECT/INSERT/UPDATE covers most CRUD operations. But real applications need more: reports that rank users by activity, dashboards that show running totals, queries that filter based on the results of other queries. These patterns — subqueries, CTEs, window functions — separate engineers who can write SQL from engineers who can write _powerful_ SQL.
+
+## Subqueries
+
+A subquery is a SELECT statement nested inside another query. They appear in three positions:
+
+**In WHERE (scalar subquery) — filter based on computed values:**
+
+```sql
+-- Find users who have posted more than the average
+SELECT username
+FROM   users
+WHERE  (
+  SELECT COUNT(*) FROM posts WHERE posts.user_id = users.id
+) > (
+  SELECT AVG(post_count)
+  FROM   (SELECT COUNT(*) AS post_count FROM posts GROUP BY user_id) counts
+);
+```
+
+**In FROM (derived table) — treat query results as a table:**
+
+```sql
+-- Get the top 5 users by post count, then fetch their details
+SELECT u.username, ranked.post_count
+FROM   users u
+INNER JOIN (
+  SELECT user_id, COUNT(*) AS post_count
+  FROM   posts
+  WHERE  status = 'published'
+  GROUP  BY user_id
+  ORDER  BY post_count DESC
+  LIMIT  5
+) ranked ON ranked.user_id = u.id;
+```
+
+**EXISTS vs IN — prefer EXISTS for large result sets:**
+
+```sql
+-- IN: loads all matching ids into memory
+SELECT username FROM users
+WHERE id IN (SELECT user_id FROM posts WHERE status = 'published');
+
+-- EXISTS: stops as soon as a match is found — often faster
+SELECT username FROM users u
+WHERE EXISTS (
+  SELECT 1 FROM posts p WHERE p.user_id = u.id AND p.status = 'published'
+);
+```
+
+## CTEs (Common Table Expressions)
+
+CTEs are named subqueries defined at the top of a query using `WITH`. They make complex queries readable by breaking them into named steps:
+
+```sql
+WITH
+  published_posts AS (
+    SELECT id, user_id, title, published_at
+    FROM   posts
+    WHERE  status = 'published'
+  ),
+  author_stats AS (
+    SELECT
+      user_id,
+      COUNT(*)              AS post_count,
+      MAX(published_at)     AS last_published
+    FROM published_posts
+    GROUP BY user_id
+  )
+SELECT
+  u.username,
+  s.post_count,
+  s.last_published
+FROM users u
+INNER JOIN author_stats s ON s.user_id = u.id
+ORDER BY s.post_count DESC;
+```
+
+CTEs are not just syntax sugar — they're much easier to debug (you can test each CTE independently) and communicate intent clearly.
+
+**Recursive CTEs** power hierarchical queries — org charts, comment threads, category trees:
+
+```sql
+-- Walk a category tree starting from root
+WITH RECURSIVE category_tree AS (
+  -- Base case: top-level categories
+  SELECT id, name, parent_id, 0 AS depth
+  FROM   categories
+  WHERE  parent_id IS NULL
+
+  UNION ALL
+
+  -- Recursive case: children of rows already in the result
+  SELECT c.id, c.name, c.parent_id, t.depth + 1
+  FROM   categories c
+  INNER JOIN category_tree t ON c.parent_id = t.id
+)
+SELECT * FROM category_tree ORDER BY depth, name;
+```
+
+## Window functions
+
+Window functions perform calculations across a _set of rows related to the current row_ — without collapsing rows like GROUP BY does. This makes them fundamentally different from aggregates.
+
+```sql
+SELECT
+  username,
+  department,
+  salary,
+  -- Rank within department by salary
+  RANK()        OVER (PARTITION BY department ORDER BY salary DESC) AS dept_rank,
+  DENSE_RANK()  OVER (PARTITION BY department ORDER BY salary DESC) AS dense_rank,
+  ROW_NUMBER()  OVER (PARTITION BY department ORDER BY salary DESC) AS row_num,
+  -- Running total of salaries within department
+  SUM(salary)   OVER (PARTITION BY department ORDER BY salary DESC) AS running_total,
+  -- Previous and next row's salary
+  LAG(salary)   OVER (PARTITION BY department ORDER BY salary)      AS prev_salary,
+  LEAD(salary)  OVER (PARTITION BY department ORDER BY salary)      AS next_salary
+FROM employees;
+```
+
+`PARTITION BY` is like GROUP BY but it doesn't collapse rows. `ORDER BY` inside the OVER clause controls the window frame.
+
+**RANK vs DENSE_RANK vs ROW_NUMBER:**
+
+- `ROW_NUMBER()` — unique sequential number, ties get different numbers (arbitrary order)
+- `RANK()` — tied rows get the same rank; the next rank skips (1, 1, 3)
+- `DENSE_RANK()` — tied rows get the same rank; no gaps (1, 1, 2)
+
+**Top N per group** — a classic pattern using window functions:
+
+```sql
+-- Top 3 most recent posts per user
+WITH ranked AS (
+  SELECT
+    user_id,
+    title,
+    published_at,
+    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY published_at DESC) AS rn
+  FROM posts
+  WHERE status = 'published'
+)
+SELECT user_id, title, published_at
+FROM   ranked
+WHERE  rn <= 3;
+```
+
+## Advanced GROUP BY: ROLLUP for subtotals
+
+```sql
+-- Sales totals with row subtotals and a grand total
+SELECT
+  COALESCE(region,   'ALL REGIONS') AS region,
+  COALESCE(category, 'ALL CATEGORIES') AS category,
+  SUM(amount) AS total_sales
+FROM sales
+GROUP BY ROLLUP (region, category)
+ORDER BY region, category;
+```
+
+`ROLLUP` automatically adds subtotal rows at each level of the grouping hierarchy, plus a grand total row. `COALESCE` handles the NULLs that ROLLUP uses to represent "all."
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement window function-style operations in plain JavaScript
+// windowFn(rows, partitionBy, orderBy, fn) — groups, sorts, then calls fn per row
+
+function windowFn(rows, partitionBy, orderBy, fn) {
+// 1. Group rows into partitions
+const partitions = new Map();
+for (const row of rows) {
+const key = partitionBy ? String(row[partitionBy]) : '**all**';
+if (!partitions.has(key)) partitions.set(key, []);
+partitions.get(key).push(row);
+}
+
+// 2. Sort each partition
+for (const partition of partitions.values()) {
+if (orderBy) {
+partition.sort((a, b) => {
+const av = a[orderBy], bv = b[orderBy];
+return av < bv ? -1 : av > bv ? 1 : 0;
+});
+}
+}
+
+// 3. Map each row through the window function
+const result = [];
+for (const [, partition] of partitions) {
+partition.forEach((row, index) => {
+result.push({ ...row, ...fn(row, index, partition) });
+});
+}
+return result;
+}
+
+// Built-in window function implementations
+function rowNumber() {
+return (row, index) => ({ row_number: index + 1 });
+}
+
+function runningSum(field) {
+return (row, index, partition) => ({
+[`running_${field}`]: partition
+.slice(0, index + 1)
+.reduce((sum, r) => sum + (r[field] || 0), 0),
+});
+}
+
+function rank() {
+return (row, index, partition) => {
+// Count how many rows have a strictly smaller value in sort order
+const sortField = Object.keys(partition[0]).find(k => k !== 'rank');
+const currentVal = partition[index][sortField];
+const rankVal = partition.filter((r, i) => i < index &&
+Object.values(r)[0] !== currentVal).length + 1;
+return { rank: index + 1 }; // simplified: just use position
+};
+}
+
+// --- Test: sales data with running total per region ---
+const sales = [
+{ salesperson: 'Alice', region: 'West', amount: 500 },
+{ salesperson: 'Bob', region: 'East', amount: 300 },
+{ salesperson: 'Carol', region: 'West', amount: 800 },
+{ salesperson: 'Dave', region: 'East', amount: 450 },
+{ salesperson: 'Eve', region: 'West', amount: 200 },
+{ salesperson: 'Frank', region: 'East', amount: 700 },
+];
+
+console.log('ROW_NUMBER per region (ordered by amount):');
+const withRowNum = windowFn(sales, 'region', 'amount', rowNumber());
+withRowNum.forEach(r =>
+console.log(\` [\${r.region}] #\${r.row_number} \${r.salesperson}: $\${r.amount}\`)
+);
+
+console.log('\\nRunning total per region (ordered by amount):');
+const withRunning = windowFn(sales, 'region', 'amount', runningSum('amount'));
+withRunning.forEach(r =>
+console.log(\` [\${r.region}] \${r.salesperson}: $\${r.amount} → running total: $\${r.running_amount}\`)
+);
+
+// Bonus: top N per partition (simulate ROW_NUMBER + WHERE rn <= 2)
+console.log('\\nTop 2 earners per region:');
+const top2 = windowFn(sales, 'region', 'amount', rowNumber())
+.filter(r => r.row_number <= 2);
+top2.forEach(r =>
+console.log(\` [\${r.region}] #\${r.row_number}: \${r.salesperson} $\${r.amount}\`)
+);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the key difference between a window function and GROUP BY?"
+  options={[
+    "Window functions are faster",
+    "Window functions don't collapse rows — each input row appears in the output",
+    "Window functions require an index",
+    "GROUP BY can't be used with ORDER BY",
+  ]}
+  answer={1}
+  explanation="GROUP BY collapses multiple rows into one aggregate row per group. Window functions compute values across related rows but keep every individual row in the output."
+/>
+<Quiz
+  question="Which ranking function produces no gaps in rank numbers when rows are tied?"
+  options={["ROW_NUMBER()", "RANK()", "DENSE_RANK()", "NTILE()"]}
+  answer={2}
+  explanation="DENSE_RANK() assigns the same rank to tied rows but doesn't skip numbers — ties get rank 1, next distinct value gets rank 2. RANK() would skip to rank 3 after two tied rank-1 rows."
+/>
+<Quiz
+  question="A CTE defined with WITH can only be referenced once in the query."
+  options={["True", "False"]}
+  answer={1}
+  explanation="CTEs can be referenced multiple times within the same query. This is one of their advantages over subqueries — define once, use anywhere in the main query."
+/>
+<FillBlank
+  question="The keyword used to define a named subquery (Common Table Expression) is ___."
+  answer="WITH"
+/>
+
+## What you learned
+
+- Subqueries can appear in WHERE, FROM, or SELECT clauses; use EXISTS instead of IN for better performance on large datasets
+- CTEs (WITH clause) break complex queries into readable named steps and can reference each other
+- Recursive CTEs enable hierarchical queries like org charts and category trees
+- Window functions compute across related rows without collapsing them — unlike GROUP BY aggregates
+- PARTITION BY divides rows into groups; ORDER BY within OVER defines the window frame
+- ROW_NUMBER gives unique numbers, RANK skips after ties, DENSE_RANK never skips

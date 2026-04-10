@@ -1,0 +1,283 @@
+---
+title: "PostgreSQL Performance"
+description: "Read query plans, understand sequential vs index scans, and optimize slow queries."
+phase: 4
+module: "4-3-postgresql"
+order: 7
+estimatedMinutes: 12
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - explain-analyze
+  - sequential-scan
+  - index-scan
+  - composite-index
+  - query-plan
+  - vacuum
+---
+
+## Why this matters
+
+A query that runs in 2ms on a table with 1,000 rows might take 45 seconds on a table with 10 million rows if it's doing a sequential scan. Performance problems don't show up in development — they appear in production, at 3am, under real load. Learning to read query plans and design indexes means you catch these problems before users do.
+
+## EXPLAIN and EXPLAIN ANALYZE
+
+`EXPLAIN` shows PostgreSQL's plan for executing a query without running it. `EXPLAIN ANALYZE` runs the query and shows both the plan _and_ actual execution statistics.
+
+```sql
+EXPLAIN ANALYZE
+SELECT u.username, COUNT(p.id) AS post_count
+FROM   users u
+LEFT   JOIN posts p ON p.user_id = u.id
+WHERE  u.created_at > '2024-01-01'
+GROUP  BY u.id, u.username
+ORDER  BY post_count DESC
+LIMIT  10;
+```
+
+Sample output:
+
+```
+Limit  (cost=1234.56..1234.59 rows=10 width=40) (actual time=8.432..8.435 rows=10 loops=1)
+  -> Sort  (cost=1234.56..1260.23 rows=10268 width=40) (actual time=8.430..8.431 rows=10 loops=1)
+    -> HashAggregate  (cost=...) (actual time=7.123..7.891 rows=10268 loops=1)
+      -> Hash Left Join  (cost=...) (actual time=0.521..5.234 rows=34891 loops=1)
+        -> Seq Scan on users  (cost=...) (actual time=0.012..1.234 rows=12345 loops=1)
+            Filter: (created_at > '2024-01-01')
+            Rows Removed by Filter: 1234
+        -> Hash  (cost=...) (actual time=0.345..0.345 rows=34891 loops=1)
+            -> Seq Scan on posts  (cost=...) rows=34891
+Planning Time: 0.432 ms
+Execution Time: 8.891 ms
+```
+
+**Reading a plan:** indentation shows nesting — inner operations run first. The planner's `cost` estimate uses arbitrary units (not milliseconds). The `actual time` is real milliseconds. When estimated rows differ wildly from actual rows, the planner made poor decisions — often because statistics are stale (run `ANALYZE` to update them).
+
+## Scan types
+
+**Sequential scan (Seq Scan):** Read every row in the table, filter as you go. Fast for small tables or when you're reading most of the table. Slow for large tables when you only want a few rows.
+
+**Index scan:** Look up the specific rows you need using the index, then fetch them from the table. Fast when you're selecting a small fraction of rows (under ~15% is the rule of thumb).
+
+**Index Only Scan:** Like an index scan, but all needed columns are in the index itself — no table fetch required. Fastest option when possible; requires a covering index.
+
+**Bitmap Heap Scan:** Used when an index query returns many rows. Builds a bitmap of which pages to fetch, then fetches them in physical order. Efficient for range queries.
+
+```sql
+-- Create an index to make a slow query fast
+-- BEFORE: sequential scan on 10M rows
+SELECT * FROM events WHERE user_id = 42 AND created_at > NOW() - INTERVAL '7 days';
+
+-- Add an index on both filter columns
+CREATE INDEX idx_events_user_created ON events (user_id, created_at DESC);
+
+-- AFTER: index scan — retrieves only matching rows
+```
+
+## Why column order matters in composite indexes
+
+A composite index `(user_id, created_at)` can satisfy:
+
+- Queries filtering on `user_id` alone — yes
+- Queries filtering on both `user_id` AND `created_at` — yes
+- Queries filtering on `created_at` alone — no (PostgreSQL can't use the index without the leading column)
+
+The leading column is the "outermost sort." Think of a phone book sorted by last name then first name — you can look up all "Smiths" (leading column), or "Smith, John" (both columns), but you can't efficiently find all "Johns" without scanning the whole book.
+
+## Partial and covering indexes
+
+**Partial index:** includes only rows matching a WHERE condition. Smaller, faster, and more useful:
+
+```sql
+-- Index only published posts — ignores drafts and archived posts
+CREATE INDEX idx_posts_published_at ON posts (published_at DESC)
+WHERE status = 'published';
+
+-- PostgreSQL uses this index only when the query's WHERE includes status = 'published'
+SELECT title, published_at FROM posts
+WHERE  status = 'published'
+AND    published_at > NOW() - INTERVAL '30 days';
+```
+
+**Covering index with INCLUDE:** adds extra columns to the index so the query never needs to touch the table:
+
+```sql
+CREATE INDEX idx_posts_user_covering ON posts (user_id)
+INCLUDE (title, status, published_at);
+
+-- This query becomes an Index Only Scan
+SELECT title, status, published_at FROM posts WHERE user_id = 42;
+```
+
+## VACUUM and ANALYZE: database maintenance
+
+PostgreSQL uses MVCC (Multi-Version Concurrency Control) — instead of overwriting rows, it marks old versions as deleted and keeps them around for concurrent transactions. **VACUUM** reclaims this dead space.
+
+**Autovacuum** runs automatically in the background and handles most cases. You shouldn't need to run VACUUM manually unless you have unusual workloads (tables with millions of updates per hour).
+
+**ANALYZE** updates the statistics the query planner uses to choose between sequential and index scans. If the planner is making bad decisions (actual rows far from estimated rows in EXPLAIN ANALYZE), run `ANALYZE tablename`.
+
+```sql
+-- Manual maintenance (normally not needed)
+VACUUM ANALYZE posts;
+
+-- Check table bloat and vacuum stats
+SELECT schemaname, tablename, n_dead_tup, last_vacuum, last_autovacuum
+FROM   pg_stat_user_tables
+ORDER  BY n_dead_tup DESC;
+```
+
+## Connection pooling
+
+PostgreSQL creates a process for each connection. At 10,000 concurrent users, 10,000 processes would exhaust memory. **Connection poolers** (PgBouncer is the standard choice) sit between your app and PostgreSQL, multiplexing many application connections onto a small pool of actual database connections.
+
+In production, your Node.js app talks to PgBouncer (which might maintain 20 real PostgreSQL connections), not to PostgreSQL directly. This scales to thousands of concurrent users without PostgreSQL being overwhelmed.
+
+```javascript
+// In Node.js, use a connection pool from the `pg` library
+// Pool size should match your PostgreSQL max_connections setting
+import { Pool } from "pg";
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20, // Maximum pool size
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 2_000,
+});
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Query cost estimator — simulates the PostgreSQL planner's decision
+// between a sequential scan and an index scan
+
+function estimateCost(table, query, indexes) {
+// table: { rowCount: number, columns: string[] }
+// query: { filter: { field: string, op: '='|'>'|'<'|'BETWEEN', value: unknown }, sort?: string }
+// indexes: string[] — list of indexed column names
+
+const { rowCount } = table;
+const { filter, sort } = query;
+
+const hasIndexOnFilter = filter && indexes.includes(filter.field);
+const hasIndexOnSort = sort && indexes.includes(sort);
+
+// Selectivity heuristics (simplified)
+let selectivityFactor;
+if (!filter) {
+selectivityFactor = 1.0; // Full table scan
+} else if (filter.op === '=') {
+selectivityFactor = 0.01; // Equality: ~1% of rows
+} else if (filter.op === 'BETWEEN') {
+selectivityFactor = 0.10; // Range: ~10% of rows
+} else {
+selectivityFactor = 0.30; // >/< comparison: ~30% of rows
+}
+
+const estimatedRows = Math.round(rowCount \* selectivityFactor);
+
+// PostgreSQL uses an index when estimated rows < ~15% of total (simplified)
+const useIndex = hasIndexOnFilter && selectivityFactor <= 0.15;
+
+let scanType;
+let costScore;
+
+if (useIndex) {
+// Index scan: O(log n) to find entries + random I/O for rows
+// For covering index (sort field also indexed), cheaper
+const indexCost = Math.log2(rowCount);
+const fetchCost = estimatedRows \* (hasIndexOnSort ? 0.5 : 1.0);
+costScore = Math.round(indexCost + fetchCost);
+scanType = hasIndexOnSort ? 'index-only' : 'index';
+} else {
+// Sequential scan: O(n) — read every row
+costScore = rowCount;
+scanType = 'sequential';
+}
+
+return {
+scanType,
+estimatedRows,
+costScore,
+recommendation: useIndex
+? 'Index will be used — query should be fast'
+: hasIndexOnFilter
+? \`Index exists on "\${filter.field}" but selectivity (\${Math.round(selectivityFactor \* 100)}%) is too low — sequential scan is cheaper\`
+: \`No index on "\${filter?.field}" — add CREATE INDEX for better performance\`,
+};
+}
+
+// --- Test scenarios ---
+const postsTable = { rowCount: 1_000_000, columns: ['id', 'user_id', 'status', 'published_at', 'title'] };
+const indexes = ['user_id', 'published_at'];
+
+console.log('--- Scenario 1: Equality filter on indexed column ---');
+console.log(estimateCost(
+postsTable,
+{ filter: { field: 'user_id', op: '=', value: 42 } },
+indexes
+));
+
+console.log('\\n--- Scenario 2: Range filter on indexed column ---');
+console.log(estimateCost(
+postsTable,
+{ filter: { field: 'published_at', op: '>', value: '2024-01-01' } },
+indexes
+));
+
+console.log('\\n--- Scenario 3: Filter on unindexed column ---');
+console.log(estimateCost(
+postsTable,
+{ filter: { field: 'status', op: '=', value: 'published' } },
+indexes
+));
+
+console.log('\\n--- Scenario 4: No filter (full table scan) ---');
+console.log(estimateCost(postsTable, {}, indexes));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="When does PostgreSQL prefer a sequential scan over an index scan?"
+  options={[
+    "When the table has no primary key",
+    "When the query is expected to return a large percentage of rows",
+    "When the table is larger than 1GB",
+    "When there are concurrent transactions",
+  ]}
+  answer={1}
+  explanation="An index scan has overhead per row (random I/O). When a query is expected to return more than ~15% of rows, reading the whole table sequentially is cheaper than many random index lookups."
+/>
+<Quiz
+  question="A composite index on (user_id, status) can be used to efficiently filter on status alone."
+  options={["True", "False"]}
+  answer={1}
+  explanation="A composite index requires the leading column to be in the query's filter. The index (user_id, status) can satisfy filters on user_id alone or user_id + status, but not status alone — PostgreSQL would need to scan the entire index."
+/>
+<Quiz
+  question="EXPLAIN ANALYZE actually executes the query — it is not a dry run."
+  options={["True", "False"]}
+  answer={0}
+  explanation="EXPLAIN ANALYZE runs the query and reports actual execution statistics. For SELECT queries this is safe. For INSERT/UPDATE/DELETE, wrap it in a transaction and ROLLBACK to avoid modifying data."
+/>
+<FillBlank
+  question="The PostgreSQL command that updates table statistics used by the query planner is ___."
+  answer="ANALYZE"
+/>
+
+## What you learned
+
+- EXPLAIN shows the query plan; EXPLAIN ANALYZE runs the query and shows actual vs estimated statistics
+- Sequential scans read every row; index scans look up specific rows — index wins when fetching under ~15% of rows
+- Composite index column order determines which queries can use the index — leading column must appear in the filter
+- Partial indexes include only rows matching a WHERE clause, making them smaller and faster
+- Covering indexes (INCLUDE) allow Index Only Scans — no table fetch required
+- VACUUM reclaims dead tuple space; ANALYZE updates planner statistics; autovacuum handles both automatically

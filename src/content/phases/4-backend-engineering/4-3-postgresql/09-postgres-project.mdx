@@ -1,0 +1,421 @@
+---
+title: "PostgreSQL Project: Multi-Table Schema"
+description: "Design, create, and query a complete schema for a blog platform from scratch."
+phase: 4
+module: "4-3-postgresql"
+order: 9
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - schema-design
+  - blog-schema
+  - many-to-many
+  - join-table
+  - seeding
+---
+
+## Why this matters
+
+Everything in this module comes together here: normalization, constraints, indexes, joins, and advanced queries — applied to a real, cohesive schema. Designing and querying a multi-table system from scratch is the skill that separates engineers who know SQL syntax from engineers who can ship a production-ready data layer.
+
+## The blog platform schema
+
+The domain: a blogging platform where users write posts, posts have tags, and readers leave comments.
+
+### The tables
+
+**users** — authors and commenters
+
+```sql
+CREATE TABLE users (
+  id         BIGSERIAL   PRIMARY KEY,
+  email      TEXT        NOT NULL UNIQUE,
+  username   TEXT        NOT NULL UNIQUE,
+  avatar_url TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_users_email ON users (email);
+```
+
+**posts** — articles written by users
+
+```sql
+CREATE TABLE posts (
+  id           BIGSERIAL   PRIMARY KEY,
+  user_id      BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title        TEXT        NOT NULL,
+  slug         TEXT        NOT NULL UNIQUE,
+  body         TEXT        NOT NULL,
+  status       TEXT        NOT NULL DEFAULT 'draft'
+                CHECK (status IN ('draft', 'published', 'archived')),
+  published_at TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_posts_user_id    ON posts (user_id);
+CREATE INDEX idx_posts_published  ON posts (published_at DESC)
+  WHERE status = 'published';
+```
+
+**comments** — reader comments on posts
+
+```sql
+CREATE TABLE comments (
+  id         BIGSERIAL   PRIMARY KEY,
+  post_id    BIGINT      NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  user_id    BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body       TEXT        NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_comments_post_id ON comments (post_id);
+```
+
+**tags** — labels that categorize posts
+
+```sql
+CREATE TABLE tags (
+  id   BIGSERIAL PRIMARY KEY,
+  name TEXT      NOT NULL UNIQUE,
+  slug TEXT      NOT NULL UNIQUE
+);
+```
+
+**post_tags** — the join table for the many-to-many relationship between posts and tags
+
+```sql
+CREATE TABLE post_tags (
+  post_id BIGINT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  tag_id  BIGINT NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,
+  PRIMARY KEY (post_id, tag_id)
+);
+```
+
+### Migration file
+
+A production deployment would ship all of the above as a single migration:
+
+```sql
+-- 001_create_blog_schema.sql
+-- UP: Run all CREATE TABLE statements above (in dependency order: users → posts → tags → comments → post_tags)
+-- DOWN: Drop in reverse order
+DROP TABLE IF EXISTS post_tags;
+DROP TABLE IF EXISTS comments;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS posts;
+DROP TABLE IF EXISTS users;
+```
+
+### Seed data
+
+```sql
+-- Seed users
+INSERT INTO users (email, username) VALUES
+  ('alice@example.com', 'alice'),
+  ('bob@example.com',   'bob'),
+  ('carol@example.com', 'carol');
+
+-- Seed tags
+INSERT INTO tags (name, slug) VALUES
+  ('PostgreSQL',  'postgresql'),
+  ('JavaScript',  'javascript'),
+  ('Performance', 'performance');
+
+-- Seed a published post
+INSERT INTO posts (user_id, title, slug, body, status, published_at)
+SELECT id, 'Getting Started with PostgreSQL', 'getting-started-postgresql',
+       'PostgreSQL is a powerful relational database...', 'published', NOW()
+FROM   users WHERE username = 'alice'
+RETURNING id;
+```
+
+## The five production queries
+
+**Query 1: All published posts with author name**
+
+```sql
+SELECT
+  posts.id,
+  posts.title,
+  posts.slug,
+  posts.published_at,
+  users.username AS author
+FROM   posts
+INNER  JOIN users ON users.id = posts.user_id
+WHERE  posts.status = 'published'
+ORDER  BY posts.published_at DESC;
+```
+
+**Query 2: Post count per author (including authors with zero posts)**
+
+```sql
+SELECT
+  users.username,
+  COUNT(posts.id) AS post_count
+FROM   users
+LEFT   JOIN posts ON posts.user_id = users.id AND posts.status = 'published'
+GROUP  BY users.id, users.username
+ORDER  BY post_count DESC;
+```
+
+**Query 3: Top 5 most-commented posts**
+
+```sql
+SELECT
+  posts.title,
+  users.username AS author,
+  COUNT(comments.id) AS comment_count
+FROM   posts
+INNER  JOIN users    ON users.id = posts.user_id
+LEFT   JOIN comments ON comments.post_id = posts.id
+WHERE  posts.status = 'published'
+GROUP  BY posts.id, posts.title, users.username
+ORDER  BY comment_count DESC
+LIMIT  5;
+```
+
+**Query 4: Posts with a specific tag**
+
+```sql
+SELECT
+  posts.title,
+  posts.slug,
+  users.username AS author
+FROM   posts
+INNER  JOIN users     ON users.id = posts.user_id
+INNER  JOIN post_tags ON post_tags.post_id = posts.id
+INNER  JOIN tags      ON tags.id = post_tags.tag_id
+WHERE  tags.slug = 'postgresql'
+AND    posts.status = 'published'
+ORDER  BY posts.published_at DESC;
+```
+
+**Query 5: Comments with post title and author**
+
+```sql
+SELECT
+  comments.body,
+  comments.created_at,
+  commenter.username  AS commenter,
+  posts.title         AS post_title,
+  post_author.username AS post_author
+FROM   comments
+INNER  JOIN users post_author ON post_author.id = posts.user_id
+INNER  JOIN posts             ON posts.id = comments.post_id
+INNER  JOIN users commenter   ON commenter.id = comments.user_id
+ORDER  BY comments.created_at DESC;
+```
+
+This query joins `users` twice with different aliases — once for the commenter, once for the post's author. This is the self-join pattern applied in a practical context.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Blog database query layer — pure JavaScript
+// This is what the application layer wrapping a real DB looks like
+
+function createBlogDB(users, posts, comments, tags, postTags) {
+// Utility: simple equality filter
+function where(arr, predicate) {
+return arr.filter(predicate);
+}
+
+// Query 1: Published posts with author name
+function getPublishedPostsWithAuthor() {
+return posts
+.filter(p => p.status === 'published')
+.map(post => {
+const author = users.find(u => u.id === post.user_id);
+return {
+id: post.id,
+title: post.title,
+slug: post.slug,
+published_at: post.published_at,
+author: author?.username ?? '(unknown)',
+};
+})
+.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+}
+
+// Query 2: Post count per author (including zero-post authors)
+function getPostCountByAuthor() {
+return users
+.map(user => {
+const post_count = posts.filter(
+p => p.user_id === user.id && p.status === 'published'
+).length;
+return { username: user.username, post_count };
+})
+.sort((a, b) => b.post_count - a.post_count);
+}
+
+// Query 3: Top N most-commented posts
+function getTopCommentedPosts(n = 5) {
+return posts
+.filter(p => p.status === 'published')
+.map(post => {
+const author = users.find(u => u.id === post.user_id);
+const comment_count = comments.filter(c => c.post_id === post.id).length;
+return {
+title: post.title,
+author: author?.username ?? '(unknown)',
+comment_count,
+};
+})
+.sort((a, b) => b.comment_count - a.comment_count)
+.slice(0, n);
+}
+
+// Query 4: Posts with a specific tag
+function getPostsByTag(tagName) {
+const tag = tags.find(t => t.name.toLowerCase() === tagName.toLowerCase());
+if (!tag) return [];
+
+    const taggedPostIds = new Set(
+      postTags.filter(pt => pt.tag_id === tag.id).map(pt => pt.post_id)
+    );
+
+    return posts
+      .filter(p => p.status === 'published' && taggedPostIds.has(p.id))
+      .map(post => {
+        const author = users.find(u => u.id === post.user_id);
+        return {
+          title:        post.title,
+          slug:         post.slug,
+          author:       author?.username ?? '(unknown)',
+          published_at: post.published_at,
+        };
+      })
+      .sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+
+}
+
+return {
+getPublishedPostsWithAuthor,
+getPostCountByAuthor,
+getTopCommentedPosts,
+getPostsByTag,
+};
+}
+
+// --- Seed data ---
+const users = [
+{ id: 1, username: 'alice', email: 'alice@example.com' },
+{ id: 2, username: 'bob', email: 'bob@example.com' },
+{ id: 3, username: 'carol', email: 'carol@example.com' },
+];
+
+const posts = [
+{ id: 1, user_id: 1, title: 'Getting Started with PostgreSQL', slug: 'getting-started-postgresql', status: 'published', published_at: '2024-03-01T10:00:00Z' },
+{ id: 2, user_id: 1, title: 'Advanced SQL Joins', slug: 'advanced-sql-joins', status: 'published', published_at: '2024-03-15T10:00:00Z' },
+{ id: 3, user_id: 2, title: 'JavaScript in 2024', slug: 'javascript-2024', status: 'published', published_at: '2024-03-10T10:00:00Z' },
+{ id: 4, user_id: 2, title: 'Draft: Next Post', slug: 'draft-next-post', status: 'draft', published_at: null },
+{ id: 5, user_id: 3, title: 'Performance Tips', slug: 'performance-tips', status: 'published', published_at: '2024-02-20T10:00:00Z' },
+];
+
+const comments = [
+{ id: 1, post_id: 1, user_id: 2, body: 'Great intro!' },
+{ id: 2, post_id: 1, user_id: 3, body: 'Bookmarked this.' },
+{ id: 3, post_id: 1, user_id: 1, body: 'Thanks everyone!' },
+{ id: 4, post_id: 2, user_id: 2, body: 'Joins are tricky!' },
+{ id: 5, post_id: 3, user_id: 1, body: 'Good JS overview.' },
+{ id: 6, post_id: 5, user_id: 1, body: 'Super useful.' },
+{ id: 7, post_id: 5, user_id: 2, body: 'Already applied this.' },
+{ id: 8, post_id: 5, user_id: 3, body: 'Shared this with my team.' },
+];
+
+const tags = [
+{ id: 1, name: 'PostgreSQL', slug: 'postgresql' },
+{ id: 2, name: 'JavaScript', slug: 'javascript' },
+{ id: 3, name: 'Performance', slug: 'performance' },
+];
+
+const postTags = [
+{ post_id: 1, tag_id: 1 }, // Getting Started with PostgreSQL → PostgreSQL
+{ post_id: 2, tag_id: 1 }, // Advanced SQL Joins → PostgreSQL
+{ post_id: 2, tag_id: 3 }, // Advanced SQL Joins → Performance
+{ post_id: 3, tag_id: 2 }, // JavaScript in 2024 → JavaScript
+{ post_id: 5, tag_id: 3 }, // Performance Tips → Performance
+];
+
+const blog = createBlogDB(users, posts, comments, tags, postTags);
+
+console.log('=== Published posts with author ===');
+blog.getPublishedPostsWithAuthor().forEach(p =>
+console.log(\` "\${p.title}" by \${p.author} (\${p.published_at?.slice(0, 10)})\`)
+);
+
+console.log('\\n=== Post count per author ===');
+blog.getPostCountByAuthor().forEach(r =>
+console.log(\` \${r.username}: \${r.post_count} published post(s)\`)
+);
+
+console.log('\\n=== Top 3 most-commented posts ===');
+blog.getTopCommentedPosts(3).forEach((p, i) =>
+console.log(\` #\${i + 1} "\${p.title}" by \${p.author} — \${p.comment_count} comment(s)\`)
+);
+
+console.log('\\n=== Posts tagged "PostgreSQL" ===');
+blog.getPostsByTag('PostgreSQL').forEach(p =>
+console.log(\` "\${p.title}" by \${p.author}\`)
+);
+
+console.log('\\n=== Posts tagged "Performance" ===');
+blog.getPostsByTag('Performance').forEach(p =>
+console.log(\` "\${p.title}" by \${p.author}\`)
+);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In the blog schema, why does post_tags use a composite primary key (post_id, tag_id) instead of a separate id column?"
+  options={[
+    "It saves storage",
+    "It prevents the same post/tag pair from appearing more than once, enforcing uniqueness at the database level",
+    "It makes joins faster",
+    "A join table is not allowed to have its own id",
+  ]}
+  answer={1}
+  explanation="A composite primary key on (post_id, tag_id) ensures each combination is unique — the same tag can only be associated with the same post once. The database enforces this constraint automatically without any application-level checking."
+/>
+<Quiz
+  question="Why does Query 5 (comments with author info) join the users table twice?"
+  options={[
+    "It's a mistake — users should only be joined once",
+    "Because comments have two different user references: the commenter and the post's author",
+    "To improve performance by loading users into memory once",
+    "Because SQL requires duplicate joins for many-to-many relationships",
+  ]}
+  answer={1}
+  explanation="The comments table links to a user (the commenter via comments.user_id), and the posts table also links to a user (the post author via posts.user_id). To get both usernames in one query, you join users twice with different table aliases."
+/>
+<Quiz
+  question="ON DELETE CASCADE means that deleting a user automatically deletes all of that user's posts and comments."
+  options={["True", "False"]}
+  answer={0}
+  explanation="The posts table has user_id REFERENCES users(id) ON DELETE CASCADE, and comments has both post_id and user_id with ON DELETE CASCADE. So deleting a user cascades to delete their posts, and deleting a post cascades to delete its comments."
+/>
+<FillBlank
+  question="The table that connects posts to tags in a many-to-many relationship is called a ___ table."
+  answer="join"
+/>
+
+## What you learned
+
+- A complete blog schema uses five tables: users, posts, comments, tags, and post_tags (join table)
+- Constraints (CHECK, UNIQUE, REFERENCES, NOT NULL) enforce data integrity at the database level
+- The post_tags composite primary key prevents duplicate tag associations automatically
+- Joining users twice with different aliases retrieves both the post author and commenter in one query
+- Partial indexes on status = 'published' make published post queries fast without indexing draft rows
+- Seeding with realistic data enables meaningful testing of complex queries across all five tables

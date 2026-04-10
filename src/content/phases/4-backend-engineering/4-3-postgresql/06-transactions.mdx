@@ -1,0 +1,317 @@
+---
+title: "Transactions"
+description: "ACID guarantees, BEGIN/COMMIT/ROLLBACK, and isolation levels that protect your data integrity."
+phase: 4
+module: "4-3-postgresql"
+order: 6
+estimatedMinutes: 10
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "understand"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - transaction
+  - acid
+  - commit
+  - rollback
+  - isolation-level
+  - deadlock
+---
+
+## Why this matters
+
+Without transactions, a bug, crash, or concurrent user at exactly the wrong moment can leave your database in an inconsistent state — money debited without a corresponding credit, a user created without their required settings, an order placed with no inventory decremented. Transactions are the mechanism that makes "all or nothing" a database guarantee rather than a hope.
+
+## What is a transaction?
+
+A transaction is a sequence of SQL statements that execute as a single unit. Either all of them succeed and their effects persist, or none of them do.
+
+```sql
+-- Transfer $100 from Alice to Bob
+BEGIN;
+
+UPDATE accounts SET balance = balance - 100 WHERE user_id = 1;  -- Debit Alice
+UPDATE accounts SET balance = balance + 100 WHERE user_id = 2;  -- Credit Bob
+
+COMMIT;
+```
+
+If anything fails between BEGIN and COMMIT — a constraint violation, a network drop, a server crash — PostgreSQL automatically rolls back all changes from that transaction. Neither debit nor credit applies.
+
+```sql
+-- Explicit rollback when your application detects a problem
+BEGIN;
+
+UPDATE accounts SET balance = balance - 100 WHERE user_id = 1;
+
+-- Check if Alice has enough funds
+-- (In real code, this check happens in your application layer)
+
+ROLLBACK;  -- Undo the debit — nothing committed
+```
+
+In application code (Node.js with `pg`):
+
+```javascript
+const client = await pool.connect();
+try {
+  await client.query("BEGIN");
+
+  const { rows } = await client.query(
+    "SELECT balance FROM accounts WHERE user_id = $1 FOR UPDATE",
+    [senderId]
+  );
+
+  if (rows[0].balance < amount) {
+    throw new Error("Insufficient funds");
+  }
+
+  await client.query("UPDATE accounts SET balance = balance - $1 WHERE user_id = $2", [
+    amount,
+    senderId,
+  ]);
+  await client.query("UPDATE accounts SET balance = balance + $1 WHERE user_id = $2", [
+    amount,
+    receiverId,
+  ]);
+
+  await client.query("COMMIT");
+} catch (error) {
+  await client.query("ROLLBACK");
+  throw error;
+} finally {
+  client.release();
+}
+```
+
+`FOR UPDATE` is a row-level lock: it prevents other transactions from modifying the selected row until this transaction commits or rolls back.
+
+## Savepoints: partial rollback
+
+Savepoints let you roll back to a specific point within a transaction without discarding everything:
+
+```sql
+BEGIN;
+
+INSERT INTO orders (user_id, total) VALUES (1, 250);
+SAVEPOINT order_created;
+
+INSERT INTO order_items (order_id, product_id) VALUES (42, 99);
+-- If this fails:
+ROLLBACK TO order_created;  -- Undo the order_items insert, keep the order
+
+-- Try again with corrected data
+INSERT INTO order_items (order_id, product_id) VALUES (42, 100);
+
+COMMIT;
+```
+
+Savepoints are useful in long multi-step transactions where you want to retry a sub-step without restarting from scratch.
+
+## Isolation levels and their anomalies
+
+Multiple transactions can run concurrently. Isolation levels control how much they can see of each other's in-progress work. Higher isolation = fewer anomalies = more locking overhead.
+
+| Isolation Level  | Dirty Read | Non-Repeatable Read | Phantom Read |
+| ---------------- | ---------- | ------------------- | ------------ |
+| Read Uncommitted | possible   | possible            | possible     |
+| Read Committed   | prevented  | possible            | possible     |
+| Repeatable Read  | prevented  | prevented           | possible     |
+| Serializable     | prevented  | prevented           | prevented    |
+
+- **Dirty read:** Reading uncommitted changes from another transaction (transaction A reads data that transaction B hasn't committed yet — and might roll back)
+- **Non-repeatable read:** Reading the same row twice in a transaction and getting different values (another transaction committed a change between your two reads)
+- **Phantom read:** A query run twice within a transaction returns different rows (another transaction inserted or deleted rows between your two queries)
+
+PostgreSQL's default is **Read Committed** — you never see uncommitted data, but two reads of the same row within a transaction can differ. For financial operations, use **Repeatable Read** or **Serializable**.
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- Now this transaction sees a consistent snapshot of the entire database
+-- Any conflicting concurrent write causes one transaction to fail with a serialization error
+COMMIT;
+```
+
+## Deadlocks
+
+A deadlock occurs when two transactions each hold a lock the other needs:
+
+- Transaction A locks row 1, then tries to lock row 2
+- Transaction B locks row 2, then tries to lock row 1
+- Both are waiting forever
+
+PostgreSQL detects deadlocks automatically and kills one of the transactions with an error:
+
+```
+ERROR: deadlock detected
+DETAIL: Process 12345 waits for ShareLock on transaction 67890
+```
+
+The killed transaction rolls back automatically. Your application must detect this error and retry.
+
+**Prevent deadlocks by establishing lock order:** always lock rows in the same order across all transactions. If every money transfer always locks the lower `user_id` first, two concurrent transfers can never deadlock.
+
+## When to use transactions
+
+Use explicit transactions for:
+
+- **Multi-step writes** — any operation that requires more than one INSERT/UPDATE/DELETE to be correct
+- **Conditional writes** — read a value, make a decision, write based on that decision (without a transaction, another transaction can change the value between your read and write)
+- **Bulk operations** — inserting thousands of rows in a transaction is dramatically faster than auto-committing each row individually
+
+In PostgreSQL, every single SQL statement is implicitly wrapped in a transaction. `BEGIN` just lets you group multiple statements together.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate a transaction log with BEGIN, COMMIT, and ROLLBACK
+// Operations are staged until commit; rollback discards them
+
+function createTransactionLog() {
+// Persisted state (simulates actual database)
+const committed = {};
+// Staged operations for the current transaction
+let staged = null;
+let inTransaction = false;
+
+function begin() {
+if (inTransaction) throw new Error('Already in a transaction');
+inTransaction = true;
+staged = [];
+console.log('BEGIN');
+}
+
+function execute(description, operation) {
+// operation: (state) => newState — pure function, no side effects yet
+if (!inTransaction) throw new Error('No active transaction — call begin() first');
+staged.push({ description, operation });
+console.log(\` Staged: \${description}\`);
+}
+
+function commit() {
+if (!inTransaction) throw new Error('No active transaction');
+
+    // Apply all staged operations to committed state
+    let state = { ...committed };
+    for (const { operation } of staged) {
+      state = operation(state);
+    }
+
+    // Persist
+    Object.assign(committed, state);
+    staged = null;
+    inTransaction = false;
+    console.log('COMMIT — all changes applied');
+
+}
+
+function rollback() {
+if (!inTransaction) throw new Error('No active transaction');
+const count = staged.length;
+staged = null;
+inTransaction = false;
+console.log(\`ROLLBACK — \${count} staged operation(s) discarded\`);
+}
+
+function getState() {
+return { ...committed };
+}
+
+return { begin, execute, commit, rollback, getState };
+}
+
+// --- Simulate a bank transfer ---
+function transfer(db, fromAccount, toAccount, amount) {
+db.begin();
+try {
+// Check balance BEFORE staging any changes
+const state = db.getState();
+const balance = state[fromAccount] ?? 0;
+
+    if (balance < amount) {
+      throw new Error(
+        \`Insufficient funds: \${fromAccount} has $\${balance}, transfer requires $\${amount}\`
+      );
+    }
+
+    db.execute(
+      \`Debit \${fromAccount} $\${amount}\`,
+      state => ({ ...state, [fromAccount]: (state[fromAccount] ?? 0) - amount })
+    );
+
+    db.execute(
+      \`Credit \${toAccount} $\${amount}\`,
+      state => ({ ...state, [toAccount]: (state[toAccount] ?? 0) + amount })
+    );
+
+    db.commit();
+    console.log('Transfer successful.\\n');
+
+} catch (err) {
+db.rollback();
+console.log(\`Transfer failed: \${err.message}\\n\`);
+}
+}
+
+// Initialize balances via a transaction
+const db = createTransactionLog();
+db.begin();
+db.execute('Seed Alice: $1000', () => ({ alice: 1000, bob: 200 }));
+db.commit();
+
+console.log('Initial state:', db.getState());
+console.log('');
+
+// Successful transfer
+console.log('--- Transfer $300 from Alice to Bob ---');
+transfer(db, 'alice', 'bob', 300);
+console.log('State after transfer:', db.getState());
+
+// Failed transfer (insufficient funds)
+console.log('--- Transfer $2000 from Bob to Alice ---');
+transfer(db, 'bob', 'alice', 2000);
+console.log('State after failed transfer:', db.getState());`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What happens to a transaction if the server crashes between BEGIN and COMMIT?"
+  options={[
+    "The partial changes are saved",
+    "The transaction is automatically rolled back",
+    "The changes are replayed on restart",
+    "The database becomes corrupted",
+  ]}
+  answer={1}
+  explanation="Durability (the 'D' in ACID) guarantees that only committed transactions persist. If a crash occurs before COMMIT, PostgreSQL automatically rolls back all changes from the incomplete transaction on restart."
+/>
+<Quiz
+  question="Which isolation level prevents dirty reads, non-repeatable reads, AND phantom reads?"
+  options={["Read Committed", "Repeatable Read", "Serializable", "Read Uncommitted"]}
+  answer={2}
+  explanation="Serializable is the strictest isolation level. It prevents all three anomalies by making transactions behave as if they ran one at a time, in serial order."
+/>
+<Quiz
+  question="A deadlock requires human intervention to resolve — PostgreSQL cannot detect or handle it automatically."
+  options={["True", "False"]}
+  answer={1}
+  explanation="PostgreSQL automatically detects deadlocks and kills one of the blocking transactions, which then rolls back. Your application code needs to catch the resulting error and retry the operation."
+/>
+<FillBlank
+  question="To undo all changes in the current transaction without committing, use the ___ command."
+  answer="ROLLBACK"
+/>
+
+## What you learned
+
+- A transaction groups SQL statements so they execute as an atomic unit — all succeed or all fail
+- BEGIN starts a transaction; COMMIT persists it; ROLLBACK discards all changes
+- Savepoints allow partial rollbacks within a long transaction
+- Isolation levels (Read Committed, Repeatable Read, Serializable) control how concurrent transactions interact
+- PostgreSQL defaults to Read Committed; use Repeatable Read or Serializable for financial operations
+- PostgreSQL automatically detects and resolves deadlocks by rolling back one of the conflicting transactions

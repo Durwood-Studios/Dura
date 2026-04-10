@@ -1,0 +1,314 @@
+---
+title: "SQL Joins"
+description: "Combine data from multiple tables — INNER, LEFT, RIGHT, and FULL JOIN with real examples."
+phase: 4
+module: "4-3-postgresql"
+order: 3
+estimatedMinutes: 10
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - join
+  - inner-join
+  - left-join
+  - full-outer-join
+  - n-plus-one
+  - self-join
+---
+
+## Why this matters
+
+Relational databases split data across tables to avoid redundancy. Joins are how you put it back together for a query. Without joins, retrieving a post with its author's name would require two separate queries from your application — and for a list of 100 posts, that balloons into 101 queries. Understanding joins lets you write one efficient query instead.
+
+## The four join types
+
+### INNER JOIN — only matching rows
+
+An INNER JOIN returns rows that have a match in _both_ tables. Non-matching rows are excluded entirely.
+
+```sql
+-- Get posts with their author's username
+SELECT
+  posts.title,
+  users.username AS author
+FROM   posts
+INNER JOIN users ON posts.user_id = users.id;
+```
+
+If a post has a `user_id` that doesn't exist in `users` (data integrity bug), that post is silently excluded. If a user has no posts, they don't appear at all.
+
+### LEFT JOIN — all left rows, matched right
+
+A LEFT JOIN returns _every_ row from the left table, plus matching rows from the right. Where there's no match, right-table columns are `NULL`.
+
+```sql
+-- Get every user and their post count (including users with zero posts)
+SELECT
+  users.username,
+  COUNT(posts.id) AS post_count
+FROM   users
+LEFT JOIN posts ON posts.user_id = users.id
+GROUP BY users.id, users.username;
+```
+
+Users with no posts appear with `post_count = 0`. With an INNER JOIN they'd be missing entirely.
+
+### RIGHT JOIN — all right rows, matched left
+
+RIGHT JOIN is the mirror of LEFT JOIN: every row from the right table, matching rows from the left. In practice, most developers rewrite RIGHT JOINs as LEFT JOINs by swapping the table order — it's easier to read.
+
+```sql
+-- Equivalent queries
+SELECT u.username, p.title
+FROM   posts p RIGHT JOIN users u ON p.user_id = u.id;
+
+-- Same result, more readable:
+SELECT u.username, p.title
+FROM   users u LEFT JOIN posts p ON p.user_id = u.id;
+```
+
+### FULL OUTER JOIN — all rows from both tables
+
+FULL OUTER JOIN returns all rows from both tables. Where there's no match on either side, the missing columns are `NULL`.
+
+```sql
+-- Find any orphaned data in either table
+SELECT
+  users.username,
+  posts.title
+FROM   users
+FULL OUTER JOIN posts ON posts.user_id = users.id
+WHERE  users.id IS NULL OR posts.id IS NULL;
+```
+
+This is useful for data audits — finding users with no posts _and_ posts with no valid user.
+
+## Multiple joins in one query
+
+You can chain as many joins as you need:
+
+```sql
+SELECT
+  posts.title,
+  users.username     AS author,
+  tags.name          AS tag,
+  comments.body      AS first_comment
+FROM posts
+INNER JOIN users    ON users.id    = posts.user_id
+LEFT  JOIN post_tags ON post_tags.post_id = posts.id
+LEFT  JOIN tags     ON tags.id     = post_tags.tag_id
+LEFT  JOIN comments ON comments.post_id = posts.id
+  AND comments.id = (
+    SELECT MIN(id) FROM comments c WHERE c.post_id = posts.id
+  )
+WHERE posts.status = 'published';
+```
+
+Note that joining through `post_tags` to `tags` can produce multiple rows per post (one per tag). This is expected and correct — you handle it in your application or aggregate it with `array_agg(tags.name)`.
+
+## Self-join: a table joined to itself
+
+A self-join is used when rows in a table reference other rows in the _same_ table — a common pattern for hierarchical data like employees and their managers.
+
+```sql
+SELECT
+  e.username  AS employee,
+  m.username  AS manager
+FROM   users e
+LEFT JOIN users m ON e.manager_id = m.id;
+```
+
+The table is aliased twice (`e` and `m`) to distinguish the two roles.
+
+## The N+1 query problem
+
+The N+1 problem is what happens when you forget to use joins. Imagine loading a list of posts and then fetching each author:
+
+```javascript
+// This is wrong — N+1 queries
+const posts = await db.query("SELECT * FROM posts LIMIT 100"); // 1 query
+for (const post of posts) {
+  post.author = await db.query(
+    // 100 queries
+    "SELECT * FROM users WHERE id = $1",
+    [post.user_id]
+  );
+}
+// Total: 101 queries for 100 posts
+```
+
+The fix: one JOIN instead of a loop.
+
+```sql
+-- 1 query, same result
+SELECT
+  posts.id,
+  posts.title,
+  users.username AS author
+FROM   posts
+INNER JOIN users ON users.id = posts.user_id
+LIMIT 100;
+```
+
+The N+1 problem is one of the most common performance killers in web applications. ORMs can generate it automatically if you're not watching for it — always check what queries your ORM is producing.
+
+## Avoid implicit joins
+
+Older SQL uses a comma-separated FROM list for joins. Don't write this:
+
+```sql
+-- Implicit join — avoid
+SELECT users.username, posts.title
+FROM users, posts
+WHERE users.id = posts.user_id;
+```
+
+Use explicit JOIN syntax. It's clearer, harder to accidentally produce a Cartesian product (every row matched with every other row), and easier to convert to a LEFT JOIN when needed.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement the four SQL join types in pure JavaScript
+// Each takes two arrays of objects and a predicate function
+
+function innerJoin(left, right, on) {
+// on: (leftRow, rightRow) => boolean
+const result = [];
+for (const l of left) {
+for (const r of right) {
+if (on(l, r)) {
+result.push({ ...l, ...r });
+}
+}
+}
+return result;
+}
+
+function leftJoin(left, right, on) {
+const result = [];
+for (const l of left) {
+const matches = right.filter(r => on(l, r));
+if (matches.length > 0) {
+matches.forEach(r => result.push({ ...l, ...r }));
+} else {
+// No match — fill right-side fields with null
+const nullRight = Object.fromEntries(
+Object.keys(right[0] || {}).map(k => [k, null])
+);
+result.push({ ...l, ...nullRight });
+}
+}
+return result;
+}
+
+function rightJoin(left, right, on) {
+// Mirror of leftJoin — swap the sides
+const result = [];
+for (const r of right) {
+const matches = left.filter(l => on(l, r));
+if (matches.length > 0) {
+matches.forEach(l => result.push({ ...l, ...r }));
+} else {
+const nullLeft = Object.fromEntries(
+Object.keys(left[0] || {}).map(k => [k, null])
+);
+result.push({ ...nullLeft, ...r });
+}
+}
+return result;
+}
+
+function fullJoin(left, right, on) {
+const leftResult = leftJoin(left, right, on);
+
+// Add right rows that had no match in the left
+const rightOrphans = right.filter(r => !left.some(l => on(l, r)));
+const nullLeft = Object.fromEntries(
+Object.keys(left[0] || {}).map(k => [k, null])
+);
+const rightResult = rightOrphans.map(r => ({ ...nullLeft, ...r }));
+
+return [...leftResult, ...rightResult];
+}
+
+// --- Test data ---
+const users = [
+{ userId: 1, username: 'alice' },
+{ userId: 2, username: 'bob' },
+{ userId: 3, username: 'carol' }, // no orders
+];
+
+const orders = [
+{ orderId: 101, userId: 1, product: 'Book' },
+{ orderId: 102, userId: 1, product: 'Laptop' },
+{ orderId: 103, userId: 2, product: 'Monitor' },
+{ orderId: 104, userId: 9, product: 'Orphan' }, // no matching user
+];
+
+const matchOn = (u, o) => u.userId === o.userId;
+
+console.log('INNER JOIN (only matched rows):');
+innerJoin(users, orders, matchOn).forEach(r =>
+console.log(\` \${r.username} ordered \${r.product}\`)
+);
+
+console.log('\\nLEFT JOIN (all users, even those with no orders):');
+leftJoin(users, orders, matchOn).forEach(r =>
+console.log(\` \${r.username}: \${r.product ?? '(no orders)'}\`)
+);
+
+console.log('\\nRIGHT JOIN (all orders, even orphans):');
+rightJoin(users, orders, matchOn).forEach(r =>
+console.log(\` order #\${r.orderId} by \${r.username ?? '(unknown user)'}\`)
+);
+
+console.log('\\nFULL JOIN (everything from both sides):');
+fullJoin(users, orders, matchOn).forEach(r =>
+console.log(\` user:\${r.username ?? 'NULL'} / order:\${r.product ?? 'NULL'}\`)
+);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Which join type returns all rows from the LEFT table, even if there's no match on the right?"
+  options={["INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL OUTER JOIN"]}
+  answer={1}
+  explanation="A LEFT JOIN returns every row from the left table. When there's no matching row on the right, the right-side columns are NULL."
+/>
+<Quiz
+  question="What is the N+1 query problem?"
+  options={[
+    "Running N queries when 1 would suffice",
+    "A bug in SQL that affects every Nth row",
+    "Querying N tables at once",
+    "An index that covers N columns",
+  ]}
+  answer={0}
+  explanation="The N+1 problem occurs when you load N rows then issue 1 additional query per row (e.g., loading 100 posts then fetching each author individually — 101 total queries). A JOIN solves it with a single query."
+/>
+<Quiz
+  question="A self-join connects a table to a completely different table."
+  options={["True", "False"]}
+  answer={1}
+  explanation="A self-join joins a table to itself. It's used for hierarchical data where rows reference other rows in the same table, like employees referencing their manager's id in the same users table."
+/>
+<FillBlank
+  question="When a LEFT JOIN finds no match on the right side, the right-side columns contain ___."
+  answer="NULL"
+/>
+
+## What you learned
+
+- INNER JOIN returns only rows with matches in both tables
+- LEFT JOIN returns all rows from the left table; unmatched right columns are NULL
+- RIGHT JOIN is the mirror of LEFT JOIN; most developers rewrite these as LEFT JOINs
+- FULL OUTER JOIN returns all rows from both tables, NULLs where no match exists
+- Self-joins join a table to itself, useful for hierarchical data like manager/employee relationships
+- The N+1 problem is loading N records then querying for each one's data — always use a JOIN instead

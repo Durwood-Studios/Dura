@@ -1,0 +1,338 @@
+---
+title: "Database Migrations"
+description: "Version-control your schema with up/down migration files — deploy schema changes safely."
+phase: 4
+module: "4-3-postgresql"
+order: 8
+estimatedMinutes: 10
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - migration
+  - schema-versioning
+  - up-migration
+  - down-migration
+  - zero-downtime
+---
+
+## Why this matters
+
+Your schema will change. Users are added, features require new columns, a bad design decision gets corrected. Without a migration system, schema changes are ad-hoc: someone SSHes into production, runs a SQL command, and nobody else knows the schema changed. This breaks deployments, causes bugs, and makes onboarding new developers painful. Migrations solve this by treating schema changes as code: version-controlled, reviewed, tested, and reproducible.
+
+## The migration pattern
+
+A migration is a file that describes exactly one schema change. Each file has two sections:
+
+- **UP** — apply the change (run when deploying forward)
+- **DOWN** — reverse the change (run when rolling back)
+
+Files are numbered sequentially so they run in order:
+
+```
+migrations/
+  001_create_users.sql
+  002_create_posts.sql
+  003_add_email_index.sql
+  004_add_users_avatar.sql
+```
+
+A `_migrations` table in your database tracks which files have been applied:
+
+```sql
+CREATE TABLE _migrations (
+  version    INTEGER     PRIMARY KEY,
+  name       TEXT        NOT NULL,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+When you deploy, the migration runner checks this table, finds which migrations haven't run yet, and runs them in order.
+
+## Example migration files
+
+```sql
+-- 001_create_users.sql
+
+-- UP
+CREATE TABLE users (
+  id         BIGSERIAL   PRIMARY KEY,
+  email      TEXT        NOT NULL UNIQUE,
+  username   TEXT        NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- DOWN
+DROP TABLE users;
+```
+
+```sql
+-- 002_add_users_avatar.sql
+
+-- UP
+ALTER TABLE users ADD COLUMN avatar_url TEXT;
+
+-- DOWN
+ALTER TABLE users DROP COLUMN avatar_url;
+```
+
+```sql
+-- 003_add_email_index.sql
+
+-- UP
+CREATE INDEX CONCURRENTLY idx_users_email ON users (email);
+
+-- DOWN
+DROP INDEX CONCURRENTLY idx_users_email;
+```
+
+`CREATE INDEX CONCURRENTLY` builds the index without locking the table for writes — essential in production where you can't take the table offline.
+
+## The golden rules of migrations
+
+**1. Never edit a migration that has run in production.** Once a migration is in production's `_migrations` table, it exists. Editing it won't re-run it, and the file on disk will no longer match what the database actually reflects. Instead, create a new migration.
+
+**2. Always write a DOWN migration.** You may never use it, but the one time you need to roll back a deploy at 2am, you'll be grateful.
+
+**3. Test DOWN migrations.** Most teams test UP migrations thoroughly and discover the DOWN is broken when they need it most.
+
+**4. One change per migration.** A migration that creates a table, adds three indexes, and backfills data is impossible to roll back cleanly. Keep them focused.
+
+## Zero-downtime migrations
+
+Dropping a column, renaming a column, or changing a column's type can lock the table and cause downtime. For high-traffic production systems, apply changes additively:
+
+**Adding a non-null column with a default (dangerous with large tables):**
+
+```sql
+-- BAD: locks the table to backfill all existing rows
+ALTER TABLE users ADD COLUMN is_verified BOOLEAN NOT NULL DEFAULT false;
+
+-- GOOD: three-step migration for large tables
+-- Step 1: Add nullable column
+ALTER TABLE users ADD COLUMN is_verified BOOLEAN;
+
+-- Step 2 (separate migration): Backfill existing rows in batches
+UPDATE users SET is_verified = false
+WHERE  is_verified IS NULL AND id BETWEEN 1 AND 10000;
+-- (Run this in batches to avoid long-running transactions)
+
+-- Step 3 (separate migration): Add NOT NULL constraint + default
+ALTER TABLE users ALTER COLUMN is_verified SET DEFAULT false;
+ALTER TABLE users ALTER COLUMN is_verified SET NOT NULL;
+```
+
+**Renaming a column (will break queries using the old name):**
+
+```sql
+-- GOOD: additive rename — add the new column, copy data, deprecate old
+-- Step 1: Add new column
+ALTER TABLE users ADD COLUMN display_name TEXT;
+
+-- Step 2: Copy data
+UPDATE users SET display_name = full_name;
+
+-- Step 3: Update all queries to use display_name
+
+-- Step 4 (after full deployment): Drop old column
+ALTER TABLE users DROP COLUMN full_name;
+```
+
+## Migration tools
+
+- **Drizzle Kit** — TypeScript-native, generates migrations from your schema definition; popular in the Next.js ecosystem
+- **Prisma Migrate** — integrates with Prisma ORM; auto-generates migrations from schema changes
+- **Flyway** — battle-tested Java tool; runs plain SQL files in numbered order
+- **Liquibase** — XML/YAML/SQL format; very feature-rich, enterprise-focused
+- **node-pg-migrate** — lightweight Node.js runner for plain SQL or JS migration files
+
+For DURA's stack (Next.js + PostgreSQL + Supabase), Drizzle Kit or Supabase's built-in migration system are the natural choices.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a migration runner in pure JavaScript
+// Tracks applied migrations, supports forward migration and rollback
+
+function createMigrationRunner(db, migrations) {
+// db: a plain object representing database state (our in-memory DB)
+// migrations: [{ version, name, up(db), down(db) }]
+
+// Ensure the \_migrations tracking table exists
+if (!db.\_migrations) db.\_migrations = [];
+
+function getApplied() {
+return new Set(db.\_migrations.map(m => m.version));
+}
+
+function status() {
+const applied = getApplied();
+return {
+applied: migrations
+.filter(m => applied.has(m.version))
+.map(m => ({ version: m.version, name: m.name })),
+pending: migrations
+.filter(m => !applied.has(m.version))
+.map(m => ({ version: m.version, name: m.name })),
+};
+}
+
+function migrate() {
+const applied = getApplied();
+const pending = migrations
+.filter(m => !applied.has(m.version))
+.sort((a, b) => a.version - b.version);
+
+    if (pending.length === 0) {
+      console.log('Already up to date — no pending migrations.');
+      return;
+    }
+
+    for (const migration of pending) {
+      console.log(\`Applying migration \${migration.version}: \${migration.name}\`);
+      try {
+        migration.up(db);
+        db._migrations.push({
+          version:    migration.version,
+          name:       migration.name,
+          applied_at: new Date().toISOString(),
+        });
+        console.log(\`  ✓ Applied\`);
+      } catch (err) {
+        console.error(\`  ✗ Failed: \${err.message}\`);
+        throw err;
+      }
+    }
+
+}
+
+function rollback(n = 1) {
+const applied = getApplied();
+const toRollback = migrations
+.filter(m => applied.has(m.version))
+.sort((a, b) => b.version - a.version) // Reverse order
+.slice(0, n);
+
+    if (toRollback.length === 0) {
+      console.log('Nothing to rollback.');
+      return;
+    }
+
+    for (const migration of toRollback) {
+      console.log(\`Rolling back migration \${migration.version}: \${migration.name}\`);
+      try {
+        migration.down(db);
+        db._migrations = db._migrations.filter(m => m.version !== migration.version);
+        console.log(\`  ✓ Rolled back\`);
+      } catch (err) {
+        console.error(\`  ✗ Rollback failed: \${err.message}\`);
+        throw err;
+      }
+    }
+
+}
+
+return { migrate, rollback, status };
+}
+
+// --- Define migrations ---
+const db = {}; // Our in-memory "database"
+
+const migrations = [
+{
+version: 1,
+name: 'create_users',
+up(db) { db.users = []; },
+down(db) { delete db.users; },
+},
+{
+version: 2,
+name: 'create_posts',
+up(db) { db.posts = []; },
+down(db) { delete db.posts; },
+},
+{
+version: 3,
+name: 'add_users_avatar_url',
+up(db) {
+// Simulate adding a nullable column to existing rows
+(db.users || []).forEach(u => { u.avatar_url = null; });
+db.\_schema = db.\_schema || {};
+db.\_schema.users_avatar_url = true;
+},
+down(db) {
+(db.users || []).forEach(u => { delete u.avatar_url; });
+delete (db.\_schema || {}).users_avatar_url;
+},
+},
+];
+
+const runner = createMigrationRunner(db, migrations);
+
+console.log('=== Initial status ===');
+console.log(runner.status());
+
+console.log('\\n=== Running all migrations ===');
+runner.migrate();
+
+console.log('\\n=== Status after migrate ===');
+console.log(runner.status());
+
+console.log('\\n=== Rolling back 1 migration ===');
+runner.rollback(1);
+
+console.log('\\n=== Status after rollback ===');
+console.log(runner.status());
+
+console.log('\\n=== DB state ===');
+console.log('Tables:', Object.keys(db).filter(k => !k.startsWith('\_')));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What should you do if you need to change a migration that has already run in production?"
+  options={[
+    "Edit the existing file",
+    "Create a new migration that applies the corrected change",
+    "Delete the row from _migrations and re-run",
+    "Use ROLLBACK on the original migration",
+  ]}
+  answer={1}
+  explanation="Never edit a migration that has run in production — the file no longer matches what the database actually reflects. Create a new migration with a higher version number that corrects or builds on the previous change."
+/>
+<Quiz
+  question="What is the purpose of the DOWN migration?"
+  options={[
+    "It runs automatically on deployment",
+    "It allows rolling back the schema change if a deployment fails",
+    "It speeds up the UP migration",
+    "It documents what the migration does",
+  ]}
+  answer={1}
+  explanation="The DOWN migration reverses the changes made by the UP migration. It's run when you need to roll back a deployment — for example, after discovering a bug in production that requires reverting to the previous schema."
+/>
+<Quiz
+  question="CREATE INDEX CONCURRENTLY builds the index without locking the table for writes."
+  options={["True", "False"]}
+  answer={0}
+  explanation="CREATE INDEX CONCURRENTLY is a PostgreSQL feature that builds the index while allowing concurrent reads and writes. It takes longer to complete, but it's essential for production tables that can't be locked."
+/>
+<FillBlank
+  question="The three-step pattern for safely adding a NOT NULL column to a large production table is: add nullable, ___, then add the constraint."
+  answer="backfill"
+/>
+
+## What you learned
+
+- Migrations are numbered files with UP (apply) and DOWN (rollback) sections, tracked in a database table
+- Never edit a migration that has run in production — create a new one instead
+- Always write and test DOWN migrations before you need them
+- Zero-downtime migrations apply additive changes first: add nullable column, backfill, then add constraint
+- CREATE INDEX CONCURRENTLY builds indexes without table locks — use it in production
+- Migration tools like Drizzle Kit, Prisma Migrate, and Flyway automate running and tracking migrations

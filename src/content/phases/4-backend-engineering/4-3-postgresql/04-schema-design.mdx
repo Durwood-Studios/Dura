@@ -1,0 +1,334 @@
+---
+title: "Schema Design"
+description: "Design tables with proper normalization, constraints, and indexes that make your data consistent and fast."
+phase: 4
+module: "4-3-postgresql"
+order: 4
+estimatedMinutes: 12
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - normalization
+  - constraint
+  - index
+  - primary-key
+  - uuid
+  - schema-design
+---
+
+## Why this matters
+
+A poorly designed schema is one of the hardest technical debts to pay off. Changing a column type in production, splitting a table that should have been two from the start, or adding an index to a table that's grown to 50 million rows — all of these are painful, risky operations. Getting schema design right at the beginning is one of the highest-leverage decisions in backend engineering.
+
+## Normalization: design for one source of truth
+
+**Normalization** is organizing your schema so that each fact is stored in exactly one place. When data is duplicated, it can diverge — two copies of the same fact that disagree with each other.
+
+**First Normal Form (1NF):** Each column holds a single atomic value. No comma-separated lists, no arrays of values in a column (though PostgreSQL's native array type is a deliberate, indexed exception to this guideline).
+
+```sql
+-- Bad: violates 1NF
+CREATE TABLE users (
+  id    BIGSERIAL PRIMARY KEY,
+  name  TEXT,
+  tags  TEXT  -- "admin,editor,beta" — terrible
+);
+
+-- Good: separate table for the multi-valued attribute
+CREATE TABLE user_roles (
+  user_id BIGINT REFERENCES users(id),
+  role    TEXT NOT NULL,
+  PRIMARY KEY (user_id, role)
+);
+```
+
+**Second Normal Form (2NF):** Every non-key column depends on the _entire_ primary key (relevant when you have composite primary keys).
+
+**Third Normal Form (3NF):** No non-key column depends on another non-key column (no transitive dependencies).
+
+```sql
+-- Bad: zip_code determines city — transitive dependency
+CREATE TABLE orders (
+  id       BIGSERIAL PRIMARY KEY,
+  zip_code TEXT,
+  city     TEXT  -- derived from zip_code, not from id
+);
+
+-- Good: extract city lookup to its own table
+CREATE TABLE zip_codes (
+  zip_code TEXT PRIMARY KEY,
+  city     TEXT NOT NULL,
+  state    TEXT NOT NULL
+);
+```
+
+**When to denormalize:** Intentionally. When a join is so expensive (or so frequent) that duplicating data is worth the maintenance cost. Analytics/reporting schemas often denormalize deliberately. Always document why.
+
+## Constraints: let the database enforce your rules
+
+Constraints are rules the database enforces for every write, regardless of where the write comes from. Application code can have bugs; constraints cannot be bypassed by a buggy API.
+
+```sql
+CREATE TABLE products (
+  id          BIGSERIAL   PRIMARY KEY,
+  sku         TEXT        NOT NULL UNIQUE,
+  name        TEXT        NOT NULL,
+  price_cents INTEGER     NOT NULL CHECK (price_cents >= 0),
+  stock       INTEGER     NOT NULL DEFAULT 0 CHECK (stock >= 0),
+  category_id BIGINT      REFERENCES categories(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+- `NOT NULL` — the column must always have a value
+- `UNIQUE` — no two rows can share this value (creates an index automatically)
+- `CHECK (expr)` — any boolean expression; the insert/update is rejected if false
+- `DEFAULT` — the value used when the column is omitted in an INSERT
+- `REFERENCES` — foreign key; enforces referential integrity
+- `ON DELETE SET NULL` — when the referenced category is deleted, set this column to NULL (alternative: `ON DELETE CASCADE` deletes the child row, `ON DELETE RESTRICT` prevents deletion)
+
+## Primary key types: SERIAL vs UUID
+
+**BIGSERIAL (auto-increment integer):**
+
+- Compact, fast, sortable by insertion order
+- Exposes row count and creation order (can be a privacy leak)
+- Not globally unique — conflicts if you ever merge databases
+
+```sql
+id BIGSERIAL PRIMARY KEY
+-- Equivalent to: id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+```
+
+**UUID (Universally Unique Identifier):**
+
+- 36-character string like `550e8400-e29b-41d4-a716-446655440000`
+- Globally unique — safe for distributed systems, public-facing IDs
+- Larger storage (16 bytes vs 8 bytes), index performance slightly worse
+- Use `gen_random_uuid()` in PostgreSQL 13+ to generate
+
+```sql
+id UUID PRIMARY KEY DEFAULT gen_random_uuid()
+```
+
+For public-facing APIs, UUIDs prevent enumeration attacks (an attacker guessing `/users/1`, `/users/2`, ...). For internal tables, BIGSERIAL is fine and slightly more efficient.
+
+## Indexes: speed up reads, pay in writes
+
+PostgreSQL automatically creates an index on every `PRIMARY KEY` and `UNIQUE` column. For everything else, you create them manually:
+
+```sql
+-- Simple index on a frequently filtered column
+CREATE INDEX idx_posts_user_id ON posts (user_id);
+
+-- Composite index: both columns used together in a WHERE
+CREATE INDEX idx_posts_user_status ON posts (user_id, status);
+
+-- Partial index: only index published posts (smaller, faster)
+CREATE INDEX idx_posts_published ON posts (published_at)
+WHERE status = 'published';
+
+-- Covering index: include extra columns to avoid a table lookup
+CREATE INDEX idx_posts_user_title ON posts (user_id)
+INCLUDE (title, published_at);
+```
+
+**The trade-off:** Every index speeds up reads but slows down writes (INSERT, UPDATE, DELETE must update the index too) and uses disk space. Index columns you filter on frequently, join on, or sort on. Don't index every column.
+
+**Index column order matters for composite indexes.** `(user_id, status)` is useful for queries filtering on `user_id` alone OR `user_id + status`. It is _not_ useful for queries filtering on `status` alone. Put the most selective column first.
+
+## Naming conventions
+
+Consistent naming is the cheapest form of documentation:
+
+- Table names: **plural, snake_case** — `users`, `blog_posts`, `order_items`
+- Column names: **snake_case** — `first_name`, `created_at`, `is_active`
+- Foreign keys: `{referenced_table_singular}_id` — `user_id`, `post_id`
+- Indexes: `idx_{table}_{columns}` — `idx_posts_user_id`
+- Boolean columns: `is_`, `has_`, `can_` prefix — `is_active`, `has_avatar`
+- Timestamp columns: `_at` suffix — `created_at`, `published_at`, `deleted_at`
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Schema validator: enforce constraints in a JS in-memory database
+// Simulates NOT NULL, UNIQUE, CHECK, DEFAULT, and REFERENCES
+
+function createSchemaValidator(schema) {
+// schema: {
+// tableName: {
+// fields: { fieldName: { type, required, unique, default, check } },
+// foreignKeys: [{ field, references: { table, field } }]
+// }
+// }
+
+// Tracks unique values per table per field
+const uniqueSets = {};
+// Tracks all table data (for FK validation)
+const tableData = {};
+
+for (const tableName of Object.keys(schema)) {
+uniqueSets[tableName] = {};
+tableData[tableName] = [];
+for (const [fieldName, rules] of Object.entries(schema[tableName].fields)) {
+if (rules.unique) uniqueSets[tableName][fieldName] = new Set();
+}
+}
+
+function validate(tableName, row) {
+const tableSchema = schema[tableName];
+if (!tableSchema) return { valid: false, errors: [\`Unknown table: \${tableName}\`] };
+
+    const errors = [];
+    const resolved = { ...row };
+
+    // Apply defaults
+    for (const [field, rules] of Object.entries(tableSchema.fields)) {
+      if (resolved[field] == null && rules.default !== undefined) {
+        resolved[field] = typeof rules.default === 'function'
+          ? rules.default()
+          : rules.default;
+      }
+    }
+
+    // Check required (NOT NULL)
+    for (const [field, rules] of Object.entries(tableSchema.fields)) {
+      if (rules.required && (resolved[field] == null || resolved[field] === '')) {
+        errors.push(\`Field "\${field}" is required (NOT NULL)\`);
+      }
+    }
+
+    // Check UNIQUE
+    for (const [field, rules] of Object.entries(tableSchema.fields)) {
+      if (rules.unique && resolved[field] != null) {
+        if (uniqueSets[tableName][field].has(resolved[field])) {
+          errors.push(\`Field "\${field}" must be unique; value "\${resolved[field]}" already exists\`);
+        }
+      }
+    }
+
+    // CHECK constraints
+    for (const [field, rules] of Object.entries(tableSchema.fields)) {
+      if (rules.check && resolved[field] != null) {
+        if (!rules.check(resolved[field])) {
+          errors.push(\`Field "\${field}" failed CHECK constraint with value \${resolved[field]}\`);
+        }
+      }
+    }
+
+    // REFERENCES (foreign keys)
+    for (const fk of (tableSchema.foreignKeys || [])) {
+      const fkValue = resolved[fk.field];
+      if (fkValue != null) {
+        const refTable = tableData[fk.references.table] || [];
+        const exists = refTable.some(r => r[fk.references.field] === fkValue);
+        if (!exists) {
+          errors.push(\`Foreign key violation: "\${fk.field}" = \${fkValue} not found in \${fk.references.table}.\${fk.references.field}\`);
+        }
+      }
+    }
+
+    if (errors.length === 0) {
+      // Commit unique values only on success
+      for (const [field, rules] of Object.entries(tableSchema.fields)) {
+        if (rules.unique && resolved[field] != null) {
+          uniqueSets[tableName][field].add(resolved[field]);
+        }
+      }
+      tableData[tableName].push(resolved);
+    }
+
+    return { valid: errors.length === 0, errors, resolved };
+
+}
+
+return { validate, getData: (t) => tableData[t] || [] };
+}
+
+// --- Test ---
+const validator = createSchemaValidator({
+users: {
+fields: {
+id: { type: 'number', required: true, unique: true },
+email: { type: 'string', required: true, unique: true },
+username: { type: 'string', required: true },
+age: { type: 'number', required: false, check: v => v >= 0 && v < 150 },
+role: { type: 'string', required: false, default: 'member' },
+},
+foreignKeys: [],
+},
+posts: {
+fields: {
+id: { type: 'number', required: true, unique: true },
+user_id: { type: 'number', required: true },
+title: { type: 'string', required: true },
+status: { type: 'string', required: false, default: 'draft',
+check: v => ['draft', 'published', 'archived'].includes(v) },
+},
+foreignKeys: [{ field: 'user_id', references: { table: 'users', field: 'id' } }],
+},
+});
+
+console.log('Valid user:', validator.validate('users', { id: 1, email: 'alice@ex.com', username: 'alice', age: 30 }));
+
+console.log('\\nDuplicate email:',
+validator.validate('users', { id: 2, email: 'alice@ex.com', username: 'bob' }));
+
+console.log('\\nInvalid age:',
+validator.validate('users', { id: 2, email: 'bob@ex.com', username: 'bob', age: -5 }));
+
+console.log('\\nPost with valid FK:',
+validator.validate('posts', { id: 1, user_id: 1, title: 'Hello World' }));
+
+console.log('\\nPost with bad FK:',
+validator.validate('posts', { id: 2, user_id: 99, title: 'Orphan post' }));
+
+console.log('\\nPost with bad status:',
+validator.validate('posts', { id: 3, user_id: 1, title: 'Bad status', status: 'banana' }));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Which normal form states that each column should hold a single atomic value?"
+  options={["1NF", "2NF", "3NF", "BCNF"]}
+  answer={0}
+  explanation="First Normal Form (1NF) requires each column to hold a single atomic value — no comma-separated lists or repeated groups."
+/>
+<Quiz
+  question="What is the trade-off of adding more indexes to a table?"
+  options={[
+    "Faster reads but slower writes and more storage",
+    "Faster reads and faster writes",
+    "Slower reads but faster writes",
+    "No trade-off — more indexes are always better",
+  ]}
+  answer={0}
+  explanation="Every index must be updated on INSERT, UPDATE, and DELETE, which slows those operations. Indexes also consume disk space. Index thoughtfully — only columns you filter, join, or sort on frequently."
+/>
+<Quiz
+  question="BIGSERIAL and UUID are both valid primary key types; the right choice depends on your use case."
+  options={["True", "False"]}
+  answer={0}
+  explanation="BIGSERIAL is compact, fast, and sortable but exposes row counts and is not globally unique. UUID is globally unique and safe for public APIs but uses more storage. Both are valid — choose based on your requirements."
+/>
+<FillBlank
+  question="The constraint that prevents a column from containing a NULL value is called ___."
+  answer="NOT NULL"
+/>
+
+## What you learned
+
+- Normalization stores each fact exactly once, eliminating data duplication and the inconsistency it causes
+- 1NF requires atomic column values; 3NF eliminates transitive dependencies between non-key columns
+- Constraints (NOT NULL, UNIQUE, CHECK, REFERENCES) are enforced by the database on every write
+- BIGSERIAL auto-increment is compact and sortable; UUID is globally unique and safe for public-facing IDs
+- Indexes speed up reads but slow down writes — index columns used in WHERE, JOIN, and ORDER BY clauses
+- Composite index column order matters: most selective column first, match the query's filter pattern
