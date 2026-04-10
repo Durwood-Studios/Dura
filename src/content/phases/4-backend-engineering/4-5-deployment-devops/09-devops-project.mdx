@@ -1,0 +1,384 @@
+---
+title: "DevOps Project: Full-Stack Deployment"
+description: "Deploy the complete bookshelf app — Express API + PostgreSQL + Next.js frontend — with CI/CD."
+phase: 4
+module: "4-5-deployment-devops"
+order: 9
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - full-stack-deployment
+  - deploy-hook
+  - railway
+  - vercel
+  - cicd-pipeline
+---
+
+## Why this matters
+
+Individual deployment concepts only pay off when you assemble them into a working system. This lesson walks through the complete deployment of a full-stack application — the same bookshelf app from the Express and PostgreSQL modules — connecting every piece from the previous lessons into a production-ready configuration.
+
+## The target architecture
+
+```
+Browser
+  │
+  ├── Next.js Frontend ──────────────── Vercel
+  │       │
+  │       └── API_URL env var → Railway
+  │
+  └── Express API ────────────────────── Railway
+          │
+          └── DATABASE_URL env var → Railway PostgreSQL
+                                     (same project, private network)
+```
+
+**Why this split?**
+
+- Vercel is optimized for Next.js: automatic ISR, image optimization, Edge Functions, global CDN
+- Railway handles persistent Node.js services and managed databases with a private network between them
+- Separating concerns means the frontend can be deployed independently of the API, and vice versa
+
+## Setting up Railway (API + Database)
+
+**Step 1**: Create a Railway project and add two services:
+
+```bash
+# In the Railway dashboard:
+# 1. New Project → Deploy from GitHub repo (your Express API)
+# 2. Add Database → PostgreSQL
+
+# Railway automatically:
+# - Injects DATABASE_URL into your API service
+# - Creates a private network between the two services
+```
+
+**Step 2**: Configure your Express app to use the injected environment variables:
+
+```javascript
+// src/index.ts — environment-driven configuration
+const PORT = process.env.PORT ?? 3001;
+const DATABASE_URL = process.env.DATABASE_URL; // injected by Railway
+
+if (!DATABASE_URL) {
+  console.error("DATABASE_URL is required");
+  process.exit(1);
+}
+```
+
+**Step 3**: Add a health check endpoint (Railway monitors this):
+
+```javascript
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+```
+
+**Step 4**: Configure the build and start commands in Railway:
+
+```bash
+# Build command
+npm run build          # compiles TypeScript to dist/
+
+# Start command
+node dist/index.js
+```
+
+## Running migrations on deploy
+
+Database migrations need to run before the API serves traffic. There are two patterns:
+
+**Pattern A — Startup migration**: run migrations in the application's startup code:
+
+```javascript
+// Runs before the server starts listening
+await runMigrations();
+app.listen(PORT, () => console.log(\`Listening on \${PORT}\`));
+```
+
+Simple, but adds latency to each deploy. If migrations fail, the service fails health checks and Railway rolls back automatically.
+
+**Pattern B — Railway pre-deploy command**: some hosting platforms let you run a command before traffic shifts. Railway supports this via their CLI scripts. The migration runs as a one-off job before the new version receives traffic.
+
+For most projects at this stage, Pattern A is simpler and reliable enough.
+
+## Setting up Vercel (Frontend)
+
+**Step 1**: Import the Next.js repo into Vercel. Auto-detection handles build settings.
+
+**Step 2**: Add the required environment variable in the Vercel dashboard:
+
+```bash
+# Vercel → Settings → Environment Variables
+NEXT_PUBLIC_API_URL=https://my-api.up.railway.app   # Railway's generated URL
+```
+
+**Step 3**: In your Next.js code, use this variable:
+
+```typescript
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+
+const books = await fetch(\`\${API_URL}/api/books\`).then(r => r.json());
+```
+
+## CI/CD pipeline with GitHub Actions
+
+This pipeline runs on every push: lint and test, then deploy to Railway (API) or trigger Vercel (automatically on push to main):
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+
+  deploy-api:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Railway deploy
+        run: curl -X POST "${{ secrets.RAILWAY_DEPLOY_HOOK }}"
+```
+
+Vercel watches the GitHub repo and deploys automatically on push to `main` — no additional step needed.
+
+## Environment variables checklist
+
+| Variable              | Where               | Value                                |
+| --------------------- | ------------------- | ------------------------------------ |
+| `DATABASE_URL`        | Railway API service | Auto-injected by Railway             |
+| `PORT`                | Railway API service | Auto-injected by Railway             |
+| `SESSION_SECRET`      | Railway API service | Set manually — random 32-char string |
+| `RAILWAY_DEPLOY_HOOK` | GitHub Secrets      | Railway deploy hook URL              |
+| `NEXT_PUBLIC_API_URL` | Vercel              | Railway API's public URL             |
+
+## The complete deployment checklist
+
+Before calling a deployment "done":
+
+```
+☐ Environment variables set in both platforms
+☐ Database migrations ran successfully (check Railway logs)
+☐ /health endpoint returns 200 on the API
+☐ Frontend fetches data from the API (open the app, verify the list loads)
+☐ SSL is working (https:// with padlock — both Vercel and Railway handle this)
+☐ Custom domain resolves (if applicable)
+☐ Error tracking configured (Sentry DSN in both services)
+☐ Uptime monitor pointed at /health endpoint
+☐ GitHub Actions CI passing (green checkmark on main)
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Deployment checklist runner — runs checks in parallel, collects results
+
+function createDeployChecklist(checks) {
+// checks: Array<{ name: string, fn: () => { passed: boolean, detail: string } }>
+
+function run() {
+const results = [];
+
+    // Run all checks (simulated parallel execution)
+    for (const check of checks) {
+      try {
+        const result = check.fn();
+        results.push({
+          name: check.name,
+          passed: result.passed,
+          detail: result.detail,
+        });
+      } catch (err) {
+        results.push({
+          name: check.name,
+          passed: false,
+          detail: \`Check threw an error: \${err.message}\`,
+        });
+      }
+    }
+
+    const allPassed = results.every(r => r.passed);
+    const passCount = results.filter(r => r.passed).length;
+    const failCount = results.filter(r => !r.passed).length;
+
+    const summary = allPassed
+      ? \`All \${passCount} checks passed — deployment is healthy\`
+      : \`\${failCount} of \${results.length} checks FAILED — do not route traffic\`;
+
+    return { allPassed, results, summary };
+
+}
+
+return { run };
+}
+
+// Simulate a deployment environment
+const deployState = {
+envVars: {
+DATABASE_URL: 'postgresql://user:pass@db.railway.internal/myapp',
+SESSION_SECRET: 'abc123xyz456def789',
+PORT: '3001',
+},
+dbVersion: 5, // latest migration version
+requiredDbVersion: 5,
+apiHealthy: true,
+sslValid: true,
+domainResolves: true,
+};
+
+const checklist = createDeployChecklist([
+{
+name: 'Required env vars present',
+fn: () => {
+const required = ['DATABASE_URL', 'SESSION_SECRET', 'PORT'];
+const missing = required.filter(k => !deployState.envVars[k]);
+return {
+passed: missing.length === 0,
+detail: missing.length === 0
+? \`All \${required.length} required vars are set\`
+: \`Missing vars: \${missing.join(', ')}\`,
+};
+},
+},
+{
+name: 'Health endpoint responding',
+fn: () => ({
+passed: deployState.apiHealthy,
+detail: deployState.apiHealthy
+? 'GET /health → 200 OK'
+: 'GET /health timed out after 5s',
+}),
+},
+{
+name: 'Database migrations current',
+fn: () => ({
+passed: deployState.dbVersion >= deployState.requiredDbVersion,
+detail: deployState.dbVersion >= deployState.requiredDbVersion
+? \`Schema at version \${deployState.dbVersion} (required: \${deployState.requiredDbVersion})\`
+: \`Schema at v\${deployState.dbVersion} but v\${deployState.requiredDbVersion} required — run migrations\`,
+}),
+},
+{
+name: 'SSL certificate valid',
+fn: () => ({
+passed: deployState.sslValid,
+detail: deployState.sslValid
+? 'TLS certificate valid, expires in 87 days'
+: 'TLS certificate expired or invalid',
+}),
+},
+{
+name: 'Domain resolves correctly',
+fn: () => ({
+passed: deployState.domainResolves,
+detail: deployState.domainResolves
+? 'myapp.com → 76.76.21.21 (Vercel)'
+: 'DNS lookup failed — check A/CNAME records',
+}),
+},
+]);
+
+const { allPassed, results, summary } = checklist.run();
+
+console.log('Deployment Check Results:');
+results.forEach(r => {
+const icon = r.passed ? '✓' : '✗';
+console.log(\` \${icon} \${r.name}: \${r.detail}\`);
+});
+console.log(\`\\n\${summary}\`);
+
+// Now simulate a failed deployment
+console.log('\\n--- Failed deployment scenario ---');
+deployState.apiHealthy = false;
+deployState.dbVersion = 4; // migration not run
+
+const failedResult = checklist.run();
+failedResult.results.forEach(r => {
+const icon = r.passed ? '✓' : '✗';
+console.log(\` \${icon} \${r.name}: \${r.detail}\`);
+});
+console.log(\`\\n\${failedResult.summary}\`);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why is the Express API deployed to Railway while the Next.js frontend goes to Vercel?"
+  options={[
+    "Railway is cheaper than Vercel",
+    "Vercel is optimized for Next.js (ISR, Image Optimization, Edge Functions); Railway supports persistent Node.js processes and managed PostgreSQL",
+    "Vercel doesn't support Node.js",
+    "Railway provides better CI/CD integration with GitHub",
+  ]}
+  answer={1}
+  explanation="Each platform is optimized for its use case. Vercel handles Next.js features (ISR, Image Optimization, global CDN) natively. Railway manages persistent backend services, database add-ons, and private networking between services in the same project."
+/>
+<Quiz
+  question="The NEXT_PUBLIC_API_URL variable must use the NEXT_PUBLIC_ prefix because it is accessed in server-side code."
+  options={["True", "False"]}
+  answer={1}
+  explanation="NEXT_PUBLIC_ prefix embeds the variable in the client-side JavaScript bundle, making it accessible in the browser. In this case, the API URL is used in client-side fetch calls. Server-only variables (like DATABASE_URL) should NOT use this prefix."
+/>
+<Quiz
+  question="What is a Railway deploy hook and how is it used in the CI/CD pipeline?"
+  options={[
+    "A webhook that Railway sends to GitHub when a deployment completes",
+    "A URL that, when called with a POST request, triggers a Railway deployment — used in GitHub Actions to deploy after tests pass",
+    "A Railway plugin that hooks into the npm install process",
+    "A health check that Railway uses to verify your application is running",
+  ]}
+  answer={1}
+  explanation="A deploy hook is a Railway-generated URL. Sending a POST request to it triggers a deployment of your Railway service. In the GitHub Actions pipeline, the deploy job calls this URL after the test job passes, automating deployment on merge to main."
+/>
+<FillBlank
+  question="Before routing real user traffic to a new deployment, you should verify that the ___ endpoint returns a 200 response."
+  answer="health"
+/>
+
+## What you learned
+
+- The full-stack deployment splits Next.js to Vercel and Express + PostgreSQL to Railway, using each platform's strengths
+- Railway injects DATABASE_URL automatically when you add a PostgreSQL service to the same project
+- CI/CD pipeline runs lint, typecheck, and tests before triggering Railway via deploy hook; Vercel deploys automatically on push to main
+- Database migrations run on startup and cause a health check failure (and automatic rollback) if they fail
+- A deployment checklist — env vars, health endpoint, migrations, SSL, domain — should pass before traffic reaches the new version

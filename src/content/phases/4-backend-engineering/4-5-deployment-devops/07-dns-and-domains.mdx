@@ -1,0 +1,261 @@
+---
+title: "DNS and Domains"
+description: "How domain names resolve to IPs, what record types mean, and how HTTPS certificates work."
+phase: 4
+module: "4-5-deployment-devops"
+order: 7
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "understand"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - dns
+  - a-record
+  - cname
+  - ttl
+  - ssl-tls
+  - lets-encrypt
+---
+
+## Why this matters
+
+The moment you want a custom domain on your app, DNS becomes something you need to understand rather than fear. Getting a CNAME wrong delays your launch by hours. Getting HTTPS wrong means browsers show a security warning that drives users away before they see your app. These are not obscure topics — they come up on every production deployment.
+
+## How DNS resolution works
+
+DNS (Domain Name System) is the phone book of the internet — it translates human-readable domain names like `api.myapp.com` into IP addresses like `104.21.67.8` that computers use to connect.
+
+When your browser navigates to a domain, the resolution process looks like this:
+
+1. **Browser checks its cache**: has it resolved this domain recently? If yes and TTL hasn't expired, use the cached IP.
+2. **Operating system resolver**: the OS checks its cache and `/etc/hosts`.
+3. **Recursive resolver**: your ISP or a configured resolver (8.8.8.8 for Google, 1.1.1.1 for Cloudflare) takes over.
+4. **Root servers**: the resolver asks a root nameserver where to find the `.com` TLD nameservers.
+5. **TLD nameservers**: the `.com` nameservers know which authoritative nameserver is responsible for `myapp.com`.
+6. **Authoritative nameserver**: this is the DNS server configured at your registrar or Cloudflare. It returns the actual records for `api.myapp.com`.
+7. The answer flows back through the chain; your browser caches it for the TTL duration.
+
+This chain completes in milliseconds, but understanding it explains why changing a DNS record doesn't take effect immediately — every cache in the chain must expire before the new value is seen.
+
+## TTL: time to live
+
+TTL (time to live) is the number of seconds a cached DNS record is valid. Typical values:
+
+- **3600** (1 hour): standard for most records
+- **300** (5 minutes): use before a planned change so you can roll back quickly if needed
+- **86400** (24 hours): stable records that rarely change
+
+Before making a DNS change, reduce the TTL to 300. Wait for the old TTL to expire. Make the change. Once it propagates and looks correct, raise the TTL back to 3600. This ensures that if you made an error, the rollback takes only 5 minutes instead of 24 hours.
+
+## DNS record types
+
+| Record    | Purpose                                       | Example                              |
+| --------- | --------------------------------------------- | ------------------------------------ |
+| **A**     | Maps domain to IPv4 address                   | `example.com → 104.21.67.8`          |
+| **AAAA**  | Maps domain to IPv6 address                   | `example.com → 2606:4700::...`       |
+| **CNAME** | Maps domain to another domain (alias)         | `www.example.com → example.com`      |
+| **MX**    | Mail exchange — routes email                  | `example.com → mail.example.com`     |
+| **TXT**   | Free-form text — verification, SPF, DKIM      | `"v=spf1 include:sendgrid.net ~all"` |
+| **CAA**   | Which certificate authorities can issue certs | `example.com → letsencrypt.org`      |
+| **NS**    | Which nameservers are authoritative           | `example.com → ns1.cloudflare.com`   |
+
+**CNAME chains**: CNAMEs can point to other CNAMEs, which is how platforms like Vercel and Railway work. You set your `www` subdomain as a CNAME to `cname.vercel-dns.com`, and Vercel handles the rest. There is a maximum hop count (typically 8-10) before resolvers give up.
+
+**CNAME restriction**: You cannot use a CNAME for an apex domain (`example.com` — no subdomain). This is a DNS protocol limitation. Use an A record or a CNAME-flattening service like Cloudflare's "ALIAS" record.
+
+## Buying and managing domains
+
+A **registrar** is where you register the domain name. Namecheap and Cloudflare are the most developer-friendly options.
+
+A **DNS host** manages the authoritative nameservers. You can use your registrar's DNS or point your domain's NS records at a different provider (like Cloudflare for its additional features).
+
+Using **Cloudflare as both registrar and DNS host** is common for developers because:
+
+- DDoS protection and global CDN for free (proxied records)
+- Analytics on DNS queries
+- SSL/TLS termination at the edge
+- Domain registration at cost (no markup)
+
+## SSL/TLS and HTTPS
+
+TLS (Transport Layer Security, formerly SSL) encrypts the connection between client and server. The padlock icon in browsers indicates an active TLS connection. Without it, any network observer can read or modify traffic — including login credentials.
+
+The TLS handshake process:
+
+1. Browser sends a "ClientHello" listing supported cipher suites
+2. Server responds with its certificate (proof of identity signed by a CA)
+3. Browser verifies the certificate against trusted Certificate Authorities (CAs) baked into the OS
+4. Keys are exchanged; encrypted communication begins
+
+**Certificate Authorities (CAs)** are trusted third parties that verify domain ownership and sign certificates. Browsers trust a curated list of CAs. If your certificate is not signed by a trusted CA, browsers show a security warning.
+
+**Let's Encrypt** is a free, automated CA that issues domain-validated (DV) certificates valid for 90 days, auto-renewed. It is how Vercel, Railway, Fly.io, and most modern platforms provision HTTPS automatically — you add a domain, they handle the rest.
+
+**HSTS** (HTTP Strict Transport Security) is an HTTP header that instructs browsers to only connect over HTTPS for a specified period, even if the user types `http://`:
+
+```
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+```
+
+Once a browser sees this header, it refuses to load the site over plain HTTP for one year. Enable it only after you are certain HTTPS is working correctly — it is difficult to undo.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// DNS resolver simulator — walks zones, follows CNAMEs, handles NXDOMAIN
+
+function createDNSSimulator(zones) {
+// zones: { [domain]: { [type]: { value, ttl } } }
+// domain can be exact ('api.example.com') or wildcard ('\*.example.com')
+
+const cache = new Map();
+
+function matchZone(domain) {
+// Exact match first
+if (zones[domain]) return zones[domain];
+// Wildcard match: _.example.com matches api.example.com
+const parts = domain.split('.');
+for (let i = 1; i < parts.length; i++) {
+const wildcard = '_.' + parts.slice(i).join('.');
+if (zones[wildcard]) return zones[wildcard];
+}
+return null;
+}
+
+function resolve(domain, type, hops = 0) {
+if (hops > 10) {
+return { error: 'CNAME_LOOP', message: 'Max CNAME hops exceeded (possible loop)' };
+}
+
+    const cacheKey = \`\${domain}:\${type}\`;
+    if (cache.has(cacheKey)) {
+      return { ...cache.get(cacheKey), cached: true };
+    }
+
+    const zone = matchZone(domain);
+    if (!zone) {
+      return { error: 'NXDOMAIN', message: \`Domain '\${domain}' not found\` };
+    }
+
+    // If looking for A record but only have CNAME, follow the CNAME
+    if (type === 'A' && !zone.A && zone.CNAME) {
+      const cnameResult = resolve(zone.CNAME.value, 'A', hops + 1);
+      if (!cnameResult.error) {
+        const result = { type: 'A', value: cnameResult.value, ttl: zone.CNAME.ttl, via: domain };
+        cache.set(cacheKey, result);
+        return result;
+      }
+      return cnameResult;
+    }
+
+    const record = zone[type];
+    if (!record) {
+      return { error: 'NODATA', message: \`No '\${type}' record for '\${domain}'\` };
+    }
+
+    // Follow CNAME chain for CNAME type queries
+    if (type === 'CNAME' && zone.CNAME) {
+      const result = { type: 'CNAME', value: record.value, ttl: record.ttl, target: record.value };
+      cache.set(cacheKey, result);
+      return result;
+    }
+
+    const result = { type, value: record.value, ttl: record.ttl, domain };
+    cache.set(cacheKey, result);
+    return result;
+
+}
+
+return { resolve };
+}
+
+// Set up a realistic DNS zone configuration
+const dns = createDNSSimulator({
+'myapp.com': {
+A: { value: '76.76.21.21', ttl: 3600 }, // Vercel IP
+MX: { value: 'mail.myapp.com', ttl: 3600 },
+TXT: { value: 'v=spf1 include:sendgrid.net ~all', ttl: 3600 },
+},
+'www.myapp.com': {
+CNAME: { value: 'cname.vercel-dns.com', ttl: 3600 },
+},
+'api.myapp.com': {
+CNAME: { value: 'myapp-api.fly.dev', ttl: 300 },
+},
+'myapp-api.fly.dev': {
+A: { value: '137.66.32.10', ttl: 60 },
+},
+'cname.vercel-dns.com': {
+A: { value: '76.76.21.21', ttl: 60 },
+},
+'\*.myapp.com': {
+CNAME: { value: 'myapp.com', ttl: 3600 }, // wildcard fallback
+},
+});
+
+// Direct A record lookup
+console.log("myapp.com A:", dns.resolve('myapp.com', 'A'));
+
+// CNAME following: www → vercel-dns → IP
+console.log("www.myapp.com A (follows CNAME):", dns.resolve('www.myapp.com', 'A'));
+
+// Double CNAME chain: api.myapp.com → fly.dev → IP
+console.log("api.myapp.com A (double CNAME):", dns.resolve('api.myapp.com', 'A'));
+
+// TXT record lookup
+console.log("myapp.com TXT:", dns.resolve('myapp.com', 'TXT'));
+
+// NXDOMAIN
+console.log("notreal.com A:", dns.resolve('notreal.com', 'A'));
+
+// Wildcard match
+console.log("blog.myapp.com A (wildcard):", dns.resolve('blog.myapp.com', 'A'));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why can't you use a CNAME record for an apex domain (example.com without a subdomain)?"
+  options={[
+    "It is too expensive to register CNAME records at the apex",
+    "The DNS protocol does not allow CNAME records to coexist with other records at the same label, and apex domains require SOA and NS records",
+    "Apex domains always require SSL certificates",
+    "CNAME records only work with IPv6 addresses",
+  ]}
+  answer={1}
+  explanation="The DNS spec requires that a CNAME not coexist with other records for the same name. Apex domains always have SOA and NS records, making a CNAME impossible. Use an A record pointing to the host's IP, or a Cloudflare ALIAS (CNAME flattening) record instead."
+/>
+<Quiz
+  question="Increasing your DNS record's TTL to 86400 before making a DNS change is a best practice."
+  options={["True", "False"]}
+  answer={1}
+  explanation="You should REDUCE your TTL (to 300 seconds) before making a change, not increase it. A lower TTL means caches expire quickly, so clients pick up the new record faster and rollback is quicker if something goes wrong."
+/>
+<Quiz
+  question="What does HSTS do once a browser receives the Strict-Transport-Security header?"
+  options={[
+    "It encrypts all JavaScript files automatically",
+    "It instructs the browser to refuse HTTP connections to that domain for the specified duration",
+    "It configures the server's TLS certificate rotation schedule",
+    "It blocks all third-party cookies on the domain",
+  ]}
+  answer={1}
+  explanation="HSTS tells browsers to only connect to the domain over HTTPS for the specified max-age period. Even if a user types http://, the browser upgrades to https:// automatically. This prevents SSL-stripping attacks."
+/>
+<FillBlank
+  question="Let's Encrypt is a free, automated Certificate Authority that issues ___ certificates valid for 90 days."
+  answer="TLS"
+/>
+
+## What you learned
+
+- DNS resolution walks a hierarchy: local cache → resolver → root → TLD → authoritative nameserver
+- TTL controls how long records are cached — lower it before planned changes to enable fast rollback
+- A records point to IPv4 addresses; CNAMEs alias one domain to another and can be chained
+- Let's Encrypt provides free, auto-renewed TLS certificates used by all major deployment platforms
+- HSTS forces HTTPS connections for a set duration — enable it only after HTTPS is confirmed working

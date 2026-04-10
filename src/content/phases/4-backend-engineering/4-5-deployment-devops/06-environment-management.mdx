@@ -1,0 +1,246 @@
+---
+title: "Environment Management"
+description: "Dev, staging, and production environments — feature flags, config management, and safe rollouts."
+phase: 4
+module: "4-5-deployment-devops"
+order: 6
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - staging-environment
+  - feature-flag
+  - blue-green-deployment
+  - canary-deployment
+  - config-parity
+---
+
+## Why this matters
+
+"It works in staging" is almost as frustrating as "it works on my machine" — but it happens for a different reason. Environments that don't match each other create a false sense of confidence before production and a mystery when things break there. Getting environment management right means your staging actually predicts production, and feature flags let you ship code to production before it's ready to be seen.
+
+## The three environments
+
+Most teams operate three environments, each serving a different purpose:
+
+**Development** is your local machine. It runs fast, fails loudly, and uses synthetic data. Logging is verbose. External services may be mocked or pointed at sandbox/test accounts. The database is local or a throwaway hosted instance.
+
+**Staging** is as close to production as possible. It uses the same infrastructure type, the same runtime version, the same third-party services (ideally staging accounts for services like Stripe), and real-looking data. Its purpose is final validation before production. If staging and production differ meaningfully, staging's value collapses.
+
+**Production** is where real users are. Changes are made carefully. Direct database access is controlled. Every change is deployed through CI/CD, never manually patched.
+
+## The 12-factor principle: config parity
+
+The [12-factor app](https://12factor.net/) methodology (written by Heroku founders) describes how to build software-as-a-service. Factor III is Config, and it has two rules:
+
+1. Store config (anything that changes between environments) in environment variables — not code
+2. Keep environments as similar as possible — "dev/prod parity"
+
+Config parity fails when, for example, development uses SQLite and production uses PostgreSQL, or development uses in-memory sessions and production uses Redis. These differences mean bugs that only appear in production, often in edge cases that SQLite handles differently from PostgreSQL.
+
+```bash
+# .env.local (development — never committed)
+DATABASE_URL=postgresql://localhost:5432/myapp_dev
+LOG_LEVEL=debug
+STRIPE_SECRET_KEY=sk_test_...   # Stripe test key
+
+# Staging environment variables (set in Railway/Fly dashboard)
+DATABASE_URL=postgresql://staging-db.internal:5432/myapp_staging
+LOG_LEVEL=info
+STRIPE_SECRET_KEY=sk_test_...   # Still test key — staging doesn't charge real money
+
+# Production environment variables
+DATABASE_URL=postgresql://prod-db.internal:5432/myapp_prod
+LOG_LEVEL=warn
+STRIPE_SECRET_KEY=sk_live_...   # Live key — real money
+```
+
+## Feature flags
+
+A feature flag is a runtime toggle that enables or disables a feature without deploying new code. The feature's code ships to production in an "off" state; you flip the flag when ready.
+
+Use cases:
+
+- **Dark launches**: ship code that affects 0% of users, verify it doesn't break anything, gradually turn it on
+- **A/B testing**: route 50% of users to the new UI, measure conversion, decide which wins
+- **Gradual rollouts**: enable a feature for 5% of users → monitor → 25% → 50% → 100%
+- **Kill switches**: if a feature causes problems, disable it instantly without reverting a deploy
+
+The simplest possible feature flag system is a database table:
+
+```sql
+CREATE TABLE feature_flags (
+  name        TEXT PRIMARY KEY,
+  enabled     BOOLEAN NOT NULL DEFAULT false,
+  rollout_pct INT NOT NULL DEFAULT 0,   -- 0-100
+  allowed_ids TEXT[]                    -- specific user IDs to always enable for
+);
+```
+
+Your API reads the flag on each request (or caches with a short TTL), and your UI renders or hides the feature accordingly. More sophisticated services like LaunchDarkly, Unleash, and Flagsmith add targeting rules, analytics, and A/B test frameworks on top of this concept.
+
+## Blue-green deployment
+
+A blue-green deployment runs two identical production environments simultaneously. One serves live traffic (say, "blue"). The other (green) receives the new version. When green's health checks pass, you switch DNS or the load balancer to point at green. Blue becomes idle — ready to be the next deploy target, or instant rollback if green has issues.
+
+```
+Before deploy:              After deploy:
+  DNS → Blue (v1)             DNS → Green (v2)
+                              Blue (v1) — idle, ready for rollback
+```
+
+The cost is running two production environments. For most small teams, this is handled by your PaaS (Railway and Vercel already implement a version of this under the hood). For teams managing their own infrastructure, blue-green requires explicit setup.
+
+## Canary deployment
+
+A canary deployment routes a small percentage of real production traffic to the new version while the rest continues on the old version. You watch metrics (error rate, latency, business KPIs) for the canary population. If they look good, you gradually increase the canary percentage until it's 100%.
+
+```
+10% traffic → New version (v2)  ← watch error rate
+90% traffic → Old version (v1)
+```
+
+Canary deployments catch issues that staging missed because they test with real production traffic patterns and real data. Named after the "canary in a coal mine" — a small exposure to risk before full commitment.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Feature flag system with percentage rollout and allowlist
+
+function createFeatureFlags(flags) {
+// flags: Array<{ name, enabled, rolloutPercentage, allowedUsers: [] }>
+const flagMap = new Map(flags.map(f => [f.name, f]));
+
+function hashUserId(userId) {
+// Deterministic hash: same userId always maps to the same bucket (0-99)
+// This ensures a user consistently sees the same experience
+const hash = (userId.charCodeAt(0) _ 7 + userId.length _ 13) % 100;
+return hash;
+}
+
+function isEnabled(flagName, userId) {
+const flag = flagMap.get(flagName);
+
+    if (!flag) {
+      console.warn(\`Feature flag '\${flagName}' not found — defaulting to disabled\`);
+      return false;
+    }
+
+    // Flag is globally disabled
+    if (!flag.enabled) return false;
+
+    // User is in the explicit allowlist (always enabled for them)
+    if (flag.allowedUsers && flag.allowedUsers.includes(userId)) return true;
+
+    // Check rollout percentage via deterministic hash
+    const bucket = hashUserId(userId);
+    return bucket < flag.rolloutPercentage;
+
+}
+
+function setFlag(flagName, updates) {
+const existing = flagMap.get(flagName);
+if (!existing) throw new Error(\`Flag '\${flagName}' not found\`);
+flagMap.set(flagName, { ...existing, ...updates });
+}
+
+function getFlag(flagName) {
+return flagMap.get(flagName) ?? null;
+}
+
+return { isEnabled, setFlag, getFlag };
+}
+
+const flags = createFeatureFlags([
+{
+name: 'new-dashboard',
+enabled: true,
+rolloutPercentage: 25, // 25% of users
+allowedUsers: ['usr_dustin'], // always on for specific users
+},
+{
+name: 'ai-suggestions',
+enabled: false, // globally disabled (dark launch)
+rolloutPercentage: 0,
+allowedUsers: [],
+},
+{
+name: 'export-csv',
+enabled: true,
+rolloutPercentage: 100, // fully rolled out to everyone
+allowedUsers: [],
+},
+]);
+
+// Simulate checking the flag for a batch of users
+const userIds = ['usr_alice', 'usr_bob', 'usr_carol', 'usr_dave', 'usr_eve',
+'usr_frank', 'usr_grace', 'usr_dustin', 'usr_henry', 'usr_iris'];
+
+console.log("=== new-dashboard rollout (25%) ===");
+userIds.forEach(id => {
+const enabled = flags.isEnabled('new-dashboard', id);
+console.log(\` \${id}: \${enabled ? '✓ enabled' : '✗ disabled'}\`);
+});
+
+console.log("\\n=== ai-suggestions (globally disabled) ===");
+userIds.slice(0, 3).forEach(id => {
+console.log(\` \${id}: \${flags.isEnabled('ai-suggestions', id) ? '✓ enabled' : '✗ disabled'}\`);
+});
+
+// Gradually roll out more
+console.log("\\n=== Increasing ai-suggestions to 50% ===");
+flags.setFlag('ai-suggestions', { enabled: true, rolloutPercentage: 50 });
+userIds.forEach(id => {
+const enabled = flags.isEnabled('ai-suggestions', id);
+console.log(\` \${id}: \${enabled ? '✓ enabled' : '✗ disabled'}\`);
+});`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="According to the 12-factor app methodology, where should environment-specific configuration (like DATABASE_URL) live?"
+  options={[
+    "In a config.json file committed to the repository",
+    "In environment variables, never in code",
+    "In a constants.ts file with different values per environment",
+    "In the application's database",
+  ]}
+  answer={1}
+  explanation="The 12-factor app Factor III states that config (anything that varies between deployments) should be stored in environment variables. This keeps secrets out of source control and makes config changes deployable without code changes."
+/>
+<Quiz
+  question="A canary deployment routes all traffic to the new version immediately, then rolls back if problems appear."
+  options={["True", "False"]}
+  answer={1}
+  explanation="A canary deployment routes a small percentage of traffic (e.g., 5-10%) to the new version while most traffic stays on the old version. You monitor the canary and gradually increase the percentage only if metrics look healthy."
+/>
+<Quiz
+  question="What is the primary use case for a feature flag 'kill switch'?"
+  options={[
+    "To disable a feature during development",
+    "To instantly disable a problematic production feature without rolling back a deployment",
+    "To prevent non-admin users from accessing admin features",
+    "To A/B test two designs simultaneously",
+  ]}
+  answer={1}
+  explanation="A kill switch feature flag lets you disable a feature instantly in production by flipping a toggle — no deploy, no rollback needed. It's the fastest recovery path when a feature causes unexpected problems."
+/>
+<FillBlank
+  question="A ___ deployment runs two identical production environments simultaneously, letting you switch traffic instantly between them."
+  answer="blue-green"
+/>
+
+## What you learned
+
+- The three environments are development (fast feedback), staging (production-like validation), and production (real users)
+- Config parity means dev, staging, and production use the same database engine, runtime, and service types — differences cause production-only bugs
+- Feature flags enable dark launches, A/B tests, gradual rollouts, and instant kill switches without redeployment
+- Blue-green deployments keep a previous version live for instant rollback
+- Canary deployments route a small percentage of real traffic to the new version, letting you validate before full rollout

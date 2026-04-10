@@ -1,0 +1,280 @@
+---
+title: "CI/CD Fundamentals"
+description: "Automated pipelines that test, build, and deploy your code on every push — the foundation of modern software delivery."
+phase: 4
+module: "4-5-deployment-devops"
+order: 2
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "understand"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - ci-cd
+  - pipeline
+  - github-actions
+  - workflow
+  - job
+  - step
+---
+
+## Why this matters
+
+Manual deployments are how bugs reach production at 5pm on a Friday. CI/CD — Continuous Integration and Continuous Deployment — is the practice of automating the path from code change to running software. When you get it right, every merged pull request either deploys successfully or gets caught by automated tests before it can do damage. It turns deployment from a risky event into a routine non-event.
+
+## Continuous Integration vs Continuous Deployment
+
+These terms are related but distinct, and the "CD" abbreviation covers two different things:
+
+**Continuous Integration (CI)** is the practice of merging code frequently — ideally multiple times per day — and running an automated suite of tests on every merge. The goal is to catch integration problems early, when they are cheap to fix. The longer branches diverge, the more painful the eventual merge.
+
+**Continuous Delivery** means every build that passes CI is in a deployable state. A human still decides when to deploy, but the act of deploying is a single button press, not a ceremony.
+
+**Continuous Deployment** goes one step further: every passing build deploys automatically to production without human intervention. This requires high confidence in your test suite. Most teams reach Continuous Delivery; the subset with robust testing reach Continuous Deployment.
+
+## The pipeline stages
+
+A CI/CD pipeline is a sequence of automated steps that your code passes through. A typical Node.js pipeline looks like this:
+
+```yaml
+trigger (push to any branch)
+└── install dependencies
+└── lint (ESLint)
+└── typecheck (tsc --noEmit)
+└── test (jest / vitest)
+└── build (next build / tsc)
+└── deploy (if branch = main)
+```
+
+Each stage gates the next. If lint fails, tests never run — you get fast feedback and don't waste compute.
+
+## GitHub Actions anatomy
+
+GitHub Actions is the most common CI/CD platform for open-source and small-to-medium teams. A **workflow** is a YAML file in `.github/workflows/`. It contains one or more **jobs**, each of which contains a sequence of **steps**.
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm # cache node_modules between runs
+
+      - run: npm ci # clean install — never npm install in CI
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test
+
+  deploy:
+    needs: test # only runs if test job passes
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      # trigger Railway or Vercel deploy hook
+      - run: curl -X POST "${{ secrets.DEPLOY_HOOK_URL }}"
+```
+
+Key concepts from the above:
+
+- **`on`**: what triggers the workflow. `push` and `pull_request` are most common.
+- **`jobs`**: multiple jobs run in **parallel by default**. Use `needs:` to express dependencies between them.
+- **`steps`**: run sequentially within a job. Each step is either a reusable `uses: action@version` or a shell `run:` command.
+- **`secrets`**: sensitive values stored in the GitHub repo settings, referenced as `${{ secrets.MY_SECRET }}`. Never hardcode API keys in workflow files.
+- **`cache:`** in `setup-node` stores `node_modules` between runs, cutting install time from 60s to under 5s on cache hits.
+
+## Matrix builds
+
+When you need to verify your code works across multiple environments, matrix builds run the same job in parallel for each combination:
+
+```yaml
+strategy:
+  matrix:
+    node-version: [18, 20, 22]
+    os: [ubuntu-latest, windows-latest]
+```
+
+This creates six parallel jobs. Useful for libraries that need to support multiple Node versions.
+
+## Self-hosted runners
+
+GitHub provides hosted runners (Ubuntu, Windows, macOS) for free up to a limit. For large builds, GPU workloads, or access to private network resources, you can run your own runner on a machine you control. It registers with GitHub and receives jobs just like hosted runners.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// CI pipeline simulator with dependency resolution
+// Stages run in parallel where possible, sequentially when dependencies require it
+
+function createPipeline(stages) {
+// stages: Array<{ name: string, fn: (inputs) => any, dependsOn: string[] }>
+
+function buildExecutionOrder(stages) {
+const stageMap = new Map(stages.map(s => [s.name, s]));
+const resolved = new Set();
+const groups = [];
+
+    while (resolved.size < stages.length) {
+      // Find all stages whose dependencies are fully resolved
+      const ready = stages.filter(
+        s => !resolved.has(s.name) && s.dependsOn.every(dep => resolved.has(dep))
+      );
+      if (ready.length === 0) throw new Error("Circular dependency detected");
+      groups.push(ready);
+      ready.forEach(s => resolved.add(s.name));
+    }
+
+    return groups;
+
+}
+
+return {
+run(inputs) {
+const groups = buildExecutionOrder(stages);
+const stageResults = {};
+let allPassed = true;
+
+      for (const group of groups) {
+        // Run this group's stages (simulated parallel)
+        for (const stage of group) {
+          // Collect outputs from dependencies
+          const dependencyOutputs = {};
+          for (const dep of stage.dependsOn) {
+            dependencyOutputs[dep] = stageResults[dep];
+          }
+
+          try {
+            const result = stage.fn({ inputs, outputs: dependencyOutputs });
+            stageResults[stage.name] = { success: true, result };
+            console.log(\`✓ \${stage.name}\`);
+          } catch (err) {
+            stageResults[stage.name] = { success: false, error: err.message };
+            allPassed = false;
+            console.log(\`✗ \${stage.name}: \${err.message}\`);
+            // In a real pipeline, downstream stages would be skipped
+          }
+        }
+      }
+
+      return { success: allPassed, stageResults };
+    },
+
+};
+}
+
+// Define a realistic pipeline
+const pipeline = createPipeline([
+{
+name: 'install',
+dependsOn: [],
+fn: ({ inputs }) => {
+if (!inputs.hasPackageJson) throw new Error("No package.json found");
+return { packages: 42, cached: true };
+},
+},
+{
+name: 'lint',
+dependsOn: ['install'],
+fn: ({ inputs }) => {
+if (inputs.hasLintErrors) throw new Error("ESLint: 3 errors found");
+return { warnings: 0, errors: 0 };
+},
+},
+{
+name: 'typecheck',
+dependsOn: ['install'],
+fn: ({ inputs }) => {
+if (inputs.hasTypeErrors) throw new Error("tsc: Type 'string' is not assignable to type 'number'");
+return { diagnostics: 0 };
+},
+},
+{
+name: 'test',
+dependsOn: ['lint', 'typecheck'],
+fn: ({ inputs }) => {
+if (inputs.hasTestFailures) throw new Error("2 tests failed");
+return { passed: 24, failed: 0 };
+},
+},
+{
+name: 'build',
+dependsOn: ['test'],
+fn: () => ({ outputDir: '.next', size: '2.4MB' }),
+},
+{
+name: 'deploy',
+dependsOn: ['build'],
+fn: ({ inputs }) => {
+if (inputs.branch !== 'main') return { skipped: true, reason: 'not main branch' };
+return { url: 'https://myapp.vercel.app', timestamp: new Date().toISOString() };
+},
+},
+]);
+
+console.log("=== Passing pipeline ===");
+console.log(pipeline.run({ hasPackageJson: true, hasLintErrors: false, hasTypeErrors: false, hasTestFailures: false, branch: 'main' }));
+
+console.log("\\n=== Pipeline with lint errors ===");
+console.log(pipeline.run({ hasPackageJson: true, hasLintErrors: true, hasTypeErrors: false, hasTestFailures: false, branch: 'main' }));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does the `needs:` key do in a GitHub Actions workflow?"
+  options={[
+    "Installs npm dependencies automatically",
+    "Makes a job wait for another job to pass before running",
+    "Specifies which secrets the job requires",
+    "Caches the node_modules directory",
+  ]}
+  answer={1}
+  explanation="The `needs:` key creates a dependency between jobs. The dependent job only starts after all listed jobs succeed. Without it, jobs run in parallel."
+/>
+<Quiz
+  question="In CI/CD, 'Continuous Deployment' means a human must approve every production release."
+  options={["True", "False"]}
+  answer={1}
+  explanation="Continuous Deployment means every passing build deploys automatically without human approval. Continuous Delivery is the model where a human triggers the final deployment after the build passes."
+/>
+<Quiz
+  question="Why should you use `npm ci` instead of `npm install` in CI pipelines?"
+  options={[
+    "npm ci is faster on first install",
+    "npm ci uses the lockfile exactly and fails on mismatch, ensuring reproducible builds",
+    "npm ci skips devDependencies",
+    "npm ci automatically caches packages",
+  ]}
+  answer={1}
+  explanation="npm ci installs exactly what is in package-lock.json and fails if the lockfile is out of sync. This ensures every CI run uses the same dependency tree, preventing 'works on my machine' problems."
+/>
+<FillBlank
+  question="CI/CD stands for Continuous Integration and Continuous ___."
+  answer="Deployment"
+/>
+
+## What you learned
+
+- CI runs tests on every push; CD makes every passing build deployable or deployed automatically
+- A pipeline gates each stage — lint must pass before tests run, tests before build, build before deploy
+- GitHub Actions workflows live in `.github/workflows/` and consist of jobs containing steps
+- Jobs run in parallel by default; `needs:` creates sequential dependencies between them
+- Secrets are stored in GitHub settings and referenced as `${{ secrets.KEY }}` — never hardcoded

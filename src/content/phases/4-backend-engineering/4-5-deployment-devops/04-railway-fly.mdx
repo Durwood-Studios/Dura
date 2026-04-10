@@ -1,0 +1,318 @@
+---
+title: "Backend Deployment: Railway and Fly.io"
+description: "Deploy Node.js APIs and PostgreSQL databases to platforms built for backend services."
+phase: 4
+module: "4-5-deployment-devops"
+order: 4
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - railway
+  - fly-io
+  - managed-database
+  - container-deployment
+  - fly-toml
+---
+
+## Why this matters
+
+Vercel deploys frontends beautifully, but it is not the right tool for a persistent Node.js API that holds open database connections, runs background jobs, or needs WebSocket support. Railway and Fly.io are PaaS and CaaS platforms purpose-built for backend services — they handle the operational complexity while you focus on the application.
+
+## Railway: the simplest backend PaaS
+
+Railway's model is: connect your GitHub repo, Railway detects it's Node.js, and within 90 seconds you have a running service. No Dockerfile required. Railway reads your `package.json`, installs dependencies, and runs your `start` script.
+
+The real power is **project-level networking**. A Railway project can contain multiple services — a Node.js API, a PostgreSQL database, a Redis cache — and they share a private network. Your API reaches the database via `DATABASE_URL`, which Railway injects automatically when you add a database service to the same project.
+
+```bash
+# In your Railway project (configured in the dashboard, not code):
+# Service 1: Node.js API (auto-detected from package.json)
+# Service 2: PostgreSQL (one click to add)
+
+# Railway injects these automatically:
+DATABASE_URL=postgresql://postgres:password@postgres.railway.internal:5432/railway
+PORT=3000
+```
+
+Your application reads `process.env.DATABASE_URL` — the same code that works locally works in production. The only change is the environment variable value.
+
+**Custom start commands**: If your `package.json` `start` script doesn't work for production, override it in Railway's service settings. A common pattern for TypeScript projects:
+
+```bash
+# Build step
+npm run build
+
+# Start command
+node dist/index.js
+```
+
+**Deploy hooks**: Railway provides a webhook URL that triggers a deployment when called. Use this in your GitHub Actions CI pipeline to deploy after tests pass:
+
+```bash
+curl -X POST "$RAILWAY_DEPLOY_HOOK_URL"
+```
+
+## Fly.io: container-based global deployment
+
+Fly.io is a step up in control. Instead of handing it source code, you hand it a Docker image. The tradeoff: you write a Dockerfile (or let `fly launch` generate one), but you get a container that runs anywhere Fly has a presence — 30+ regions worldwide.
+
+**Getting started**:
+
+```bash
+# Install the CLI
+curl -L https://fly.io/install.sh | sh
+
+# Initialize your app (auto-generates fly.toml and Dockerfile)
+fly launch
+
+# Deploy
+fly deploy
+
+# Check status
+fly status
+
+# Stream logs
+fly logs
+```
+
+The `fly.toml` file is your deployment configuration. It lives in your repo alongside your code:
+
+```toml
+# fly.toml
+app = "my-api"
+primary_region = "ord"   # Chicago — choose closest to your users
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = true   # scale to zero when idle (saves cost)
+  auto_start_machines = true
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 500
+    soft_limit = 400
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+```
+
+**Fly Postgres**: Managed PostgreSQL with automatic failover and daily backups:
+
+```bash
+fly postgres create --name my-api-db --region ord
+fly postgres attach my-api-db   # injects DATABASE_URL into your app
+```
+
+**Secrets** in Fly never touch your repo:
+
+```bash
+fly secrets set STRIPE_SECRET_KEY=sk_live_...
+fly secrets set SESSION_SECRET=your-random-secret
+```
+
+**Persistent volumes** for stateful services (file storage, SQLite):
+
+```bash
+fly volumes create data --size 10   # 10GB volume
+```
+
+Then mount it in `fly.toml`:
+
+```toml
+[mounts]
+  source = "data"
+  destination = "/data"
+```
+
+## Health checks and rolling deployments
+
+Both Railway and Fly.io support health checks — HTTP endpoints that the platform polls to verify your service is alive before routing traffic. A standard health check endpoint:
+
+```javascript
+// Express
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+```
+
+Fly.io performs health checks during `fly deploy`. If the new version fails health checks within the timeout, Fly automatically rolls back to the previous version. This is a **rolling deployment**: new instances come up, health-checked, then old instances come down. Zero downtime.
+
+## Railway vs Fly.io: when to use which
+
+|                  | Railway                      | Fly.io                           |
+| ---------------- | ---------------------------- | -------------------------------- |
+| Setup complexity | Minimal (no Dockerfile)      | Moderate (needs Dockerfile)      |
+| Control          | Less                         | More                             |
+| Database         | Managed PostgreSQL (1 click) | Fly Postgres (CLI command)       |
+| Regions          | Limited                      | 30+ global regions               |
+| Scaling          | Manual or usage-based        | Auto-scale, scale to zero        |
+| Best for         | Quick APIs, side projects    | Production backends, global apps |
+
+Start with Railway when you want fast results. Graduate to Fly.io when you need global distribution, finer resource control, or auto-scaling to zero.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Deployment config validator
+// Validates a simplified fly.toml or railway config object
+
+function validateDeployConfig(config) {
+const errors = [];
+const warnings = [];
+
+// Required: app name
+if (!config.app || typeof config.app !== 'string' || config.app.trim() === '') {
+errors.push("'app' name is required and must be a non-empty string");
+} else if (!/^[a-z0-9-]+$/.test(config.app)) {
+errors.push("'app' name must contain only lowercase letters, numbers, and hyphens");
+}
+
+// Required: port
+if (config.port === undefined || config.port === null) {
+errors.push("'port' is required");
+} else if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
+errors.push(\`'port' must be an integer between 1 and 65535, got: \${config.port}\`);
+} else if (config.port < 1024) {
+warnings.push(\`Port \${config.port} is a privileged port — containers typically use 3000+\`);
+}
+
+// Health check path
+if (config.healthcheck) {
+if (typeof config.healthcheck !== 'string') {
+errors.push("'healthcheck' must be a string path");
+} else if (!config.healthcheck.startsWith('/')) {
+errors.push(\`'healthcheck' path must start with '/', got: '\${config.healthcheck}'\`);
+}
+} else {
+warnings.push("No 'healthcheck' defined — platform cannot verify your service is alive");
+}
+
+// Memory
+if (config.memory !== undefined) {
+const memMB = typeof config.memory === 'string'
+? parseInt(config.memory, 10)
+: config.memory;
+
+    if (isNaN(memMB) || memMB < 1) {
+      errors.push("'memory' must be a positive number (MB)");
+    } else if (memMB > 8192) {
+      errors.push(\`'memory' of \${memMB}MB exceeds the 8192MB limit\`);
+    } else if (memMB < 256) {
+      warnings.push(\`'memory' of \${memMB}MB is very low — Node.js may crash under load\`);
+    }
+
+}
+
+// Regions
+const validRegions = ['iad', 'ord', 'lax', 'sea', 'dfw', 'sjc', 'lhr', 'fra', 'nrt', 'sin', 'syd', 'gru'];
+if (!config.regions || !Array.isArray(config.regions) || config.regions.length === 0) {
+errors.push("At least one 'region' must be specified");
+} else {
+const invalidRegions = config.regions.filter(r => !validRegions.includes(r));
+if (invalidRegions.length > 0) {
+warnings.push(\`Unknown region codes: \${invalidRegions.join(', ')} — verify these are valid\`);
+}
+}
+
+// Environment variables — warn about obvious secrets patterns
+if (config.env) {
+for (const [key, value] of Object.entries(config.env)) {
+if (typeof value === 'string' && value.length > 10 &&
+(key.toLowerCase().includes('secret') || key.toLowerCase().includes('key') || key.toLowerCase().includes('password'))) {
+warnings.push(\`'\${key}' looks like a secret — use fly secrets set or Railway env vars instead of hardcoding\`);
+}
+}
+}
+
+return {
+valid: errors.length === 0,
+errors,
+warnings,
+};
+}
+
+// Test cases
+const validConfig = {
+app: 'my-api',
+port: 3000,
+healthcheck: '/health',
+memory: 512,
+regions: ['ord', 'lhr'],
+};
+
+const invalidConfig = {
+app: 'My API!!!',
+port: 99999,
+healthcheck: 'health', // missing leading slash
+memory: 16000, // exceeds limit
+regions: [], // empty
+env: { SECRET_KEY: 'sk_live_very_secret_value_here' },
+};
+
+console.log("Valid config:", validateDeployConfig(validConfig));
+console.log("\\nInvalid config:", validateDeployConfig(invalidConfig));
+
+// Low memory warning test
+console.log("\\nLow memory config:", validateDeployConfig({
+app: 'tiny-api',
+port: 3000,
+memory: 128,
+regions: ['iad'],
+}));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does Railway inject automatically when you add a PostgreSQL service to the same project as your API?"
+  options={[
+    "A migration script",
+    "The DATABASE_URL environment variable",
+    "A connection pool",
+    "A backup schedule",
+  ]}
+  answer={1}
+  explanation="Railway injects DATABASE_URL automatically when services are in the same project. Your code reads process.env.DATABASE_URL — the same pattern works locally and in production."
+/>
+<Quiz
+  question="Fly.io requires a Dockerfile to deploy."
+  options={["True", "False"]}
+  answer={0}
+  explanation="Fly.io is container-based and requires a Docker image. You can write your own Dockerfile or let `fly launch` auto-generate one, but the deployment unit is always a container."
+/>
+<Quiz
+  question="What happens during a Fly.io rolling deployment if the new version fails health checks?"
+  options={[
+    "Fly pauses the deployment and waits for manual intervention",
+    "Fly automatically rolls back to the previous version",
+    "Fly deploys anyway and alerts you",
+    "The old version is stopped immediately",
+  ]}
+  answer={1}
+  explanation="Fly.io monitors health checks during deployment. If the new version fails to become healthy within the timeout, Fly automatically reverts to the previous deployment — zero-downtime rollback."
+/>
+<FillBlank
+  question="In Fly.io, you set sensitive environment variables using `fly ___ set KEY=VALUE` to avoid storing secrets in your repo."
+  answer="secrets"
+/>
+
+## What you learned
+
+- Railway auto-detects Node.js and injects DATABASE_URL when you add a PostgreSQL service to the same project
+- Fly.io is container-based — deploy a Dockerfile to 30+ global regions with `fly deploy`
+- `fly.toml` configures app name, port, memory, regions, and health checks — checked into your repo
+- Health checks enable rolling deployments: new instances must pass health checks before old ones are stopped
+- Start with Railway for simplicity; graduate to Fly.io for global distribution or auto-scaling needs

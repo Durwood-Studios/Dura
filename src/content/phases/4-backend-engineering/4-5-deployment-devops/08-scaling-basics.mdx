@@ -1,0 +1,281 @@
+---
+title: "Scaling Basics"
+description: "Horizontal vs vertical scaling, load balancers, connection pooling, and the limits of a single server."
+phase: 4
+module: "4-5-deployment-devops"
+order: 8
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "understand"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - horizontal-scaling
+  - vertical-scaling
+  - load-balancer
+  - connection-pool
+  - redis
+  - cdn
+---
+
+## Why this matters
+
+Your app works fine with 10 users. Then you get featured in a newsletter and 10,000 hit it simultaneously. Knowing how to scale before that moment means you prepare calmly rather than scramble. More importantly, understanding the constraints of single-server architecture helps you design stateless services from the start, which is the prerequisite for scaling at all.
+
+## Vertical vs horizontal scaling
+
+**Vertical scaling** (scale up) means moving your application to a bigger machine — more CPU cores, more RAM, faster SSD. It is the simplest path: no code changes, no architecture changes. The limits are real: the largest cloud VMs top out around 192 cores and 12TB RAM, they cost thousands per month, and a single machine is a single point of failure — if it goes down, your entire application is down.
+
+**Horizontal scaling** (scale out) means running multiple identical instances of your application behind a load balancer. Add instances when load increases; remove them when it decreases. The theoretical scale is unlimited, and losing one instance does not take the application down. The constraint: your application must be stateless for horizontal scaling to work cleanly.
+
+## Load balancers
+
+A load balancer sits in front of your instances and distributes incoming requests across them. The most common algorithms:
+
+**Round-robin**: each new request goes to the next instance in sequence. Simple, effective when all instances are equal.
+
+**Least connections**: each new request goes to the instance with the fewest active connections. Better for workloads where requests have variable duration (some take 10ms, some take 2s).
+
+**IP hash**: the same client IP always routes to the same instance. This is called "sticky sessions" — useful when session data is stored in instance memory. However, it undermines load distribution if clients are unequally distributed.
+
+```
+Client requests
+     ↓
+  Load Balancer
+  /     |     \
+App1  App2  App3
+```
+
+Most PaaS platforms handle load balancing automatically. On Fly.io, adding `min_machines_running = 2` in `fly.toml` runs multiple instances; Fly load-balances between them. On Railway, horizontal scaling is available in Pro plans.
+
+## The session problem
+
+In-memory sessions are the most common obstacle to horizontal scaling. A user logs in, their session is stored in App1's memory. Next request hits App2 — App2 has no session, user appears logged out. This is a real, subtle bug that only appears at scale.
+
+Two solutions:
+
+1. **Sticky sessions (IP hash)**: route the same client to the same instance. Fragile — if that instance goes down, the session is lost.
+2. **External session store**: store sessions in Redis or the database, shared across all instances. Preferred — sessions survive instance restarts and deployments.
+
+```javascript
+// Express with Redis session store
+import session from "express-session";
+import RedisStore from "connect-redis";
+import { createClient } from "redis";
+
+const redisClient = createClient({ url: process.env.REDIS_URL });
+await redisClient.connect();
+
+app.use(
+  session({
+    store: new RedisStore({ client: redisClient }),
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+  })
+);
+```
+
+This is why **stateless services scale easily**: if your application stores no user-specific state in memory (using JWTs for auth, for example), every instance can handle every request, and horizontal scaling is transparent.
+
+## Database scaling
+
+Your application instances scale horizontally, but your database is still a single machine. Databases are harder to scale because they have to maintain consistency.
+
+**Connection pooling** is the first bottleneck. PostgreSQL has a connection limit (typically 100-500). Each application instance keeps a pool of connections open. With 10 instances each holding 10 connections, you use 100 connections — close to or beyond the limit. **PgBouncer** is a connection pooler that sits between your app and PostgreSQL, multiplexing many application connections onto fewer database connections.
+
+**Read replicas** handle read-heavy load. Write operations go to the primary; read operations can be distributed across replicas. This works well for reporting queries, public data APIs, and any read that tolerates slight replication lag.
+
+**Caching** reduces database load for frequently-read, rarely-changed data:
+
+```javascript
+// Cache pattern: check cache first, fall back to DB
+async function getBooks(userId) {
+  const cacheKey = \`books:\${userId}\`;
+  const cached = await redis.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  const books = await db.query('SELECT * FROM books WHERE user_id = $1', [userId]);
+  await redis.setex(cacheKey, 300, JSON.stringify(books)); // cache for 5 minutes
+  return books;
+}
+```
+
+## CDN for static assets
+
+A CDN (Content Delivery Network) caches your static files — images, fonts, JavaScript bundles — at edge locations worldwide. Instead of every user downloading your 2MB JavaScript bundle from your US-east server, they get it from a CDN node 10ms away.
+
+Next.js and Vercel handle this automatically for the `public/` directory and `next/image` optimized images. For custom CDNs, Cloudflare sits in front of your origin and caches based on Cache-Control headers you set.
+
+## The C10K problem
+
+The C10K problem (circa 1999) asked: how do you handle 10,000 simultaneous connections on a single server? Traditional threaded servers spawn a thread per connection — at 10K threads, memory is exhausted.
+
+Node.js's answer is the **event loop**: a single thread handles all I/O asynchronously. While waiting for a database response, the event loop handles other requests. Node.js can handle thousands of concurrent connections on a single process because I/O doesn't block the thread.
+
+The implication for scaling: Node.js scales horizontally well, but a single CPU-bound operation (complex computation, synchronous loops) blocks the entire event loop for every request. Keep your Node.js handlers I/O-bound; move CPU-intensive work to worker threads or a separate service.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Load balancer simulator with round-robin and least-connections algorithms
+
+function createLoadBalancer(servers, algorithm = 'round-robin') {
+// servers: Array<{ id, currentConnections, maxConnections }>
+let serverList = servers.map(s => ({ ...s }));
+let roundRobinIndex = 0;
+
+function route(request) {
+const available = serverList.filter(s => s.currentConnections < s.maxConnections);
+
+    if (available.length === 0) {
+      throw new Error('All servers at capacity');
+    }
+
+    let selected;
+
+    if (algorithm === 'round-robin') {
+      // Simple round-robin: cycle through all available servers
+      selected = available[roundRobinIndex % available.length];
+      roundRobinIndex++;
+    } else if (algorithm === 'least-connections') {
+      // Select server with fewest active connections
+      selected = available.reduce((min, s) =>
+        s.currentConnections < min.currentConnections ? s : min
+      );
+    } else {
+      throw new Error(\`Unknown algorithm: \${algorithm}\`);
+    }
+
+    return selected;
+
+}
+
+function connect(serverId) {
+const server = serverList.find(s => s.id === serverId);
+if (!server) throw new Error(\`Server \${serverId} not found\`);
+if (server.currentConnections >= server.maxConnections) {
+throw new Error(\`Server \${serverId} is at capacity\`);
+}
+server.currentConnections++;
+return server;
+}
+
+function disconnect(serverId) {
+const server = serverList.find(s => s.id === serverId);
+if (!server) throw new Error(\`Server \${serverId} not found\`);
+if (server.currentConnections <= 0) return;
+server.currentConnections--;
+return server;
+}
+
+function getStats() {
+return serverList.map(s => ({
+...s,
+utilization: \`\${Math.round(s.currentConnections / s.maxConnections \* 100)}%\`,
+}));
+}
+
+return { route, connect, disconnect, getStats };
+}
+
+// Simulate 100 requests across 3 servers
+
+function simulate(algorithm) {
+console.log(\`\\n=== \${algorithm.toUpperCase()} ===\`);
+const lb = createLoadBalancer(
+[
+{ id: 'app-1', currentConnections: 0, maxConnections: 50 },
+{ id: 'app-2', currentConnections: 0, maxConnections: 50 },
+{ id: 'app-3', currentConnections: 0, maxConnections: 50 },
+],
+algorithm
+);
+
+const activeSessions = [];
+
+for (let i = 0; i < 100; i++) {
+// Route new request
+const server = lb.route(\`req-\${i}\`);
+lb.connect(server.id);
+activeSessions.push(server.id);
+
+    // Randomly complete some requests (simulating variable response time)
+    if (activeSessions.length > 10 && Math.random() < 0.4) {
+      const idx = Math.floor(Math.random() * activeSessions.length);
+      lb.disconnect(activeSessions[idx]);
+      activeSessions.splice(idx, 1);
+    }
+
+}
+
+console.log("Final distribution:", lb.getStats());
+}
+
+simulate('round-robin');
+simulate('least-connections');
+
+// Demonstrate the session problem
+console.log('\\n=== Session affinity problem ===');
+const lb = createLoadBalancer(
+[
+{ id: 'app-1', currentConnections: 0, maxConnections: 100 },
+{ id: 'app-2', currentConnections: 0, maxConnections: 100 },
+],
+'round-robin'
+);
+
+const req1 = lb.route('user-login');
+lb.connect(req1.id);
+console.log(\`Login request → \${req1.id} (session stored here)\`);
+
+const req2 = lb.route('user-profile');
+console.log(\`Next request → \${req2.id} (\${req2.id === req1.id ? 'same server — session found ✓' : 'different server — session MISSING ✗'})\`);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why can't you simply run 10 copies of an application that stores session data in process memory?"
+  options={[
+    "Process memory is too expensive to use for sessions",
+    "Each copy has its own isolated memory — a user logging in on instance 1 would appear logged out on instance 2",
+    "Process memory doesn't persist between requests",
+    "Sessions require a database connection pool",
+  ]}
+  answer={1}
+  explanation="Each process has isolated memory. If a user's session is stored in instance 1's memory and their next request routes to instance 2, instance 2 has no knowledge of that session. The fix is an external session store (Redis, database) shared across all instances."
+/>
+<Quiz
+  question="Vertical scaling (bigger machines) is always preferable to horizontal scaling because it requires no code changes."
+  options={["True", "False"]}
+  answer={1}
+  explanation="Vertical scaling has hard limits (largest available machine size), creates a single point of failure, and becomes increasingly expensive. Horizontal scaling requires stateless application design but provides unlimited theoretical scale and resilience."
+/>
+<Quiz
+  question="What problem does PgBouncer solve?"
+  options={[
+    "It replicates your PostgreSQL database for high availability",
+    "It multiplexes many application connections onto fewer actual database connections, staying within PostgreSQL's connection limit",
+    "It caches query results to reduce database load",
+    "It automatically creates read replicas for scaling reads",
+  ]}
+  answer={1}
+  explanation="PostgreSQL has a limited number of connections (often 100-500). PgBouncer is a connection pooler that sits between your app instances and the database, multiplexing many application connections onto a smaller pool of real database connections."
+/>
+<FillBlank
+  question="Node.js handles thousands of concurrent connections using a single-threaded ___ loop that processes I/O asynchronously."
+  answer="event"
+/>
+
+## What you learned
+
+- Vertical scaling (bigger machine) is simple but limited; horizontal scaling (more instances) is unlimited but requires stateless applications
+- Load balancers use round-robin, least-connections, or IP-hash algorithms to distribute traffic across instances
+- In-memory sessions break horizontal scaling — use Redis or database-backed session stores instead
+- Connection pooling (PgBouncer) prevents exceeding PostgreSQL's connection limit when running many app instances
+- CDNs cache static assets at edge locations worldwide, reducing origin load and improving global latency

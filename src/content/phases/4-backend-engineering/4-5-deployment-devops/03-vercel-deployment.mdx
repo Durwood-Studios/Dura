@@ -1,0 +1,268 @@
+---
+title: "Deploying to Vercel"
+description: "From git push to live URL — Vercel's import, preview deployments, and environment variable system."
+phase: 4
+module: "4-5-deployment-devops"
+order: 3
+estimatedMinutes: 9
+difficulty: "beginner"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - vercel
+  - preview-deployment
+  - production-deployment
+  - environment-variables
+  - custom-domain
+---
+
+## Why this matters
+
+Vercel is where Next.js lives best — it was built by the same team. Understanding its deployment model, especially preview deployments, changes how you work on a team. Instead of "can you check my branch?" you send a live URL to a colleague and get feedback on running code, not screenshots.
+
+## How Vercel thinks about deployments
+
+Vercel's core model is simple: connect a GitHub repository, and every push creates a deployment. The destination depends on which branch you pushed to.
+
+**Every push to any branch** creates a **preview deployment** — a real, fully functional URL unique to that push. The URL format is `your-project-abc123.vercel.app`. These are shareable, persistent, and completely isolated from production. When you open a pull request on GitHub, Vercel automatically posts the preview URL as a comment on the PR.
+
+**Merging to your production branch** (usually `main`) creates a **production deployment** and updates your primary domain — `yourproject.vercel.app` or your custom domain. Production deployments go through the same build process but serve traffic to real users.
+
+This means code review and QA happen on the actual deployment, not a simulated environment. That eliminates an entire category of "it worked in staging" bugs.
+
+## Project configuration
+
+When you import a project, Vercel auto-detects most settings, but you can override them in the dashboard or via `vercel.json`:
+
+```json
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "installCommand": "npm ci",
+  "framework": "nextjs"
+}
+```
+
+For Next.js projects, Vercel handles everything automatically — including Incremental Static Regeneration, Image Optimization, and routing. No configuration needed for standard setups.
+
+## Environment variables
+
+Environment variables are the mechanism for passing secrets and environment-specific config to your app. Vercel has three environments that map to deployment types:
+
+| Environment | When it applies                                          |
+| ----------- | -------------------------------------------------------- |
+| Development | Local dev (`vercel env pull` to sync)                    |
+| Preview     | All preview deployments (all branches except production) |
+| Production  | Production deployments only                              |
+
+You set variables in the Vercel dashboard under **Settings → Environment Variables**. Each variable can be scoped to one or more environments. Variables prefixed with `NEXT_PUBLIC_` are embedded in the client bundle and visible to the browser — use them only for non-sensitive values like your public API URL.
+
+```bash
+# Example environment variables in Vercel dashboard
+DATABASE_URL          # Production + Preview (different values)
+NEXTAUTH_SECRET       # All environments
+NEXT_PUBLIC_API_URL   # All environments — safe, not sensitive
+STRIPE_SECRET_KEY     # Production only — never expose in Preview
+```
+
+To use these locally without committing them, run `vercel env pull .env.local`. This downloads your Preview environment variables into your `.env.local` file, which is already in `.gitignore`.
+
+## Serverless and edge functions
+
+Vercel serves Next.js API routes and Server Components through either Node.js or Edge runtimes:
+
+**Node.js runtime** (default): Full Node.js environment, up to 5 seconds execution time (Hobby) or 60 seconds (Pro). Access to the filesystem, native modules, and all Node APIs.
+
+**Edge runtime**: Constrained V8 environment, globally distributed, sub-1ms cold starts, 30-second execution limit. Opt in at the route level:
+
+```typescript
+export const runtime = "edge";
+```
+
+Use Edge for auth token validation, redirects, and response rewriting. Use Node.js for database queries, file processing, and anything requiring Node APIs.
+
+## Custom domains
+
+Adding a custom domain takes three steps:
+
+1. Add the domain in **Vercel Dashboard → Settings → Domains**
+2. Update your DNS records at your registrar:
+   - For apex domain (`example.com`): add an A record pointing to `76.76.21.21`
+   - For subdomain (`www.example.com`): add a CNAME record pointing to `cname.vercel-dns.com`
+3. Wait for DNS propagation (minutes to hours depending on TTL)
+
+Vercel automatically provisions a TLS certificate via Let's Encrypt once DNS resolves. You get HTTPS with no configuration.
+
+## Reading deployment logs
+
+When a deployment fails or a function errors, logs are your first debugging tool. In the Vercel dashboard:
+
+- **Deployment logs**: the build output — install, build steps, errors during compilation
+- **Function logs**: runtime logs from your API routes — `console.log` output, errors, response times
+
+You can also stream logs in the CLI with `vercel logs your-deployment-url`.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Deployment tracker — simulates Vercel's deployment model
+
+function createDeploymentTracker() {
+let deployments = [];
+let deploymentCounter = 0;
+const environments = { preview: {}, production: null };
+
+function generateId() {
+return 'dpl\_' + Math.random().toString(36).slice(2, 10);
+}
+
+function generateUrl(branch, id) {
+const slug = branch.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+return \`https://my-app-\${slug}-\${id.slice(4, 8)}.vercel.app\`;
+}
+
+function push(branch, commit) {
+const id = generateId();
+const isProduction = branch === 'main';
+const environment = isProduction ? 'production' : 'preview';
+const url = isProduction ? 'https://my-app.vercel.app' : generateUrl(branch, id);
+
+    const deployment = {
+      id,
+      branch,
+      commit: commit.slice(0, 7),
+      environment,
+      status: 'building',
+      url,
+      timestamp: new Date().toISOString(),
+    };
+
+    deployments.push(deployment);
+
+    // Simulate build completing
+    deployment.status = 'ready';
+
+    // Update environment pointers
+    if (isProduction) {
+      environments.production = deployment;
+    } else {
+      environments.preview[branch] = deployment;
+    }
+
+    console.log(\`Deployed \${branch}@\${deployment.commit} → \${url}\`);
+    return deployment;
+
+}
+
+function getDeployments(filter = {}) {
+return deployments.filter(d => {
+if (filter.branch && d.branch !== filter.branch) return false;
+if (filter.environment && d.environment !== filter.environment) return false;
+if (filter.status && d.status !== filter.status) return false;
+return true;
+});
+}
+
+function promote(deploymentId, targetEnvironment) {
+const source = deployments.find(d => d.id === deploymentId);
+if (!source) throw new Error(\`Deployment \${deploymentId} not found\`);
+
+    const promoted = {
+      ...source,
+      id: generateId(),
+      environment: targetEnvironment,
+      url: 'https://my-app.vercel.app',
+      timestamp: new Date().toISOString(),
+      promotedFrom: deploymentId,
+    };
+
+    deployments.push(promoted);
+    environments.production = promoted;
+    console.log(\`Promoted \${deploymentId} → production\`);
+    return promoted;
+
+}
+
+function rollback(environment) {
+// Find the previous successful deployment in this environment
+const envDeployments = deployments
+.filter(d => d.environment === environment && d.status === 'ready')
+.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    if (envDeployments.length < 2) throw new Error('No previous deployment to roll back to');
+
+    const previous = envDeployments[1]; // second-most-recent
+    environments[environment] = previous;
+    console.log(\`Rolled back \${environment} to \${previous.id} (\${previous.commit})\`);
+    return previous;
+
+}
+
+return { push, getDeployments, promote, rollback,
+currentProduction: () => environments.production };
+}
+
+const tracker = createDeploymentTracker();
+
+// Simulate a real workflow
+tracker.push('main', 'abc1234567890'); // production deploy
+tracker.push('feature/auth', 'def9876543210'); // preview deploy
+tracker.push('feature/auth', 'bbb1111111111'); // updated preview
+
+console.log('\\nAll deployments:', tracker.getDeployments());
+console.log('\\nProduction:', tracker.currentProduction());
+console.log('\\nPreviews only:', tracker.getDeployments({ environment: 'preview' }));
+
+// Promote a preview to production
+const previews = tracker.getDeployments({ environment: 'preview' });
+tracker.promote(previews[0].id, 'production');
+console.log('\\nAfter promotion:', tracker.currentProduction());`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What happens when you push a commit to a feature branch on a Vercel-connected repo?"
+  options={[
+    "Nothing — only pushes to main trigger deployments",
+    "A preview deployment is created with a unique URL",
+    "The production deployment is updated immediately",
+    "A staging deployment replaces the previous staging URL",
+  ]}
+  answer={1}
+  explanation="Every push to any branch triggers a preview deployment with a unique URL. This lets you share and test changes before merging to production."
+/>
+<Quiz
+  question="Environment variables prefixed with NEXT_PUBLIC_ are safe to use for database passwords."
+  options={["True", "False"]}
+  answer={1}
+  explanation="NEXT_PUBLIC_ variables are embedded in the client-side JavaScript bundle and visible to anyone who inspects the page source. Use them only for non-sensitive values like public API URLs."
+/>
+<Quiz
+  question="Which Vercel runtime should you choose for a route that validates JWT tokens and redirects unauthenticated requests?"
+  options={[
+    "Node.js runtime, because auth is complex",
+    "Edge runtime, because it runs globally with near-zero latency",
+    "Serverless runtime, because tokens need to be parsed",
+    "No runtime — use middleware instead",
+  ]}
+  answer={1}
+  explanation="JWT validation is a lightweight operation that benefits from Edge's global distribution and near-zero cold starts. It doesn't require Node.js APIs, making it a perfect Edge use case."
+/>
+<FillBlank
+  question="Vercel automatically provisions ___ certificates for custom domains via Let's Encrypt."
+  answer="TLS"
+/>
+
+## What you learned
+
+- Every push creates a preview deployment; merging to main creates a production deployment
+- Environment variables have three scopes: Development, Preview, and Production
+- `NEXT_PUBLIC_` variables are client-visible — never put secrets in them
+- Edge runtime is globally distributed with near-zero cold starts; Node.js runtime supports full Node APIs
+- Custom domains require A or CNAME records at your registrar; TLS is provisioned automatically

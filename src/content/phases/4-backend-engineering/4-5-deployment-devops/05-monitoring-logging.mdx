@@ -1,0 +1,270 @@
+---
+title: "Monitoring and Logging"
+description: "Structured logs, health checks, uptime monitoring, and the observability that tells you when something breaks."
+phase: 4
+module: "4-5-deployment-devops"
+order: 5
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - observability
+  - structured-logging
+  - metrics
+  - health-check
+  - readiness
+  - sentry
+---
+
+## Why this matters
+
+Your application will fail in production. Servers crash, third-party APIs go down, a bad deploy introduces a bug that affects 1% of requests. The question is not whether these things happen — it is how quickly you find out and how much information you have when you do. Good observability turns a catastrophe into an investigation with a clear resolution path.
+
+## The three pillars of observability
+
+**Logs** are the record of what happened. Each event — a request received, a database query executed, an error thrown — produces a log entry. Logs are your primary debugging tool.
+
+**Metrics** are aggregations over time: how many requests per second, what percentage are errors, what is the 95th-percentile latency. Metrics tell you that something is wrong; logs tell you why.
+
+**Traces** connect a single user request across multiple services. When a request flows through an API gateway, a backend service, and a database, a trace shows the entire journey with timing for each segment.
+
+Most small teams start with logs and basic metrics. Add distributed tracing when you have multiple services and need to understand cross-service latency.
+
+## Structured logging
+
+Unstructured logs are `console.log("User 123 logged in at " + new Date())`. They are human-readable but machine-hostile — you cannot filter them, aggregate them, or query them efficiently.
+
+Structured logs are JSON:
+
+```json
+{
+  "timestamp": "2025-04-09T14:23:01.442Z",
+  "level": "info",
+  "service": "api",
+  "requestId": "req_abc123",
+  "userId": "usr_456",
+  "message": "User logged in",
+  "durationMs": 42
+}
+```
+
+Every field is queryable. In your log aggregator, you can instantly answer: "Show me all errors for user `usr_456` in the last hour." With unstructured logs, you'd need regex and luck.
+
+**Log levels** signal the severity of an event:
+
+| Level   | Use when                               | Production behavior         |
+| ------- | -------------------------------------- | --------------------------- |
+| `debug` | Internal details useful in development | Usually suppressed          |
+| `info`  | Normal, notable events                 | Stored, sampled             |
+| `warn`  | Something unexpected but recoverable   | Stored, alerted if frequent |
+| `error` | Something failed and needs attention   | Stored, alerted immediately |
+
+In production, set your log level to `info` or `warn`. Logging every debug message generates enormous volumes and buries the signal in noise.
+
+## Log aggregators
+
+A log aggregator collects logs from all your service instances, indexes them, and provides search and alerting:
+
+- **Datadog**: full observability platform — logs, metrics, traces, APM
+- **Grafana + Loki**: open-source; Loki stores logs, Grafana visualizes them
+- **AWS CloudWatch**: built-in for AWS-hosted services
+- **Axiom**: developer-friendly, generous free tier, built for modern cloud apps
+
+Most platforms accept logs via HTTP or as output to stdout (12-factor apps log to stdout; the platform captures and forwards them).
+
+## Health check endpoints
+
+A health check is an HTTP endpoint your infrastructure calls to verify the service is running correctly. There are two types:
+
+**Liveness** (`/health`): Is the process alive? This is the simplest check. If it fails, restart the process.
+
+```javascript
+// Express — liveness check
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", uptime: process.uptime() });
+});
+```
+
+**Readiness** (`/ready`): Is the process ready to handle traffic? This checks dependencies — database connectivity, external service availability. Traffic should not route to a process that cannot reach its database.
+
+```javascript
+// Express — readiness check
+app.get("/ready", async (req, res) => {
+  try {
+    await pool.query("SELECT 1"); // verify DB connection
+    res.json({ status: "ready", db: "connected" });
+  } catch (err) {
+    res.status(503).json({ status: "not ready", db: "disconnected" });
+  }
+});
+```
+
+Kubernetes uses both: liveness to decide whether to restart a pod, readiness to decide whether to route traffic to it. Railway and Fly.io use similar concepts in their health check configuration.
+
+## Uptime monitoring
+
+Uptime monitors call your health endpoint on a schedule (every 30 seconds to 5 minutes) from outside your infrastructure. If the endpoint fails to respond, you get an alert.
+
+Popular options:
+
+- **Better Uptime**: modern UI, on-call scheduling, status pages
+- **Uptime Robot**: generous free tier, 5-minute check intervals
+- **Cronitor**: good for both uptime and cron job monitoring
+
+Set up an uptime monitor before your first real user. Knowing your service went down 3 hours before you noticed is bad. Getting paged within 2 minutes is normal operations.
+
+## Error tracking with Sentry
+
+Log aggregators are great for searching known events. Sentry is for capturing the unknown — exceptions that escape your try/catch blocks, unhandled promise rejections, client-side JavaScript errors.
+
+Sentry captures the full stack trace, the request context, the user who experienced the error, and the breadcrumb trail of events leading up to it. It groups duplicate errors so you see "this error happened 847 times in the last hour" rather than 847 separate alerts.
+
+```javascript
+import * as Sentry from "@sentry/node";
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+  tracesSampleRate: 0.1, // trace 10% of requests
+});
+
+// Automatically captures unhandled exceptions
+// Manually capture with context:
+try {
+  await processOrder(order);
+} catch (err) {
+  Sentry.captureException(err, { extra: { orderId: order.id } });
+  throw err;
+}
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Structured logger with level filtering
+
+function createLogger(config) {
+const { level: minLevel, service } = config;
+
+// Log levels as numeric values for comparison
+const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+
+function shouldLog(level) {
+return LEVELS[level] >= LEVELS[minLevel];
+}
+
+function log(level, message, meta = {}) {
+if (!shouldLog(level)) return;
+
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level,
+      service,
+      message,
+      ...meta,
+    };
+
+    // In a real logger, this would write to stdout as a JSON string
+    // which your log aggregator captures and indexes
+    console.log(JSON.stringify(entry));
+
+}
+
+return {
+debug: (msg, meta) => log('debug', msg, meta),
+info: (msg, meta) => log('info', msg, meta),
+warn: (msg, meta) => log('warn', msg, meta),
+error: (msg, meta) => log('error', msg, meta),
+};
+}
+
+// Production logger — debug messages suppressed
+const logger = createLogger({ level: 'info', service: 'api' });
+
+// Simulate a request lifecycle
+function handleRequest(userId, path) {
+const requestId = 'req\_' + Math.random().toString(36).slice(2, 8);
+const start = Date.now();
+
+logger.debug('Request received', { requestId, userId, path }); // suppressed in prod
+logger.info('Handling request', { requestId, userId, path });
+
+try {
+if (path === '/admin' && userId !== 'admin') {
+logger.warn('Unauthorized access attempt', { requestId, userId, path });
+return { status: 403 };
+}
+
+    if (path === '/crash') {
+      throw new Error('Database connection lost');
+    }
+
+    const durationMs = Date.now() - start;
+    logger.info('Request completed', { requestId, userId, path, durationMs, status: 200 });
+    return { status: 200 };
+
+} catch (err) {
+logger.error('Request failed', { requestId, userId, path, error: err.message });
+return { status: 500 };
+}
+}
+
+handleRequest('usr_123', '/api/books');
+handleRequest('usr_456', '/admin');
+handleRequest('usr_789', '/crash');
+
+// Now try a debug-level logger to see suppressed messages
+console.log('\\n--- Debug logger (all levels visible) ---');
+const debugLogger = createLogger({ level: 'debug', service: 'api' });
+debugLogger.debug('Cache miss', { key: 'books:all', ttl: 300 });
+debugLogger.info('Cache populated', { key: 'books:all', count: 42 });`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the difference between a liveness check and a readiness check?"
+  options={[
+    "Liveness checks run faster; readiness checks are more thorough",
+    "Liveness checks whether the process is alive; readiness checks whether it can handle traffic (dependencies reachable)",
+    "They are the same thing with different names",
+    "Liveness is for databases; readiness is for APIs",
+  ]}
+  answer={1}
+  explanation="Liveness answers 'is the process running?' A failure triggers a restart. Readiness answers 'is the process ready to receive traffic?' — it checks database connectivity and external services. A readiness failure removes the instance from the load balancer without restarting it."
+/>
+<Quiz
+  question="Setting your production log level to 'debug' is a good practice to capture maximum information."
+  options={["True", "False"]}
+  answer={1}
+  explanation="Debug-level logging generates enormous log volume, increases storage costs, and buries important signals in noise. Production log levels are typically 'info' or 'warn', with debug enabled temporarily during incident investigation."
+/>
+<Quiz
+  question="What does Sentry provide that a log aggregator does not?"
+  options={[
+    "Faster log search",
+    "Exception grouping with full stack traces and request context, including user breadcrumbs",
+    "Cheaper storage for logs",
+    "Integration with GitHub Actions",
+  ]}
+  answer={1}
+  explanation="Sentry specializes in exception tracking — it captures the full stack trace, groups duplicate errors, records the user context and breadcrumb trail of events leading to the error. Log aggregators store structured text; Sentry understands exceptions."
+/>
+<FillBlank
+  question="The three pillars of observability are logs, metrics, and ___."
+  answer="traces"
+/>
+
+## What you learned
+
+- Observability rests on three pillars: logs (what happened), metrics (trends over time), traces (cross-service request flow)
+- Structured logging uses JSON with consistent fields, making logs searchable and filterable by machines
+- Log levels (debug, info, warn, error) let you control signal-to-noise ratio — suppress debug in production
+- Liveness checks confirm a process is alive; readiness checks confirm it can serve traffic
+- Sentry captures and groups unhandled exceptions with full stack traces and user context
