@@ -135,24 +135,48 @@ export const PHASES: Phase[] = [
     lessonCount: 40,
     order: 3,
     modules: [
-      mod("3", 1, "complexity", "Complexity", "Big-O, time and space, tradeoffs.", 45, 8),
+      mod(
+        "3",
+        1,
+        "complexity",
+        "Complexity and Big O",
+        "Big-O, time and space, amortized analysis.",
+        45,
+        8
+      ),
       mod(
         "3",
         2,
-        "data-structures",
-        "Data Structures",
-        "Lists, trees, hashes, graphs, heaps.",
+        "arrays-and-strings",
+        "Arrays and Strings",
+        "Memory layout, two pointers, sliding window, sorting.",
         50,
         8
       ),
-      mod("3", 3, "algorithms", "Algorithms", "Sorting, searching, recursion, DP.", 50, 8),
-      mod("3", 4, "discrete-math", "Discrete Math", "Logic, proofs, sets, combinatorics.", 40, 8),
+      mod(
+        "3",
+        3,
+        "linked-lists-stacks-queues",
+        "Linked Lists, Stacks, and Queues",
+        "Node-based structures, LIFO, FIFO, monotonic patterns.",
+        50,
+        8
+      ),
+      mod(
+        "3",
+        4,
+        "trees-and-graphs",
+        "Trees and Graphs",
+        "BSTs, traversal, BFS, DFS, shortest paths.",
+        40,
+        8
+      ),
       mod(
         "3",
         5,
-        "problem-solving",
-        "Problem Solving",
-        "Patterns, decomposition, interviews.",
+        "hash-maps-advanced",
+        "Hash Maps and Advanced Patterns",
+        "Hashing, recursion, DP, greedy, backtracking.",
         40,
         8
       ),
