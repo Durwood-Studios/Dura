@@ -1631,7 +1631,10 @@ export const DICTIONARY: DictionaryTerm[] = [
         "libuv wraps OS async I/O primitives (epoll, kqueue, IOCP). Worker threads (worker_threads module) add true parallelism for CPU-bound work. Cluster module forks OS processes to use all CPU cores.",
     },
     examples: [
-      "const fs = require('fs/promises'); const data = await fs.readFile('data.json', 'utf8');",
+      {
+        language: "js",
+        code: "const fs = require('fs/promises'); const data = await fs.readFile('data.json', 'utf8');",
+      },
     ],
     seeAlso: ["event-loop", "middleware"],
   },
@@ -1651,7 +1654,10 @@ export const DICTIONARY: DictionaryTerm[] = [
         "Poll phase blocks until I/O completes or the next timer fires. nextTick queue and microtask queue drain completely before any macro-task runs — starvation risk. `setImmediate` fires in the check phase, after I/O.",
     },
     examples: [
-      "setTimeout(() => console.log('timer'), 0); Promise.resolve().then(() => console.log('microtask')); // microtask logs first",
+      {
+        language: "js",
+        code: "setTimeout(() => console.log('timer'), 0); Promise.resolve().then(() => console.log('microtask')); // microtask logs first",
+      },
     ],
     seeAlso: ["nodejs", "async-await"],
   },
@@ -1670,7 +1676,12 @@ export const DICTIONARY: DictionaryTerm[] = [
       advanced:
         "Error middleware has signature (err, req, res, next). Middleware composition is function pipelining — each wraps the next. Frameworks like Koa use async generator-based 'onion model' instead.",
     },
-    examples: ["app.use((req, res, next) => { console.log(req.method, req.path); next(); });"],
+    examples: [
+      {
+        language: "js",
+        code: "app.use((req, res, next) => { console.log(req.method, req.path); next(); });",
+      },
+    ],
     seeAlso: ["rest", "nodejs"],
   },
   {
@@ -1723,7 +1734,10 @@ export const DICTIONARY: DictionaryTerm[] = [
         "HS256 is symmetric (same key signs and verifies). RS256 is asymmetric — private key signs, public key verifies (good for microservices). Refresh token rotation mitigates stolen access tokens.",
     },
     examples: [
-      "// Header.Payload.Signature\n// eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMSJ9.signature",
+      {
+        language: "text",
+        code: "// Header.Payload.Signature\n// eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMSJ9.signature",
+      },
     ],
     seeAlso: ["bcrypt", "rest"],
   },
@@ -1760,7 +1774,10 @@ export const DICTIONARY: DictionaryTerm[] = [
         "Query planner parses SQL into an AST, optimizes it into a plan, and executes. CTEs (WITH clause) and window functions (ROW_NUMBER, LAG) enable complex analytic queries. EXPLAIN ANALYZE reveals actual execution cost.",
     },
     examples: [
-      "SELECT u.name, COUNT(o.id) AS orders FROM users u LEFT JOIN orders o ON o.user_id = u.id GROUP BY u.id;",
+      {
+        language: "sql",
+        code: "SELECT u.name, COUNT(o.id) AS orders FROM users u LEFT JOIN orders o ON o.user_id = u.id GROUP BY u.id;",
+      },
     ],
     seeAlso: ["join", "transaction", "index", "migration"],
   },
@@ -1916,7 +1933,10 @@ export const DICTIONARY: DictionaryTerm[] = [
         'Use .dockerignore to exclude node_modules, .git, .env from build context. ENTRYPOINT sets the fixed command; CMD provides default args overridable at runtime. Use exec form (["node", "server.js"]) not shell form to avoid PID 1 signal issues.',
     },
     examples: [
-      'FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --only=production\nCOPY . .\nCMD ["node", "server.js"]',
+      {
+        language: "dockerfile",
+        code: 'FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --only=production\nCOPY . .\nCMD ["node", "server.js"]',
+      },
     ],
     seeAlso: ["docker", "image"],
   },
