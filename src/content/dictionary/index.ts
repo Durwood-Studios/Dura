@@ -1612,6 +1612,450 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["two-pointer", "time-complexity"],
   },
+
+  // ─── Phase 4: Backend Engineering ────────────────────────────────────────
+
+  {
+    slug: "nodejs",
+    term: "Node.js",
+    aliases: ["node", "node.js"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A runtime that lets you run JavaScript outside the browser — on a server or your laptop.",
+      intermediate:
+        "Built on V8 with an event-driven, non-blocking I/O model. Single-threaded but handles many concurrent operations via the event loop. npm gives access to millions of packages.",
+      advanced:
+        "libuv wraps OS async I/O primitives (epoll, kqueue, IOCP). Worker threads (worker_threads module) add true parallelism for CPU-bound work. Cluster module forks OS processes to use all CPU cores.",
+    },
+    examples: [
+      "const fs = require('fs/promises'); const data = await fs.readFile('data.json', 'utf8');",
+    ],
+    seeAlso: ["event-loop", "middleware"],
+  },
+  {
+    slug: "event-loop",
+    term: "Event Loop",
+    aliases: ["event loop"],
+    category: "backend",
+    phaseIds: ["1", "4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The mechanism that lets JavaScript do one thing at a time while still handling many tasks — like waiting for a file without freezing.",
+      intermediate:
+        "Single-threaded loop that processes one callback at a time. Phases: timers → I/O callbacks → idle → poll → check → close. Microtasks (Promises, queueMicrotask) drain between every phase.",
+      advanced:
+        "Poll phase blocks until I/O completes or the next timer fires. nextTick queue and microtask queue drain completely before any macro-task runs — starvation risk. `setImmediate` fires in the check phase, after I/O.",
+    },
+    examples: [
+      "setTimeout(() => console.log('timer'), 0); Promise.resolve().then(() => console.log('microtask')); // microtask logs first",
+    ],
+    seeAlso: ["nodejs", "async-await"],
+  },
+  {
+    slug: "middleware",
+    term: "Middleware",
+    aliases: [],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A function that runs between an incoming request and your final response — like a checkpoint that can inspect, modify, or block requests.",
+      intermediate:
+        "In Express: (req, res, next) => void. Calling next() passes control to the next middleware. Used for logging, auth, body parsing, error handling. Order matters — middleware runs top to bottom.",
+      advanced:
+        "Error middleware has signature (err, req, res, next). Middleware composition is function pipelining — each wraps the next. Frameworks like Koa use async generator-based 'onion model' instead.",
+    },
+    examples: ["app.use((req, res, next) => { console.log(req.method, req.path); next(); });"],
+    seeAlso: ["rest", "nodejs"],
+  },
+  {
+    slug: "rest",
+    term: "REST",
+    aliases: ["REST API", "RESTful", "representational state transfer"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A style for building web APIs where URLs represent resources and HTTP verbs (GET, POST, PUT, DELETE) represent actions on them.",
+      intermediate:
+        "Six constraints: client-server, stateless, cacheable, uniform interface, layered system, optional code-on-demand. Stateless means no session state on the server — each request carries all context.",
+      advanced:
+        "Richardson Maturity Model levels 0-3. HATEOAS (level 3) embeds hypermedia links so clients discover transitions dynamically. Content negotiation via Accept/Content-Type headers.",
+    },
+    seeAlso: ["crud", "middleware", "jwt"],
+  },
+  {
+    slug: "crud",
+    term: "CRUD",
+    aliases: ["create read update delete"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The four basic operations every data-driven app needs: Create, Read, Update, and Delete.",
+      intermediate:
+        "Maps to HTTP methods: POST (Create), GET (Read), PUT/PATCH (Update), DELETE (Delete). Also maps to SQL: INSERT, SELECT, UPDATE, DELETE.",
+      advanced:
+        "CQRS (Command Query Responsibility Segregation) splits read and write models. Event sourcing replaces CRUD updates with immutable event logs, deriving current state by replaying events.",
+    },
+    seeAlso: ["rest", "sql"],
+  },
+  {
+    slug: "jwt",
+    term: "JWT",
+    aliases: ["JSON Web Token", "json web token"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A compact, self-contained token that proves who you are — sent with every request so the server doesn't need to look you up in a database.",
+      intermediate:
+        "Three base64url-encoded parts: header (alg, typ), payload (claims: sub, iat, exp), signature. Stateless — server verifies signature with the secret key without a DB lookup. Expires via `exp` claim.",
+      advanced:
+        "HS256 is symmetric (same key signs and verifies). RS256 is asymmetric — private key signs, public key verifies (good for microservices). Refresh token rotation mitigates stolen access tokens.",
+    },
+    examples: [
+      "// Header.Payload.Signature\n// eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMSJ9.signature",
+    ],
+    seeAlso: ["bcrypt", "rest"],
+  },
+  {
+    slug: "bcrypt",
+    term: "bcrypt",
+    aliases: ["password hashing"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A function that converts a password into a scrambled string that can't be reversed — so you never store raw passwords.",
+      intermediate:
+        "Adaptive hash function with a cost factor (work factor) that controls how slow it runs. Slow-by-design resists brute force. Each hash includes a random salt to prevent rainbow table attacks.",
+      advanced:
+        "Cost factor doubles work per increment. bcrypt truncates at 72 bytes — pre-hash with SHA-256 for longer passwords. Argon2id (winner of Password Hashing Competition) is the modern successor.",
+    },
+    seeAlso: ["jwt"],
+  },
+  {
+    slug: "sql",
+    term: "SQL",
+    aliases: ["structured query language"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The language used to talk to relational databases — asking for data, adding rows, updating records, and deleting entries.",
+      intermediate:
+        "DDL (CREATE, ALTER, DROP) defines schema. DML (SELECT, INSERT, UPDATE, DELETE) manipulates data. Queries compose via WHERE, GROUP BY, HAVING, ORDER BY, and LIMIT. JOINs combine rows from multiple tables.",
+      advanced:
+        "Query planner parses SQL into an AST, optimizes it into a plan, and executes. CTEs (WITH clause) and window functions (ROW_NUMBER, LAG) enable complex analytic queries. EXPLAIN ANALYZE reveals actual execution cost.",
+    },
+    examples: [
+      "SELECT u.name, COUNT(o.id) AS orders FROM users u LEFT JOIN orders o ON o.user_id = u.id GROUP BY u.id;",
+    ],
+    seeAlso: ["join", "transaction", "index", "migration"],
+  },
+  {
+    slug: "join",
+    term: "JOIN",
+    aliases: ["sql join", "table join"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A way to combine rows from two tables based on a matching column — like linking orders to the customer who placed them.",
+      intermediate:
+        "INNER JOIN: only rows with matches in both tables. LEFT JOIN: all left rows, nulls for unmatched right. RIGHT JOIN: mirror of LEFT. FULL OUTER JOIN: all rows from both. CROSS JOIN: Cartesian product.",
+      advanced:
+        "Planner picks hash join (build hash table on smaller relation), merge join (both sorted), or nested loop (small outer). Index on the join column makes nested loop O(n log n) instead of O(n²).",
+    },
+    seeAlso: ["sql", "index"],
+  },
+  {
+    slug: "index",
+    term: "Database Index",
+    aliases: ["index", "db index"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A data structure the database builds to find rows faster — like a book's index letting you skip to a page without reading every page.",
+      intermediate:
+        "B-tree index (default in Postgres) supports =, <, >, BETWEEN, LIKE 'prefix%'. Hash index is equality-only but O(1). Covering index includes all columns in the query — no table heap fetch needed.",
+      advanced:
+        "Index write overhead: each INSERT/UPDATE/DELETE must update all indexes on that table. Partial indexes (WHERE clause) index only a subset of rows — smaller and faster. BRIN indexes for naturally ordered data (timestamps) are tiny.",
+    },
+    seeAlso: ["sql", "join", "transaction"],
+  },
+  {
+    slug: "transaction",
+    term: "Database Transaction",
+    aliases: ["transaction", "db transaction"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A group of database operations that either all succeed together or all fail together — no partial updates.",
+      intermediate:
+        "BEGIN / COMMIT / ROLLBACK. Guarantees ACID. Isolation levels control what partial changes are visible between concurrent transactions: Read Uncommitted, Read Committed, Repeatable Read, Serializable.",
+      advanced:
+        "MVCC (Multi-Version Concurrency Control) lets readers and writers not block each other — Postgres keeps old row versions. Deadlocks occur when two transactions each hold a lock the other needs — detected and one is aborted.",
+    },
+    seeAlso: ["acid", "sql"],
+  },
+  {
+    slug: "acid",
+    term: "ACID",
+    aliases: ["atomicity consistency isolation durability"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Four guarantees a good database makes: all-or-nothing operations, correct data, isolated concurrent changes, and data that survives crashes.",
+      intermediate:
+        "Atomicity: transaction fully completes or fully rolls back. Consistency: constraints (FK, NOT NULL, CHECK) always hold. Isolation: concurrent transactions don't see each other's dirty work. Durability: committed data survives crashes (WAL).",
+      advanced:
+        "WAL (Write-Ahead Log) ensures durability — changes written to log before data pages. Isolation is implemented via MVCC in Postgres. Distributed databases trade some ACID guarantees for availability (see CAP theorem).",
+    },
+    seeAlso: ["transaction", "sql"],
+  },
+  {
+    slug: "migration",
+    term: "Database Migration",
+    aliases: ["schema migration", "db migration"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A versioned script that changes your database structure — adding a column, renaming a table — and can be run or reversed.",
+      intermediate:
+        "Each migration has an up (apply) and down (rollback) script. Tools run pending migrations in order, tracking applied ones in a metadata table. Zero-downtime migrations avoid long-running locks.",
+      advanced:
+        "Expand-contract pattern: add new column nullable → backfill → add NOT NULL constraint → remove old column. Never add NOT NULL without a default on a table with rows — it acquires a full table lock in older Postgres.",
+    },
+    seeAlso: ["sql", "transaction"],
+  },
+  {
+    slug: "docker",
+    term: "Docker",
+    aliases: [],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A tool that packages your app and everything it needs into a portable box called a container — so it runs the same everywhere.",
+      intermediate:
+        "Docker builds images from a Dockerfile. Images are layered — each instruction adds a layer. `docker run` creates a container from an image. Docker Compose orchestrates multi-container apps with a YAML file.",
+      advanced:
+        "Images use Union File System (OverlayFS on Linux) — layers are read-only, container adds a writable layer on top. Build cache invalidates from the first changed instruction downward — order Dockerfile instructions by change frequency.",
+    },
+    seeAlso: ["container", "image", "dockerfile", "compose"],
+  },
+  {
+    slug: "container",
+    term: "Container",
+    aliases: ["containers"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A lightweight, isolated environment that runs your app — like a VM but much smaller and faster to start.",
+      intermediate:
+        "Containers share the host kernel but isolate processes with Linux namespaces (pid, net, mnt, uts, ipc) and limit resources with cgroups. Not a VM — no separate OS kernel.",
+      advanced:
+        "Namespaces provide isolation; cgroups provide resource control. Container escape vulnerabilities exploit namespace or cgroup misconfiguration. Rootless containers run without host root privileges — better security posture.",
+    },
+    seeAlso: ["docker", "image", "volume"],
+  },
+  {
+    slug: "image",
+    term: "Container Image",
+    aliases: ["docker image"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A read-only blueprint for a container — like a recipe. Running a container is like cooking from that recipe.",
+      intermediate:
+        "Composed of read-only layers. Each Dockerfile instruction (RUN, COPY, ADD) creates a layer. Images are stored in registries (Docker Hub, ECR, GHCR) and pulled by reference (name:tag or digest).",
+      advanced:
+        "Multi-stage builds compile in one stage and copy only the artifact to a minimal final stage — dramatically reduces image size. Image digest (sha256:...) is content-addressable and immutable; tags are mutable pointers.",
+    },
+    seeAlso: ["docker", "container", "dockerfile"],
+  },
+  {
+    slug: "dockerfile",
+    term: "Dockerfile",
+    aliases: [],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A text file of instructions that tells Docker how to build your container image — like a recipe for your app's environment.",
+      intermediate:
+        "Key instructions: FROM (base image), RUN (execute command), COPY (add files), WORKDIR (set working dir), EXPOSE (document port), CMD/ENTRYPOINT (default process). Each RUN creates a layer.",
+      advanced:
+        'Use .dockerignore to exclude node_modules, .git, .env from build context. ENTRYPOINT sets the fixed command; CMD provides default args overridable at runtime. Use exec form (["node", "server.js"]) not shell form to avoid PID 1 signal issues.',
+    },
+    examples: [
+      'FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --only=production\nCOPY . .\nCMD ["node", "server.js"]',
+    ],
+    seeAlso: ["docker", "image"],
+  },
+  {
+    slug: "compose",
+    term: "Docker Compose",
+    aliases: ["docker compose", "docker-compose"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A tool that lets you define and run multiple containers together with a single YAML file — so your app, database, and cache all start with one command.",
+      intermediate:
+        "`docker compose up` starts all services. Services share a network by default — reachable by service name as hostname. `depends_on` controls startup order. Volumes persist data across container restarts.",
+      advanced:
+        "Compose profiles let you opt-in to optional services (dev tools, test databases). Compose Watch (v2.22+) syncs file changes into running containers — faster than rebuilding. Not for production orchestration — use Kubernetes or ECS.",
+    },
+    seeAlso: ["docker", "container", "volume"],
+  },
+  {
+    slug: "volume",
+    term: "Docker Volume",
+    aliases: ["volumes", "docker volume"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A way to save data outside the container so it isn't lost when the container stops or is deleted.",
+      intermediate:
+        "Named volumes are managed by Docker and live at /var/lib/docker/volumes. Bind mounts link a host directory into the container — good for development file sync. Volumes survive `docker rm`; container filesystem doesn't.",
+      advanced:
+        "For stateful workloads (databases) in production, use cloud-managed storage (EBS, GCP Persistent Disk) not Docker volumes — volumes are local to one host. Volume drivers extend Docker to NFS, S3, and other backends.",
+    },
+    seeAlso: ["docker", "container", "compose"],
+  },
+  {
+    slug: "ci-cd",
+    term: "CI/CD",
+    aliases: ["continuous integration", "continuous delivery", "continuous deployment"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An automated system that tests and deploys your code every time you push — so you catch bugs early and ship faster.",
+      intermediate:
+        "CI: run tests, lint, type-check on every push. CD: automatically deploy to staging or production when CI passes. Tools: GitHub Actions, CircleCI, Jenkins. Pipelines defined as YAML.",
+      advanced:
+        "Trunk-based development + feature flags enables continuous deployment without long-lived branches. Canary deployments route a small percentage of traffic to new code before full rollout. Rollback = re-deploy the previous image.",
+    },
+    seeAlso: ["pipeline", "deployment"],
+  },
+  {
+    slug: "pipeline",
+    term: "Deployment Pipeline",
+    aliases: ["pipeline", "build pipeline"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The automated sequence of steps — build, test, deploy — that runs every time you push code.",
+      intermediate:
+        "Stages: checkout → install deps → lint → test → build → push image → deploy. Each stage must pass for the next to run. Parallel stages run concurrently to reduce total time.",
+      advanced:
+        "Artifact promotion: build once, deploy the same artifact to staging then production. Immutable artifacts (Docker images tagged by git SHA) ensure staging and production run identical code. Gate approvals between staging and production for compliance.",
+    },
+    seeAlso: ["ci-cd", "deployment"],
+  },
+  {
+    slug: "deployment",
+    term: "Deployment",
+    aliases: ["deploy", "releasing"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The process of making your code available on the internet — uploading it to a server so real users can access it.",
+      intermediate:
+        "Deployment strategies: recreate (downtime), rolling (gradual), blue-green (instant cutover), canary (percentage-based). PaaS (Vercel, Render, Railway) abstracts server management. IaaS (EC2, GCE) gives more control.",
+      advanced:
+        "Immutable infrastructure: never modify running servers — replace them. Infrastructure-as-Code (Terraform, Pulumi) versions infrastructure alongside application code. GitOps: git is the source of truth for cluster state.",
+    },
+    seeAlso: ["ci-cd", "pipeline", "load-balancer"],
+  },
+  {
+    slug: "dns",
+    term: "DNS",
+    aliases: ["domain name system"],
+    category: "backend",
+    phaseIds: ["0", "4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The internet's phone book — it translates human-readable domain names like 'example.com' into the IP addresses computers actually use.",
+      intermediate:
+        "Record types: A (domain → IPv4), AAAA (domain → IPv6), CNAME (alias to another domain), MX (mail servers), TXT (verification, SPF, DKIM). TTL controls how long resolvers cache records.",
+      advanced:
+        "Recursive resolver queries root → TLD nameserver → authoritative nameserver. DNSSEC adds cryptographic signatures to prevent cache poisoning. Anycast routes DNS queries to the nearest datacenter.",
+    },
+    seeAlso: ["ssl", "deployment"],
+  },
+  {
+    slug: "ssl",
+    term: "SSL/TLS",
+    aliases: ["tls", "ssl", "https", "tls certificate"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The encryption layer that makes HTTPS work — scrambling data between your browser and the server so no one in between can read it.",
+      intermediate:
+        "TLS handshake: client hello (supported ciphers) → server hello + certificate → key exchange → encrypted session. Certificate issued by a Certificate Authority (CA) proves the server owns the domain. Let's Encrypt provides free certs.",
+      advanced:
+        "TLS 1.3 reduces handshake to 1 round-trip (0-RTT for resumption). HSTS header tells browsers to always use HTTPS. Certificate Transparency logs all issued certs — public record for detecting misissuance.",
+    },
+    seeAlso: ["dns", "load-balancer"],
+  },
+  {
+    slug: "load-balancer",
+    term: "Load Balancer",
+    aliases: ["load balancing"],
+    category: "backend",
+    phaseIds: ["4"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A server that sits in front of your app servers and distributes incoming requests among them — so no single server gets overwhelmed.",
+      intermediate:
+        "Algorithms: round-robin, least connections, IP hash (sticky sessions). Layer 4 (TCP) balances by IP/port. Layer 7 (HTTP) balances by URL path, headers, or cookies — enables routing /api to backend and / to frontend.",
+      advanced:
+        "Health checks detect unhealthy instances and remove them from rotation. Connection draining gives in-flight requests time to complete before removing an instance. AWS ALB, Nginx, HAProxy, Cloudflare are common implementations.",
+    },
+    seeAlso: ["deployment", "ssl", "ci-cd"],
+  },
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
