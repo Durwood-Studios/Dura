@@ -1278,6 +1278,340 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["ssr", "deployment", "server-component"],
   },
+
+  // ── Phase 3: CS Fundamentals ─────────────────────────────────────────────
+  {
+    slug: "time-complexity",
+    term: "Time Complexity",
+    aliases: ["runtime complexity"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A measure of how much slower an algorithm gets as the input grows larger.",
+      intermediate:
+        "The number of operations an algorithm performs as a function of input size n, expressed in Big O notation. Ignores constants and lower-order terms to capture growth rate.",
+      advanced:
+        "Formally characterized using asymptotic notation. Determined by the dominant term in the operation count function. Common complexities from fastest to slowest: O(1), O(log n), O(n), O(n log n), O(n²), O(2^n), O(n!).",
+    },
+    seeAlso: ["big-o", "space-complexity", "algorithm"],
+  },
+  {
+    slug: "space-complexity",
+    term: "Space Complexity",
+    aliases: ["memory complexity"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "How much extra memory an algorithm needs as the input grows.",
+      intermediate:
+        "The amount of auxiliary memory (beyond the input itself) an algorithm allocates, in Big O. O(1) = fixed extra memory; O(n) = memory grows with input.",
+      advanced:
+        "Includes explicitly allocated memory and implicit stack space from recursion. The time-space tradeoff is fundamental: memoization reduces exponential time to polynomial at the cost of O(n) space.",
+    },
+    seeAlso: ["time-complexity", "big-o", "recursion"],
+  },
+  {
+    slug: "linked-list",
+    term: "Linked List",
+    aliases: ["singly linked list"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A chain of nodes where each node holds a value and a pointer to the next node.",
+      intermediate:
+        "A linear data structure of nodes connected by references. Head insertion is O(1). Random access is O(n) — no indexing. No cache locality.",
+      advanced:
+        "A null-terminated sequence of heap-allocated nodes. Singly linked: one next pointer. Doubly linked: next + prev, enabling O(1) deletion given a node reference. Backing structure for stacks, queues, and LRU caches.",
+    },
+    examples: [
+      {
+        language: "javascript",
+        code: "class Node { constructor(val) { this.val = val; this.next = null; } }\nconst head = new Node(1);\nhead.next = new Node(2);",
+      },
+    ],
+    seeAlso: ["stack", "queue", "array"],
+  },
+  {
+    slug: "stack",
+    term: "Stack",
+    aliases: ["LIFO"],
+    category: "cs-fundamentals",
+    phaseIds: ["1", "3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A pile where you can only add or remove from the top — last in, first out.",
+      intermediate:
+        "A LIFO (Last In, First Out) data structure. Push, pop, peek are all O(1). JavaScript's call stack uses this for function invocations.",
+      advanced:
+        "Array-backed stacks are most common. The call stack is a hardware-managed stack of activation records. Recursive algorithms implicitly use it; deep recursion risks stack overflow. Explicit stacks enable DFS and expression evaluation.",
+    },
+    seeAlso: ["queue", "recursion", "linked-list"],
+  },
+  {
+    slug: "queue",
+    term: "Queue",
+    aliases: ["FIFO"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A line where things are added at the back and removed from the front — first in, first out.",
+      intermediate:
+        "A FIFO (First In, First Out) data structure. Enqueue and dequeue are O(1) with a proper implementation. Array shift() is O(n) — prefer a linked list or circular buffer.",
+      advanced:
+        "BFS uses a queue to ensure level-by-level exploration. Priority queues generalize by always dequeuing the highest-priority element — backed by a heap for O(log n) insert and extract.",
+    },
+    seeAlso: ["stack", "bfs", "heap"],
+  },
+  {
+    slug: "heap",
+    term: "Heap",
+    aliases: ["binary heap", "priority queue"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A tree stored as an array where the smallest (or largest) element is always at the top.",
+      intermediate:
+        "A complete binary tree satisfying the heap property: min-heap has parent ≤ children; max-heap has parent ≥ children. Insert: O(log n), extract-min: O(log n), peek-min: O(1).",
+      advanced:
+        "Standard backing structure for priority queues. Used in Dijkstra's algorithm, heap sort, and scheduling. Stored as an array: parent at i, children at 2i+1 and 2i+2. Fibonacci heaps offer amortized O(1) decrease-key.",
+    },
+    seeAlso: ["queue", "sorting", "dijkstra"],
+  },
+  {
+    slug: "binary-tree",
+    term: "Binary Tree",
+    aliases: ["tree"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A tree where every node has at most two children: a left child and a right child.",
+      intermediate:
+        "A hierarchical data structure. Height = longest path from root to a leaf. Balanced binary tree has height O(log n). Tree traversals (inorder, preorder, postorder, level-order) each visit every node in O(n).",
+      advanced:
+        "Basis for BSTs, heaps, and segment trees. Recursive algorithms on trees are natural — each call processes a node and recurses on its children. Serialization uses preorder or level-order traversal.",
+    },
+    seeAlso: ["bst", "heap", "graph"],
+  },
+  {
+    slug: "bst",
+    term: "Binary Search Tree",
+    aliases: ["BST"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A binary tree where every left child is smaller than its parent and every right child is larger.",
+      intermediate:
+        "BST property: left subtree values < node < right subtree values. Search, insert, delete are O(h) where h = height. Inorder traversal yields sorted order.",
+      advanced:
+        "Degenerate BST (inserting sorted data) has h = n — O(n) operations. Self-balancing BSTs (AVL, red-black) maintain h = O(log n) via rotations. V8's Map is typically backed by a red-black tree.",
+    },
+    seeAlso: ["binary-tree", "sorting", "balanced-tree"],
+  },
+  {
+    slug: "balanced-tree",
+    term: "Balanced Tree",
+    aliases: ["AVL tree", "red-black tree"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A BST that automatically stays balanced so operations remain fast.",
+      intermediate:
+        "Guarantees O(log n) height via rebalancing after insertions/deletions. AVL: balance factor ≤ 1 via rotations. Red-black: coloring rules guarantee height ≤ 2 log n.",
+      advanced:
+        "AVL trees are more strictly balanced — better for read-heavy workloads. Red-black trees allow more imbalance but fewer rotations — preferred for write-heavy. Java's TreeMap and C++ std::map use red-black trees.",
+    },
+    seeAlso: ["bst", "binary-tree"],
+  },
+  {
+    slug: "graph",
+    term: "Graph",
+    aliases: ["network"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A structure of nodes (vertices) connected by links (edges) — like a map of cities and roads.",
+      intermediate:
+        "A set of vertices V and edges E. Directed or undirected. Weighted or unweighted. Represented as adjacency list (O(V + E) space) or adjacency matrix (O(V²) space).",
+      advanced:
+        "Trees are acyclic connected undirected graphs. DAGs support topological sort. Key algorithms: BFS, DFS, Dijkstra, Bellman-Ford, Floyd-Warshall, Prim, Kruskal. Most run in O(V + E) or O((V + E) log V).",
+    },
+    seeAlso: ["bfs", "dfs", "dijkstra"],
+  },
+  {
+    slug: "bfs",
+    term: "BFS",
+    aliases: ["breadth-first search"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Explore a graph level by level — visit all neighbors before going deeper.",
+      intermediate:
+        "Breadth-First Search uses a queue. Finds shortest path (fewest hops) in unweighted graphs. O(V + E) time and space.",
+      advanced:
+        "Guaranteed to find the shortest unweighted path. Uses a visited set to avoid cycles. Level-order tree traversal is BFS. Bidirectional BFS halves search depth for large graphs.",
+    },
+    seeAlso: ["dfs", "queue", "graph"],
+  },
+  {
+    slug: "dfs",
+    term: "DFS",
+    aliases: ["depth-first search"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Explore a graph by going as deep as possible before backtracking.",
+      intermediate:
+        "Depth-First Search uses a stack (or recursion). O(V + E) time. Used for cycle detection, topological sort, connected components.",
+      advanced:
+        "Edge classification (tree, back, forward, cross) is used for cycle detection and SCC algorithms like Tarjan's and Kosaraju's. Recursive DFS uses the call stack implicitly; iterative DFS needs an explicit stack.",
+    },
+    seeAlso: ["bfs", "stack", "graph", "recursion"],
+  },
+  {
+    slug: "dijkstra",
+    term: "Dijkstra's Algorithm",
+    aliases: ["Dijkstra"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "An algorithm that finds the shortest route through a weighted map.",
+      intermediate:
+        "Greedy shortest-path for non-negative weighted graphs. Uses a priority queue: always extend the unvisited vertex with the smallest known distance. O((V + E) log V).",
+      advanced:
+        "Fails with negative edges — use Bellman-Ford instead. Used in routing protocols (OSPF) and navigation. With Fibonacci heaps: O(E + V log V). Johnson's algorithm extends it to graphs with negative edges by reweighting.",
+    },
+    seeAlso: ["graph", "bfs", "heap"],
+  },
+  {
+    slug: "sorting",
+    term: "Sorting",
+    aliases: ["sort"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Arranging a list of items in order — one of the most common algorithmic tasks.",
+      intermediate:
+        "Comparison-based sorting has a lower bound of O(n log n). Merge sort: O(n log n) always, stable, O(n) space. Quick sort: O(n log n) average, O(n²) worst, in-place. Insertion sort: O(n) on nearly-sorted data.",
+      advanced:
+        "JavaScript's Array.sort() uses Timsort — a hybrid of merge and insertion sort. Non-comparison sorts (counting, radix) achieve O(n) by exploiting key structure, not comparisons.",
+    },
+    seeAlso: ["time-complexity", "binary-search"],
+  },
+  {
+    slug: "binary-search",
+    term: "Binary Search",
+    aliases: ["bisection"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Find an item in a sorted list by repeatedly cutting the search space in half.",
+      intermediate:
+        "Requires a sorted array. Compare target to mid: if equal → found; if less → search left; if greater → search right. O(log n) time, O(1) space.",
+      advanced:
+        "Generalized binary search finds the smallest x where a monotone predicate is true — applicable to 'answer space' problems. Pitfall: (lo + hi) / 2 overflows 32-bit integers; use lo + Math.floor((hi - lo) / 2).",
+    },
+    seeAlso: ["sorting", "time-complexity"],
+  },
+  {
+    slug: "dynamic-programming",
+    term: "Dynamic Programming",
+    aliases: ["DP"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Solve a big problem by breaking it into smaller overlapping pieces and remembering the answers.",
+      intermediate:
+        "Requires overlapping subproblems and optimal substructure. Top-down: recursion + cache (memoization). Bottom-up: fill a table iteratively from base cases. Classic: Fibonacci, coin change, LCS, knapsack.",
+      advanced:
+        "Rooted in Bellman's optimality principle. Time = unique subproblems × work per subproblem. Space can often be reduced to O(1 row). Bitmask DP handles exponential state spaces.",
+    },
+    seeAlso: ["recursion", "greedy"],
+  },
+  {
+    slug: "greedy",
+    term: "Greedy Algorithm",
+    aliases: ["greedy"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Always make the choice that looks best right now and never look back.",
+      intermediate:
+        "Makes the locally optimal choice at each step. Simpler than DP when applicable. Classic: activity selection, Huffman coding, Dijkstra, canonical coin change.",
+      advanced:
+        "Correctness proven via greedy choice property and exchange argument. Greedy fails when future choices depend on past ones — use DP. Matroid theory characterizes problems where greedy is optimal.",
+    },
+    seeAlso: ["dynamic-programming", "algorithm"],
+  },
+  {
+    slug: "backtracking",
+    term: "Backtracking",
+    aliases: ["pruning"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Try all possibilities, but stop and undo as soon as you know a path can't work.",
+      intermediate:
+        "Choose an option, explore recursively, undo if it leads to a dead end. Pattern: choose → explore → unchoose. Used for permutations, N-Queens, Sudoku, word search.",
+      advanced:
+        "Explores the implicit solution tree. Pruning eliminates subtrees that cannot yield valid solutions. Worst case is exhaustive enumeration; pruning gives dramatic practical speedups. Constraint propagation is a powerful complement.",
+    },
+    seeAlso: ["recursion", "dynamic-programming"],
+  },
+  {
+    slug: "two-pointer",
+    term: "Two-Pointer Technique",
+    aliases: ["two pointers"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Use two index variables moving through an array to avoid a nested loop.",
+      intermediate:
+        "Two indices — often moving inward from opposite ends or at different speeds. Reduces O(n²) to O(n). Common: pair sum in sorted array, palindrome check, cycle detection.",
+      advanced:
+        "Each pointer traverses at most n positions — O(n) by amortization. Fast/slow pointers (Floyd's cycle detection) use speed ratio instead of direction. Applicable to linked lists, sorted arrays, and strings.",
+    },
+    seeAlso: ["sliding-window-term", "binary-search"],
+  },
+  {
+    slug: "sliding-window-term",
+    term: "Sliding Window",
+    aliases: ["sliding window"],
+    category: "cs-fundamentals",
+    phaseIds: ["3"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Maintain a moving subarray and slide it across the array to avoid recomputing from scratch.",
+      intermediate:
+        "For contiguous subarray/substring problems. Fixed window: add right element, remove leftmost. Variable window: expand right to satisfy condition, shrink left to restore it. O(n) — each element enters and exits once.",
+      advanced:
+        "Window state incrementally maintained. Sliding window + monotonic deque solves sliding window maximum in O(n). Hash map tracks character frequencies in O(1) per update.",
+    },
+    seeAlso: ["two-pointer", "time-complexity"],
+  },
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
