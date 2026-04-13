@@ -1,0 +1,298 @@
+---
+title: "Agent Frameworks"
+description: "LangGraph, CrewAI, OpenAI Agents SDK, Anthropic tool use — when to use a framework vs build from scratch."
+phase: 6
+module: "6-3-agentic-ai"
+order: 3
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+You can build an agent with a while loop and an API call. So why do frameworks exist? Because production agents need state management, error recovery, observability, streaming, and persistence — and reimplementing all of that for every project is a waste of time. But frameworks also add complexity, opinions, and abstractions that can fight you. Knowing what each framework does (and does not do) lets you pick the right tool for the job — or decide to skip the framework entirely.
+
+## The build-from-scratch baseline
+
+Before evaluating any framework, understand what you are replacing. A minimal agent is about 40 lines of code:
+
+```javascript
+async function minimalAgent(task, tools, toolImpls, llm) {
+  const messages = [{ role: "user", content: task }];
+  const MAX_STEPS = 10;
+
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const response = await llm.chat(messages, { tools });
+
+    if (!response.toolCalls?.length) {
+      return response.content;
+    }
+
+    messages.push({ role: "assistant", content: response.content, toolCalls: response.toolCalls });
+
+    for (const tc of response.toolCalls) {
+      try {
+        const result = await toolImpls[tc.name](tc.arguments);
+        messages.push({ role: "tool", toolCallId: tc.id, content: JSON.stringify(result) });
+      } catch (error) {
+        messages.push({ role: "tool", toolCallId: tc.id, content: `Error: ${error.message}` });
+      }
+    }
+  }
+
+  return "Agent reached step limit without completing.";
+}
+```
+
+This works for simple tasks. It breaks down when you need branching logic, persistent state across sessions, parallel tool execution, human approval steps, or multi-agent coordination. That is where frameworks earn their keep.
+
+## Anthropic tool use
+
+Anthropic's approach keeps tool use as a first-class feature of the Messages API rather than wrapping it in a separate SDK. You define tools in the API request and the model returns `tool_use` content blocks.
+
+```javascript
+// Anthropic tool use pattern (API structure)
+const request = {
+  model: "claude-sonnet-4-20250514",
+  max_tokens: 1024,
+  tools: [
+    {
+      name: "get_stock_price",
+      description: "Get current stock price by ticker symbol",
+      input_schema: {
+        type: "object",
+        properties: {
+          ticker: { type: "string", description: "Stock ticker like AAPL" },
+        },
+        required: ["ticker"],
+      },
+    },
+  ],
+  messages: [{ role: "user", content: "What is Apple's stock price?" }],
+};
+
+// Response includes tool_use blocks you execute yourself
+// { type: "tool_use", id: "toolu_1", name: "get_stock_price", input: { ticker: "AAPL" } }
+// You run the tool, then send a tool_result back in the next request
+```
+
+This is the most transparent approach — you control every step. It works well when you want full control over the loop, error handling, and tool execution.
+
+## OpenAI Agents SDK
+
+OpenAI's Agents SDK provides a higher-level abstraction with built-in support for handoffs between agents, guardrails, and tracing.
+
+```javascript
+// OpenAI Agents SDK pattern (conceptual structure)
+const triageAgent = {
+  name: "Triage",
+  instructions: "Route the user to the correct specialist agent.",
+  tools: [transferToSales, transferToSupport],
+};
+
+const salesAgent = {
+  name: "Sales",
+  instructions: "Help with pricing and plan questions.",
+  tools: [lookupPricing, createQuote],
+};
+
+// The SDK manages the loop, handoffs, and message history
+// runner.run(triageAgent, userMessage) handles everything
+```
+
+The SDK's key feature is **handoffs** — one agent can transfer the conversation to another, and the SDK manages the transition. This makes multi-agent systems straightforward to build.
+
+## LangGraph
+
+LangGraph models agents as **state machines**. Each node is a function, edges are transitions, and the state is an object that flows through the graph.
+
+```javascript
+// LangGraph pattern (conceptual structure)
+const agentGraph = {
+  nodes: {
+    planner: async (state) => {
+      const plan = await llm.chat(state.messages, { tools: planningTools });
+      return { ...state, plan: plan.content };
+    },
+    executor: async (state) => {
+      const result = await executePlan(state.plan, state.tools);
+      return { ...state, result };
+    },
+    reviewer: async (state) => {
+      const review = await llm.chat([
+        { role: "user", content: `Review this result: ${state.result}` },
+      ]);
+      return { ...state, review: review.content, approved: review.content.includes("APPROVED") };
+    },
+  },
+  edges: {
+    planner: "executor",
+    executor: "reviewer",
+    reviewer: (state) => (state.approved ? "end" : "planner"),
+  },
+};
+```
+
+LangGraph's strength is **complex workflows with conditional branching**. If your agent needs to loop, branch, retry specific steps, or checkpoint state for later resumption, the graph model makes these flows explicit rather than buried in if-statements.
+
+## CrewAI
+
+CrewAI focuses on **role-based multi-agent systems**. You define agents with specific roles, backstories, and goals, then organize them into crews with a process (sequential or hierarchical).
+
+```javascript
+// CrewAI pattern (conceptual structure)
+const researcher = {
+  role: "Research Analyst",
+  goal: "Find accurate, recent data on the given topic",
+  tools: [webSearch, documentReader],
+};
+
+const writer = {
+  role: "Technical Writer",
+  goal: "Synthesize research into a clear, actionable report",
+  tools: [formatReport],
+};
+
+const crew = {
+  agents: [researcher, writer],
+  tasks: [
+    { description: "Research market trends for Q1 2026", agent: researcher },
+    { description: "Write a summary report from the research", agent: writer },
+  ],
+  process: "sequential", // or "hierarchical" with a manager agent
+};
+```
+
+CrewAI excels at **delegation workflows** where distinct roles pass work between each other. It is higher-level than LangGraph and less flexible, but faster to set up for team-style agent patterns.
+
+## When to use what
+
+| Situation                                        | Recommendation                            |
+| ------------------------------------------------ | ----------------------------------------- |
+| Simple tool-use loop, full control needed        | Build from scratch                        |
+| Single agent, production-quality tool use        | Anthropic tool use or OpenAI API directly |
+| Multi-agent with handoffs                        | OpenAI Agents SDK                         |
+| Complex branching, checkpointing, state machines | LangGraph                                 |
+| Role-based delegation, team simulation           | CrewAI                                    |
+| Prototype or proof of concept                    | Whatever gets you running fastest         |
+
+The honest answer: start without a framework. Add one when the complexity of your loop management exceeds the complexity of learning the framework. Most agents in production are simpler than you think.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Build a simple state machine agent with three nodes: 'plan', 'execute', and 'check'. Each node transforms a state object. The 'check' node should route back to 'plan' if state.attempts < 2, or to 'done' otherwise. Run the state machine until it reaches 'done'."
+  initialCode={`const nodes = {
+  plan: (state) => ({
+    ...state,
+    currentStep: "execute",
+    plan: "Fetch data from API",
+  }),
+  execute: (state) => ({
+    ...state,
+    currentStep: "check",
+    result: "partial data",
+    attempts: state.attempts + 1,
+  }),
+  check: (state) => {
+    // Route back to plan if attempts < 2, otherwise done
+  },
+};
+
+function runStateMachine(initialState) {
+let state = initialState;
+while (state.currentStep !== "done") {
+// Run the current node and update state
+}
+return state;
+}
+
+const result = runStateMachine({ currentStep: "plan", attempts: 0 });
+console.log("Finished in", result.attempts, "attempts");`}
+  solution={`const nodes = {
+plan: (state) => ({
+...state,
+currentStep: "execute",
+plan: "Fetch data from API",
+}),
+execute: (state) => ({
+...state,
+currentStep: "check",
+result: "partial data",
+attempts: state.attempts + 1,
+}),
+check: (state) => {
+if (state.attempts < 2) {
+return { ...state, currentStep: "plan" };
+}
+return { ...state, currentStep: "done" };
+},
+};
+
+function runStateMachine(initialState) {
+let state = initialState;
+while (state.currentStep !== "done") {
+const node = nodes[state.currentStep];
+state = node(state);
+}
+return state;
+}
+
+const result = runStateMachine({ currentStep: "plan", attempts: 0 });
+console.log("Finished in", result.attempts, "attempts");`}
+testCases={["State machine runs through plan-execute-check cycle and terminates"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What is LangGraph's core abstraction for modeling agents?",
+      options: [
+        "A chat loop with tool calls",
+        "A state machine with nodes and edges",
+        "Role-based agents in a crew",
+        "A chain of prompt templates",
+      ],
+      correct: 1,
+      explanation:
+        "LangGraph models agents as state machines where nodes are functions, edges are transitions, and state flows through the graph.",
+    },
+    {
+      type: "multiple-choice",
+      question: "When should you build an agent from scratch instead of using a framework?",
+      options: [
+        "Never — always use a framework",
+        "When you need multi-agent handoffs",
+        "When the loop is simple and you want full control",
+        "When you need checkpointing",
+      ],
+      correct: 2,
+      explanation:
+        "A simple tool-use loop with full control is best built from scratch. Frameworks add value when you need complex state management, branching, or multi-agent coordination.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="LangGraph models agents as ___ machines. CrewAI organizes agents by ___ with specific goals. The simplest approach is to build from ___ with a while loop."
+  answers={["state", "roles", "scratch"]}
+  hints={["Think nodes and edges.", "Each agent has a job title.", "No framework at all."]}
+/>
+
+## What you learned
+
+- **Frameworks** like LangGraph, CrewAI, and OpenAI Agents SDK solve real problems — state management, handoffs, branching — but add complexity you may not need.
+- **Anthropic tool use** and direct API integration give you the most control with the least abstraction.
+- **Start simple**: build from scratch, then adopt a framework when loop management complexity exceeds framework learning cost.

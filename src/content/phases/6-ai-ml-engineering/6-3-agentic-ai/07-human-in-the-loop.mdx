@@ -1,0 +1,298 @@
+---
+title: "Human-in-the-Loop"
+description: "Approval flows, escalation, confidence thresholds, and the trust gradient from full automation to human-only decisions."
+phase: 6
+module: "6-3-agentic-ai"
+order: 7
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+No responsible engineer deploys an agent with unrestricted access to production databases, financial systems, or customer communications. Agents make mistakes — they misinterpret tasks, call wrong tools, and generate plausible-sounding nonsense. Human-in-the-loop (HITL) patterns let you harness agent speed for routine tasks while keeping a human in control of high-stakes decisions. This is not a limitation — it is how you build agents people actually trust.
+
+## The trust gradient
+
+Not all actions carry equal risk. A trust gradient maps actions to the appropriate level of human oversight:
+
+```javascript
+const trustLevels = {
+  FULL_AUTO: {
+    description: "Agent acts without human review",
+    examples: ["Read-only queries", "Searching documents", "Generating summaries"],
+  },
+  NOTIFY: {
+    description: "Agent acts, human is notified after",
+    examples: ["Sending non-critical notifications", "Updating draft documents"],
+  },
+  APPROVE: {
+    description: "Agent proposes, human must approve before execution",
+    examples: ["Sending emails", "Modifying database records", "Making purchases"],
+  },
+  HUMAN_ONLY: {
+    description: "Agent cannot perform this action at all",
+    examples: ["Deleting production data", "Transferring large sums", "Changing access controls"],
+  },
+};
+```
+
+The gradient is not fixed — it shifts as trust is earned. A new agent starts with most actions requiring approval. As it demonstrates reliability, more actions move toward full auto. If it makes a serious mistake, actions move back toward human review.
+
+## Implementing approval flows
+
+An approval flow pauses the agent loop when a tool call requires human sign-off.
+
+```javascript
+async function agentWithApproval(task, tools, toolImpls, llm, approvalConfig) {
+  const messages = [{ role: "user", content: task }];
+
+  for (let step = 0; step < 15; step++) {
+    const response = await llm.chat(messages, { tools });
+
+    if (!response.toolCalls?.length) {
+      return response.content;
+    }
+
+    for (const tc of response.toolCalls) {
+      const level = approvalConfig[tc.name] || "FULL_AUTO";
+
+      if (level === "HUMAN_ONLY") {
+        messages.push({
+          role: "tool",
+          toolCallId: tc.id,
+          content: "DENIED: This action requires a human operator. Please suggest an alternative.",
+        });
+        continue;
+      }
+
+      if (level === "APPROVE") {
+        const approved = await requestHumanApproval({
+          tool: tc.name,
+          arguments: tc.arguments,
+          context: messages.slice(-3),
+        });
+
+        if (!approved) {
+          messages.push({
+            role: "tool",
+            toolCallId: tc.id,
+            content: "DENIED: Human reviewer rejected this action. Ask the user how to proceed.",
+          });
+          continue;
+        }
+      }
+
+      // FULL_AUTO or approved — execute the tool
+      try {
+        const result = await toolImpls[tc.name](tc.arguments);
+        messages.push({ role: "tool", toolCallId: tc.id, content: JSON.stringify(result) });
+      } catch (error) {
+        messages.push({ role: "tool", toolCallId: tc.id, content: `Error: ${error.message}` });
+      }
+
+      if (level === "NOTIFY") {
+        notifyHuman({ tool: tc.name, arguments: tc.arguments, status: "executed" });
+      }
+    }
+
+    messages.push({ role: "assistant", content: response.content, toolCalls: response.toolCalls });
+  }
+}
+
+// Approval configs per tool
+const approvalConfig = {
+  search_docs: "FULL_AUTO",
+  send_email: "APPROVE",
+  update_record: "APPROVE",
+  delete_record: "HUMAN_ONLY",
+  generate_report: "NOTIFY",
+};
+```
+
+The agent sees denied actions as tool results. It does not crash — it adapts. A well-prompted agent will explain what it wanted to do and ask the user for an alternative approach.
+
+## Confidence thresholds
+
+Sometimes the agent itself should decide when to escalate. You can instruct the model to rate its confidence and automatically request human input when confidence is low.
+
+```javascript
+const confidencePrompt = `Before executing any action, rate your confidence (0-100) that this is the correct action. Include your rating in your response.
+
+- Confidence >= 80: Proceed automatically
+- Confidence 50-79: Explain your reasoning and ask for approval
+- Confidence < 50: Stop and ask the human for guidance
+
+Example: "CONFIDENCE: 45 — I found two possible interpretations of this request. Let me check with you before proceeding."`;
+
+function parseConfidence(response) {
+  const match = response.content.match(/CONFIDENCE:\s*(\d+)/);
+  if (!match) return 80; // Default to auto if model does not include rating
+  return parseInt(match[1], 10);
+}
+
+async function confidenceBasedEscalation(response) {
+  const confidence = parseConfidence(response);
+
+  if (confidence >= 80) {
+    return { action: "proceed" };
+  }
+
+  if (confidence >= 50) {
+    return {
+      action: "request_approval",
+      reason: response.content,
+    };
+  }
+
+  return {
+    action: "escalate",
+    reason: response.content,
+  };
+}
+```
+
+This is imperfect — models are not well-calibrated on confidence. But it adds a useful layer of self-regulation. Over time, you can tune the thresholds based on observed accuracy at each confidence level.
+
+## Escalation patterns
+
+Escalation is what happens when the agent hits a wall. Good escalation provides the human with everything they need to take over.
+
+```javascript
+function buildEscalationPackage(agentState) {
+  return {
+    summary: "Agent could not complete the task autonomously",
+    originalTask: agentState.task,
+    stepsTaken: agentState.messages.filter((m) => m.role === "assistant").map((m) => m.content),
+    toolResults: agentState.messages.filter((m) => m.role === "tool").map((m) => m.content),
+    failureReason: agentState.lastError || "Confidence too low to proceed",
+    suggestedActions: [
+      "Review the tool results above for accuracy",
+      "Provide clarification on the original task",
+      "Manually complete the remaining steps",
+    ],
+    resumeContext: agentState.messages, // So the agent can continue after human input
+  };
+}
+```
+
+The `resumeContext` is critical. After the human provides guidance, the agent should be able to pick up where it left off — not start from scratch. Include the full message history so the agent retains context.
+
+## Designing the approval UI
+
+The human needs enough context to make a fast, informed decision. Show them:
+
+```javascript
+// What the human sees in an approval request
+const approvalRequest = {
+  agent: "Customer Support Agent",
+  action: "send_email",
+  arguments: {
+    to: "customer@example.com",
+    subject: "Your refund has been processed",
+    body: "Dear Customer, Your refund of $149.99 has been issued...",
+  },
+  reasoning: "Customer requested a refund 3 days ago. Policy allows refunds within 30 days.",
+  conversationSnippet: "...last 3 messages for context...",
+  options: ["Approve", "Deny", "Edit and approve"],
+};
+```
+
+The "Edit and approve" option is essential. Often the agent is 90% right — the human just needs to fix a detail. Let them modify the action rather than forcing a binary approve/deny.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a checkApproval function that takes a tool call and an approval config, and returns 'execute', 'request_approval', or 'denied' based on the trust level assigned to that tool."
+  initialCode={`const approvalConfig = {
+  read_file: "FULL_AUTO",
+  write_file: "APPROVE",
+  delete_file: "HUMAN_ONLY",
+};
+
+function checkApproval(toolCall, config) {
+// Look up the tool name in config
+// FULL_AUTO → return "execute"
+// APPROVE → return "request_approval"
+// HUMAN_ONLY → return "denied"
+// Unknown tools → return "request_approval" (safe default)
+}
+
+console.log(checkApproval({ name: "read_file" }, approvalConfig));
+console.log(checkApproval({ name: "write_file" }, approvalConfig));
+console.log(checkApproval({ name: "delete_file" }, approvalConfig));
+console.log(checkApproval({ name: "unknown_tool" }, approvalConfig));`}
+  solution={`const approvalConfig = {
+read_file: "FULL_AUTO",
+write_file: "APPROVE",
+delete_file: "HUMAN_ONLY",
+};
+
+function checkApproval(toolCall, config) {
+const level = config[toolCall.name] || "APPROVE";
+if (level === "FULL_AUTO") return "execute";
+if (level === "APPROVE") return "request_approval";
+if (level === "HUMAN_ONLY") return "denied";
+return "request_approval";
+}
+
+console.log(checkApproval({ name: "read_file" }, approvalConfig));
+console.log(checkApproval({ name: "write_file" }, approvalConfig));
+console.log(checkApproval({ name: "delete_file" }, approvalConfig));
+console.log(checkApproval({ name: "unknown_tool" }, approvalConfig));`}
+testCases={["checkApproval returns correct action for each trust level"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What should an agent do when a tool call is denied by the approval system?",
+      options: [
+        "Crash and report an error",
+        "Retry the same call until it is approved",
+        "See the denial as a tool result and adapt — explain what it wanted to do and ask for alternatives",
+        "Ignore the denial and execute anyway",
+      ],
+      correct: 2,
+      explanation:
+        "Denials are returned as tool results. A well-designed agent reads the denial, explains its intent, and either suggests an alternative or asks the user for guidance.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Why is 'Edit and approve' a better option than just 'Approve' or 'Deny'?",
+      options: [
+        "It is faster for the human",
+        "It lets the human fix small details instead of rejecting the whole action",
+        "It removes the need for confidence thresholds",
+        "It makes the agent more autonomous",
+      ],
+      correct: 1,
+      explanation:
+        "Agents are often close to correct. Letting the human edit the proposed action (fix an email subject, adjust a value) is more efficient than denying and re-prompting from scratch.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The trust gradient ranges from full ___ (no review) to human-___ (agent cannot act). When an agent's confidence is low, it should ___ to a human."
+  answers={["auto", "only", "escalate"]}
+  hints={["Automatic execution.", "The agent is blocked entirely.", "Pass the decision upward."]}
+/>
+
+## What you learned
+
+- The **trust gradient** maps actions to oversight levels: full auto, notify, approve, or human-only — and shifts as trust is earned or lost.
+- **Approval flows** pause the agent loop for human sign-off on high-stakes actions, returning denials as tool results so the agent can adapt.
+- **Escalation packages** give humans full context (steps taken, results, failure reason) so they can make fast decisions and the agent can resume after input.

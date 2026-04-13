@@ -340,4 +340,161 @@ export const PHASE_6_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["retrieval", "quality"]
   ),
+
+  // ── Module 6-3: Agentic AI ───────────────────────────────────────────────
+  q(
+    "6-3-q1",
+    "6-3",
+    "multiple-choice",
+    "What distinguishes an AI agent from a chatbot?",
+    [
+      "Agents are faster",
+      "Agents can use tools, plan multi-step actions, and act on the world — chatbots only generate text",
+      "Chatbots use LLMs but agents do not",
+      "Agents require fine-tuning",
+    ],
+    1,
+    "An agent = LLM + tools + action loop. It reasons about what to do next and takes actions, not just generates text.",
+    "easy",
+    ["agent", "tool-use"]
+  ),
+  q(
+    "6-3-q2",
+    "6-3",
+    "multiple-choice",
+    "What is the ReAct pattern?",
+    [
+      "A React.js design pattern",
+      "Reason then Act — the model thinks step-by-step, decides on a tool call, observes the result, then reasons again",
+      "A database query pattern",
+      "A CSS animation technique",
+    ],
+    1,
+    "ReAct interleaves reasoning and acting: think → act → observe → think → act... until the task is done.",
+    "easy",
+    ["react-pattern", "agent"]
+  ),
+  q(
+    "6-3-q3",
+    "6-3",
+    "multiple-choice",
+    "How do you define a tool for an LLM agent?",
+    [
+      "Write it in natural language in the system prompt only",
+      "Provide a JSON schema with the tool name, description, and input parameters",
+      "Upload a binary executable",
+      "Hard-code the tool calls in the output",
+    ],
+    1,
+    "Tools are defined as JSON schemas with name, description, and parameter types. The model decides when to call them.",
+    "easy",
+    ["tool-calling", "json-schema"]
+  ),
+  q(
+    "6-3-q4",
+    "6-3",
+    "true-false",
+    "True or false: in a multi-agent system, a supervisor agent coordinates which specialized agents handle which tasks.",
+    ["True", "False"],
+    0,
+    "The supervisor pattern routes tasks to the right specialist agent and aggregates results.",
+    "easy",
+    ["multi-agent", "supervisor"]
+  ),
+  q(
+    "6-3-q5",
+    "6-3",
+    "multiple-choice",
+    "Why is human-in-the-loop important for agents?",
+    [
+      "It makes agents faster",
+      "Agents can take destructive actions — human approval prevents irreversible mistakes",
+      "LLMs require human input to function",
+      "It reduces API costs",
+    ],
+    1,
+    "Agents with tool access can delete data, send emails, or modify systems. Human approval gates prevent catastrophic errors.",
+    "medium",
+    ["human-in-the-loop", "safety"]
+  ),
+  q(
+    "6-3-q6",
+    "6-3",
+    "multiple-choice",
+    "What is the biggest challenge in evaluating AI agents?",
+    [
+      "Agents are too fast to observe",
+      "Outputs are non-deterministic and multi-step, making traditional unit tests insufficient",
+      "Agents don't produce any output",
+      "Evaluation requires GPUs",
+    ],
+    1,
+    "Agents take variable paths to solve tasks. Trajectory evaluation, task completion rate, and tool call accuracy are needed.",
+    "medium",
+    ["evaluation", "agent"]
+  ),
+  q(
+    "6-3-q7",
+    "6-3",
+    "multiple-choice",
+    "What type of memory allows an agent to recall past interactions across sessions?",
+    [
+      "Short-term memory (conversation context)",
+      "Long-term memory (persistent store)",
+      "CPU cache",
+      "Browser localStorage",
+    ],
+    1,
+    "Long-term memory persists across sessions — stored in a database, retrieved when relevant to the current task.",
+    "medium",
+    ["agent-memory", "long-term"]
+  ),
+  q(
+    "6-3-q8",
+    "6-3",
+    "multiple-choice",
+    "When should you use a framework like LangGraph vs building an agent from scratch?",
+    [
+      "Always use a framework",
+      "Frameworks help with complex multi-step flows; simple tool-calling agents are easier built directly on the API",
+      "Never use a framework",
+      "Frameworks are only for Python",
+    ],
+    1,
+    "Simple agents (1-2 tools, linear flow) are easy to build on raw APIs. Complex state machines and multi-agent flows benefit from framework abstractions.",
+    "hard",
+    ["framework", "langraph"]
+  ),
+  q(
+    "6-3-q9",
+    "6-3",
+    "multiple-choice",
+    "What is the 'confidence threshold' pattern in human-in-the-loop?",
+    [
+      "Only run the agent when the user is confident",
+      "The agent auto-executes when confidence is high, escalates to a human when confidence is low",
+      "A threshold for how many tokens to generate",
+      "A limit on API costs",
+    ],
+    1,
+    "The trust gradient: high-confidence actions run automatically, low-confidence actions pause for human approval.",
+    "hard",
+    ["confidence", "human-in-the-loop"]
+  ),
+  q(
+    "6-3-q10",
+    "6-3",
+    "multiple-choice",
+    "What is the main risk of an agent loop without a maximum iteration limit?",
+    [
+      "It will generate better answers",
+      "It can run indefinitely, consuming tokens and costs without converging on a solution",
+      "It will crash the browser",
+      "It makes the agent faster",
+    ],
+    1,
+    "Unbounded loops can burn through API budgets. Always set max iterations and a cost ceiling.",
+    "hard",
+    ["agent-loop", "safety", "cost"]
+  ),
 ];

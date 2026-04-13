@@ -1,0 +1,296 @@
+---
+title: "Multi-Step Planning"
+description: "ReAct in detail, chain-of-thought planning, task decomposition, and handling plan failures."
+phase: 6
+module: "6-3-agentic-ai"
+order: 4
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Simple agents react one step at a time — call a tool, read the result, decide what to do next. This works for straightforward tasks, but complex tasks require planning: breaking a big goal into subtasks, ordering them, and adapting when things go wrong. The difference between a toy demo and a useful agent is often the planning strategy. Get this right and your agent can handle multi-step research, data pipelines, and complex workflows. Get it wrong and it wanders in circles.
+
+## ReAct in depth
+
+The ReAct pattern (Reason + Act) interleaves thinking with tool use. On every iteration, the model explicitly states its reasoning before choosing an action.
+
+```javascript
+// ReAct-style system prompt
+const systemPrompt = `You are a research assistant. For each step:
+1. THOUGHT: Reason about what you know and what you need to find out.
+2. ACTION: Call a tool to get information or perform a task.
+3. OBSERVATION: You will see the tool result.
+Repeat until you can answer the user's question with confidence.
+When ready, respond with your final answer — no tool call.`;
+
+// The message history shows the interleaving pattern:
+const exampleHistory = [
+  { role: "user", content: "Compare quarterly revenue for Acme Corp and Beta Inc in 2025." },
+  {
+    role: "assistant",
+    content: "THOUGHT: I need revenue data for both companies. I will search for Acme Corp first.",
+    toolCalls: [{ name: "search_financials", arguments: { company: "Acme Corp", year: 2025 } }],
+  },
+  { role: "tool", content: "Acme Corp 2025 revenue: Q1 $12M, Q2 $14M, Q3 $13M, Q4 $16M" },
+  {
+    role: "assistant",
+    content: "THOUGHT: Got Acme data. Now I need Beta Inc.",
+    toolCalls: [{ name: "search_financials", arguments: { company: "Beta Inc", year: 2025 } }],
+  },
+  { role: "tool", content: "Beta Inc 2025 revenue: Q1 $9M, Q2 $11M, Q3 $12M, Q4 $14M" },
+  {
+    role: "assistant",
+    content:
+      "Both companies grew through 2025. Acme Corp had higher absolute revenue each quarter...",
+  },
+];
+```
+
+The explicit THOUGHT step is not just formatting — it measurably improves accuracy. When the model writes out its reasoning, it makes better decisions about which tool to call next and how to interpret results.
+
+## Plan-then-execute
+
+An alternative to interleaved ReAct is to generate the full plan upfront, then execute it step by step. This works well when the task structure is predictable.
+
+```javascript
+async function planThenExecute(task, tools, toolImpls, llm) {
+  // Step 1: Generate a plan
+  const planResponse = await llm.chat([
+    {
+      role: "system",
+      content: `Break this task into numbered steps. Each step should specify which tool to use and what arguments to pass. Output JSON array.`,
+    },
+    { role: "user", content: task },
+  ]);
+
+  const plan = JSON.parse(planResponse.content);
+  // plan = [
+  //   { step: 1, tool: "search_docs", args: { query: "..." }, purpose: "..." },
+  //   { step: 2, tool: "run_sql", args: { query: "..." }, purpose: "..." },
+  //   { step: 3, tool: null, purpose: "Synthesize results into final answer" }
+  // ]
+
+  // Step 2: Execute each step
+  const results = [];
+  for (const step of plan) {
+    if (step.tool && toolImpls[step.tool]) {
+      try {
+        const result = await toolImpls[step.tool](step.args);
+        results.push({ step: step.step, result });
+      } catch (error) {
+        results.push({ step: step.step, error: error.message });
+      }
+    }
+  }
+
+  // Step 3: Synthesize with all results
+  const synthesis = await llm.chat([
+    {
+      role: "user",
+      content: `Task: ${task}\nResults: ${JSON.stringify(results)}\nSynthesize a final answer.`,
+    },
+  ]);
+
+  return synthesis.content;
+}
+```
+
+The trade-off: plan-then-execute is faster (fewer LLM calls) but brittle. If step 2 depends on step 1's output and step 1 fails, the plan is useless.
+
+## Task decomposition
+
+For complex tasks, neither pure ReAct nor plan-then-execute is enough. You need to decompose the task into subtasks that can each be solved independently or sequentially.
+
+```javascript
+async function decomposeTask(task, llm) {
+  const response = await llm.chat([
+    {
+      role: "system",
+      content: `Decompose this task into independent subtasks.
+Return a JSON object with:
+- subtasks: array of { id, description, dependencies (array of ids), tools_needed }
+- execution_order: array of ids in the order they should run`,
+    },
+    { role: "user", content: task },
+  ]);
+
+  return JSON.parse(response.content);
+}
+
+// Example output for "Build a competitive analysis report":
+// {
+//   subtasks: [
+//     { id: "a", description: "Identify top 5 competitors", dependencies: [], tools_needed: ["search"] },
+//     { id: "b", description: "Get revenue data for each", dependencies: ["a"], tools_needed: ["search_financials"] },
+//     { id: "c", description: "Get product features for each", dependencies: ["a"], tools_needed: ["search"] },
+//     { id: "d", description: "Synthesize into report", dependencies: ["b", "c"], tools_needed: [] }
+//   ],
+//   execution_order: ["a", "b", "c", "d"]
+// }
+```
+
+Notice that subtasks `b` and `c` both depend on `a` but not on each other. They can run in parallel. This kind of dependency analysis lets you build agents that are both faster and more resilient.
+
+## Handling plan failures
+
+Plans fail. APIs return errors, data is missing, assumptions are wrong. A robust planning agent needs a re-planning strategy.
+
+```javascript
+async function executeWithReplan(task, plan, tools, toolImpls, llm) {
+  const completed = [];
+  const failed = [];
+
+  for (const step of plan) {
+    try {
+      const result = await toolImpls[step.tool](step.args);
+      completed.push({ ...step, result });
+    } catch (error) {
+      failed.push({ ...step, error: error.message });
+
+      // Re-plan: ask the model to adjust remaining steps
+      const replanResponse = await llm.chat([
+        {
+          role: "system",
+          content:
+            "A step in the plan failed. Adjust the remaining plan to work around the failure.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            originalTask: task,
+            completed,
+            failed,
+            remainingSteps: plan.slice(plan.indexOf(step) + 1),
+          }),
+        },
+      ]);
+
+      // Replace remaining plan with adjusted version
+      const newPlan = JSON.parse(replanResponse.content);
+      return executeWithReplan(task, newPlan, tools, toolImpls, llm);
+    }
+  }
+
+  return completed;
+}
+```
+
+The key insight: re-planning is not a special feature — it is just another LLM call with the right context. You tell the model what worked, what failed, and ask it to adjust. This is what makes agents adaptive rather than rigid.
+
+## Choosing a planning strategy
+
+| Strategy                 | Best for                              | Weakness                          |
+| ------------------------ | ------------------------------------- | --------------------------------- |
+| **ReAct (interleaved)**  | Exploratory tasks, unknown domains    | Slow (many LLM calls), can wander |
+| **Plan-then-execute**    | Predictable workflows, speed          | Brittle if steps fail             |
+| **Decompose + parallel** | Complex tasks with independent parts  | Harder to implement               |
+| **Adaptive re-planning** | Unreliable tools, changing conditions | Token-expensive                   |
+
+Most production agents use a hybrid: plan upfront for structure, but fall back to ReAct-style interleaving when the plan breaks down.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a simple task decomposer. Given a plan array where each step has dependencies, return the steps sorted in valid execution order (steps with no unmet dependencies first). This is topological sort."
+  initialCode={`function executionOrder(steps) {
+  // steps = [{ id: "a", deps: [] }, { id: "b", deps: ["a"] }, { id: "c", deps: ["a"] }, { id: "d", deps: ["b", "c"] }]
+  // Return: ["a", "b", "c", "d"] (or ["a", "c", "b", "d"] — both valid)
+  const ordered = [];
+  const completed = new Set();
+
+// Keep going until all steps are ordered
+// On each pass, find steps whose deps are all in completed
+}
+
+const steps = [
+{ id: "d", deps: ["b", "c"] },
+{ id: "b", deps: ["a"] },
+{ id: "a", deps: [] },
+{ id: "c", deps: ["a"] },
+];
+
+console.log(executionOrder(steps));`}
+  solution={`function executionOrder(steps) {
+const ordered = [];
+const completed = new Set();
+
+while (ordered.length < steps.length) {
+for (const step of steps) {
+if (completed.has(step.id)) continue;
+const depsReady = step.deps.every((d) => completed.has(d));
+if (depsReady) {
+ordered.push(step.id);
+completed.add(step.id);
+}
+}
+}
+
+return ordered;
+}
+
+const steps = [
+{ id: "d", deps: ["b", "c"] },
+{ id: "b", deps: ["a"] },
+{ id: "a", deps: [] },
+{ id: "c", deps: ["a"] },
+];
+
+console.log(executionOrder(steps));`}
+testCases={["executionOrder returns a valid topological sort"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What is the main advantage of plan-then-execute over interleaved ReAct?",
+      options: [
+        "It handles failures better",
+        "It is more creative",
+        "It requires fewer LLM calls and is faster",
+        "It always produces better results",
+      ],
+      correct: 2,
+      explanation:
+        "Plan-then-execute generates the full plan in one LLM call and executes steps without returning to the model. Fewer calls means faster execution — but it is brittle when steps fail.",
+    },
+    {
+      type: "multiple-choice",
+      question: "When a plan step fails, what should an adaptive agent do?",
+      options: [
+        "Abort the entire task",
+        "Skip the step and continue",
+        "Re-plan by giving the model the completed steps, failure details, and remaining steps",
+        "Retry the same step indefinitely",
+      ],
+      correct: 2,
+      explanation:
+        "Re-planning uses a fresh LLM call with full context: what worked, what failed, and what remains. This lets the model adjust its approach rather than blindly retrying or giving up.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The plan-then-execute strategy generates the full ___ upfront. When a step fails, an adaptive agent uses ___ to adjust the remaining steps."
+  answers={["plan", "re-planning"]}
+  hints={["It plans first, then...", "Planning again with updated context."]}
+/>
+
+## What you learned
+
+- **ReAct** interleaves reasoning with action for flexible, exploratory problem-solving but uses many LLM calls.
+- **Plan-then-execute** is faster but brittle — it works best for predictable workflows.
+- **Adaptive re-planning** handles failures by giving the model context about what went wrong and asking it to adjust, making agents resilient to real-world unpredictability.

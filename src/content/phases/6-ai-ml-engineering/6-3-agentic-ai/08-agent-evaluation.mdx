@@ -1,0 +1,311 @@
+---
+title: "Agent Evaluation"
+description: "Testing non-deterministic, multi-step systems: trajectory evaluation, task completion rates, tool call accuracy, and benchmark design."
+phase: 6
+module: "6-3-agentic-ai"
+order: 8
+estimatedMinutes: 9
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Testing agents is fundamentally harder than testing regular software. A function returns the same output for the same input. An agent might take three different paths to the same answer, or five steps one time and eight the next. Traditional unit tests do not work when the system is non-deterministic and multi-step. You need new evaluation strategies — and without them, you are deploying agents blind, hoping they work in production.
+
+## Why traditional testing fails
+
+Consider testing a search agent. You give it "Find the CEO of Acme Corp." A traditional test checks if the output is "Jane Smith." But the agent might:
+
+- Search Google, find the answer on the first try (3 steps)
+- Search Google, get a bad result, search Wikipedia, find it there (6 steps)
+- Search Google, call the wrong tool, recover, search again, find it (8 steps)
+
+All three produce the correct answer. The paths are completely different. Testing only the final output misses whether the agent is efficient, whether it recovers gracefully, or whether it is calling tools correctly.
+
+```javascript
+// This test is insufficient for agents
+function testSearchAgent() {
+  const result = agent.run("Find the CEO of Acme Corp");
+  assert(result.includes("Jane Smith")); // Checks output, ignores everything else
+}
+
+// A better evaluation checks the trajectory
+function evaluateSearchAgent(trace) {
+  return {
+    correctAnswer: trace.finalOutput.includes("Jane Smith"),
+    totalSteps: trace.steps.length,
+    toolCallAccuracy: trace.toolCalls.filter((tc) => tc.wasUseful).length / trace.toolCalls.length,
+    recoveredFromError: trace.steps.some((s) => s.wasRetry),
+    totalTokens: trace.tokenUsage,
+  };
+}
+```
+
+## Trajectory evaluation
+
+A trajectory is the full sequence of reasoning steps, tool calls, and tool results an agent produces. Evaluating the trajectory tells you not just whether the agent succeeded, but how it got there.
+
+```javascript
+function evaluateTrajectory(trajectory, expectedBehavior) {
+  const scores = {};
+
+  // Did the agent reach the goal?
+  scores.taskCompleted = trajectory.finalOutput !== null;
+
+  // Did it use the right tools?
+  scores.toolSelection = trajectory.toolCalls.every((tc) =>
+    expectedBehavior.validTools.includes(tc.name)
+  );
+
+  // Were tool arguments valid?
+  scores.argumentQuality =
+    trajectory.toolCalls.reduce((sum, tc) => {
+      const isValid = validateArguments(tc.name, tc.arguments);
+      return sum + (isValid ? 1 : 0);
+    }, 0) / Math.max(trajectory.toolCalls.length, 1);
+
+  // Efficiency: how many steps vs expected?
+  scores.efficiency = Math.min(1, expectedBehavior.expectedSteps / trajectory.steps.length);
+
+  // Did it handle errors gracefully?
+  const errors = trajectory.steps.filter((s) => s.isError);
+  const recoveries = errors.filter((e) => e.wasRecoveredFrom);
+  scores.errorRecovery = errors.length === 0 ? 1 : recoveries.length / errors.length;
+
+  // Weighted overall score
+  scores.overall =
+    scores.taskCompleted * 0.4 +
+    scores.toolSelection * 0.2 +
+    scores.argumentQuality * 0.15 +
+    scores.efficiency * 0.15 +
+    scores.errorRecovery * 0.1;
+
+  return scores;
+}
+```
+
+Trajectory evaluation answers questions like: "The agent succeeded, but it called the search tool 12 times when 3 would have been enough." That matters for cost, latency, and user experience.
+
+## Task completion benchmarks
+
+Build a benchmark suite — a set of tasks with known correct outcomes — and run your agent against it regularly.
+
+```javascript
+const benchmarkSuite = [
+  {
+    id: "search-simple",
+    task: "What is the capital of France?",
+    expectedAnswer: "Paris",
+    maxSteps: 3,
+    requiredTools: ["search"],
+    difficulty: "easy",
+  },
+  {
+    id: "search-multi-step",
+    task: "What is the population of the country whose capital is Berlin?",
+    expectedAnswer: /83|84 million/,
+    maxSteps: 5,
+    requiredTools: ["search"],
+    difficulty: "medium",
+  },
+  {
+    id: "data-analysis",
+    task: "Query the sales database for total revenue in Q1 2025 and format as currency.",
+    expectedAnswer: /\$[\d,]+/,
+    maxSteps: 4,
+    requiredTools: ["run_sql", "format_output"],
+    difficulty: "medium",
+  },
+];
+
+async function runBenchmark(agent, suite) {
+  const results = [];
+
+  for (const testCase of suite) {
+    const trace = await agent.runWithTrace(testCase.task);
+
+    results.push({
+      id: testCase.id,
+      passed:
+        testCase.expectedAnswer instanceof RegExp
+          ? testCase.expectedAnswer.test(trace.finalOutput)
+          : trace.finalOutput.includes(testCase.expectedAnswer),
+      steps: trace.steps.length,
+      withinStepLimit: trace.steps.length <= testCase.maxSteps,
+      usedCorrectTools: testCase.requiredTools.every((t) =>
+        trace.toolCalls.some((tc) => tc.name === t)
+      ),
+    });
+  }
+
+  const passRate = results.filter((r) => r.passed).length / results.length;
+  return { passRate, results };
+}
+```
+
+Run this after every change to your agent's system prompt, tools, or model version. A benchmark that passes at 90% today might drop to 70% after a prompt tweak. Track it over time.
+
+## Tool call accuracy
+
+Measure how often the agent calls the right tool with the right arguments. This is a more granular metric than task completion.
+
+```javascript
+function measureToolAccuracy(traces, groundTruth) {
+  let correctCalls = 0;
+  let totalCalls = 0;
+  let unnecessaryCalls = 0;
+
+  for (const trace of traces) {
+    const expected = groundTruth[trace.taskId];
+
+    for (const tc of trace.toolCalls) {
+      totalCalls++;
+
+      const matchesExpected = expected.toolCalls.some(
+        (e) => e.name === tc.name && JSON.stringify(e.arguments) === JSON.stringify(tc.arguments)
+      );
+
+      if (matchesExpected) {
+        correctCalls++;
+      }
+
+      const isUseful = tc.resultUsedInFinalAnswer;
+      if (!isUseful) {
+        unnecessaryCalls++;
+      }
+    }
+  }
+
+  return {
+    accuracy: correctCalls / Math.max(totalCalls, 1),
+    wasteRate: unnecessaryCalls / Math.max(totalCalls, 1),
+    avgCallsPerTask: totalCalls / traces.length,
+  };
+}
+```
+
+A high waste rate means the agent is exploring too much — calling tools speculatively and not using the results. This is a prompt engineering problem: the tool descriptions or system prompt need tightening.
+
+## Handling non-determinism
+
+Agents produce different outputs on each run. Account for this by running each benchmark case multiple times:
+
+```javascript
+async function robustBenchmark(agent, testCase, runs) {
+  const results = [];
+
+  for (let i = 0; i < runs; i++) {
+    const trace = await agent.runWithTrace(testCase.task);
+    results.push({
+      passed: checkAnswer(trace.finalOutput, testCase.expectedAnswer),
+      steps: trace.steps.length,
+      tokens: trace.tokenUsage,
+    });
+  }
+
+  return {
+    passRate: results.filter((r) => r.passed).length / runs,
+    avgSteps: results.reduce((s, r) => s + r.steps, 0) / runs,
+    avgTokens: results.reduce((s, r) => s + r.tokens, 0) / runs,
+    variance: calculateVariance(results.map((r) => r.steps)),
+  };
+}
+```
+
+High variance is a red flag. If the agent completes a task in 3 steps sometimes and 15 steps other times, the behavior is unreliable. Look for prompt or tool definition improvements that reduce variance.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write an evaluateTrace function that takes a trace object (with steps and finalOutput) and returns a score object with taskCompleted (boolean), stepCount, efficiency (expectedSteps / actual, capped at 1), and an overall score."
+  initialCode={`function evaluateTrace(trace, expected) {
+  // trace = { finalOutput: "Paris", steps: [{}, {}, {}], toolCalls: [...] }
+  // expected = { answer: "Paris", maxSteps: 5 }
+  // Return: { taskCompleted, stepCount, efficiency, overall }
+}
+
+const trace = {
+finalOutput: "The capital of France is Paris.",
+steps: [{}, {}, {}, {}],
+toolCalls: [{ name: "search" }, { name: "search" }],
+};
+
+const expected = { answer: "Paris", maxSteps: 3 };
+console.log(evaluateTrace(trace, expected));`}
+  solution={`function evaluateTrace(trace, expected) {
+const taskCompleted = trace.finalOutput.includes(expected.answer);
+const stepCount = trace.steps.length;
+const efficiency = Math.min(1, expected.maxSteps / stepCount);
+const overall = (taskCompleted ? 0.7 : 0) + efficiency \* 0.3;
+
+return { taskCompleted, stepCount, efficiency, overall };
+}
+
+const trace = {
+finalOutput: "The capital of France is Paris.",
+steps: [{}, {}, {}, {}],
+toolCalls: [{ name: "search" }, { name: "search" }],
+};
+
+const expected = { answer: "Paris", maxSteps: 3 };
+console.log(evaluateTrace(trace, expected));`}
+testCases={["evaluateTrace returns correct scores for task completion and efficiency"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Why is checking only the final output insufficient for agent evaluation?",
+      options: [
+        "The final output is always wrong",
+        "It misses efficiency, tool accuracy, and error recovery — the agent might succeed wastefully or by luck",
+        "Traditional tests work fine for agents",
+        "Final outputs are non-deterministic so they cannot be checked",
+      ],
+      correct: 1,
+      explanation:
+        "An agent can produce the right answer through wildly different paths. Trajectory evaluation reveals whether it was efficient, used the right tools, and handled errors — not just whether it got lucky.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Why should you run each benchmark case multiple times?",
+      options: [
+        "To make the benchmark take longer",
+        "Because agents are deterministic and results vary due to network latency",
+        "Because agents are non-deterministic — multiple runs reveal pass rate and variance",
+        "To warm up the model",
+      ],
+      correct: 2,
+      explanation:
+        "Agents produce different outputs on each run. Multiple runs give you a pass rate and variance, revealing how reliable the agent actually is.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="A ___ is the full sequence of steps an agent takes. High ___ in step counts across runs indicates unreliable behavior. ___ rate measures how often the agent calls tools whose results are not used."
+  answers={["trajectory", "variance", "Waste"]}
+  hints={[
+    "The path the agent took.",
+    "A statistical measure of spread.",
+    "Unnecessary tool calls.",
+  ]}
+/>
+
+## What you learned
+
+- **Trajectory evaluation** examines the full path an agent takes — not just the final answer — covering tool selection, argument quality, efficiency, and error recovery.
+- **Benchmark suites** with known answers let you track agent performance over time and catch regressions after prompt or model changes.
+- **Non-determinism** requires running benchmarks multiple times to measure pass rate and variance — high variance signals unreliable behavior.

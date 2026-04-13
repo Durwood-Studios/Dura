@@ -1,0 +1,342 @@
+---
+title: "Agent Memory"
+description: "Short-term, long-term, and episodic memory systems for agents. Context management, summarization, and retrieval patterns."
+phase: 6
+module: "6-3-agentic-ai"
+order: 5
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+An agent without memory forgets everything between requests. It cannot learn from past mistakes, remember user preferences, or build on previous research. Memory transforms an agent from a stateless tool into a persistent collaborator. But LLMs have finite context windows, so you cannot just dump everything into the prompt. You need strategies for what to remember, how to store it, and when to retrieve it.
+
+## The three types of agent memory
+
+Agent memory maps roughly to how human memory works:
+
+1. **Short-term (working) memory** — the current conversation context. What the model can see right now.
+2. **Long-term memory** — persistent facts stored outside the context window. User preferences, learned procedures, domain knowledge.
+3. **Episodic memory** — records of past interactions. What happened last time this task was attempted, what tools failed, what approach worked.
+
+```javascript
+// A memory system with all three types
+const agentMemory = {
+  // Short-term: the current message history
+  shortTerm: [],
+
+  // Long-term: persistent key-value store
+  longTerm: new Map(),
+
+  // Episodic: past interaction summaries
+  episodic: [],
+
+  addMessage(msg) {
+    this.shortTerm.push(msg);
+  },
+
+  storeFact(key, value) {
+    this.longTerm.set(key, value);
+  },
+
+  recordEpisode(summary) {
+    this.episodic.push({
+      timestamp: Date.now(),
+      summary,
+    });
+  },
+};
+```
+
+## Short-term memory: context management
+
+The conversation history is your agent's short-term memory. Every message, tool call, and tool result consumes tokens. When the context fills up, you lose the ability to add new information.
+
+```javascript
+function manageContext(messages, maxTokenEstimate) {
+  // Rough estimate: 1 token ≈ 4 characters
+  const estimateTokens = (msgs) => msgs.reduce((sum, m) => sum + (m.content?.length || 0) / 4, 0);
+
+  if (estimateTokens(messages) < maxTokenEstimate) {
+    return messages;
+  }
+
+  // Strategy: keep system prompt + first user message + last N messages
+  const system = messages.filter((m) => m.role === "system");
+  const firstUser = messages.find((m) => m.role === "user");
+  const recent = messages.slice(-10);
+
+  // Summarize the middle section
+  const middleCount = messages.length - system.length - 1 - recent.length;
+  const summaryMsg = {
+    role: "system",
+    content: `[${middleCount} earlier messages summarized: The agent searched for data, called several tools, and gathered preliminary results.]`,
+  };
+
+  return [...system, firstUser, summaryMsg, ...recent];
+}
+```
+
+The sliding window approach (keep recent, drop old) is the simplest strategy. Better approaches use the model itself to summarize dropped messages so the agent retains the key findings even as raw messages are pruned.
+
+## Summarization for context management
+
+When the context window fills up, summarize older interactions instead of discarding them entirely.
+
+```javascript
+async function summarizeAndCompress(messages, llm) {
+  // Split into chunks the model can summarize
+  const oldMessages = messages.slice(0, -6); // Keep the 6 most recent intact
+  const recentMessages = messages.slice(-6);
+
+  if (oldMessages.length < 4) {
+    return messages; // Nothing worth summarizing yet
+  }
+
+  const summaryResponse = await llm.chat([
+    {
+      role: "system",
+      content: `Summarize this conversation segment. Preserve: key facts discovered, tool results, decisions made, and any unresolved questions. Be concise.`,
+    },
+    {
+      role: "user",
+      content: oldMessages.map((m) => `${m.role}: ${m.content}`).join("\n"),
+    },
+  ]);
+
+  const summaryMessage = {
+    role: "system",
+    content: `[Conversation summary] ${summaryResponse.content}`,
+  };
+
+  return [messages[0], summaryMessage, ...recentMessages];
+}
+```
+
+This costs one extra LLM call but dramatically extends effective memory. The agent can now reference findings from 100 steps ago through the summary, even though those raw messages are gone.
+
+## Long-term memory: persistent storage
+
+Long-term memory lives outside the context window in a database or key-value store. The agent writes to it explicitly and retrieves relevant facts before each reasoning step.
+
+```javascript
+class LongTermMemory {
+  constructor() {
+    this.store = new Map();
+  }
+
+  save(key, value, metadata = {}) {
+    this.store.set(key, {
+      value,
+      metadata,
+      savedAt: Date.now(),
+    });
+  }
+
+  retrieve(key) {
+    return this.store.get(key)?.value || null;
+  }
+
+  search(query) {
+    // In production, use vector similarity search
+    const results = [];
+    for (const [key, entry] of this.store) {
+      if (key.includes(query) || entry.value.includes(query)) {
+        results.push({ key, ...entry });
+      }
+    }
+    return results.sort((a, b) => b.savedAt - a.savedAt).slice(0, 5);
+  }
+}
+
+// Expose as tools for the agent
+const memoryTools = [
+  {
+    name: "save_memory",
+    description: "Save a fact or finding for future reference",
+    parameters: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Short label for this memory" },
+        value: { type: "string", description: "The information to remember" },
+      },
+      required: ["key", "value"],
+    },
+  },
+  {
+    name: "recall_memory",
+    description: "Search saved memories for relevant information",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "What to search for" },
+      },
+      required: ["query"],
+    },
+  },
+];
+```
+
+In production, long-term memory typically uses a vector database (like Pinecone or pgvector) for semantic search. The agent stores embeddings of its findings, and retrieves the most relevant ones based on the current task.
+
+## Episodic memory: learning from past interactions
+
+Episodic memory records what happened in past sessions so the agent can avoid repeating mistakes and reuse successful strategies.
+
+```javascript
+class EpisodicMemory {
+  constructor() {
+    this.episodes = [];
+  }
+
+  recordEpisode(task, steps, outcome, lessons) {
+    this.episodes.push({
+      task,
+      steps: steps.length,
+      outcome,
+      lessons,
+      timestamp: Date.now(),
+    });
+  }
+
+  findSimilarEpisodes(currentTask) {
+    // In production, use embedding similarity
+    return this.episodes
+      .filter((ep) => ep.task.split(" ").some((word) => currentTask.includes(word)))
+      .slice(-3);
+  }
+}
+
+// Before starting a task, check episodic memory
+async function agentWithEpisodicMemory(task, episodicMem, llm) {
+  const pastExperiences = episodicMem.findSimilarEpisodes(task);
+
+  const systemPrompt =
+    pastExperiences.length > 0
+      ? `You have handled similar tasks before. Lessons learned:\n${pastExperiences.map((e) => `- ${e.lessons}`).join("\n")}`
+      : "This is a new type of task. Proceed carefully.";
+
+  // Agent now starts with relevant past experience in context
+  return { systemPrompt, pastExperiences };
+}
+```
+
+Episodic memory is powerful for agents that handle recurring tasks — support agents, research assistants, code reviewers. Each interaction makes the agent slightly better at the next one.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a context manager that keeps messages under a token budget. When over budget, keep the first message and the last 4 messages, replacing everything in between with a summary placeholder."
+  initialCode={`function manageContext(messages, maxTokens) {
+  // Estimate tokens: 1 token ≈ 4 characters
+  const countTokens = (msgs) =>
+    msgs.reduce((sum, m) => sum + m.content.length / 4, 0);
+
+// If under budget, return as-is
+// If over, keep first message + summary + last 4 messages
+}
+
+const messages = [
+{ role: "user", content: "Research climate data" },
+{ role: "assistant", content: "I will search for recent climate reports..." },
+{ role: "tool", content: "Global temp rose 1.2C since pre-industrial..." },
+{ role: "assistant", content: "Found temperature data. Now searching emissions..." },
+{ role: "tool", content: "CO2 emissions reached 36.8 Gt in 2025..." },
+{ role: "assistant", content: "Got emissions data. Let me find regional breakdown..." },
+{ role: "tool", content: "Asia: 18Gt, Americas: 7Gt, Europe: 4Gt, Other: 7.8Gt" },
+{ role: "assistant", content: "Here is the complete analysis..." },
+];
+
+console.log(manageContext(messages, 20)); // Low budget forces compression`}
+  solution={`function manageContext(messages, maxTokens) {
+const countTokens = (msgs) =>
+msgs.reduce((sum, m) => sum + m.content.length / 4, 0);
+
+if (countTokens(messages) <= maxTokens) {
+return messages;
+}
+
+const first = messages[0];
+const lastFour = messages.slice(-4);
+const droppedCount = messages.length - 1 - 4;
+const summary = {
+role: "system",
+content: "[" + droppedCount + " earlier messages were summarized to save context]",
+};
+
+return [first, summary, ...lastFour];
+}
+
+const messages = [
+{ role: "user", content: "Research climate data" },
+{ role: "assistant", content: "I will search for recent climate reports..." },
+{ role: "tool", content: "Global temp rose 1.2C since pre-industrial..." },
+{ role: "assistant", content: "Found temperature data. Now searching emissions..." },
+{ role: "tool", content: "CO2 emissions reached 36.8 Gt in 2025..." },
+{ role: "assistant", content: "Got emissions data. Let me find regional breakdown..." },
+{ role: "tool", content: "Asia: 18Gt, Americas: 7Gt, Europe: 4Gt, Other: 7.8Gt" },
+{ role: "assistant", content: "Here is the complete analysis..." },
+];
+
+console.log(manageContext(messages, 20));`}
+testCases={["manageContext compresses messages when over budget"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Why can't you just put everything into the conversation history as agent memory?",
+      options: [
+        "The model refuses to read long histories",
+        "LLMs have finite context windows — eventually you run out of space",
+        "Long histories make the model more creative",
+        "Memory is only needed for multi-agent systems",
+      ],
+      correct: 1,
+      explanation:
+        "LLM context windows have a maximum token limit. As conversation history grows, you must prune or summarize old messages to make room for new information.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What is the purpose of episodic memory in an agent?",
+      options: [
+        "To store the current conversation messages",
+        "To record API keys and credentials",
+        "To learn from past interactions so the agent improves over time",
+        "To replace the need for tools",
+      ],
+      correct: 2,
+      explanation:
+        "Episodic memory records summaries and lessons from past sessions. The agent retrieves relevant episodes to avoid past mistakes and reuse successful strategies.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The three types of agent memory are short-term (___), long-term (___), and ___ (past interactions)."
+  answers={["conversation context", "persistent store", "episodic"]}
+  hints={[
+    "What the model sees right now.",
+    "Where facts live between sessions.",
+    "Named after a type of human memory.",
+  ]}
+/>
+
+## What you learned
+
+- **Short-term memory** is the conversation context — managed by summarization and sliding windows to stay within token limits.
+- **Long-term memory** persists facts in an external store (often a vector database) and retrieves relevant ones before each reasoning step.
+- **Episodic memory** records past interactions so the agent learns from experience and improves over time.

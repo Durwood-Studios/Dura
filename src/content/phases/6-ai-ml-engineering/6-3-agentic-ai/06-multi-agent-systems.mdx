@@ -1,0 +1,293 @@
+---
+title: "Multi-Agent Systems"
+description: "Orchestration patterns, delegation, handoffs between specialized agents, supervisor agents, and when multi-agent beats single-agent."
+phase: 6
+module: "6-3-agentic-ai"
+order: 6
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+A single agent with 30 tools performs worse than three agents with 10 tools each. This is not a framework limitation — it is a fundamental property of LLMs. As the number of tools grows, the model's ability to select the right one degrades. Multi-agent systems solve this by splitting responsibilities: each agent specializes in one domain, and an orchestrator routes tasks between them. Understanding these patterns is essential for building agents that scale beyond toy demos.
+
+## The case for multiple agents
+
+Single agents hit walls at scale:
+
+- **Tool overload** — accuracy drops as tool count increases
+- **Prompt complexity** — one massive system prompt tries to cover every scenario
+- **Conflicting instructions** — "be thorough" for research vs "be concise" for summaries
+- **No separation of concerns** — debugging is hard when everything runs in one loop
+
+Multi-agent systems apply the same principle as microservices: decompose by capability, communicate through well-defined interfaces.
+
+## Pattern 1: Supervisor orchestration
+
+A supervisor agent receives tasks, decides which specialist to delegate to, and assembles the final output.
+
+```javascript
+const supervisor = {
+  name: "Supervisor",
+  systemPrompt: `You coordinate a team of specialists. For each user request:
+1. Decide which specialist(s) to delegate to.
+2. Call the delegate tool with the specialist name and task.
+3. Review results and either delegate more work or return the final answer.`,
+  tools: [
+    {
+      name: "delegate",
+      description: "Assign a task to a specialist agent",
+      parameters: {
+        type: "object",
+        properties: {
+          agent: {
+            type: "string",
+            enum: ["researcher", "analyst", "writer"],
+            description: "Which specialist to assign the task to",
+          },
+          task: { type: "string", description: "What the specialist should do" },
+        },
+        required: ["agent", "task"],
+      },
+    },
+  ],
+};
+
+async function runSupervisor(userTask, specialists, llm) {
+  const messages = [
+    { role: "system", content: supervisor.systemPrompt },
+    { role: "user", content: userTask },
+  ];
+
+  for (let step = 0; step < 10; step++) {
+    const response = await llm.chat(messages, { tools: supervisor.tools });
+
+    if (!response.toolCalls?.length) {
+      return response.content; // Final answer
+    }
+
+    for (const tc of response.toolCalls) {
+      const specialist = specialists[tc.arguments.agent];
+      const result = await runAgent(specialist, tc.arguments.task, llm);
+      messages.push({ role: "tool", toolCallId: tc.id, content: result });
+    }
+
+    messages.push({ role: "assistant", content: response.content, toolCalls: response.toolCalls });
+  }
+}
+```
+
+The supervisor never does domain work itself. It reads, routes, reviews, and decides when the task is complete. This separation makes the system easier to debug — you can test each specialist in isolation.
+
+## Pattern 2: Handoff chains
+
+Instead of a central supervisor, agents pass work directly to the next agent in a chain. Each agent completes its part and hands off.
+
+```javascript
+async function handoffChain(task, agentPipeline, llm) {
+  let currentInput = task;
+  const traceLog = [];
+
+  for (const agent of agentPipeline) {
+    const messages = [
+      { role: "system", content: agent.systemPrompt },
+      { role: "user", content: currentInput },
+    ];
+
+    const result = await runAgent(agent, currentInput, llm);
+    traceLog.push({ agent: agent.name, input: currentInput, output: result });
+    currentInput = result; // Output becomes next agent's input
+  }
+
+  return { finalOutput: currentInput, trace: traceLog };
+}
+
+// Example: research → analyze → write
+const pipeline = [
+  {
+    name: "Researcher",
+    systemPrompt: "Find relevant data and sources for the given topic.",
+    tools: [searchWeb, searchPapers],
+  },
+  {
+    name: "Analyst",
+    systemPrompt: "Analyze the provided research data. Identify key trends and insights.",
+    tools: [calculateStats, createChart],
+  },
+  {
+    name: "Writer",
+    systemPrompt: "Write a clear, concise report from the analysis provided.",
+    tools: [formatMarkdown],
+  },
+];
+```
+
+Handoff chains are simple and predictable. The downside: if the researcher misses something, the analyst cannot ask for more data — it only sees what was passed to it. For interactive workflows, use the supervisor pattern instead.
+
+## Pattern 3: Parallel specialists
+
+When subtasks are independent, run multiple specialists in parallel and merge their results.
+
+```javascript
+async function parallelSpecialists(task, specialists, llm) {
+  // Decompose the task into subtasks
+  const decomposition = await llm.chat([
+    {
+      role: "system",
+      content: `Split this task into independent subtasks, one per specialist: ${specialists.map((s) => s.name).join(", ")}. Return JSON array of { agent, subtask }.`,
+    },
+    { role: "user", content: task },
+  ]);
+
+  const subtasks = JSON.parse(decomposition.content);
+
+  // Run all specialists in parallel
+  const results = await Promise.all(
+    subtasks.map(async ({ agent, subtask }) => {
+      const specialist = specialists.find((s) => s.name === agent);
+      const result = await runAgent(specialist, subtask, llm);
+      return { agent, subtask, result };
+    })
+  );
+
+  // Merge results
+  const mergePrompt = results.map((r) => `[${r.agent}]: ${r.result}`).join("\n\n");
+
+  const merged = await llm.chat([
+    {
+      role: "system",
+      content: "Combine these specialist outputs into a unified response.",
+    },
+    { role: "user", content: mergePrompt },
+  ]);
+
+  return merged.content;
+}
+```
+
+Parallel execution is significantly faster for tasks like competitive analysis (research multiple companies simultaneously), multi-language translation, or any task where subtasks do not depend on each other.
+
+## Communication between agents
+
+Agents need a structured way to pass information. The simplest approach is string messages, but richer protocols help:
+
+```javascript
+// Structured message format between agents
+const agentMessage = {
+  from: "researcher",
+  to: "analyst",
+  type: "handoff",
+  content: {
+    findings: [
+      { source: "SEC filing", data: "Revenue grew 12% YoY", confidence: 0.95 },
+      { source: "News article", data: "New product launched Q3", confidence: 0.7 },
+    ],
+    openQuestions: ["Could not find Q4 data — may not be published yet"],
+    suggestedNextSteps: ["Verify Q4 revenue from alternative sources"],
+  },
+};
+```
+
+Structured messages let the receiving agent make better decisions. The `confidence` field tells the analyst which findings to trust. The `openQuestions` field prevents the analyst from assuming the data is complete.
+
+## When multi-agent beats single-agent
+
+Multi-agent is not always better. It adds latency (multiple LLM calls), cost (more tokens), and complexity (debugging across agents). Use it when:
+
+- **Tool count exceeds 10-15** — split by domain
+- **Tasks require genuinely different expertise** — research vs writing vs code
+- **Subtasks can run in parallel** — time savings outweigh added cost
+- **You need audit trails** — each agent's work is independently reviewable
+
+Stick with a single agent when the task is straightforward, the tool set is small, and you value simplicity over scalability.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a simple supervisor that delegates tasks to specialists and collects results. The supervisor should call the 'delegate' function for each specialist, then combine the results."
+  initialCode={`const specialists = {
+  math: (task) => "Result: " + eval(task.replace(/[^0-9+\-*/().]/g, "")),
+  words: (task) => "Word count: " + task.split(" ").length,
+};
+
+function supervisor(task, specialistList) {
+// Decide which specialist to use based on the task
+// If task includes numbers and operators, use "math"
+// Otherwise use "words"
+// Return the specialist's result
+}
+
+console.log(supervisor("What is 10 + 25?", specialists));
+console.log(supervisor("Count the words in this sentence please", specialists));`}
+  solution={`const specialists = {
+math: (task) => "Result: " + eval(task.replace(/[^0-9+\-*/().]/g, "")),
+words: (task) => "Word count: " + task.split(" ").length,
+};
+
+function supervisor(task, specialistList) {
+const hasMath = /[0-9]._[+\-_/]/.test(task);
+if (hasMath) {
+return specialistList.math(task);
+}
+return specialistList.words(task);
+}
+
+console.log(supervisor("What is 10 + 25?", specialists));
+console.log(supervisor("Count the words in this sentence please", specialists));`}
+testCases={["supervisor routes math tasks to math specialist and text tasks to words specialist"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Why do multi-agent systems outperform single agents at scale?",
+      options: [
+        "Multiple models are always smarter than one",
+        "LLM accuracy degrades as tool count grows — specialists with fewer tools perform better",
+        "Multi-agent is always cheaper",
+        "Single agents cannot use tools",
+      ],
+      correct: 1,
+      explanation:
+        "LLMs select the right tool less accurately as the tool set grows. Splitting tools across specialized agents keeps each agent's tool set small and focused.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What is the key difference between a supervisor pattern and a handoff chain?",
+      options: [
+        "Supervisors use more tokens",
+        "Handoff chains are always faster",
+        "A supervisor routes dynamically; a handoff chain follows a fixed sequence",
+        "Only supervisors can use tools",
+      ],
+      correct: 2,
+      explanation:
+        "A supervisor decides which specialist to call based on the current state. A handoff chain passes work through agents in a predetermined sequence.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="In a ___ pattern, a coordinating agent routes tasks to specialists. In a ___ chain, agents pass work in a fixed sequence. For independent subtasks, run specialists in ___."
+  answers={["supervisor", "handoff", "parallel"]}
+  hints={["The agent that manages others.", "Passing the baton.", "At the same time."]}
+/>
+
+## What you learned
+
+- **Supervisor orchestration** uses a coordinating agent that dynamically routes tasks to specialists and reviews their output.
+- **Handoff chains** pass work through agents in a fixed sequence — simple but inflexible when earlier agents miss information.
+- **Parallel specialists** run independent subtasks simultaneously, trading added cost for significant speed improvements.

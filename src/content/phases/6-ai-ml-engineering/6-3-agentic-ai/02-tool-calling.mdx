@@ -1,0 +1,321 @@
+---
+title: "Tool Calling"
+description: "How LLMs invoke functions: defining tools with JSON schema, validating inputs, executing calls, and handling errors."
+phase: 6
+module: "6-3-agentic-ai"
+order: 2
+estimatedMinutes: 10
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Tool calling is the mechanism that turns a language model into an agent. Without it, the model can only generate text. With it, the model can query databases, call APIs, run calculations, and interact with any system you expose. Every production agent — from coding assistants to customer support bots — depends on reliable tool calling. Getting the tool definitions, validation, and error handling right determines whether your agent works or hallucinates.
+
+## Defining tools with JSON schema
+
+LLM APIs accept tool definitions as JSON objects that describe what each tool does and what parameters it expects. The model reads these descriptions to decide which tool to call and how to fill in the arguments.
+
+```javascript
+const tools = [
+  {
+    name: "search_docs",
+    description: "Search the documentation for a given query. Returns the top 3 matching sections.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The search query — be specific for better results",
+        },
+        limit: {
+          type: "number",
+          description: "Max results to return (default 3)",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "run_sql",
+    description: "Execute a read-only SQL query against the analytics database.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "A SELECT query. No mutations allowed.",
+        },
+      },
+      required: ["query"],
+    },
+  },
+];
+```
+
+Three rules for good tool definitions:
+
+1. **Descriptions matter more than names.** The model uses the description to understand when and how to use the tool. Be precise about what the tool returns and any constraints.
+2. **Constrain the parameters.** Use `required`, `enum`, and `description` fields to guide the model. The tighter the schema, the fewer malformed calls you get.
+3. **Keep the tool set small.** Models perform worse with 50 tools than with 5. Group related operations or use a routing layer.
+
+## Input validation
+
+The model generates arguments as JSON, but it can produce invalid data — wrong types, missing fields, values outside expected ranges. Always validate before executing.
+
+```javascript
+function validateToolCall(toolCall, toolDefinitions) {
+  const tool = toolDefinitions.find((t) => t.name === toolCall.name);
+
+  if (!tool) {
+    return { valid: false, error: `Unknown tool: ${toolCall.name}` };
+  }
+
+  const args = toolCall.arguments;
+  const required = tool.parameters.required || [];
+
+  for (const field of required) {
+    if (args[field] === undefined || args[field] === null) {
+      return { valid: false, error: `Missing required field: ${field}` };
+    }
+  }
+
+  // Type checking against schema
+  for (const [key, schema] of Object.entries(tool.parameters.properties)) {
+    if (args[key] !== undefined && typeof args[key] !== schema.type) {
+      return {
+        valid: false,
+        error: `Field ${key} expected ${schema.type}, got ${typeof args[key]}`,
+      };
+    }
+  }
+
+  return { valid: true };
+}
+```
+
+In production, use a library like Zod to parse and validate tool arguments against a schema. The pattern is the same: define the expected shape, reject anything that does not match, and return a clear error message the model can learn from.
+
+## Executing tool calls
+
+When the model returns a tool call, your code is responsible for running it. This is where you bridge the gap between the model's intent and the real world.
+
+```javascript
+async function executeToolCall(toolCall, toolImplementations) {
+  const fn = toolImplementations[toolCall.name];
+
+  if (!fn) {
+    return {
+      toolCallId: toolCall.id,
+      content: `Error: tool '${toolCall.name}' not found`,
+      isError: true,
+    };
+  }
+
+  try {
+    const result = await fn(toolCall.arguments);
+    return {
+      toolCallId: toolCall.id,
+      content: typeof result === "string" ? result : JSON.stringify(result),
+      isError: false,
+    };
+  } catch (error) {
+    return {
+      toolCallId: toolCall.id,
+      content: `Error executing ${toolCall.name}: ${error.message}`,
+      isError: true,
+    };
+  }
+}
+```
+
+Notice the try/catch. Tools fail — APIs time out, queries return errors, files do not exist. The agent needs to see these failures as observations so it can recover. Never let a tool error crash the loop.
+
+## Returning results to the model
+
+After execution, push the result back into the conversation as a `tool` message. The model reads this on the next iteration and decides what to do next.
+
+```javascript
+async function agentStep(messages, tools, toolImpls, llm) {
+  const response = await llm.chat(messages, { tools });
+
+  if (!response.toolCalls || response.toolCalls.length === 0) {
+    return { done: true, answer: response.content };
+  }
+
+  // Execute all tool calls (some APIs allow parallel tool calls)
+  const toolResults = await Promise.all(
+    response.toolCalls.map((tc) => executeToolCall(tc, toolImpls))
+  );
+
+  // Add assistant message and all tool results to history
+  messages.push({ role: "assistant", content: response.content, toolCalls: response.toolCalls });
+
+  for (const result of toolResults) {
+    messages.push({
+      role: "tool",
+      toolCallId: result.toolCallId,
+      content: result.content,
+    });
+  }
+
+  return { done: false };
+}
+```
+
+The model sees every tool result in context. If it called two tools in parallel, it gets both results before reasoning again. This is how agents build up knowledge across multiple steps.
+
+## Error handling patterns
+
+Robust agents handle errors at every layer:
+
+```javascript
+const TOOL_CONFIG = {
+  maxRetries: 2,
+  timeoutMs: 10000,
+  maxIterations: 15,
+};
+
+async function resilientToolCall(toolCall, toolImpls) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= TOOL_CONFIG.maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), TOOL_CONFIG.timeoutMs);
+
+      const result = await toolImpls[toolCall.name](toolCall.arguments, {
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+      return { content: JSON.stringify(result), isError: false };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  return {
+    content: `Tool ${toolCall.name} failed after ${TOOL_CONFIG.maxRetries + 1} attempts: ${lastError.message}`,
+    isError: true,
+  };
+}
+```
+
+Always cap the total number of loop iterations. A model stuck in a retry loop will burn tokens and time. Set `maxIterations` and return a graceful failure if the agent cannot complete the task.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a validateAndExecute function that validates a tool call against the schema, runs it if valid, and returns an error message if not. Use the provided tool definition and implementation."
+  initialCode={`const toolDef = {
+  name: "calculate",
+  parameters: {
+    type: "object",
+    properties: {
+      expression: { type: "string", description: "Math expression" },
+    },
+    required: ["expression"],
+  },
+};
+
+const toolImpl = {
+calculate: ({ expression }) => String(eval(expression)),
+};
+
+function validateAndExecute(toolCall) {
+// 1. Check that toolCall.name matches toolDef.name
+// 2. Check required fields exist in toolCall.arguments
+// 3. If valid, execute and return { result: "..." }
+// 4. If invalid, return { error: "..." }
+}
+
+console.log(validateAndExecute({ name: "calculate", arguments: { expression: "2+2" } }));
+console.log(validateAndExecute({ name: "calculate", arguments: {} }));
+console.log(validateAndExecute({ name: "unknown", arguments: {} }));`}
+  solution={`const toolDef = {
+name: "calculate",
+parameters: {
+type: "object",
+properties: {
+expression: { type: "string", description: "Math expression" },
+},
+required: ["expression"],
+},
+};
+
+const toolImpl = {
+calculate: ({ expression }) => String(eval(expression)),
+};
+
+function validateAndExecute(toolCall) {
+if (toolCall.name !== toolDef.name) {
+return { error: "Unknown tool: " + toolCall.name };
+}
+for (const field of toolDef.parameters.required) {
+if (!toolCall.arguments[field]) {
+return { error: "Missing required field: " + field };
+}
+}
+return { result: toolImpl[toolCall.name](toolCall.arguments) };
+}
+
+console.log(validateAndExecute({ name: "calculate", arguments: { expression: "2+2" } }));
+console.log(validateAndExecute({ name: "calculate", arguments: {} }));
+console.log(validateAndExecute({ name: "unknown", arguments: {} }));`}
+testCases={["validateAndExecute returns result for valid calls and error for invalid calls"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Why should you always validate tool call arguments before executing?",
+      options: [
+        "The LLM guarantees valid JSON so validation is optional",
+        "The model can generate wrong types, missing fields, or unexpected values",
+        "Validation makes the agent faster",
+        "It is only needed for SQL tools",
+      ],
+      correct: 1,
+      explanation:
+        "Models can produce malformed arguments — wrong types, missing required fields, or out-of-range values. Always validate before executing.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What should happen when a tool call throws an error?",
+      options: [
+        "Crash the agent loop immediately",
+        "Silently ignore the error and continue",
+        "Return the error as a tool result so the model can see it and adapt",
+        "Retry infinitely until it works",
+      ],
+      correct: 2,
+      explanation:
+        "Return the error as an observation. The model can then try a different approach or report the failure. Never crash the loop or retry forever.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Tool definitions use ___ schema to describe parameters. When a tool fails, the error should be returned as a tool ___ so the model can recover."
+  answers={["JSON", "result"]}
+  hints={["The schema format.", "What does the model read after a tool runs?"]}
+/>
+
+## What you learned
+
+- **Tool definitions** use JSON schema to describe what each tool does, its parameters, and constraints — the model reads these to decide how to call them.
+- **Input validation** is essential because the model can generate malformed arguments — always check types and required fields before executing.
+- **Error handling** means returning failures as tool results (not crashing the loop) so the agent can observe and recover.
