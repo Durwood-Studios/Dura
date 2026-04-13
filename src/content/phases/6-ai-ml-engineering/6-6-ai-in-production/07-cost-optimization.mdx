@@ -1,0 +1,332 @@
+---
+title: "Cost Optimization"
+description: "Reduce AI inference costs with model routing, prompt compression, request batching, and the cost-quality-latency triangle."
+phase: 6
+module: "6-6-ai-in-production"
+order: 7
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Engineering Economics"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+AI inference costs scale linearly with traffic. At 100 requests per day, cost is a rounding error. At 100,000 requests per day, it becomes your largest infrastructure expense. The difference between a naive implementation and an optimized one can be 10x in monthly spend — the same quality, the same features, one-tenth the cost. Understanding the cost-quality-latency triangle lets you make deliberate tradeoffs instead of discovering your bill at the end of the month.
+
+## The cost-quality-latency triangle
+
+Every AI request involves three variables that trade off against each other. You cannot optimize all three simultaneously.
+
+```javascript
+// The triangle: pick two, sacrifice one
+const tradeoffs = {
+  cheapAndFast: {
+    model: "small", // Low cost, low latency
+    quality: "acceptable", // Not the best output
+    use: "Classification, simple extraction, routing decisions",
+  },
+  cheapAndGood: {
+    model: "large",
+    quality: "high",
+    latency: "slow", // Batch processing, async workflows
+    use: "Overnight batch analysis, background content generation",
+  },
+  fastAndGood: {
+    model: "large",
+    quality: "high",
+    cost: "expensive", // Pay the premium for speed + quality
+    use: "Real-time user-facing features where quality matters",
+  },
+};
+```
+
+Most production systems use different points on the triangle for different features. The key insight: not every request needs your best model.
+
+## Model routing
+
+Route each request to the cheapest model that can handle it. Use a small, fast classifier to decide which model answers the actual question.
+
+````javascript
+class ModelRouter {
+  constructor(models) {
+    this.models = models;
+    // Sorted cheapest first
+    this.tiers = Object.entries(models).sort((a, b) => a[1].costPer1k - b[1].costPer1k);
+  }
+
+  async route(request) {
+    const complexity = this.classifyComplexity(request.prompt);
+
+    switch (complexity) {
+      case "simple":
+        return this.tiers[0]; // Cheapest model
+      case "moderate":
+        return this.tiers[1]; // Mid-tier
+      case "complex":
+        return this.tiers[this.tiers.length - 1]; // Best model
+      default:
+        return this.tiers[1]; // Default to mid-tier
+    }
+  }
+
+  classifyComplexity(prompt) {
+    // Heuristics — fast and free
+    const wordCount = prompt.split(/\s+/).length;
+    const hasCode = /```|function |const |let |var /.test(prompt);
+    const isQuestion = prompt.includes("?");
+    const requiresReasoning = /explain|analyze|compare|design|architect/i.test(prompt);
+
+    if (wordCount < 20 && !hasCode && isQuestion && !requiresReasoning) {
+      return "simple";
+    }
+    if (hasCode || requiresReasoning || wordCount > 200) {
+      return "complex";
+    }
+    return "moderate";
+  }
+}
+
+// Configuration
+const models = {
+  small: { name: "gpt-4o-mini", costPer1k: 0.00015, avgLatencyMs: 500 },
+  medium: { name: "gpt-4o", costPer1k: 0.005, avgLatencyMs: 1500 },
+  large: { name: "claude-sonnet", costPer1k: 0.003, avgLatencyMs: 2000 },
+};
+
+const router = new ModelRouter(models);
+````
+
+In practice, start with a heuristic router (fast, free) and graduate to an LLM-based classifier when you have enough data to justify the extra inference call.
+
+## Prompt compression
+
+Tokens are the unit of cost. Fewer tokens means lower bills. Compress prompts without losing information.
+
+```javascript
+function compressPrompt(prompt, options = {}) {
+  let compressed = prompt;
+
+  // Remove excessive whitespace
+  compressed = compressed.replace(/\n{3,}/g, "\n\n");
+  compressed = compressed.replace(/[ \t]+/g, " ");
+
+  // Remove filler language that doesn't affect output
+  const fillers = [
+    /please /gi,
+    /could you /gi,
+    /I would like you to /gi,
+    /It would be great if you could /gi,
+    /I want you to /gi,
+  ];
+  for (const filler of fillers) {
+    compressed = compressed.replace(filler, "");
+  }
+
+  // Abbreviate common instruction patterns
+  compressed = compressed.replace(/respond in JSON format/gi, "Output: JSON");
+  compressed = compressed.replace(/do not include any explanation/gi, "No explanation");
+
+  // Truncate context to fit budget
+  if (options.maxTokens) {
+    const estimatedTokens = Math.ceil(compressed.length / 4);
+    if (estimatedTokens > options.maxTokens) {
+      const maxChars = options.maxTokens * 4;
+      compressed = compressed.slice(0, maxChars) + "\n[truncated]";
+    }
+  }
+
+  return {
+    original: prompt,
+    compressed,
+    savedChars: prompt.length - compressed.length,
+    estimatedTokensSaved: Math.floor((prompt.length - compressed.length) / 4),
+  };
+}
+```
+
+More aggressive compression uses a small model to summarize the context window before passing it to the expensive model. This is called "context distillation."
+
+## Request batching
+
+If multiple requests can wait a few hundred milliseconds, batch them into a single API call. Many providers offer batch endpoints at reduced pricing.
+
+```javascript
+class RequestBatcher {
+  constructor(modelFn, options = {}) {
+    this.modelFn = modelFn;
+    this.maxBatchSize = options.maxBatchSize || 10;
+    this.maxWaitMs = options.maxWaitMs || 200;
+    this.queue = [];
+    this.timer = null;
+  }
+
+  add(prompt) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ prompt, resolve, reject });
+
+      if (this.queue.length >= this.maxBatchSize) {
+        this.flush();
+      } else if (!this.timer) {
+        this.timer = setTimeout(() => this.flush(), this.maxWaitMs);
+      }
+    });
+  }
+
+  async flush() {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+
+    const batch = this.queue.splice(0, this.maxBatchSize);
+    if (batch.length === 0) return;
+
+    try {
+      // Single API call with all prompts
+      const results = await this.modelFn(batch.map((b) => b.prompt));
+
+      for (let i = 0; i < batch.length; i++) {
+        batch[i].resolve(results[i]);
+      }
+    } catch (error) {
+      for (const item of batch) {
+        item.reject(error);
+      }
+    }
+  }
+}
+
+// Usage
+const batcher = new RequestBatcher(batchModelCall, {
+  maxBatchSize: 10,
+  maxWaitMs: 200,
+});
+
+// These three requests batch into one API call
+const results = await Promise.all([
+  batcher.add("Classify: 'Meeting at 3pm'"),
+  batcher.add("Classify: 'You won a prize!'"),
+  batcher.add("Classify: 'PR review needed'"),
+]);
+```
+
+Batching is most effective for classification, embedding, and extraction tasks where prompts are short and independent.
+
+## Cost tracking and budgets
+
+Optimization without measurement is guessing. Track cost per feature, per model, and per user.
+
+```javascript
+class CostOptimizer {
+  constructor() {
+    this.log = [];
+  }
+
+  record(entry) {
+    this.log.push({
+      timestamp: Date.now(),
+      feature: entry.feature,
+      model: entry.model,
+      inputTokens: entry.inputTokens,
+      outputTokens: entry.outputTokens,
+      cost: entry.cost,
+      cached: entry.cached || false,
+      routed: entry.routed || false,
+    });
+  }
+
+  savingsReport(since) {
+    const recent = this.log.filter((e) => e.timestamp >= since);
+    const cachedSavings = recent.filter((e) => e.cached).reduce((sum, e) => sum + e.cost, 0);
+    const routingSavings = recent.filter((e) => e.routed).reduce((sum, e) => sum + e.cost * 0.5, 0); // Estimate 50% savings from routing
+
+    const totalSpend = recent.reduce((sum, e) => sum + e.cost, 0);
+
+    return {
+      totalSpend,
+      cachedSavings,
+      routingSavings,
+      effectiveSpend: totalSpend - cachedSavings - routingSavings,
+      cacheHitRate: recent.filter((e) => e.cached).length / recent.length,
+    };
+  }
+}
+```
+
+<SandboxExercise language="javascript">
+{`// Build a model router that picks the cheapest model
+// capable of handling each request.
+
+const MODELS = {
+small: { name: "mini", costPer1k: 0.0001, maxComplexity: "simple" },
+medium: { name: "standard", costPer1k: 0.002, maxComplexity: "moderate" },
+large: { name: "premium", costPer1k: 0.01, maxComplexity: "complex" },
+};
+
+function classifyComplexity(prompt) {
+// Return "simple", "moderate", or "complex" based on:
+// - Under 30 words and no code (backticks) → "simple"
+// - Contains "explain", "analyze", or "compare" → "complex"
+// - Everything else → "moderate"
+}
+
+function routeRequest(prompt) {
+// Return the model object from MODELS that matches the complexity
+// Always pick the cheapest model that can handle the complexity level
+}
+
+// Test it
+console.log(routeRequest("What is 2+2?"));
+// { name: "mini", costPer1k: 0.0001, maxComplexity: "simple" }
+
+console.log(routeRequest("Explain the difference between TCP and UDP in detail"));
+// { name: "premium", costPer1k: 0.01, maxComplexity: "complex" }
+
+console.log(routeRequest("Summarize this paragraph about JavaScript closures and how they work in practice"));
+// { name: "standard", costPer1k: 0.002, maxComplexity: "moderate" }`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the cost-quality-latency triangle?"
+  options={[
+    "A framework for choosing between three AI providers",
+    "A model that shows you can optimize cost, quality, and latency simultaneously",
+    "The principle that optimizing any two of cost, quality, and latency requires sacrificing the third",
+    "A pricing structure used by all AI model providers",
+  ]}
+  answer={2}
+  explanation="You cannot have the cheapest, highest quality, and fastest response all at once. Cheap + fast means lower quality (small model). Cheap + good means slow (batch processing). Fast + good means expensive (premium model). Every feature should choose its tradeoff deliberately."
+/>
+
+<Quiz
+  question="Why does model routing reduce costs more effectively than using a single mid-tier model for everything?"
+  options={[
+    "Because mid-tier models are always overpriced",
+    "Because simple requests get routed to much cheaper models, while only complex requests use expensive ones",
+    "Because routing adds caching automatically",
+    "Because mid-tier models have higher error rates",
+  ]}
+  answer={1}
+  explanation="Most traffic consists of simple requests. Routing those to a small model at 1/50th the cost saves money on the majority of requests, while still using the premium model when quality demands it."
+/>
+
+<FillBlank
+  question="Request ______ groups multiple independent prompts into a single API call to reduce per-request overhead and take advantage of bulk pricing."
+  answer="batching"
+/>
+
+## What you learned
+
+- The cost-quality-latency triangle forces deliberate tradeoffs — not every request needs the most expensive model
+- Model routing, prompt compression, and request batching can reduce AI costs by 5-10x without measurable quality loss on simple tasks
+- Cost tracking per feature and per model turns optimization from guessing into data-driven decisions

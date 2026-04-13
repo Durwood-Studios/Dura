@@ -1,0 +1,376 @@
+---
+title: "Testing AI Systems"
+description: "Build eval harnesses, regression test prompts, run A/B tests, and create automated evaluation pipelines for AI systems."
+phase: 6
+module: "6-6-ai-in-production"
+order: 6
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Testing"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Traditional software tests are deterministic: given input X, you expect output Y. AI systems are stochastic. The same prompt can produce different outputs across runs, model versions, or providers. "It seems to work" is not a testing strategy. Without structured evaluation, a prompt change that improves one use case silently breaks three others. Eval harnesses are how you make AI quality measurable, trackable, and improvable over time.
+
+## Golden datasets
+
+A golden dataset is a curated set of inputs with known-good expected outputs. It is the foundation of every AI testing strategy.
+
+```javascript
+const goldenDataset = [
+  {
+    id: "classify-spam-001",
+    input: "You won $1,000,000! Click here to claim your prize!",
+    expectedOutput: "spam",
+    category: "classification",
+    tags: ["spam", "financial"],
+  },
+  {
+    id: "classify-ham-001",
+    input: "Meeting moved to 3pm tomorrow. Same conference room.",
+    expectedOutput: "not-spam",
+    category: "classification",
+    tags: ["ham", "calendar"],
+  },
+  {
+    id: "summarize-001",
+    input:
+      "The team shipped three features this sprint: user profiles, dark mode, and export to CSV. User profiles had the most bugs. Dark mode required a design system update. CSV export was straightforward.",
+    expectedOutput: null, // Free-form — use criteria-based evaluation
+    criteria: [
+      "Mentions all three features",
+      "Notes that user profiles had the most bugs",
+      "Under 50 words",
+    ],
+    category: "summarization",
+  },
+];
+```
+
+For classification and extraction tasks, expected outputs are exact. For generation tasks, define evaluation criteria instead of exact matches.
+
+## Eval harnesses
+
+An eval harness runs your golden dataset through the model and scores the results. It is the core testing tool for AI systems.
+
+```javascript
+class EvalHarness {
+  constructor(modelFn, scorers) {
+    this.modelFn = modelFn;
+    this.scorers = scorers;
+    this.results = [];
+  }
+
+  async runSuite(dataset) {
+    this.results = [];
+
+    for (const testCase of dataset) {
+      const startTime = Date.now();
+      let output;
+      let error = null;
+
+      try {
+        output = await this.modelFn(testCase.input);
+      } catch (e) {
+        error = e.message;
+      }
+
+      const scores = {};
+      if (output && !error) {
+        for (const [name, scorer] of Object.entries(this.scorers)) {
+          scores[name] = scorer(output, testCase);
+        }
+      }
+
+      this.results.push({
+        id: testCase.id,
+        input: testCase.input,
+        expected: testCase.expectedOutput,
+        actual: output,
+        scores,
+        error,
+        latencyMs: Date.now() - startTime,
+      });
+    }
+
+    return this.summary();
+  }
+
+  summary() {
+    const total = this.results.length;
+    const errors = this.results.filter((r) => r.error).length;
+    const scoreAverages = {};
+
+    const scoredResults = this.results.filter((r) => !r.error);
+    if (scoredResults.length > 0) {
+      const scoreNames = Object.keys(scoredResults[0].scores);
+      for (const name of scoreNames) {
+        const sum = scoredResults.reduce((acc, r) => acc + (r.scores[name] || 0), 0);
+        scoreAverages[name] = sum / scoredResults.length;
+      }
+    }
+
+    return { total, errors, scoreAverages, results: this.results };
+  }
+}
+
+// Scoring functions
+const scorers = {
+  exactMatch: (output, testCase) => {
+    if (!testCase.expectedOutput) return 1; // Skip if no expected output
+    return output.trim().toLowerCase() === testCase.expectedOutput.toLowerCase() ? 1 : 0;
+  },
+
+  criteriaMatch: (output, testCase) => {
+    if (!testCase.criteria) return 1;
+    let met = 0;
+    for (const criterion of testCase.criteria) {
+      // Simple keyword check — production systems use LLM-as-judge
+      if (output.toLowerCase().includes(criterion.toLowerCase().split(" ")[0])) {
+        met++;
+      }
+    }
+    return met / testCase.criteria.length;
+  },
+
+  lengthCompliance: (output, testCase) => {
+    // Penalize responses over 500 characters for summarization
+    if (testCase.category === "summarization") {
+      return output.length <= 500 ? 1 : 0.5;
+    }
+    return 1;
+  },
+};
+```
+
+## Regression testing
+
+When you change a prompt, how do you know you did not break existing behavior? Regression tests compare new results against a known baseline.
+
+```javascript
+class RegressionTracker {
+  constructor() {
+    this.baselines = new Map(); // testId → { output, scores }
+  }
+
+  setBaseline(evalResults) {
+    for (const result of evalResults) {
+      this.baselines.set(result.id, {
+        output: result.actual,
+        scores: result.scores,
+      });
+    }
+  }
+
+  compareToBaseline(newResults) {
+    const regressions = [];
+    const improvements = [];
+
+    for (const result of newResults) {
+      const baseline = this.baselines.get(result.id);
+      if (!baseline) continue;
+
+      for (const [metric, newScore] of Object.entries(result.scores)) {
+        const oldScore = baseline.scores[metric];
+        if (oldScore === undefined) continue;
+
+        const delta = newScore - oldScore;
+        if (delta < -0.1) {
+          regressions.push({
+            id: result.id,
+            metric,
+            oldScore,
+            newScore,
+            delta,
+          });
+        } else if (delta > 0.1) {
+          improvements.push({
+            id: result.id,
+            metric,
+            oldScore,
+            newScore,
+            delta,
+          });
+        }
+      }
+    }
+
+    return {
+      regressions,
+      improvements,
+      hasRegressions: regressions.length > 0,
+      summary: `${improvements.length} improved, ${regressions.length} regressed`,
+    };
+  }
+}
+```
+
+Run regression tests in CI before merging prompt changes. A prompt change that improves average scores but regresses on specific edge cases is not ready to ship.
+
+## A/B testing prompts
+
+Sometimes you need real user data to know which prompt is better. A/B testing splits traffic between prompt variants and measures outcomes.
+
+```javascript
+class PromptExperiment {
+  constructor(variants) {
+    this.variants = variants; // [{ name, prompt, weight }]
+    this.results = new Map(); // variantName → { successes, failures, latencies }
+
+    for (const v of variants) {
+      this.results.set(v.name, { successes: 0, failures: 0, latencies: [] });
+    }
+  }
+
+  selectVariant(userId) {
+    // Deterministic assignment — same user always gets same variant
+    const hash = this.hashUserId(userId);
+    const totalWeight = this.variants.reduce((sum, v) => sum + v.weight, 0);
+    let threshold = 0;
+
+    for (const variant of this.variants) {
+      threshold += variant.weight / totalWeight;
+      if (hash < threshold) return variant;
+    }
+    return this.variants[this.variants.length - 1];
+  }
+
+  recordOutcome(variantName, success, latencyMs) {
+    const data = this.results.get(variantName);
+    if (!data) return;
+    if (success) data.successes++;
+    else data.failures++;
+    data.latencies.push(latencyMs);
+  }
+
+  report() {
+    const report = {};
+    for (const [name, data] of this.results) {
+      const total = data.successes + data.failures;
+      const sorted = [...data.latencies].sort((a, b) => a - b);
+      report[name] = {
+        total,
+        successRate: total > 0 ? data.successes / total : 0,
+        p50Latency: sorted[Math.floor(sorted.length * 0.5)] || 0,
+      };
+    }
+    return report;
+  }
+
+  hashUserId(userId) {
+    let hash = 0;
+    for (let i = 0; i < userId.length; i++) {
+      hash = ((hash << 5) - hash + userId.charCodeAt(i)) | 0;
+    }
+    return Math.abs(hash) / 2147483647; // Normalize to 0-1
+  }
+}
+```
+
+## Automated evaluation pipelines
+
+Combine golden datasets, eval harnesses, and regression tracking into a pipeline that runs on every prompt change.
+
+```javascript
+async function runEvalPipeline(modelFn, dataset, baseline) {
+  const harness = new EvalHarness(modelFn, scorers);
+  const results = await harness.runSuite(dataset);
+
+  // Check for regressions
+  const tracker = new RegressionTracker();
+  tracker.setBaseline(baseline);
+  const comparison = tracker.compareToBaseline(results.results);
+
+  // Gate deployment on quality
+  const passed =
+    !comparison.hasRegressions && results.scoreAverages.exactMatch >= 0.9 && results.errors === 0;
+
+  return {
+    passed,
+    scores: results.scoreAverages,
+    regressions: comparison.regressions,
+    improvements: comparison.improvements,
+    summary: passed ? "PASS — safe to deploy" : "FAIL — review regressions",
+  };
+}
+```
+
+<SandboxExercise language="javascript">
+{`// Build a simple eval harness that scores model output
+// against a golden dataset.
+
+function evaluate(modelFn, testCases) {
+// For each test case:
+// 1. Call modelFn(testCase.input) to get output
+// 2. Compare output to testCase.expected (case-insensitive exact match)
+// 3. Return { total, passed, failed, accuracy, results }
+// results: array of { id, input, expected, actual, pass }
+}
+
+// Mock model — always classifies based on keywords
+function mockClassifier(input) {
+if (input.includes("$") || input.includes("winner")) return "spam";
+return "not-spam";
+}
+
+const testCases = [
+{ id: "t1", input: "You are a winner! Claim $500", expected: "spam" },
+{ id: "t2", input: "Meeting at 3pm tomorrow", expected: "not-spam" },
+{ id: "t3", input: "Buy now for $9.99 only!", expected: "spam" },
+{ id: "t4", input: "Can you review my pull request?", expected: "not-spam" },
+{ id: "t5", input: "Free winner prize click here", expected: "spam" },
+];
+
+const results = evaluate(mockClassifier, testCases);
+console.log("Accuracy:", results.accuracy);
+console.log("Passed:", results.passed, "/", results.total);
+results.results.forEach(r => {
+console.log(r.id, r.pass ? "PASS" : "FAIL", "got:", r.actual, "expected:", r.expected);
+});`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the purpose of a golden dataset in AI testing?"
+  options={[
+    "To train the model on the best possible examples",
+    "To provide curated inputs with known-good expected outputs for consistent evaluation",
+    "To generate synthetic training data for fine-tuning",
+    "To store the model's best responses for caching",
+  ]}
+  answer={1}
+  explanation="A golden dataset is a fixed, curated benchmark. It lets you measure quality consistently across prompt changes, model updates, and provider swaps. Without it, you cannot detect regressions."
+/>
+
+<Quiz
+  question="Why should A/B tests for prompts use deterministic user assignment?"
+  options={[
+    "To ensure the experiment runs faster",
+    "To reduce the cost of model inference",
+    "So the same user always sees the same variant, producing consistent behavior and valid measurements",
+    "Because random assignment is not supported by AI providers",
+  ]}
+  answer={2}
+  explanation="If a user randomly gets different prompts on each request, their experience is inconsistent and you cannot attribute outcomes to a specific variant. Deterministic assignment (based on user ID hash) ensures clean experiment data."
+/>
+
+<FillBlank
+  question="A regression test compares new eval results against a stored ______ to detect quality drops."
+  answer="baseline"
+/>
+
+## What you learned
+
+- Golden datasets with curated inputs and expected outputs are the foundation of repeatable AI evaluation
+- Eval harnesses automate scoring with multiple metrics (exact match, criteria compliance, length) and surface regressions before prompt changes ship
+- A/B testing with deterministic user assignment provides real-world quality signals when offline evaluation is insufficient

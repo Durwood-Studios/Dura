@@ -1,0 +1,428 @@
+---
+title: "AI Production Project"
+description: "Build a complete production AI service with a gateway, rate limiter, cache, model router, and monitoring — end to end."
+phase: 6
+module: "6-6-ai-in-production"
+order: 8
+estimatedMinutes: 15
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Individual production concerns — caching, rate limiting, monitoring — are useful to understand in isolation. But in a real system they must work together. A cache miss feeds into the rate limiter. A rate limit rejection gets logged by the monitor. The model router picks the cheapest model, and the guardrails validate the output. This project wires every layer together into a single coherent service. Building it gives you a mental model of how production AI systems actually function end to end.
+
+## Architecture overview
+
+The system has six layers, each with a single responsibility:
+
+```
+Request → Gateway → Rate Limiter → Cache → Router → Model → Guardrails → Response
+                                                                    ↓
+                                                               Monitor (all layers)
+```
+
+Every layer reports to the monitor. Every layer can short-circuit the pipeline (reject, cache hit, rate limit). The model call is the most expensive step, so every layer before it exists to avoid unnecessary inference.
+
+## Building the gateway
+
+The gateway validates input and authenticates users before anything else runs.
+
+```javascript
+class AIGateway {
+  constructor(config) {
+    this.rateLimiter = config.rateLimiter;
+    this.cache = config.cache;
+    this.router = config.router;
+    this.guardrails = config.guardrails;
+    this.monitor = config.monitor;
+  }
+
+  async handleRequest(req) {
+    const startTime = Date.now();
+    const requestId = crypto.randomUUID();
+
+    try {
+      // Layer 1: Input validation
+      const validation = this.validateInput(req);
+      if (!validation.valid) {
+        this.monitor.record({ requestId, stage: "validation", status: "rejected" });
+        return { status: 400, body: { error: validation.error } };
+      }
+
+      const { userId, prompt, options } = req;
+
+      // Layer 2: Rate limiting
+      const rateCheck = this.rateLimiter.tryConsume(userId);
+      if (!rateCheck.allowed) {
+        this.monitor.record({ requestId, stage: "rateLimit", status: "rejected" });
+        return {
+          status: 429,
+          body: { error: "Rate limit exceeded", retryAfter: rateCheck.retryAfter },
+        };
+      }
+
+      // Layer 3: Cache lookup
+      const cached = this.cache.get(prompt, options);
+      if (cached) {
+        this.monitor.record({
+          requestId,
+          stage: "cache",
+          status: "hit",
+          latencyMs: Date.now() - startTime,
+        });
+        return { status: 200, body: { result: cached, source: "cache" } };
+      }
+
+      // Layer 4: Model routing
+      const model = this.router.selectModel(prompt);
+
+      // Layer 5: Model inference
+      const inferenceStart = Date.now();
+      const response = await model.complete(prompt, options);
+      const inferenceMs = Date.now() - inferenceStart;
+
+      // Layer 6: Output guardrails
+      const outputCheck = this.guardrails.validateOutput(response.text);
+      if (!outputCheck.safe) {
+        this.monitor.record({
+          requestId,
+          stage: "guardrails",
+          status: "blocked",
+          issues: outputCheck.issues,
+        });
+        return { status: 500, body: { error: "Response failed safety check" } };
+      }
+
+      // Cache the valid response
+      this.cache.set(prompt, options, response.text);
+
+      // Record full metrics
+      this.monitor.record({
+        requestId,
+        stage: "complete",
+        status: "success",
+        model: model.name,
+        inputTokens: response.usage.inputTokens,
+        outputTokens: response.usage.outputTokens,
+        inferenceMs,
+        totalMs: Date.now() - startTime,
+      });
+
+      return { status: 200, body: { result: response.text, model: model.name } };
+    } catch (error) {
+      this.monitor.record({
+        requestId,
+        stage: "error",
+        status: "failed",
+        error: error.message,
+        totalMs: Date.now() - startTime,
+      });
+      return { status: 500, body: { error: "Internal error" } };
+    }
+  }
+
+  validateInput(req) {
+    if (!req.userId) return { valid: false, error: "Missing userId" };
+    if (!req.prompt) return { valid: false, error: "Missing prompt" };
+    if (typeof req.prompt !== "string") return { valid: false, error: "Prompt must be a string" };
+    if (req.prompt.length > 10000) return { valid: false, error: "Prompt too long" };
+    if (req.prompt.trim().length === 0) return { valid: false, error: "Prompt is empty" };
+    return { valid: true };
+  }
+}
+```
+
+## Building the supporting components
+
+Each component is self-contained with a clear interface.
+
+````javascript
+// Rate limiter — token bucket
+class RateLimiter {
+  constructor(capacity, refillPerSecond) {
+    this.capacity = capacity;
+    this.refillRate = refillPerSecond;
+    this.buckets = new Map();
+  }
+
+  tryConsume(userId, cost = 1) {
+    const now = Date.now();
+    let bucket = this.buckets.get(userId);
+    if (!bucket) {
+      bucket = { tokens: this.capacity, lastRefill: now };
+      this.buckets.set(userId, bucket);
+    }
+
+    const elapsed = (now - bucket.lastRefill) / 1000;
+    bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsed * this.refillRate);
+    bucket.lastRefill = now;
+
+    if (bucket.tokens >= cost) {
+      bucket.tokens -= cost;
+      return { allowed: true, remaining: Math.floor(bucket.tokens) };
+    }
+    return { allowed: false, retryAfter: Math.ceil((cost - bucket.tokens) / this.refillRate) };
+  }
+}
+
+// Cache — exact match with LRU eviction
+class ResponseCache {
+  constructor(maxSize = 1000, defaultTTL = 3600) {
+    this.cache = new Map();
+    this.maxSize = maxSize;
+    this.defaultTTL = defaultTTL;
+  }
+
+  generateKey(prompt, options) {
+    return JSON.stringify({ prompt, model: options?.model, temp: options?.temperature || 0 });
+  }
+
+  get(prompt, options) {
+    const key = this.generateKey(prompt, options);
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.cache.delete(key);
+      return null;
+    }
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+    return entry.value;
+  }
+
+  set(prompt, options, value) {
+    const key = this.generateKey(prompt, options);
+    if (this.cache.size >= this.maxSize) {
+      const oldest = this.cache.keys().next().value;
+      this.cache.delete(oldest);
+    }
+    this.cache.set(key, { value, expiresAt: Date.now() + this.defaultTTL * 1000 });
+  }
+}
+
+// Model router — cheapest model for the job
+class ModelRouter {
+  constructor(models) {
+    this.models = models;
+  }
+
+  selectModel(prompt) {
+    const words = prompt.split(/\s+/).length;
+    const hasCode = /```/.test(prompt);
+    const needsReasoning = /explain|analyze|compare|design/i.test(prompt);
+
+    if (words < 30 && !hasCode && !needsReasoning) return this.models.small;
+    if (hasCode || needsReasoning) return this.models.large;
+    return this.models.medium;
+  }
+}
+
+// Guardrails — output validation
+class Guardrails {
+  validateOutput(text) {
+    const issues = [];
+    if (/ignore (previous|prior) instructions/i.test(text)) {
+      issues.push("Output contains injection-like language");
+    }
+    if (/as an AI (language )?model/i.test(text)) {
+      issues.push("Output contains meta-AI language");
+    }
+    return { safe: issues.length === 0, issues };
+  }
+}
+
+// Monitor — tracks all events
+class Monitor {
+  constructor() {
+    this.events = [];
+    this.latencies = [];
+  }
+
+  record(event) {
+    this.events.push({ ...event, timestamp: Date.now() });
+    if (event.totalMs) this.latencies.push(event.totalMs);
+  }
+
+  getStats() {
+    const sorted = [...this.latencies].sort((a, b) => a - b);
+    const total = this.events.length;
+    const errors = this.events.filter((e) => e.status === "failed").length;
+    const cacheHits = this.events.filter((e) => e.stage === "cache" && e.status === "hit").length;
+    const rateLimited = this.events.filter((e) => e.stage === "rateLimit").length;
+
+    return {
+      total,
+      errors,
+      cacheHits,
+      rateLimited,
+      errorRate: total > 0 ? errors / total : 0,
+      cacheHitRate: total > 0 ? cacheHits / total : 0,
+      p50: sorted[Math.floor(sorted.length * 0.5)] || 0,
+      p95: sorted[Math.floor(sorted.length * 0.95)] || 0,
+    };
+  }
+}
+````
+
+## Wiring it all together
+
+```javascript
+// Initialize all components
+const monitor = new Monitor();
+const rateLimiter = new RateLimiter(20, 2); // 20 burst, 2/sec refill
+const cache = new ResponseCache(500, 3600);
+const guardrails = new Guardrails();
+
+// Mock models for demonstration
+const models = {
+  small: {
+    name: "mini",
+    complete: async (p) => ({
+      text: `[mini] ${p.slice(0, 50)}...`,
+      usage: { inputTokens: 50, outputTokens: 30 },
+    }),
+  },
+  medium: {
+    name: "standard",
+    complete: async (p) => ({
+      text: `[standard] ${p.slice(0, 100)}...`,
+      usage: { inputTokens: 200, outputTokens: 100 },
+    }),
+  },
+  large: {
+    name: "premium",
+    complete: async (p) => ({
+      text: `[premium] ${p.slice(0, 200)}...`,
+      usage: { inputTokens: 500, outputTokens: 300 },
+    }),
+  },
+};
+
+const router = new ModelRouter(models);
+
+// Create the gateway
+const gateway = new AIGateway({ rateLimiter, cache, router, guardrails, monitor });
+
+// Process requests
+async function demo() {
+  const r1 = await gateway.handleRequest({ userId: "u1", prompt: "What is JavaScript?" });
+  console.log("Request 1:", r1.status, r1.body.model || r1.body.source);
+
+  // Same prompt — should be cached
+  const r2 = await gateway.handleRequest({ userId: "u1", prompt: "What is JavaScript?" });
+  console.log("Request 2:", r2.status, r2.body.source);
+
+  // Complex prompt — should route to large model
+  const r3 = await gateway.handleRequest({
+    userId: "u1",
+    prompt: "Explain the difference between TCP and UDP with code examples",
+  });
+  console.log("Request 3:", r3.status, r3.body.model);
+
+  console.log("\nMonitor stats:", monitor.getStats());
+}
+```
+
+This is the complete pattern. Every production AI service is a variation of this architecture. The specific implementations change — Redis instead of in-memory cache, SQS instead of a simple queue, Datadog instead of a custom monitor — but the layers and their responsibilities stay the same.
+
+<SandboxExercise language="javascript">
+{`// Wire together a minimal production AI pipeline.
+// Implement a gateway that uses all components.
+
+class MiniGateway {
+constructor() {
+this.cache = new Map();
+this.requestCounts = new Map(); // userId → count
+this.maxRequestsPerUser = 5;
+this.log = [];
+}
+
+async handle(userId, prompt, modelFn) {
+// 1. Validate: reject if userId or prompt is missing
+// 2. Rate limit: reject if user has made >= maxRequestsPerUser calls
+// 3. Cache: return cached response if prompt was seen before
+// 4. Call modelFn(prompt) to get the response
+// 5. Cache the response
+// 6. Increment the user's request count
+// 7. Log: push { userId, prompt, cached, timestamp } to this.log
+// 8. Return { status: "ok", result, cached: boolean }
+// or { status: "error", reason }
+}
+}
+
+async function mockModel(prompt) {
+return "AI response to: " + prompt;
+}
+
+const gw = new MiniGateway();
+
+// Test: normal request
+const r1 = await gw.handle("user1", "Hello", mockModel);
+console.log("R1:", r1); // status: ok, cached: false
+
+// Test: cached request
+const r2 = await gw.handle("user1", "Hello", mockModel);
+console.log("R2:", r2); // status: ok, cached: true
+
+// Test: missing input
+const r3 = await gw.handle("", "Hello", mockModel);
+console.log("R3:", r3); // status: error
+
+// Test: rate limit (send 5 unique requests, then try a 6th)
+for (let i = 0; i < 4; i++) {
+await gw.handle("user2", "Question " + i, mockModel);
+}
+const r4 = await gw.handle("user2", "Question 5", mockModel);
+console.log("R4:", r4); // Should still work (5th request)
+const r5 = await gw.handle("user2", "Question 6", mockModel);
+console.log("R5:", r5); // status: error, rate limited
+
+console.log("Total logged events:", gw.log.length);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In the production pipeline, why does the cache check come BEFORE model routing?"
+  options={[
+    "Because caching is faster than routing",
+    "Because a cache hit avoids inference entirely — no need to pick a model for a request you won't send",
+    "Because the router needs the cache to function",
+    "Because cache keys include the model name",
+  ]}
+  answer={1}
+  explanation="The cache check is the cheapest way to avoid the most expensive operation (inference). If the answer is already cached, there is no point routing, calling the model, or running guardrails on new output. Every layer before the model exists to prevent unnecessary inference."
+/>
+
+<Quiz
+  question="Why does the monitor receive events from EVERY layer, not just the model layer?"
+  options={[
+    "Because monitoring only the model misses cache hits, rate limit rejections, and validation failures that reveal system behavior",
+    "Because the monitor needs to calculate the total request count",
+    "Because each layer has its own error format",
+    "Because the model layer does not produce useful metrics",
+  ]}
+  answer={0}
+  explanation="A high cache hit rate means your cache is working. A spike in rate limit rejections means abuse or misconfigured limits. Validation failures reveal bad clients. Each layer produces signals that together paint the full picture of system health."
+/>
+
+<FillBlank
+  question="In the production AI pipeline, every layer before the model call exists to prevent unnecessary ______."
+  answer="inference"
+/>
+
+## What you learned
+
+- A production AI service layers gateway, rate limiter, cache, router, model, and guardrails in a pipeline where each layer can short-circuit to avoid expensive inference
+- The monitor observes every layer, providing cache hit rates, rate limit counts, error rates, and latency percentiles for complete system visibility
+- Wiring components behind clean interfaces makes each layer independently testable, swappable, and scalable

@@ -644,4 +644,303 @@ export const PHASE_6_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["sse", "transport", "mcp"]
   ),
+
+  // ── Module 6-5: Fine-Tuning ──────────────────────────────────────────────
+  q(
+    "6-5-q1",
+    "6-5",
+    "multiple-choice",
+    "When should you fine-tune instead of using RAG?",
+    [
+      "When you need the model to access new facts",
+      "When you need to change how the model responds (style, format, tone) rather than what it knows",
+      "When you want faster inference",
+      "Always — fine-tuning is always better",
+    ],
+    1,
+    "Fine-tuning changes behavior/style. RAG adds knowledge. Use the decision tree: prompt engineering → RAG → fine-tuning.",
+    "easy",
+    ["fine-tuning", "rag"]
+  ),
+  q(
+    "6-5-q2",
+    "6-5",
+    "multiple-choice",
+    "What data format is standard for fine-tuning LLMs?",
+    ["CSV", "JSONL (JSON Lines)", "XML", "YAML"],
+    1,
+    "JSONL — one JSON object per line, each containing system/user/assistant message arrays.",
+    "easy",
+    ["jsonl", "training-data"]
+  ),
+  q(
+    "6-5-q3",
+    "6-5",
+    "multiple-choice",
+    "What does LoRA stand for?",
+    [
+      "Large Output Routing Algorithm",
+      "Low-Rank Adaptation",
+      "Linear Optimization for Retrieval Augmentation",
+      "Learned Output Response Architecture",
+    ],
+    1,
+    "Low-Rank Adaptation freezes the original weights and trains small adapter matrices, making fine-tuning efficient.",
+    "easy",
+    ["lora"]
+  ),
+  q(
+    "6-5-q4",
+    "6-5",
+    "true-false",
+    "True or false: QLoRA combines quantization with LoRA to reduce memory usage during training.",
+    ["True", "False"],
+    0,
+    "QLoRA quantizes the base model to 4-bit and trains LoRA adapters on top, dramatically reducing GPU memory requirements.",
+    "easy",
+    ["qlora", "quantization"]
+  ),
+  q(
+    "6-5-q5",
+    "6-5",
+    "multiple-choice",
+    "What is overfitting in the context of fine-tuning?",
+    [
+      "The model trains too slowly",
+      "The model memorizes training examples instead of learning generalizable patterns",
+      "The model runs out of memory",
+      "The model generates longer responses",
+    ],
+    1,
+    "Overfitting means great performance on training data but poor generalization. Mitigate with validation sets and early stopping.",
+    "medium",
+    ["overfitting", "training"]
+  ),
+  q(
+    "6-5-q6",
+    "6-5",
+    "multiple-choice",
+    "What does perplexity measure?",
+    [
+      "How fast the model generates tokens",
+      "How surprised the model is by the test data — lower is better",
+      "The number of parameters in the model",
+      "The cost per token",
+    ],
+    1,
+    "Perplexity measures how well the model predicts the next token. Lower perplexity = better language modeling.",
+    "medium",
+    ["perplexity", "evaluation"]
+  ),
+  q(
+    "6-5-q7",
+    "6-5",
+    "multiple-choice",
+    "Which tool is designed for high-throughput LLM serving?",
+    ["webpack", "vLLM", "ESLint", "Docker Compose"],
+    1,
+    "vLLM uses PagedAttention for efficient memory management and high-throughput serving of LLMs.",
+    "medium",
+    ["vllm", "serving"]
+  ),
+  q(
+    "6-5-q8",
+    "6-5",
+    "multiple-choice",
+    "Why is data quality more important than data quantity for fine-tuning?",
+    [
+      "More data is always better",
+      "A small set of high-quality examples teaches the pattern; noisy data teaches noise",
+      "Quality data is cheaper",
+      "Models can only accept small datasets",
+    ],
+    1,
+    "100 perfect examples often beat 10,000 noisy ones. The model learns the patterns in your data — including the mistakes.",
+    "hard",
+    ["data-quality", "training"]
+  ),
+  q(
+    "6-5-q9",
+    "6-5",
+    "multiple-choice",
+    "What is the learning rate's role in training?",
+    [
+      "It determines how many epochs to run",
+      "It controls how much the weights change per training step — too high overshoots, too low stalls",
+      "It sets the batch size",
+      "It determines the model architecture",
+    ],
+    1,
+    "Learning rate is the most important hyperparameter. Too high = unstable training. Too low = slow convergence.",
+    "hard",
+    ["learning-rate", "optimizer"]
+  ),
+  q(
+    "6-5-q10",
+    "6-5",
+    "multiple-choice",
+    "What is model quantization?",
+    [
+      "Adding more parameters to the model",
+      "Reducing the precision of model weights (e.g., 32-bit → 4-bit) to decrease size and memory usage",
+      "Encrypting the model weights",
+      "Splitting the model across GPUs",
+    ],
+    1,
+    "Quantization trades precision for efficiency. A 4-bit quantized 7B model can run on consumer hardware with minimal quality loss.",
+    "hard",
+    ["quantization", "deployment"]
+  ),
+
+  // ── Module 6-6: AI in Production ─────────────────────────────────────────
+  q(
+    "6-6-q1",
+    "6-6",
+    "multiple-choice",
+    "What is the recommended architecture pattern for a production AI service?",
+    [
+      "Direct client → model calls",
+      "API gateway → queue → worker → model → cache",
+      "Single monolithic function",
+      "Client-side model execution only",
+    ],
+    1,
+    "Separating the gateway, queue, worker, and cache allows independent scaling, retry handling, and cost control.",
+    "easy",
+    ["architecture", "production"]
+  ),
+  q(
+    "6-6-q2",
+    "6-6",
+    "multiple-choice",
+    "Which latency metric is most important for AI service monitoring?",
+    ["Average latency", "p95 or p99 latency", "Minimum latency", "Maximum latency"],
+    1,
+    "p95/p99 show what the slowest 5%/1% of users experience. Average hides tail latency problems.",
+    "easy",
+    ["monitoring", "latency"]
+  ),
+  q(
+    "6-6-q3",
+    "6-6",
+    "true-false",
+    "True or false: semantic caching returns a cached response for prompts that are similar in meaning, not just identical.",
+    ["True", "False"],
+    0,
+    "Semantic cache embeds the prompt, finds similar cached prompts by cosine similarity, and returns the cached response if above a threshold.",
+    "easy",
+    ["caching", "semantic-cache"]
+  ),
+  q(
+    "6-6-q4",
+    "6-6",
+    "multiple-choice",
+    "What is the cost-quality-latency triangle in AI systems?",
+    [
+      "You can optimize all three equally",
+      "Improving one often trades off against the others — cheaper models are lower quality, cached responses are faster but may be stale",
+      "It refers to three types of AI models",
+      "It's a testing framework",
+    ],
+    1,
+    "You can't optimize all three simultaneously. Model routing, caching, and batching help navigate the tradeoffs.",
+    "medium",
+    ["cost", "quality", "latency"]
+  ),
+  q(
+    "6-6-q5",
+    "6-6",
+    "multiple-choice",
+    "What is model routing?",
+    [
+      "Sending all requests to one model",
+      "Using a classifier to send easy tasks to cheap models and hard tasks to expensive models",
+      "Routing network traffic to GPUs",
+      "A DNS technique for AI servers",
+    ],
+    1,
+    "Model routing matches task difficulty to model capability — saving cost on simple tasks while maintaining quality on complex ones.",
+    "medium",
+    ["model-routing", "cost-optimization"]
+  ),
+  q(
+    "6-6-q6",
+    "6-6",
+    "multiple-choice",
+    "What should input guardrails check for?",
+    [
+      "Only prompt length",
+      "PII, prompt injection patterns, content policy violations, and malformed input",
+      "Only spelling errors",
+      "The user's subscription status",
+    ],
+    1,
+    "Input guardrails are defense in depth: filter PII, detect injection, enforce content policy, and validate format before the model sees it.",
+    "medium",
+    ["guardrails", "security"]
+  ),
+  q(
+    "6-6-q7",
+    "6-6",
+    "multiple-choice",
+    "What is regression testing for AI prompts?",
+    [
+      "Testing if the model gets slower over time",
+      "Running a golden test set after every prompt change to verify existing behavior isn't broken",
+      "Training the model on test data",
+      "Deleting old test cases",
+    ],
+    1,
+    "Prompt changes can break previously working test cases. A golden dataset catches regressions before deployment.",
+    "medium",
+    ["testing", "regression"]
+  ),
+  q(
+    "6-6-q8",
+    "6-6",
+    "multiple-choice",
+    "What is the token bucket algorithm used for in AI rate limiting?",
+    [
+      "Counting how many tokens a model generates",
+      "Controlling the rate of API requests — tokens refill at a fixed rate, each request consumes tokens",
+      "Tokenizing text into sub-words",
+      "A pricing model for API access",
+    ],
+    1,
+    "Token bucket allows bursts up to a bucket capacity while enforcing an average rate. Common for API rate limiting.",
+    "hard",
+    ["rate-limiting", "token-bucket"]
+  ),
+  q(
+    "6-6-q9",
+    "6-6",
+    "multiple-choice",
+    "Why should you NOT cache responses for personalized or time-sensitive queries?",
+    [
+      "Caching is always beneficial",
+      "Cached responses may be stale or inappropriate for a different user's context",
+      "Caching increases costs",
+      "Time-sensitive queries are too short to cache",
+    ],
+    1,
+    "Caching assumes the same input produces the same valid output. Personalized or time-sensitive data violates that assumption.",
+    "hard",
+    ["caching", "invalidation"]
+  ),
+  q(
+    "6-6-q10",
+    "6-6",
+    "multiple-choice",
+    "What is prompt compression?",
+    [
+      "Making prompts shorter by removing whitespace",
+      "Reducing token count while preserving meaning — removing redundant context, using shorter instructions, summarizing long documents",
+      "Compressing the model itself",
+      "A file compression technique",
+    ],
+    1,
+    "Prompt compression reduces input tokens (and cost) by tightening instructions, summarizing context, and removing redundancy.",
+    "hard",
+    ["prompt-compression", "cost-optimization"]
+  ),
 ];

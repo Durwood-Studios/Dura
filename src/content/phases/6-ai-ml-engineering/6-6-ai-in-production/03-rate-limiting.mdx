@@ -1,0 +1,294 @@
+---
+title: "Rate Limiting"
+description: "Protect AI services with token budgets, per-user limits, and queue-based throttling using leaky bucket and token bucket algorithms."
+phase: 6
+module: "6-6-ai-in-production"
+order: 3
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Every AI request costs money. A single user running a script in a loop can burn through your monthly budget in hours. A viral moment can send traffic from 100 requests per minute to 10,000. Without rate limiting, you have no control over costs, no protection against abuse, and no way to guarantee fair access. Rate limiting is not optional — it is the seatbelt between your AI service and financial disaster.
+
+## Token budgets
+
+API rate limits typically count requests, but AI services should also count tokens. A user sending 10 requests of 50 tokens each is very different from 10 requests of 4,000 tokens each.
+
+```javascript
+class TokenBudget {
+  constructor(limits) {
+    this.limits = limits; // { dailyTokens, monthlyTokens }
+    this.usage = new Map(); // userId → { daily, monthly, lastReset }
+  }
+
+  getUsage(userId) {
+    if (!this.usage.has(userId)) {
+      this.usage.set(userId, {
+        daily: 0,
+        monthly: 0,
+        dayStart: this.startOfDay(),
+        monthStart: this.startOfMonth(),
+      });
+    }
+    const record = this.usage.get(userId);
+
+    // Reset counters if the window has rolled over
+    const now = Date.now();
+    if (now >= record.dayStart + 86400000) {
+      record.daily = 0;
+      record.dayStart = this.startOfDay();
+    }
+    if (now >= record.monthStart + 30 * 86400000) {
+      record.monthly = 0;
+      record.monthStart = this.startOfMonth();
+    }
+    return record;
+  }
+
+  canSpend(userId, estimatedTokens) {
+    const usage = this.getUsage(userId);
+    return (
+      usage.daily + estimatedTokens <= this.limits.dailyTokens &&
+      usage.monthly + estimatedTokens <= this.limits.monthlyTokens
+    );
+  }
+
+  spend(userId, actualTokens) {
+    const usage = this.getUsage(userId);
+    usage.daily += actualTokens;
+    usage.monthly += actualTokens;
+  }
+
+  remaining(userId) {
+    const usage = this.getUsage(userId);
+    return {
+      daily: Math.max(0, this.limits.dailyTokens - usage.daily),
+      monthly: Math.max(0, this.limits.monthlyTokens - usage.monthly),
+    };
+  }
+
+  startOfDay() {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
+  startOfMonth() {
+    const d = new Date();
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+}
+```
+
+Estimate tokens before the request (prompt length / 4 is a rough approximation for English text), then update with the actual count from the model response.
+
+## Leaky bucket vs token bucket
+
+Two classic algorithms power most rate limiters. They solve the same problem differently.
+
+**Token bucket** allows bursts. Tokens accumulate at a steady rate up to a maximum. Each request consumes tokens. If the bucket is empty, the request is rejected.
+
+```javascript
+class TokenBucketLimiter {
+  constructor(capacity, refillRate) {
+    this.capacity = capacity; // Max tokens in the bucket
+    this.refillRate = refillRate; // Tokens added per second
+    this.buckets = new Map(); // userId → { tokens, lastRefill }
+  }
+
+  allow(userId, cost = 1) {
+    const now = Date.now();
+    let bucket = this.buckets.get(userId);
+
+    if (!bucket) {
+      bucket = { tokens: this.capacity, lastRefill: now };
+      this.buckets.set(userId, bucket);
+    }
+
+    // Refill based on elapsed time
+    const elapsed = (now - bucket.lastRefill) / 1000;
+    bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsed * this.refillRate);
+    bucket.lastRefill = now;
+
+    // Check if enough tokens are available
+    if (bucket.tokens >= cost) {
+      bucket.tokens -= cost;
+      return { allowed: true, remaining: Math.floor(bucket.tokens) };
+    }
+
+    const retryAfter = Math.ceil((cost - bucket.tokens) / this.refillRate);
+    return { allowed: false, retryAfter };
+  }
+}
+```
+
+**Leaky bucket** enforces a steady rate. Requests enter a queue that drains at a fixed rate. If the queue is full, new requests are rejected. No bursts.
+
+```javascript
+class LeakyBucketLimiter {
+  constructor(capacity, drainRate) {
+    this.capacity = capacity; // Max queue size
+    this.drainRate = drainRate; // Requests drained per second
+    this.buckets = new Map();
+  }
+
+  allow(userId) {
+    const now = Date.now();
+    let bucket = this.buckets.get(userId);
+
+    if (!bucket) {
+      bucket = { water: 0, lastDrain: now };
+      this.buckets.set(userId, bucket);
+    }
+
+    // Drain based on elapsed time
+    const elapsed = (now - bucket.lastDrain) / 1000;
+    bucket.water = Math.max(0, bucket.water - elapsed * this.drainRate);
+    bucket.lastDrain = now;
+
+    // Try to add one unit
+    if (bucket.water < this.capacity) {
+      bucket.water += 1;
+      return { allowed: true, queueLevel: bucket.water };
+    }
+
+    return { allowed: false, retryAfter: Math.ceil(1 / this.drainRate) };
+  }
+}
+```
+
+Use token bucket when bursts are acceptable (interactive chat). Use leaky bucket when you need smooth, predictable throughput (batch processing pipelines).
+
+## Graceful degradation
+
+When a user hits their limit, do not just return a 429 and walk away. Give them useful information and, when possible, a degraded experience rather than nothing.
+
+```javascript
+async function handleWithDegradation(req, limits, models) {
+  const userId = req.user.id;
+  const prompt = req.body.prompt;
+  const estimatedTokens = Math.ceil(prompt.length / 4);
+
+  // Tier 1: Full access
+  if (limits.canSpend(userId, estimatedTokens)) {
+    const result = await models.primary.complete(prompt);
+    limits.spend(userId, result.usage.totalTokens);
+    return { status: 200, body: result, tier: "full" };
+  }
+
+  // Tier 2: Cheaper model with reduced output
+  if (limits.remaining(userId).daily > 500) {
+    const result = await models.cheap.complete(prompt, { maxTokens: 256 });
+    limits.spend(userId, result.usage.totalTokens);
+    return {
+      status: 200,
+      body: result,
+      tier: "reduced",
+      warning: "Using a smaller model due to usage limits",
+    };
+  }
+
+  // Tier 3: Cached/static response only
+  const cached = await getCachedResponse(prompt);
+  if (cached) {
+    return { status: 200, body: cached, tier: "cached" };
+  }
+
+  // Tier 4: Reject with helpful details
+  const remaining = limits.remaining(userId);
+  return {
+    status: 429,
+    body: {
+      error: "Token budget exhausted",
+      daily: remaining.daily,
+      monthly: remaining.monthly,
+      resetsAt: new Date(limits.getUsage(userId).dayStart + 86400000).toISOString(),
+    },
+  };
+}
+```
+
+The best rate-limited APIs tell you exactly when you can retry and how much budget remains.
+
+<SandboxExercise language="javascript">
+{`// Implement a token bucket rate limiter.
+// capacity: 10 tokens, refillRate: 2 tokens per second.
+
+class RateLimiter {
+constructor(capacity, refillRate) {
+this.capacity = capacity;
+this.refillRate = refillRate;
+this.tokens = capacity;
+this.lastRefill = Date.now();
+}
+
+tryConsume(cost = 1) {
+// 1. Calculate elapsed time since last refill
+// 2. Add tokens based on elapsed time (up to capacity)
+// 3. If enough tokens, consume them and return { allowed: true, remaining }
+// 4. If not enough, return { allowed: false, retryAfter } (seconds until enough tokens)
+}
+}
+
+// Test it
+const limiter = new RateLimiter(10, 2);
+
+// Should succeed — bucket starts full
+console.log(limiter.tryConsume(5)); // { allowed: true, remaining: 5 }
+console.log(limiter.tryConsume(5)); // { allowed: true, remaining: 0 }
+console.log(limiter.tryConsume(1)); // { allowed: false, retryAfter: 1 }
+
+// Simulate time passing (in real code, time passes naturally)
+limiter.lastRefill = Date.now() - 3000; // 3 seconds ago
+console.log(limiter.tryConsume(4)); // { allowed: true, remaining: 2 } (refilled 6, consumed 4)`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the key difference between a token bucket and a leaky bucket rate limiter?"
+  options={[
+    "Token buckets are faster to implement than leaky buckets",
+    "Token buckets allow bursts up to the bucket capacity, while leaky buckets enforce a steady rate",
+    "Leaky buckets cost more memory than token buckets",
+    "Token buckets only work with AI APIs, leaky buckets work with any API",
+  ]}
+  answer={1}
+  explanation="Token buckets accumulate capacity over time and allow short bursts when the bucket is full. Leaky buckets drain at a constant rate, smoothing traffic regardless of arrival pattern. Choose based on whether burst behavior is acceptable."
+/>
+
+<Quiz
+  question="Why should AI rate limits track token consumption instead of just request count?"
+  options={[
+    "Because tokens are easier to count than requests",
+    "Because a request with 4000 tokens costs 80x more than a request with 50 tokens",
+    "Because model providers only charge for tokens, not requests",
+    "Because request counting requires more complex infrastructure",
+  ]}
+  answer={1}
+  explanation="AI costs scale with token count, not request count. A user sending few large requests can cost more than a user sending many small ones. Tracking tokens gives accurate cost control."
+/>
+
+<FillBlank
+  question="When a rate-limited API returns HTTP 429, the response should include a ______ header or field telling the client when to retry."
+  answer="retryAfter"
+/>
+
+## What you learned
+
+- Token budgets track AI spending per user at daily and monthly granularity, providing accurate cost control beyond simple request counting
+- Token bucket and leaky bucket algorithms offer different tradeoffs: bursts vs steady throughput
+- Graceful degradation (cheaper models, cached responses, informative 429s) preserves user experience when limits are reached

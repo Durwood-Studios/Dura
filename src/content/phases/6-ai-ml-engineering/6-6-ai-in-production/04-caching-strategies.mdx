@@ -1,0 +1,314 @@
+---
+title: "Caching Strategies"
+description: "Reduce AI costs and latency with exact-match caching, semantic caching via embeddings, TTL policies, and invalidation strategies."
+phase: 6
+module: "6-6-ai-in-production"
+order: 4
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Model inference is the slowest and most expensive operation in any AI service. A single GPT-4 call can take 3-10 seconds and cost cents per request. If 30% of your requests are identical or nearly identical to previous ones, you are paying full price every time for the same answer. Caching is the single highest-impact optimization for cost and latency. But AI caching is trickier than traditional caching because "similar" prompts should often get the same response — and some prompts should never be cached at all.
+
+## Exact-match caching
+
+The simplest form: hash the prompt, check the cache, return the stored response if found.
+
+```javascript
+class ExactMatchCache {
+  constructor(maxSize = 10000) {
+    this.cache = new Map();
+    this.maxSize = maxSize;
+  }
+
+  generateKey(prompt, model, params) {
+    // Include model and temperature in the key — different settings produce different outputs
+    const raw = JSON.stringify({ prompt, model, temperature: params.temperature || 0 });
+    return this.hash(raw);
+  }
+
+  get(prompt, model, params) {
+    const key = this.generateKey(prompt, model, params);
+    const entry = this.cache.get(key);
+
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    // Move to end for LRU behavior
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+    return entry.response;
+  }
+
+  set(prompt, model, params, response, ttlSeconds = 3600) {
+    const key = this.generateKey(prompt, model, params);
+
+    // Evict oldest entry if at capacity
+    if (this.cache.size >= this.maxSize) {
+      const oldest = this.cache.keys().next().value;
+      this.cache.delete(oldest);
+    }
+
+    this.cache.set(key, {
+      response,
+      expiresAt: Date.now() + ttlSeconds * 1000,
+      createdAt: Date.now(),
+    });
+  }
+
+  hash(str) {
+    let hash = 5381;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+    }
+    return hash.toString(36);
+  }
+}
+```
+
+Exact-match caching works well for structured prompts (template-based generation, classification tasks) where the same input recurs frequently. Set temperature to 0 when caching — non-zero temperature means the model deliberately varies its output, making cached responses misleading.
+
+## Semantic caching
+
+Users rarely type the exact same prompt twice. But "What is rate limiting?" and "Explain rate limiting" should probably return the same cached answer. Semantic caching uses embeddings to find similar prompts.
+
+```javascript
+class SemanticCache {
+  constructor(embeddingFn, similarityThreshold = 0.95) {
+    this.entries = [];
+    this.embeddingFn = embeddingFn;
+    this.threshold = similarityThreshold;
+  }
+
+  async get(prompt) {
+    const embedding = await this.embeddingFn(prompt);
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const entry of this.entries) {
+      if (Date.now() > entry.expiresAt) continue;
+
+      const score = cosineSimilarity(embedding, entry.embedding);
+      if (score > bestScore && score >= this.threshold) {
+        bestScore = score;
+        bestMatch = entry;
+      }
+    }
+
+    return bestMatch ? { response: bestMatch.response, score: bestScore } : null;
+  }
+
+  async set(prompt, response, ttlSeconds = 3600) {
+    const embedding = await this.embeddingFn(prompt);
+    this.entries.push({
+      prompt,
+      embedding,
+      response,
+      expiresAt: Date.now() + ttlSeconds * 1000,
+    });
+  }
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+```
+
+The tradeoff: semantic caching adds an embedding call for every request (fast and cheap, but not free). Set the similarity threshold carefully. Too low (0.85) and you return wrong answers. Too high (0.99) and you rarely get cache hits.
+
+## TTL and invalidation
+
+Cached AI responses go stale. The right TTL depends on what the prompt does.
+
+```javascript
+const TTL_POLICY = {
+  // Factual lookups — cache aggressively
+  classification: 86400, // 24 hours — "Is this spam?" doesn't change
+  translation: 604800, // 7 days — translations are stable
+  codeExplanation: 86400, // 24 hours — code semantics are stable
+
+  // Dynamic content — shorter TTLs
+  summarization: 3600, // 1 hour — source data may change
+  conversational: 0, // Never cache — context-dependent
+  codeGeneration: 1800, // 30 min — libraries update, patterns evolve
+
+  // User-specific — do not cache
+  personalAdvice: 0, // Never — depends on user context
+  debuggingHelp: 0, // Never — depends on specific code
+};
+
+function getTTL(requestType) {
+  return TTL_POLICY[requestType] ?? 3600; // Default to 1 hour
+}
+```
+
+Invalidation strategies beyond TTL:
+
+```javascript
+class CacheWithInvalidation {
+  constructor() {
+    this.cache = new Map();
+    this.tags = new Map(); // tag → Set of cache keys
+  }
+
+  set(key, value, ttl, tags = []) {
+    this.cache.set(key, {
+      value,
+      expiresAt: Date.now() + ttl * 1000,
+    });
+    // Associate tags for group invalidation
+    for (const tag of tags) {
+      if (!this.tags.has(tag)) this.tags.set(tag, new Set());
+      this.tags.get(tag).add(key);
+    }
+  }
+
+  invalidateByTag(tag) {
+    const keys = this.tags.get(tag);
+    if (!keys) return 0;
+    let count = 0;
+    for (const key of keys) {
+      this.cache.delete(key);
+      count++;
+    }
+    this.tags.delete(tag);
+    return count;
+  }
+}
+
+// When the prompt template changes, invalidate all cached responses for that feature
+// cache.invalidateByTag("code-review-v2");
+```
+
+## When NOT to cache
+
+Not every response should be cached. Caching the wrong thing wastes memory and returns stale or incorrect results.
+
+```javascript
+function shouldCache(request, response) {
+  // Never cache if temperature > 0 — output is intentionally varied
+  if (request.temperature > 0) return false;
+
+  // Never cache conversations — they depend on message history
+  if (request.messages && request.messages.length > 1) return false;
+
+  // Never cache if the response indicates uncertainty
+  if (response.finishReason === "length") return false; // Truncated output
+
+  // Never cache user-specific content with PII
+  if (request.includesUserData) return false;
+
+  // Never cache streaming responses (cache the final assembled result instead)
+  if (request.stream) return false;
+
+  // Only cache successful responses
+  if (response.error) return false;
+
+  return true;
+}
+```
+
+<SandboxExercise language="javascript">
+{`// Build an exact-match cache with TTL and LRU eviction.
+
+class AICache {
+constructor(maxSize = 5) {
+this.cache = new Map();
+this.maxSize = maxSize;
+this.hits = 0;
+this.misses = 0;
+}
+
+get(key) {
+// 1. Check if key exists
+// 2. Check if entry has expired (compare expiresAt to Date.now())
+// 3. If valid, move to end of Map (LRU) and increment hits
+// 4. If missing or expired, increment misses and return null
+}
+
+set(key, value, ttlSeconds = 60) {
+// 1. If at maxSize and key is new, delete the oldest entry
+// 2. Store { value, expiresAt: Date.now() + ttlSeconds \* 1000 }
+}
+
+hitRate() {
+const total = this.hits + this.misses;
+return total === 0 ? 0 : this.hits / total;
+}
+}
+
+// Test it
+const cache = new AICache(3);
+cache.set("prompt-a", "Response A", 60);
+cache.set("prompt-b", "Response B", 60);
+
+console.log(cache.get("prompt-a")); // "Response A"
+console.log(cache.get("prompt-c")); // null
+
+cache.set("prompt-c", "Response C", 60);
+cache.set("prompt-d", "Response D", 60); // Should evict oldest (prompt-b)
+
+console.log(cache.get("prompt-b")); // null (evicted)
+console.log(cache.get("prompt-d")); // "Response D"
+console.log("Hit rate:", cache.hitRate());`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why does semantic caching use a similarity threshold instead of requiring an exact match?"
+  options={[
+    "Because embeddings are too expensive to compute exactly",
+    "Because users phrase the same question differently, and similar prompts often deserve the same cached answer",
+    "Because exact matching is not possible with embedding vectors",
+    "Because semantic caching is only used for translation tasks",
+  ]}
+  answer={1}
+  explanation="Natural language is varied — 'What is X?' and 'Explain X' mean the same thing. Semantic caching uses embedding similarity to serve cached results for paraphrased versions of the same question, dramatically improving hit rates."
+/>
+
+<Quiz
+  question="Which type of AI request should you NEVER cache?"
+  options={[
+    "Text classification with temperature 0",
+    "Multi-turn conversations that depend on message history",
+    "Code explanation requests for the same function",
+    "Translation requests between the same language pair",
+  ]}
+  answer={1}
+  explanation="Multi-turn conversations depend on the full message history. Even if the latest user message is identical, the conversation context is different, so a cached response would be wrong."
+/>
+
+<FillBlank
+  question="Semantic caching measures prompt similarity using ______ similarity between embedding vectors."
+  answer="cosine"
+/>
+
+## What you learned
+
+- Exact-match caching hashes the prompt, model, and parameters to avoid redundant inference for identical requests
+- Semantic caching uses embedding similarity to serve cached results for paraphrased prompts, but requires careful threshold tuning
+- Not all AI responses should be cached — conversations, high-temperature outputs, and user-specific content must bypass the cache

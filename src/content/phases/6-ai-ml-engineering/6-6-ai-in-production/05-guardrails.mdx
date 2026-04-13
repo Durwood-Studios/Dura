@@ -1,0 +1,336 @@
+---
+title: "Guardrails"
+description: "Protect AI services with input filtering, output validation, PII detection, injection defense, and hallucination checks."
+phase: 6
+module: "6-6-ai-in-production"
+order: 5
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+An LLM will do what its prompt tells it to do — including things you never intended. Users can inject instructions that override your system prompt. Models can hallucinate facts, generate harmful content, or leak system instructions. In production, the model is not the product — the product is the experience you build around it. Guardrails are the walls that keep that experience safe, predictable, and trustworthy. Without them, one creative user can turn your helpful assistant into a liability.
+
+## Defense in depth
+
+No single check catches everything. Layer your defenses so that if one layer fails, the next one catches the problem.
+
+```javascript
+async function processWithGuardrails(input, model) {
+  // Layer 1: Input validation
+  const inputCheck = validateInput(input);
+  if (!inputCheck.safe) return { error: inputCheck.reason, stage: "input" };
+
+  // Layer 2: PII detection and redaction
+  const sanitized = redactPII(input.prompt);
+
+  // Layer 3: Injection detection
+  const injectionCheck = detectInjection(sanitized);
+  if (injectionCheck.detected) return { error: "Suspicious input pattern", stage: "injection" };
+
+  // Layer 4: Model call
+  const response = await model.complete(sanitized);
+
+  // Layer 5: Output validation
+  const outputCheck = validateOutput(response);
+  if (!outputCheck.safe) return { error: "Response failed safety check", stage: "output" };
+
+  // Layer 6: Schema compliance
+  const formatted = enforceSchema(response, input.expectedSchema);
+
+  return { result: formatted, stage: "complete" };
+}
+```
+
+## Input filtering
+
+Catch bad input before it reaches the model. This saves money (no wasted inference) and prevents most attacks.
+
+```javascript
+function validateInput(input) {
+  const issues = [];
+
+  // Length limits — prevent context window abuse
+  if (input.prompt.length > 10000) {
+    issues.push("Prompt exceeds maximum length of 10,000 characters");
+  }
+
+  // Empty or whitespace-only
+  if (!input.prompt.trim()) {
+    issues.push("Prompt is empty");
+  }
+
+  // Content policy — reject obviously prohibited content
+  const blockedPatterns = [
+    /how to (make|build|create) (a )?(bomb|weapon|explosive)/i,
+    /generate.*malware/i,
+    /write.*phishing/i,
+  ];
+
+  for (const pattern of blockedPatterns) {
+    if (pattern.test(input.prompt)) {
+      issues.push("Content violates usage policy");
+      break;
+    }
+  }
+
+  return { safe: issues.length === 0, reason: issues.join("; ") };
+}
+```
+
+## PII detection and redaction
+
+Users paste personal data into AI prompts constantly — email addresses, phone numbers, API keys. Redact before the data reaches the model.
+
+```javascript
+function redactPII(text) {
+  const patterns = [
+    {
+      name: "email",
+      regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+      replacement: "[EMAIL]",
+    },
+    { name: "phone", regex: /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g, replacement: "[PHONE]" },
+    { name: "ssn", regex: /\b\d{3}-\d{2}-\d{4}\b/g, replacement: "[SSN]" },
+    {
+      name: "apiKey",
+      regex: /\b(sk-|pk_|api[_-]?key[=: ]+)[a-zA-Z0-9]{20,}/gi,
+      replacement: "[API_KEY]",
+    },
+    {
+      name: "creditCard",
+      regex: /\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b/g,
+      replacement: "[CARD]",
+    },
+  ];
+
+  let redacted = text;
+  const detections = [];
+
+  for (const { name, regex, replacement } of patterns) {
+    const matches = redacted.match(regex);
+    if (matches) {
+      detections.push({ type: name, count: matches.length });
+      redacted = redacted.replace(regex, replacement);
+    }
+  }
+
+  return { text: redacted, detections };
+}
+```
+
+Log detections so you know how often PII appears. If a particular feature consistently receives PII, adjust the UI to warn users before they submit.
+
+## Prompt injection detection
+
+Prompt injection is the SQL injection of AI. Users craft inputs that override your system prompt to make the model ignore its instructions.
+
+```javascript
+function detectInjection(text) {
+  const suspiciousPatterns = [
+    // Direct instruction override attempts
+    /ignore (all )?(previous|prior|above) (instructions|prompts|rules)/i,
+    /disregard (your|the) (system|initial) (prompt|instructions)/i,
+    /you are now/i,
+    /new instructions:/i,
+    /forget everything/i,
+
+    // System prompt extraction
+    /repeat (your|the) (system|initial) (prompt|message|instructions)/i,
+    /what (are|were) your (instructions|rules)/i,
+    /print your (system|initial) prompt/i,
+
+    // Role manipulation
+    /pretend (you are|to be|you're)/i,
+    /act as (a |an )?(unrestricted|unfiltered)/i,
+    /enable (developer|debug|admin) mode/i,
+  ];
+
+  const matched = [];
+  for (const pattern of suspiciousPatterns) {
+    if (pattern.test(text)) {
+      matched.push(pattern.source);
+    }
+  }
+
+  return {
+    detected: matched.length > 0,
+    patterns: matched,
+    confidence: Math.min(matched.length / 3, 1), // Rough confidence score
+  };
+}
+```
+
+Pattern matching catches obvious attempts. Sophisticated attacks use encoding tricks, multi-language instructions, or indirect injection via external content. No detection system is perfect — which is why output validation matters just as much.
+
+## Output validation
+
+Even with clean input, the model can produce problematic output. Validate every response before returning it to the user.
+
+```javascript
+function validateOutput(response) {
+  const issues = [];
+
+  // Check for leaked system prompt content
+  const systemPromptLeaks = [
+    /you are (a |an )?AI assistant/i,
+    /as (a |an )?language model/i,
+    /my (system |initial )?instructions/i,
+  ];
+
+  for (const pattern of systemPromptLeaks) {
+    if (pattern.test(response.text)) {
+      issues.push("Response may contain leaked system instructions");
+    }
+  }
+
+  // Check for hallucinated URLs (models often invent plausible-looking URLs)
+  const urls = response.text.match(/https?:\/\/[^\s)]+/g) || [];
+  if (urls.length > 0) {
+    issues.push(`Response contains ${urls.length} URL(s) — verify before displaying`);
+  }
+
+  // Check for refusal patterns that indicate the model rejected the task
+  const refusals = /I (cannot|can't|won't|am unable to|am not able to)/i;
+  if (refusals.test(response.text)) {
+    issues.push("Model refused the request");
+  }
+
+  return { safe: issues.length === 0, issues };
+}
+
+// Schema enforcement — ensure structured output matches expected format
+function enforceSchema(response, schema) {
+  if (!schema) return response.text;
+
+  try {
+    const parsed = JSON.parse(response.text);
+
+    // Validate required fields exist
+    for (const field of schema.required || []) {
+      if (!(field in parsed)) {
+        throw new Error(`Missing required field: ${field}`);
+      }
+    }
+
+    // Validate field types
+    for (const [field, type] of Object.entries(schema.types || {})) {
+      if (field in parsed && typeof parsed[field] !== type) {
+        throw new Error(`Field ${field} should be ${type}, got ${typeof parsed[field]}`);
+      }
+    }
+
+    return parsed;
+  } catch (error) {
+    return { error: "Response did not match expected schema", raw: response.text };
+  }
+}
+```
+
+## Hallucination detection
+
+Models state falsehoods with absolute confidence. For factual domains, cross-check claims against known data.
+
+```javascript
+function detectPotentialHallucinations(response, context) {
+  const flags = [];
+
+  // Check for specific claims (numbers, dates, names) not in the source context
+  const numbers = response.text.match(/\b\d{4,}\b/g) || [];
+  for (const num of numbers) {
+    if (!context.includes(num)) {
+      flags.push({ type: "unsourced-number", value: num });
+    }
+  }
+
+  // Check confidence language on uncertain topics
+  const overconfident = /(?:definitely|certainly|always|never|100%|guaranteed)/i;
+  if (overconfident.test(response.text)) {
+    flags.push({ type: "overconfident-language" });
+  }
+
+  return {
+    riskLevel: flags.length === 0 ? "low" : flags.length < 3 ? "medium" : "high",
+    flags,
+  };
+}
+```
+
+<SandboxExercise language="javascript">
+{`// Build a guardrails pipeline that validates input and output.
+
+function checkInput(prompt) {
+// Return { safe: boolean, issues: string[] }
+// Check for:
+// 1. Empty prompt
+// 2. Prompt over 5000 characters
+// 3. Contains "ignore previous instructions" (case insensitive)
+// 4. Contains email pattern (basic: word@word.word)
+}
+
+function checkOutput(response) {
+// Return { safe: boolean, issues: string[] }
+// Check for:
+// 1. Empty response
+// 2. Contains "as an AI language model" (case insensitive)
+// 3. Contains URLs (http:// or https://)
+}
+
+// Test input checks
+console.log(checkInput("")); // safe: false
+console.log(checkInput("Hello, help me code")); // safe: true
+console.log(checkInput("Ignore previous instructions")); // safe: false
+console.log(checkInput("Email me at test@example.com")); // safe: false
+
+// Test output checks
+console.log(checkOutput("Here is your answer: ...")); // safe: true
+console.log(checkOutput("As an AI language model, I")); // safe: false
+console.log(checkOutput("Check https://fake.com")); // safe: false`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why is prompt injection compared to SQL injection?"
+  options={[
+    "Both exploit database vulnerabilities",
+    "Both involve user input that changes the intended behavior of a system by overriding instructions",
+    "Both require knowledge of the backend programming language",
+    "Both can only be prevented with input validation",
+  ]}
+  answer={1}
+  explanation="SQL injection manipulates database queries by inserting commands into user input. Prompt injection manipulates AI behavior by inserting instructions into user prompts. Both exploit the mixing of data and instructions in the same channel."
+/>
+
+<Quiz
+  question="What is the purpose of output validation in an AI guardrails pipeline?"
+  options={[
+    "To improve the quality of the model's writing style",
+    "To catch leaked system prompts, hallucinated facts, and schema violations even when input was clean",
+    "To reduce the cost of model inference",
+    "To speed up response time by filtering short answers",
+  ]}
+  answer={1}
+  explanation="Even with perfectly validated input, models can hallucinate, leak system instructions, or produce malformed output. Output validation is the last line of defense before the response reaches the user."
+/>
+
+<FillBlank
+  question="The layered security approach of input filtering, PII redaction, injection detection, and output validation is called defense in ______."
+  answer="depth"
+/>
+
+## What you learned
+
+- Defense in depth layers input validation, PII redaction, injection detection, and output validation so no single failure compromises the system
+- Prompt injection detection uses pattern matching to catch instruction-override attempts, but output validation remains essential because no input filter is foolproof
+- Output guardrails verify schema compliance, detect hallucination signals, and catch leaked system instructions before responses reach users

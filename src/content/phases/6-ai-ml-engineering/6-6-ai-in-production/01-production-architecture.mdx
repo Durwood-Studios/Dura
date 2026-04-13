@@ -1,0 +1,245 @@
+---
+title: "Production Architecture"
+description: "Design AI services that separate inference from application logic using API gateways, queues, workers, and caches."
+phase: 6
+module: "6-6-ai-in-production"
+order: 1
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Architecture"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Calling an LLM directly from a request handler is fine for a prototype. In production it is a liability. Model inference is slow (seconds, not milliseconds), expensive (every token costs money), and unpredictable (timeouts, rate limits, degraded quality). If your web server blocks on a model call, a traffic spike can cascade into downtime for your entire application — not just the AI feature. A layered architecture isolates that risk and gives you knobs to tune latency, cost, and reliability independently.
+
+## The five-layer pattern
+
+Most production AI services converge on the same shape:
+
+```
+Client → API Gateway → Queue → Worker → Model → Cache
+```
+
+Each layer has one job. The gateway authenticates and validates. The queue absorbs bursts. The worker manages the model lifecycle. The cache avoids redundant inference. Separating these concerns means you can scale, swap, or disable any layer without rewriting the others.
+
+## API gateway
+
+The gateway is the front door. It handles authentication, input validation, and request routing before any AI logic runs.
+
+```javascript
+// Simplified gateway handler
+async function handleAIRequest(req) {
+  // 1. Authenticate
+  const user = await authenticateRequest(req.headers.authorization);
+  if (!user) return { status: 401, body: { error: "Unauthorized" } };
+
+  // 2. Validate input
+  const { prompt, model } = req.body;
+  if (!prompt || prompt.length > 4000) {
+    return { status: 400, body: { error: "Invalid prompt" } };
+  }
+
+  // 3. Check rate limit before queuing
+  const allowed = await checkRateLimit(user.id, "ai-requests");
+  if (!allowed) {
+    return { status: 429, body: { error: "Rate limit exceeded", retryAfter: 60 } };
+  }
+
+  // 4. Enqueue — return immediately with a job ID
+  const jobId = await enqueue({ userId: user.id, prompt, model });
+  return { status: 202, body: { jobId, status: "queued" } };
+}
+```
+
+Returning `202 Accepted` with a job ID is the key pattern. The client polls or subscribes for the result. The gateway never waits on inference.
+
+## Queue and worker
+
+The queue decouples request volume from processing capacity. Workers pull jobs at their own pace, which protects both your model infrastructure and your wallet.
+
+```javascript
+// Worker loop — pulls jobs and processes them
+async function processQueue(queue, modelClient, cache) {
+  while (true) {
+    const job = await queue.dequeue({ waitTimeSeconds: 20 });
+    if (!job) continue;
+
+    try {
+      // Check cache first
+      const cached = await cache.get(job.prompt);
+      if (cached) {
+        await markComplete(job.id, cached);
+        continue;
+      }
+
+      // Call the model
+      const result = await modelClient.complete({
+        prompt: job.prompt,
+        model: job.model || "default",
+        maxTokens: 1024,
+      });
+
+      // Cache the result, then mark done
+      await cache.set(job.prompt, result, { ttl: 3600 });
+      await markComplete(job.id, result);
+    } catch (error) {
+      await markFailed(job.id, error.message);
+      // Dead-letter queue for manual inspection
+      if (job.attempts >= 3) await deadLetter(job);
+    }
+  }
+}
+```
+
+Workers should be stateless. If one crashes, another picks up the job. The dead-letter queue catches poison messages so one bad input does not stall the entire pipeline.
+
+## Async processing patterns
+
+Clients need the result eventually. Three common patterns:
+
+```javascript
+// Pattern 1: Polling
+async function pollForResult(jobId, maxAttempts = 30) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const response = await fetch(`/api/jobs/${jobId}`);
+    const data = await response.json();
+
+    if (data.status === "complete") return data.result;
+    if (data.status === "failed") throw new Error(data.error);
+
+    await new Promise((r) => setTimeout(r, 1000 + i * 500)); // Back off
+  }
+  throw new Error("Timeout waiting for result");
+}
+
+// Pattern 2: Server-Sent Events (streaming)
+function subscribeToJob(jobId, onChunk, onDone) {
+  const source = new EventSource(`/api/jobs/${jobId}/stream`);
+  source.addEventListener("chunk", (e) => onChunk(JSON.parse(e.data)));
+  source.addEventListener("done", (e) => {
+    onDone(JSON.parse(e.data));
+    source.close();
+  });
+  return source;
+}
+
+// Pattern 3: Webhook callback
+async function enqueueWithCallback(prompt, callbackUrl) {
+  return fetch("/api/ai", {
+    method: "POST",
+    body: JSON.stringify({ prompt, callbackUrl }),
+  });
+}
+```
+
+Polling is simplest. SSE is best for streaming token-by-token output. Webhooks suit server-to-server workflows where no human is waiting.
+
+## Separating inference from application logic
+
+The application layer should never import model SDKs directly. Wrap all model access behind a service interface so you can swap providers, add fallbacks, or mock for testing.
+
+```javascript
+// ai-service.js — the only file that knows about model providers
+const AI_CONFIG = {
+  primary: { provider: "openai", model: "gpt-4o-mini" },
+  fallback: { provider: "anthropic", model: "claude-3-haiku-20240307" },
+};
+
+async function completePrompt(prompt, options = {}) {
+  try {
+    return await callProvider(AI_CONFIG.primary, prompt, options);
+  } catch (error) {
+    console.error("Primary model failed, trying fallback:", error.message);
+    return callProvider(AI_CONFIG.fallback, prompt, options);
+  }
+}
+```
+
+Your application code calls `completePrompt`. It never knows or cares which provider answered.
+
+<SandboxExercise language="javascript">
+{`// Build a simple job queue with async processing.
+// Implement enqueue, dequeue, and a worker that processes jobs.
+
+class JobQueue {
+constructor() {
+this.jobs = [];
+this.results = new Map();
+}
+
+enqueue(prompt) {
+// Generate a job ID, add to the queue, return the ID
+}
+
+getResult(jobId) {
+// Return the result if available, or { status: "pending" }
+}
+
+async processNext(modelFn) {
+// Pull the next job, call modelFn(prompt), store result
+// Handle errors by storing { status: "failed", error: message }
+}
+}
+
+// Mock model function — simulates LLM call
+async function mockModel(prompt) {
+return "Response to: " + prompt;
+}
+
+// Test it
+const queue = new JobQueue();
+const id1 = queue.enqueue("What is production architecture?");
+const id2 = queue.enqueue("Explain async patterns");
+
+console.log(queue.getResult(id1)); // { status: "pending" }
+
+await queue.processNext(mockModel);
+console.log(queue.getResult(id1)); // { status: "complete", result: "Response to: ..." }
+console.log(queue.getResult(id2)); // { status: "pending" }`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why does the API gateway return 202 Accepted instead of waiting for the model response?"
+  options={[
+    "Because 202 is the correct status code for AI responses",
+    "To free the gateway from blocking on slow inference, letting it handle more requests",
+    "Because the model always returns errors on the first try",
+    "To avoid sending the response body in the initial request",
+  ]}
+  answer={1}
+  explanation="Model inference takes seconds. If the gateway blocks, it ties up a connection and limits throughput. Returning 202 immediately lets the gateway serve thousands of requests while workers handle inference asynchronously."
+/>
+
+<Quiz
+  question="What is the purpose of a dead-letter queue in an AI worker pipeline?"
+  options={[
+    "To store successful responses for caching",
+    "To retry failed jobs indefinitely until they succeed",
+    "To capture repeatedly failing jobs for manual inspection without blocking the main queue",
+    "To prioritize high-value requests over low-value ones",
+  ]}
+  answer={2}
+  explanation="After a job fails multiple times, it moves to the dead-letter queue so the main queue keeps processing. Engineers can inspect dead-lettered jobs to find bugs, malformed inputs, or provider issues."
+/>
+
+<FillBlank
+  question="The five layers of a production AI architecture are: Client, API Gateway, ______, Worker, and Model/Cache."
+  answer="Queue"
+/>
+
+## What you learned
+
+- Production AI services separate inference from application logic using a gateway-queue-worker-model-cache pipeline
+- Async processing patterns (polling, SSE, webhooks) prevent model latency from blocking the user experience
+- Wrapping model access behind a service interface enables provider fallbacks, testing, and swappable models without application changes
