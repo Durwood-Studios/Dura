@@ -1,14 +1,14 @@
 ---
-title: "Fine-Tuning Project: End to End"
-description: "Prepare data, configure LoRA, train, evaluate, and serve. The complete fine-tuning workflow."
+title: "Fine-Tuning Project"
+description: "End-to-end walkthrough: prepare JSONL data, configure LoRA, train, evaluate, and serve a fine-tuned model."
 phase: 6
 module: "6-5-fine-tuning"
 order: 8
-estimatedMinutes: 10
+estimatedMinutes: 12
 difficulty: "advanced"
 standards:
   cs2023: ["AI-1"]
-  swebok: ["Software Design"]
+  swebok: ["Software Construction"]
   bloom: "apply"
   sfia: 5
   dreyfus: "proficient"
@@ -18,196 +18,517 @@ vocabulary:
 
 ## Why this matters
 
-The previous seven lessons taught each piece of fine-tuning in isolation. This lesson puts them together into the end-to-end workflow you will actually run when you fine-tune a model for production. Every step has a decision point, and the decisions compound.
+Individual concepts — data preparation, LoRA configuration, training loops, evaluation, deployment — are useful in isolation. But fine-tuning is an end-to-end pipeline where each stage feeds the next. A mistake in data preparation surfaces as poor evaluation metrics. A wrong LoRA rank manifests as overfitting during training. This lesson connects every concept from this module into a single working project you can adapt to your own tasks.
 
-## The pipeline
+## The project: a code review model
 
-```text
-1. Define the task
-2. Collect and format training data (JSONL)
-3. Split: train / validation / test
-4. Choose base model + LoRA config
-5. Train with early stopping
-6. Evaluate on test set
-7. Compare to base model
-8. Deploy or iterate
-```
+We are building a fine-tuned model that reviews JavaScript code and returns structured JSON output with identified issues, severity levels, and actionable suggestions. This is a realistic task where fine-tuning makes sense — the base model can already review code, but we need it to consistently output a specific JSON format with our severity taxonomy.
 
-## Step 1: Define the task
+## Stage 1: Data preparation
 
-Fine-tuning works best for well-defined, narrow tasks. "Make the model better" is not a task. "Convert customer emails into structured support tickets with category, priority, and summary" is a task.
-
-Write down: input format, expected output format, 10 example pairs. If you cannot write 10 examples by hand, you do not understand the task well enough to fine-tune for it.
-
-## Step 2: Prepare JSONL data
+Every fine-tuning project starts with data. We need system/user/assistant message triples in JSONL format.
 
 ```javascript
-const trainingExample = {
-  messages: [
-    {
-      role: "system",
-      content:
-        "Convert customer emails into support tickets. Return JSON with category, priority (low/medium/high), and a one-sentence summary.",
-    },
-    {
-      role: "user",
-      content: "Hi, my order #4521 hasn't arrived and it's been 2 weeks. This is urgent.",
-    },
-    {
-      role: "assistant",
-      content:
-        '{"category":"shipping","priority":"high","summary":"Order #4521 not delivered after 2 weeks."}',
-    },
-  ],
-};
-```
+// Stage 1: Build and validate the training dataset
+const SYSTEM_PROMPT =
+  "You are a JavaScript code reviewer. For each code snippet, respond with a JSON object containing: issues (array of strings), severity (low|medium|high|critical), and suggestion (string with actionable fix).";
 
-Each line in the JSONL file is one complete conversation. Aim for 100-500 high-quality examples. Quality beats quantity.
-
-## Step 3: Train/validation/test split
-
-```javascript
-function splitData(examples, trainRatio = 0.8, valRatio = 0.1) {
-  const shuffled = [...examples].sort(() => Math.random() - 0.5);
-  const trainEnd = Math.floor(shuffled.length * trainRatio);
-  const valEnd = trainEnd + Math.floor(shuffled.length * valRatio);
+function createTrainingExample(code, issues, severity, suggestion) {
   return {
-    train: shuffled.slice(0, trainEnd),
-    validation: shuffled.slice(trainEnd, valEnd),
-    test: shuffled.slice(valEnd),
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: `Review this code:\n\`\`\`javascript\n${code}\n\`\`\`` },
+      {
+        role: "assistant",
+        content: JSON.stringify({ issues, severity, suggestion }),
+      },
+    ],
   };
 }
+
+// Build the dataset — in production this comes from human-reviewed logs
+const dataset = [
+  createTrainingExample(
+    "let x = null;\nx.toString();",
+    ["null dereference on line 2"],
+    "high",
+    "Add a null check before calling methods: if (x !== null) { x.toString(); }"
+  ),
+  createTrainingExample(
+    "const password = 'admin123';",
+    ["hardcoded credential"],
+    "critical",
+    "Move secrets to environment variables: const password = process.env.DB_PASSWORD;"
+  ),
+  createTrainingExample(
+    "function add(a, b) {\n  return a + b;\n}",
+    ["no parameter type validation", "no JSDoc"],
+    "low",
+    "Add type checks and documentation for maintainability."
+  ),
+  createTrainingExample(
+    "eval(userInput);",
+    ["eval with untrusted input", "code injection vulnerability"],
+    "critical",
+    "Never use eval with user input. Use JSON.parse() for data or a sandboxed interpreter."
+  ),
+  createTrainingExample(
+    "for (let i = 0; i <= arr.length; i++) {\n  console.log(arr[i]);\n}",
+    ["off-by-one error: <= should be <"],
+    "high",
+    "Change i <= arr.length to i < arr.length to avoid accessing undefined."
+  ),
+];
+
+// Validate every example
+function validateExample(example) {
+  const errors = [];
+  if (example.messages.length !== 3) errors.push("Must have exactly 3 messages");
+  if (example.messages[0].role !== "system") errors.push("First message must be system");
+  if (example.messages[1].role !== "user") errors.push("Second message must be user");
+  if (example.messages[2].role !== "assistant") errors.push("Third message must be assistant");
+
+  try {
+    const parsed = JSON.parse(example.messages[2].content);
+    if (!Array.isArray(parsed.issues)) errors.push("Assistant response missing issues array");
+    if (!["low", "medium", "high", "critical"].includes(parsed.severity)) {
+      errors.push("Invalid severity: " + parsed.severity);
+    }
+    if (typeof parsed.suggestion !== "string") errors.push("Missing suggestion string");
+  } catch {
+    errors.push("Assistant response is not valid JSON");
+  }
+
+  return errors;
+}
+
+let validCount = 0;
+dataset.forEach((example, i) => {
+  const errors = validateExample(example);
+  if (errors.length === 0) {
+    validCount++;
+  } else {
+    console.log(`Example ${i}: ${errors.join(", ")}`);
+  }
+});
+console.log(`\nValidation: ${validCount}/${dataset.length} examples pass`);
+
+// Output JSONL
+const jsonl = dataset.map((ex) => JSON.stringify(ex)).join("\n");
+console.log(`\nJSONL output (${jsonl.split("\n").length} lines, ${jsonl.length} bytes)`);
 ```
 
-Train on train, tune hyperparameters on validation, report final metrics on test. Never touch the test set until the very end.
+## Stage 2: LoRA configuration
 
-## Step 4: Configure LoRA
-
-Key parameters:
-
-- **rank (r):** 8-64. Higher rank = more capacity but more parameters. Start at 16.
-- **alpha:** Usually 2× rank. Controls the scaling of the adapter.
-- **target modules:** Which layers to adapt. Usually attention layers (q_proj, v_proj).
-- **dropout:** 0.05-0.1 to prevent overfitting.
-
-## Step 5: Train with monitoring
-
-Watch the validation loss. If it stops decreasing (or starts increasing) while training loss keeps dropping, you are overfitting. Stop early.
-
-Key hyperparameters:
-
-- **Learning rate:** 1e-4 to 5e-5 for LoRA. Lower than full fine-tuning.
-- **Batch size:** As large as GPU memory allows.
-- **Epochs:** 1-5 for most tasks. More data → fewer epochs.
-
-## Step 6: Evaluate
-
-Run the test set through both the base model and the fine-tuned model. Compare:
+With validated data, we configure the training parameters. The choices here depend on dataset size, task complexity, and available hardware.
 
 ```javascript
-function evaluateModel(testSet, modelFn) {
-  let correct = 0;
-  for (const example of testSet) {
-    const prediction = modelFn(example.input);
-    if (matchesExpected(prediction, example.expected)) correct++;
-  }
-  return { accuracy: correct / testSet.length, total: testSet.length };
+// Stage 2: Configure LoRA and training parameters
+function buildTrainingConfig(datasetSize, gpuMemoryGB) {
+  // Adapt configuration to dataset size and hardware
+  const isSmallDataset = datasetSize < 200;
+  const isLimitedGPU = gpuMemoryGB <= 24;
+
+  const config = {
+    // Model selection
+    baseModel: isLimitedGPU ? "mistralai/Mistral-7B-v0.3" : "meta-llama/Llama-3.1-8B",
+    quantization: isLimitedGPU ? "4bit" : "none",
+
+    // LoRA parameters — conservative for small datasets
+    lora: {
+      rank: isSmallDataset ? 8 : 16,
+      alpha: isSmallDataset ? 16 : 32,
+      targetModules: ["q_proj", "k_proj", "v_proj", "o_proj"],
+      dropout: isSmallDataset ? 0.1 : 0.05, // More regularization for small data
+    },
+
+    // Training parameters
+    training: {
+      epochs: isSmallDataset ? 2 : 3,
+      batchSize: isLimitedGPU ? 2 : 4,
+      gradientAccumulation: isLimitedGPU ? 8 : 4,
+      learningRate: 2e-4,
+      warmupRatio: 0.03,
+      scheduler: "cosine",
+      maxSeqLength: 1024,
+    },
+
+    // Evaluation
+    evaluation: {
+      strategy: "steps",
+      evalSteps: 25,
+      saveSteps: 25,
+      loadBestAtEnd: true,
+      metric: "eval_loss",
+    },
+  };
+
+  const effectiveBatch = config.training.batchSize * config.training.gradientAccumulation;
+  const stepsPerEpoch = Math.ceil((datasetSize * 0.9) / effectiveBatch); // 90% for training
+  const totalSteps = stepsPerEpoch * config.training.epochs;
+
+  console.log("Training Configuration:");
+  console.log(`  Base model: ${config.baseModel}`);
+  console.log(`  Quantization: ${config.quantization}`);
+  console.log(`  LoRA rank: ${config.lora.rank}, alpha: ${config.lora.alpha}`);
+  console.log(`  Effective batch: ${effectiveBatch}`);
+  console.log(`  Total steps: ${totalSteps}`);
+  console.log(`  Eval every: ${config.evaluation.evalSteps} steps`);
+
+  return config;
 }
+
+const config = buildTrainingConfig(500, 24);
 ```
 
-If the fine-tuned model is not measurably better on the test set, the fine-tuning did not work. Go back to data quality.
+## Stage 3: Training simulation
 
-## Step 7: Deploy or iterate
+In production, training runs on a GPU. Here we simulate the training loop to understand what happens at each step and what to watch for.
 
-If metrics are good: quantize (4-bit or 8-bit), serve with vLLM or Ollama, monitor in production. If not: collect more/better data, adjust hyperparameters, try a different base model.
+```javascript
+// Stage 3: Simulate the training process
+function simulateTraining(datasetSize, config) {
+  const trainSize = Math.floor(datasetSize * 0.9);
+  const effectiveBatch = config.training.batchSize * config.training.gradientAccumulation;
+  const stepsPerEpoch = Math.ceil(trainSize / effectiveBatch);
+
+  let trainLoss = 3.2;
+  let bestValLoss = Infinity;
+  let bestStep = 0;
+  let patience = 0;
+  const maxPatience = 3;
+  const history = [];
+
+  console.log("Starting training...\n");
+
+  for (let epoch = 1; epoch <= config.training.epochs; epoch++) {
+    for (let step = 1; step <= stepsPerEpoch; step++) {
+      const globalStep = (epoch - 1) * stepsPerEpoch + step;
+
+      // Simulate loss decrease with noise
+      const progress = globalStep / (stepsPerEpoch * config.training.epochs);
+      trainLoss = 3.2 * Math.exp(-3 * progress) + 0.3 + (Math.random() - 0.5) * 0.1;
+
+      // Evaluate at intervals
+      if (globalStep % config.evaluation.evalSteps === 0) {
+        // Validation loss — starts rising after ~60% progress (overfitting)
+        const valLoss = trainLoss + 0.1 + (progress > 0.6 ? (progress - 0.6) * 2 : 0);
+
+        history.push({ step: globalStep, trainLoss, valLoss, epoch });
+
+        const improved = valLoss < bestValLoss;
+        if (improved) {
+          bestValLoss = valLoss;
+          bestStep = globalStep;
+          patience = 0;
+        } else {
+          patience++;
+        }
+
+        console.log(
+          `Step ${globalStep} (epoch ${epoch}) | Train: ${trainLoss.toFixed(3)} | Val: ${valLoss.toFixed(3)} | ${improved ? "IMPROVED" : "no improvement (" + patience + "/" + maxPatience + ")"}`
+        );
+
+        if (patience >= maxPatience) {
+          console.log(`\nEarly stopping at step ${globalStep}`);
+          console.log(`Best checkpoint: step ${bestStep} (val loss: ${bestValLoss.toFixed(3)})`);
+          return { bestStep, bestValLoss, history };
+        }
+      }
+    }
+  }
+
+  console.log(`\nTraining complete. Best: step ${bestStep} (val loss: ${bestValLoss.toFixed(3)})`);
+  return { bestStep, bestValLoss, history };
+}
+
+const trainingResult = simulateTraining(500, config);
+```
+
+## Stage 4: Evaluation
+
+Load the best checkpoint and run it against the evaluation dataset. We check both format compliance and task accuracy.
+
+```javascript
+// Stage 4: Evaluate the best checkpoint
+function evaluateCheckpoint(evalExamples) {
+  const metrics = {
+    formatCompliance: 0,
+    severityCorrect: 0,
+    issuesFound: 0,
+    totalIssues: 0,
+    total: evalExamples.length,
+  };
+
+  for (const example of evalExamples) {
+    // Simulate model output (in practice, run inference on eval set)
+    const modelOutput = example.simulatedOutput;
+
+    // Check format
+    try {
+      const parsed = JSON.parse(modelOutput);
+      if (parsed.issues && parsed.severity && parsed.suggestion) {
+        metrics.formatCompliance++;
+      }
+
+      // Check severity
+      if (parsed.severity === example.expectedSeverity) {
+        metrics.severityCorrect++;
+      }
+
+      // Check issue detection
+      const foundCount = parsed.issues.filter((issue) =>
+        example.expectedIssues.some((expected) =>
+          issue.toLowerCase().includes(expected.toLowerCase())
+        )
+      ).length;
+      metrics.issuesFound += foundCount;
+      metrics.totalIssues += example.expectedIssues.length;
+    } catch {
+      // Format failure — counts against format compliance
+    }
+  }
+
+  return {
+    formatCompliance: ((metrics.formatCompliance / metrics.total) * 100).toFixed(1),
+    severityAccuracy: ((metrics.severityCorrect / metrics.total) * 100).toFixed(1),
+    issueRecall: ((metrics.issuesFound / metrics.totalIssues) * 100).toFixed(1),
+  };
+}
+
+const evalExamples = [
+  {
+    simulatedOutput:
+      '{"issues":["null dereference"],"severity":"high","suggestion":"Add null check."}',
+    expectedSeverity: "high",
+    expectedIssues: ["null"],
+  },
+  {
+    simulatedOutput:
+      '{"issues":["hardcoded password"],"severity":"critical","suggestion":"Use env vars."}',
+    expectedSeverity: "critical",
+    expectedIssues: ["hardcoded"],
+  },
+  {
+    simulatedOutput:
+      '{"issues":["no validation"],"severity":"medium","suggestion":"Add input checks."}',
+    expectedSeverity: "medium",
+    expectedIssues: ["validation", "type check"],
+  },
+  {
+    simulatedOutput:
+      '{"issues":["eval injection"],"severity":"critical","suggestion":"Remove eval."}',
+    expectedSeverity: "critical",
+    expectedIssues: ["eval"],
+  },
+];
+
+const evalResults = evaluateCheckpoint(evalExamples);
+console.log("\nEvaluation Results:");
+console.log(`  Format compliance: ${evalResults.formatCompliance}%`);
+console.log(`  Severity accuracy: ${evalResults.severityAccuracy}%`);
+console.log(`  Issue recall: ${evalResults.issueRecall}%`);
+
+const isReadyForDeploy =
+  parseFloat(evalResults.formatCompliance) >= 95 && parseFloat(evalResults.severityAccuracy) >= 80;
+console.log(`\nDeploy decision: ${isReadyForDeploy ? "READY" : "NEEDS MORE WORK"}`);
+```
+
+## Stage 5: Deployment
+
+With a validated model, we configure serving and build the API integration.
+
+```javascript
+// Stage 5: Deployment configuration
+function generateDeploymentPlan(evalResults, modelConfig) {
+  const plan = {
+    steps: [
+      {
+        name: "Merge LoRA adapter",
+        command:
+          "python merge_adapter.py --base-model " +
+          modelConfig.baseModel +
+          " --adapter ./output/best-checkpoint --output ./merged-model",
+        purpose: "Combine adapter weights into base model for zero-overhead inference",
+      },
+      {
+        name: "Quantize for serving",
+        command:
+          "python quantize.py --model ./merged-model --format awq --bits 4 --output ./quantized-model",
+        purpose: "Reduce model size by ~4x with minimal quality loss",
+      },
+      {
+        name: "Start vLLM server",
+        command:
+          "vllm serve ./quantized-model --port 8000 --max-model-len 1024 --tensor-parallel-size 1",
+        purpose: "Launch high-throughput serving with PagedAttention",
+      },
+      {
+        name: "Health check",
+        command: "curl http://localhost:8000/health",
+        purpose: "Verify the server is ready to accept requests",
+      },
+    ],
+
+    apiEndpoint: {
+      url: "http://localhost:8000/v1/chat/completions",
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      exampleBody: {
+        model: "code-reviewer",
+        messages: [
+          { role: "system", content: "You are a JavaScript code reviewer. Respond in JSON." },
+          { role: "user", content: "Review: eval(input)" },
+        ],
+        max_tokens: 300,
+        temperature: 0.1,
+      },
+    },
+  };
+
+  console.log("Deployment Plan:");
+  plan.steps.forEach((step, i) => {
+    console.log(`\n  ${i + 1}. ${step.name}`);
+    console.log(`     ${step.purpose}`);
+    console.log(`     $ ${step.command}`);
+  });
+
+  console.log("\n\nAPI Usage:");
+  console.log(`  POST ${plan.apiEndpoint.url}`);
+  console.log(`  Body: ${JSON.stringify(plan.apiEndpoint.exampleBody, null, 2)}`);
+
+  return plan;
+}
+
+generateDeploymentPlan(evalResults, config);
+```
+
+## The complete pipeline at a glance
+
+```javascript
+// End-to-end pipeline summary
+const pipeline = [
+  {
+    stage: "Data",
+    input: "Raw logs / manual examples",
+    output: "Validated JSONL",
+    effort: "40% of total time",
+  },
+  {
+    stage: "Config",
+    input: "Dataset size + hardware",
+    output: "LoRA + training params",
+    effort: "5% of total time",
+  },
+  {
+    stage: "Train",
+    input: "JSONL + config",
+    output: "Best checkpoint",
+    effort: "15% of total time",
+  },
+  {
+    stage: "Evaluate",
+    input: "Checkpoint + eval set",
+    output: "Quality metrics",
+    effort: "20% of total time",
+  },
+  {
+    stage: "Deploy",
+    input: "Merged + quantized model",
+    output: "API endpoint",
+    effort: "20% of total time",
+  },
+];
+
+console.log("Fine-Tuning Pipeline:");
+pipeline.forEach((s) => {
+  console.log(`  ${s.stage}: ${s.input} → ${s.output} (${s.effort})`);
+});
+console.log("\nKey insight: Data preparation and evaluation take 60% of the effort.");
+console.log("Training itself is the easy part.");
+```
 
 ## Try it
 
-<SandboxExercise
-  language="javascript"
-  instructions="Write a function that validates a JSONL training file: each line must parse as JSON, have a messages array, and each message must have role and content fields."
-  initialCode={`function validateJSONL(lines) {
-  const errors = [];
-  for (let i = 0; i < lines.length; i++) {
-    // Validate each line
-  }
-  return { valid: errors.length === 0, errors };
+<SandboxExercise language="javascript">
+{`// Build a mini end-to-end pipeline.
+// Given raw code review data, prepare it, validate it, split it,
+// and produce a deployment readiness report.
+
+function runPipeline(rawData) {
+// Stage 1: Convert to training format
+const examples = rawData.map(d => ({
+messages: [
+{ role: "system", content: "You are a code reviewer. Respond in JSON." },
+{ role: "user", content: "Review: " + d.code },
+{ role: "assistant", content: JSON.stringify({ issues: d.issues, severity: d.severity, suggestion: d.suggestion }) }
+]
+}));
+
+// TODO: Stage 2 — Validate examples
+// Remove any where severity is not in ["low", "medium", "high", "critical"]
+// Remove any where issues array is empty AND severity is not "low"
+
+// TODO: Stage 3 — Split into train (80%) and eval (20%)
+
+// TODO: Stage 4 — Generate readiness report
+// Report should include:
+// - Total examples, train count, eval count
+// - Average assistant message length
+// - Severity distribution (count of each severity level)
+// - Ready to train: yes if train count >= 50, no otherwise
+
+console.log("Implement the pipeline stages above");
 }
 
-const lines = [
-'{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}',
-'{"messages":[{"role":"user"}]}',
-'not json',
+const rawData = [
+{ code: "eval(x)", issues: ["eval usage"], severity: "critical", suggestion: "Remove eval" },
+{ code: "let a = 1", issues: [], severity: "low", suggestion: "Use const" },
+{ code: "x.toString()", issues: ["possible null"], severity: "medium", suggestion: "Add null check" },
+{ code: "password='123'", issues: ["hardcoded secret"], severity: "critical", suggestion: "Use env vars" },
+{ code: "for(;;){}", issues: ["infinite loop"], severity: "high", suggestion: "Add break condition" },
+{ code: "var x = 1", issues: ["var usage"], severity: "low", suggestion: "Use const or let" },
+{ code: "console.log(secret)", issues: ["leaking secret"], severity: "high", suggestion: "Remove logging of sensitive data" },
+{ code: "return a + b", issues: [], severity: "invalid", suggestion: "Looks fine" }, // invalid severity
 ];
 
-console.log(validateJSONL(lines));`}
-  solution={`function validateJSONL(lines) {
-const errors = [];
-for (let i = 0; i < lines.length; i++) {
-try {
-const obj = JSON.parse(lines[i]);
-if (!Array.isArray(obj.messages)) {
-errors.push(\`Line \${i + 1}: missing messages array\`);
-continue;
-}
-for (const msg of obj.messages) {
-if (!msg.role || !msg.content) {
-errors.push(\`Line \${i + 1}: message missing role or content\`);
-}
-}
-} catch {
-errors.push(\`Line \${i + 1}: invalid JSON\`);
-}
-}
-return { valid: errors.length === 0, errors };
-}
+runPipeline(rawData);`}
 
-const lines = [
-'{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}',
-'{"messages":[{"role":"user"}]}',
-'not json',
-];
-
-console.log(validateJSONL(lines));`}
-testCases={["validateJSONL catches errors"]}
-/>
+</SandboxExercise>
 
 ## Check your understanding
 
 <Quiz
-  questions={[
-    {
-      type: "multiple-choice",
-      question: "What should you do if validation loss increases while training loss decreases?",
-      options: [
-        "Train longer",
-        "Stop training — the model is overfitting",
-        "Increase the learning rate",
-        "Add more layers",
-      ],
-      correct: 1,
-      explanation:
-        "Diverging train/validation loss is the classic sign of overfitting. Stop early and evaluate.",
-    },
-    {
-      type: "multiple-choice",
-      question: "How many high-quality examples are typically needed for LoRA fine-tuning?",
-      options: ["10", "100-500", "1 million", "It depends only on model size"],
-      correct: 1,
-      explanation:
-        "LoRA is parameter-efficient — 100-500 high-quality examples often suffice for well-defined tasks.",
-    },
+  question="In a fine-tuning project, which stage typically requires the most time and effort?"
+  options={[
+    "Configuring LoRA hyperparameters",
+    "Running the training loop on a GPU",
+    "Data preparation and evaluation — collecting, cleaning, validating, and measuring quality",
+    "Deploying the model to a serving endpoint",
   ]}
+  answer={2}
+  explanation="Data preparation (collecting, cleaning, validating examples) and evaluation (building eval sets, measuring quality, A/B testing) together consume roughly 60% of the total effort. The training run itself is largely automated once the data and config are ready."
+/>
+
+<Quiz
+  question="Before deploying a fine-tuned model, what should you verify?"
+  options={[
+    "That the model has been trained for at least 10 epochs",
+    "That format compliance and task accuracy metrics meet your quality thresholds on held-out evaluation data",
+    "That the model uses the largest possible LoRA rank",
+    "That the training loss reached exactly zero",
+  ]}
+  answer={1}
+  explanation="Deployment readiness depends on evaluation metrics on held-out data — not training loss or training duration. If format compliance and task accuracy meet your defined thresholds, the model is ready. If not, improve the data or configuration and retrain."
 />
 
 <FillBlank
-  prompt="The fine-tuning pipeline: define task → prepare ___ → train with ___ stopping → evaluate → deploy."
-  answers={["JSONL", "early"]}
-  hints={["The data format.", "Stop before overfitting."]}
+  question="Before serving a fine-tuned model, you typically ______ the LoRA adapter into the base model weights for zero-overhead inference."
+  answer="merge"
 />
 
 ## What you learned
 
-- The fine-tuning pipeline: define task → JSONL data → train/val/test split → LoRA config → train → evaluate → deploy.
-- Watch validation loss for overfitting. If it increases while training loss drops, stop early.
-- Always compare the fine-tuned model against the base model on a held-out test set. No improvement = back to data.
+- A fine-tuning project follows five stages: **data preparation, configuration, training, evaluation, and deployment** — each feeding into the next.
+- **Data and evaluation** consume the majority of effort (~60%) — the training run itself is the automated part.
+- **Deploy readiness** is determined by evaluation metrics on held-out data, not training loss — merge the adapter, quantize for efficiency, and serve behind an OpenAI-compatible API.

@@ -2504,6 +2504,497 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["observability", "slo", "tracing"],
   },
+  // ── Phase 6: AI/ML Engineering ───────────────────────────────────────────
+  {
+    slug: "llm",
+    term: "Large Language Model",
+    aliases: ["LLM"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An AI model trained on massive amounts of text that can generate, summarize, translate, and reason about language.",
+      intermediate:
+        "A neural network with billions of parameters trained on internet-scale text using the transformer architecture. Generates text by predicting the most likely next token. Examples: Claude, GPT-4, Llama.",
+      advanced:
+        "An autoregressive transformer model trained via next-token prediction on a large corpus, often followed by RLHF/RLAIF alignment. Inference is sequential (one token per forward pass for output). Capabilities emerge at scale — larger models exhibit reasoning, in-context learning, and instruction following not present in smaller models.",
+    },
+    seeAlso: ["transformer", "token"],
+  },
+  {
+    slug: "transformer",
+    term: "Transformer",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The architecture behind every modern AI language model. It processes all words at once using 'attention' to understand context.",
+      intermediate:
+        "A neural network architecture introduced in 'Attention Is All You Need' (2017). Uses self-attention to weigh relationships between all tokens in parallel, replacing sequential RNNs. The foundation of GPT, Claude, and all modern LLMs.",
+      advanced:
+        "Multi-head self-attention over input embeddings with positional encoding, followed by feed-forward layers, with residual connections and layer normalization. Encoder-decoder (original), decoder-only (GPT/Claude), or encoder-only (BERT) variants. Computational complexity O(n²) in sequence length; mitigated by FlashAttention, sparse attention, and sliding window approaches.",
+    },
+    seeAlso: ["llm", "attention"],
+  },
+  {
+    slug: "attention",
+    term: "Attention",
+    aliases: ["self-attention"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The mechanism that lets an AI model look at all the words in a sentence at once and figure out which ones are most relevant to each other.",
+      intermediate:
+        "A mechanism where each token computes a weighted sum over all other tokens, with weights determined by learned query-key similarity. This is how 'bank' in 'river bank' attends to 'river' to resolve its meaning.",
+      advanced:
+        "Scaled dot-product attention: Attention(Q,K,V) = softmax(QK^T / √d_k)V. Multi-head attention runs h parallel attention functions with different learned projections. KV-cache stores computed keys/values for autoregressive decoding, trading memory for speed.",
+    },
+    seeAlso: ["transformer", "llm"],
+  },
+  {
+    slug: "token",
+    term: "Token",
+    aliases: ["BPE token"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A chunk of text (roughly 4 characters) that the AI model processes as one unit. Models think in tokens, not words.",
+      intermediate:
+        "A sub-word unit produced by Byte Pair Encoding (BPE) or SentencePiece tokenization. Common words are single tokens; rare words are split into pieces. 1 token ≈ 4 English characters. API pricing and context windows are measured in tokens.",
+      advanced:
+        "The atomic unit of the model's vocabulary. BPE tokenizers iteratively merge frequent byte pairs to build a vocabulary (typically 32K-100K tokens). Tokenization is deterministic and model-specific — the same text produces different token counts on different models. Tiktoken (OpenAI) and the Anthropic tokenizer are the main implementations.",
+    },
+    seeAlso: ["llm", "context-window"],
+  },
+  {
+    slug: "prompt-engineering",
+    term: "Prompt Engineering",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner: "The skill of writing instructions that get the best results from an AI model.",
+      intermediate:
+        "Systematic design of prompts to control LLM behavior. Techniques include system prompts, few-shot examples, chain-of-thought reasoning, and structured output formatting. Requires version control, testing, and measurement — it's real engineering.",
+      advanced:
+        "Prompt optimization over a design space of instruction text, examples, and formatting constraints, evaluated against task-specific metrics. Advanced techniques: constitutional AI prompting, meta-prompting, prompt chaining, and automated prompt optimization (DSPy, OPRO).",
+    },
+    seeAlso: ["llm", "system-prompt"],
+  },
+  {
+    slug: "embedding",
+    term: "Embedding",
+    aliases: ["vector embedding"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A list of numbers that captures the meaning of a piece of text. Similar texts get similar number lists.",
+      intermediate:
+        "A dense vector (typically 256-3072 dimensions) that encodes semantic meaning. Produced by embedding models (OpenAI text-embedding-3, Cohere embed-v3, open-source alternatives). Used for similarity search, clustering, and RAG retrieval.",
+      advanced:
+        "A learned mapping from discrete tokens to a continuous vector space where geometric distance approximates semantic similarity. Cosine similarity is the standard metric. Matryoshka embeddings allow truncation to smaller dimensions with graceful degradation. Embedding models are typically encoder-only transformers trained with contrastive objectives.",
+    },
+    seeAlso: ["vector-database", "rag"],
+  },
+  {
+    slug: "vector-database",
+    term: "Vector Database",
+    aliases: ["vector store"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A database designed to store and search embeddings — finding the most similar items by meaning, not exact match.",
+      intermediate:
+        "A specialized database that indexes high-dimensional vectors for fast approximate nearest neighbor (ANN) search. Examples: Pinecone, Qdrant, Weaviate, pgvector (PostgreSQL extension), ChromaDB. Core to every RAG pipeline.",
+      advanced:
+        "Implements ANN algorithms (HNSW, IVF, product quantization) to trade exactness for speed at scale. HNSW (Hierarchical Navigable Small World) is the dominant index type — O(log n) search with high recall. Metadata filtering combines vector similarity with structured attribute constraints.",
+    },
+    seeAlso: ["embedding", "rag"],
+  },
+  {
+    slug: "rag",
+    term: "RAG",
+    aliases: ["Retrieval-Augmented Generation"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A pattern where the AI searches for relevant documents first, then uses them as context to answer your question accurately.",
+      intermediate:
+        "Retrieval-Augmented Generation: retrieve relevant documents from a knowledge base, augment the prompt with them, and generate a response grounded in real context. Reduces hallucination and enables real-time knowledge without retraining.",
+      advanced:
+        "A pipeline: query → embed → ANN search → rerank → stuff top-K into context → generate. Advanced variants: HyDE (hypothetical document embeddings), multi-step retrieval, query decomposition, parent document retrieval. Evaluated via RAGAS metrics: faithfulness, relevance, precision, recall.",
+    },
+    seeAlso: ["embedding", "vector-database", "chunking"],
+  },
+  {
+    slug: "chunking",
+    term: "Chunking",
+    aliases: ["text splitting"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Splitting documents into smaller pieces so an AI can search and use them effectively.",
+      intermediate:
+        "Breaking documents into chunks sized for embedding and retrieval. Strategies: fixed-size (by character/token count), recursive character splitting, semantic chunking (by paragraph/section boundaries). Overlap between chunks preserves context at boundaries.",
+      advanced:
+        "Chunk size is the critical hyperparameter in RAG quality. Too small (< 100 tokens) loses context; too large (> 1000 tokens) dilutes relevance and wastes context window. Semantic chunking using sentence-level embeddings or LLM-based boundary detection outperforms fixed-size for heterogeneous documents.",
+    },
+    seeAlso: ["rag", "embedding"],
+  },
+  {
+    slug: "reranking",
+    term: "Reranking",
+    aliases: ["reranker", "cross-encoder"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A second-pass scoring step that re-sorts search results to put the most relevant ones first.",
+      intermediate:
+        "After initial retrieval (fast but approximate), a reranker scores each result more accurately using a cross-encoder model. Cohere Rerank and open-source cross-encoders are common. Dramatically improves precision at a small latency cost.",
+      advanced:
+        "Cross-encoders jointly encode (query, document) pairs and produce a relevance score, unlike bi-encoders which encode separately. O(n) per query (score each candidate), so applied only to top-K from the initial retrieval. FlashRank and ColBERT offer faster alternatives with late interaction.",
+    },
+    seeAlso: ["rag", "embedding"],
+  },
+  {
+    slug: "agent",
+    term: "AI Agent",
+    aliases: ["agent"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An AI system that can use tools, plan multi-step actions, and take actions in the real world — not just generate text.",
+      intermediate:
+        "An LLM + tools + action loop. The model reasons about what to do, calls tools (search, database, APIs), observes results, and reasons again until the task is complete. The ReAct pattern (Reason + Act) is the standard agent loop.",
+      advanced:
+        "An autonomous system combining an LLM for reasoning with tool-use capabilities and memory. Key challenges: planning reliability, error recovery, cost control (unbounded loops), and evaluation (non-deterministic multi-step outputs). Multi-agent architectures use specialized agents coordinated by a supervisor.",
+    },
+    seeAlso: ["tool-calling", "mcp"],
+  },
+  {
+    slug: "tool-calling",
+    term: "Tool Calling",
+    aliases: ["function calling"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "When an AI model decides to use a tool (like search, calculator, or database) instead of just generating text.",
+      intermediate:
+        "The model receives tool definitions (JSON Schema) and can choose to emit a structured tool_use request instead of text. The application executes the tool and returns the result. This is how agents interact with the world.",
+      advanced:
+        "Implemented via special tokens or output modes in the model. The tool definition includes name, description, and inputSchema. The model's output is parsed for tool_use blocks, executed by the runtime, and results are fed back as tool_result messages for continued generation.",
+    },
+    seeAlso: ["agent", "mcp"],
+  },
+  {
+    slug: "mcp",
+    term: "MCP",
+    aliases: ["Model Context Protocol"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A standard protocol that lets AI models connect to external tools and data sources in a consistent way.",
+      intermediate:
+        "Model Context Protocol — an open specification by Anthropic for connecting AI models to tools, resources, and prompts via JSON-RPC 2.0. MCP servers expose capabilities; clients (Claude Desktop, IDEs) connect to them. Transports: stdio, SSE, HTTP.",
+      advanced:
+        "A client-server protocol with capabilities negotiation during initialization. Servers expose three primitives: tools (executable actions), resources (data sources via URIs), and prompts (reusable templates). The protocol separates what tools exist (discovery) from when to call them (model decision). Designed for composability — multiple MCP servers can be connected to one client.",
+    },
+    seeAlso: ["tool-calling", "agent"],
+  },
+  {
+    slug: "json-rpc",
+    term: "JSON-RPC",
+    aliases: ["JSON-RPC 2.0"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A simple way for programs to call functions on each other using JSON messages.",
+      intermediate:
+        "A lightweight remote procedure call protocol encoded in JSON. Each request has a method, params, and id. Responses include result or error. Used by MCP for communication between AI clients and tool servers.",
+      advanced:
+        "Spec: jsonrpc.org/specification. Stateless, transport-agnostic. Request: {jsonrpc: '2.0', method, params, id}. Response: {jsonrpc: '2.0', result, id} or {jsonrpc: '2.0', error: {code, message, data}, id}. Notifications have no id and expect no response. Batch requests are arrays.",
+    },
+    seeAlso: ["mcp"],
+  },
+  {
+    slug: "lora",
+    term: "LoRA",
+    aliases: ["Low-Rank Adaptation"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A technique that makes fine-tuning AI models much cheaper by only training a small add-on instead of changing the whole model.",
+      intermediate:
+        "Low-Rank Adaptation freezes the pretrained model weights and injects small trainable matrices (adapters) into attention layers. Instead of updating all parameters (billions), you train only the adapter (millions). QLoRA adds quantization (4-bit base model) to further reduce memory.",
+      advanced:
+        "Decomposes weight updates as ΔW = BA where B ∈ R^{d×r} and A ∈ R^{r×k} with rank r << min(d,k). Typically r=8-64. Alpha scaling controls the adapter's influence. Target modules are usually q_proj and v_proj in attention layers. Merged adapters can be deployed without runtime overhead.",
+    },
+    seeAlso: ["fine-tuning", "qlora"],
+  },
+  {
+    slug: "qlora",
+    term: "QLoRA",
+    aliases: ["Quantized LoRA"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A way to fine-tune AI models on regular computers by making the base model smaller (4-bit) and only training a tiny add-on.",
+      intermediate:
+        "Combines 4-bit quantization of the base model with LoRA adapters trained in higher precision. A 7B parameter model that normally needs 28GB VRAM can be fine-tuned with QLoRA on a single 24GB GPU.",
+      advanced:
+        "Uses NormalFloat4 (NF4) quantization — an information-theoretically optimal data type for normally distributed weights. Double quantization (quantizing the quantization constants) further reduces memory. Paged optimizers handle memory spikes. Published by Dettmers et al. (2023).",
+    },
+    seeAlso: ["lora", "fine-tuning"],
+  },
+  {
+    slug: "fine-tuning",
+    term: "Fine-Tuning",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Teaching an existing AI model to behave differently by training it on your own examples.",
+      intermediate:
+        "Updating a pretrained model's weights on task-specific data to change its behavior, style, or output format. Uses JSONL training data with system/user/assistant messages. Parameter-efficient methods (LoRA, QLoRA) make this practical without massive compute.",
+      advanced:
+        "Supervised fine-tuning (SFT) on instruction-output pairs, optionally followed by preference optimization (DPO/RLHF). Full fine-tuning updates all parameters; PEFT methods (LoRA, prefix tuning, adapters) update a small fraction. Key hyperparameters: learning rate (1e-5 to 5e-4), epochs (1-5), batch size, warmup ratio.",
+    },
+    seeAlso: ["lora", "qlora", "training-data"],
+  },
+  {
+    slug: "context-window",
+    term: "Context Window",
+    aliases: ["context length"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The maximum amount of text an AI model can see and work with at once — like the size of its working memory.",
+      intermediate:
+        "The total number of tokens (input + output) a model can process in one request. Claude's context window is up to 200K tokens. Exceeding it causes an error. Longer context enables RAG with more documents but increases cost and latency.",
+      advanced:
+        "Determined by the positional encoding scheme and training data. RoPE (Rotary Position Embeddings) with YaRN or NTK-aware scaling extends context beyond training length. Attention is O(n²) in context length — long contexts are expensive. Prompt caching amortizes repeated prefixes.",
+    },
+    seeAlso: ["token", "llm"],
+  },
+  {
+    slug: "hallucination",
+    term: "Hallucination",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "When an AI confidently says something that is not true — like citing a paper that doesn't exist.",
+      intermediate:
+        "The generation of plausible but factually incorrect content. Happens because LLMs predict statistically likely tokens, not truth. Mitigations: RAG (ground in real documents), citations (verify sources exist), constrained generation, and lower temperature.",
+      advanced:
+        "A consequence of the autoregressive training objective — the model maximizes P(next_token | context), not P(factually_correct). Closed-book hallucination (no supporting context) differs from open-book (context provided but ignored). Faithfulness metrics (RAGAS) measure hallucination rate. Constitutional AI training reduces but does not eliminate it.",
+    },
+    seeAlso: ["rag", "llm"],
+  },
+  {
+    slug: "temperature",
+    term: "Temperature",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A setting that controls how creative vs predictable an AI's responses are. Lower = more predictable.",
+      intermediate:
+        "A sampling parameter that scales the token probability distribution before selection. Temperature 0 always picks the most likely token (deterministic). Temperature 0.7 is typical for balanced output. Temperature 1.0+ increases randomness and creativity.",
+      advanced:
+        "Applied as softmax(logits / T) where T is the temperature. T→0 approaches argmax (greedy decoding). T=1 is the unmodified distribution. T>1 flattens the distribution, increasing entropy. Often combined with top_p (nucleus sampling) which truncates the distribution to the smallest set of tokens whose cumulative probability exceeds p.",
+    },
+    seeAlso: ["llm", "top-p"],
+  },
+  {
+    slug: "top-p",
+    term: "Top-p (Nucleus Sampling)",
+    aliases: ["nucleus sampling"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A way to limit which words the AI considers when generating text — only the most likely ones that add up to a certain probability.",
+      intermediate:
+        "A sampling method that considers only the smallest set of tokens whose cumulative probability exceeds p. top_p=0.9 means the model samples from tokens covering 90% of the probability mass, ignoring the long tail of unlikely tokens.",
+      advanced:
+        "Sorts tokens by descending probability and truncates at cumulative probability ≥ p. Adapts the effective vocabulary per token — high-confidence positions consider fewer candidates than ambiguous ones. Typically set between 0.9-0.95. When combined with temperature, apply temperature first then top-p truncation.",
+    },
+    seeAlso: ["temperature", "llm"],
+  },
+  {
+    slug: "system-prompt",
+    term: "System Prompt",
+    aliases: ["system message"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Instructions you give the AI at the start of a conversation that tell it how to behave — like a job description.",
+      intermediate:
+        "A message with role 'system' that sets persistent behavior, personality, constraints, and output format for the conversation. The primary control surface for LLM behavior. Processed before user messages and treated as authoritative instructions.",
+      advanced:
+        "In Anthropic's API, passed as a top-level 'system' string (not in the messages array). In OpenAI's API, the first message with role='system'. Cached separately by prompt caching systems for cost efficiency. Vulnerable to prompt injection — user input can attempt to override system instructions.",
+    },
+    seeAlso: ["prompt-engineering", "llm"],
+  },
+  {
+    slug: "structured-output",
+    term: "Structured Output",
+    aliases: ["JSON mode"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Getting AI to respond in a specific format (like JSON) instead of free text, so your code can reliably parse the response.",
+      intermediate:
+        "Techniques for constraining LLM output to a machine-readable format. Approaches: tool use / function calling (model fills a JSON Schema), JSON mode (API constrains output to valid JSON), or prompt-based (ask for JSON and validate). Always validate the output.",
+      advanced:
+        "Tool use provides the strongest guarantees — the model is constrained to emit a tool_use content block matching the provided inputSchema. Constrained decoding (grammar-based sampling) guarantees syntactic validity at the token level. Even with constraints, semantic validation (Zod, Pydantic) is necessary for business rules.",
+    },
+    seeAlso: ["tool-calling", "llm"],
+  },
+  {
+    slug: "semantic-cache",
+    term: "Semantic Cache",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A cache that returns a stored AI response when a new question is similar in meaning (not just identical) to a previous one.",
+      intermediate:
+        "Embeds incoming prompts and checks similarity against cached prompt embeddings. If cosine similarity exceeds a threshold, returns the cached response without calling the model. Reduces cost and latency for repetitive queries with varying phrasing.",
+      advanced:
+        "Requires a vector store for prompt embeddings alongside a key-value store for responses. Threshold tuning is critical — too low returns incorrect cached results, too high misses valid cache hits. Unsuitable for personalized, time-sensitive, or multi-turn conversations where context changes the expected response.",
+    },
+    seeAlso: ["embedding", "vector-database"],
+  },
+  {
+    slug: "guardrail",
+    term: "Guardrail",
+    aliases: ["AI guardrail"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Safety checks on AI input and output — catching bad requests before they reach the model and bad responses before they reach the user.",
+      intermediate:
+        "Input guardrails: PII detection, prompt injection scanning, content policy filtering, input validation. Output guardrails: schema validation, safety classification, hallucination detection, toxicity checks. Defense in depth — layer multiple guardrails.",
+      advanced:
+        "Implemented as middleware in the AI service pipeline. Input guardrails run before inference (fast, cheap). Output guardrails run after (may use a secondary model for classification). Guardrail frameworks: Guardrails AI, NeMo Guardrails, custom regex + classifier pipelines. False positive rate is the key metric — blocking valid requests erodes trust.",
+    },
+    seeAlso: ["prompt-engineering", "hallucination"],
+  },
+  {
+    slug: "eval-harness",
+    term: "Eval Harness",
+    aliases: ["evaluation harness"],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A testing tool that automatically checks if your AI system gives good answers on a set of example questions.",
+      intermediate:
+        "A script or framework that runs an AI system against a curated set of test cases and reports metrics (accuracy, faithfulness, relevance, latency, cost). Run on every prompt change to catch regressions. The AI equivalent of a test suite.",
+      advanced:
+        "Components: golden dataset (input + expected output pairs), scoring functions (exact match, LLM-as-judge, RAGAS metrics), reporting (aggregate scores, per-category breakdowns), and CI integration (fail the build if metrics degrade). Advanced: multi-turn evaluation, trajectory scoring for agents, human-in-the-loop annotation.",
+    },
+    seeAlso: ["rag", "hallucination"],
+  },
+  {
+    slug: "function-calling",
+    term: "Function Calling",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Another name for tool calling — when the AI decides to use a specific function you defined instead of just generating text.",
+      intermediate:
+        "OpenAI's term for tool use. You define functions with name, description, and parameters (JSON Schema). The model can choose to call a function, and you execute it and return the result. Anthropic calls the same concept 'tool use.'",
+      advanced:
+        "Parallel function calling allows models to emit multiple tool_use blocks in one turn. Forced tool use constrains the model to always call a specific tool (useful for structured extraction). The tool_choice parameter controls this: 'auto' (model decides), 'any' (must call at least one), or specific tool name.",
+    },
+    seeAlso: ["tool-calling", "structured-output"],
+  },
+  {
+    slug: "perplexity",
+    term: "Perplexity",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A score that measures how surprised a language model is by new text. Lower = the model is better at predicting what comes next.",
+      intermediate:
+        "The exponentiated average negative log-likelihood of the test set. A model with perplexity 10 is, on average, as uncertain as choosing uniformly among 10 options per token. Lower perplexity means better language modeling. Used to compare base models and detect overfitting during fine-tuning.",
+      advanced:
+        "PPL = exp(-1/N Σ log P(t_i | t_<i)). Computed over the full test set. Sensitive to tokenization — only comparable between models with the same tokenizer. Not a direct measure of task quality (a model can have low perplexity but poor instruction-following). Use alongside task-specific metrics.",
+    },
+    seeAlso: ["fine-tuning", "llm"],
+  },
+  {
+    slug: "vllm",
+    term: "vLLM",
+    aliases: [],
+    category: "ai",
+    phaseIds: ["6"],
+    lessonIds: [],
+    definitions: {
+      beginner: "A tool for running AI models fast and efficiently, serving many users at once.",
+      intermediate:
+        "A high-throughput LLM serving engine that uses PagedAttention to manage GPU memory efficiently. Supports continuous batching, tensor parallelism, and OpenAI-compatible API endpoints. The standard choice for self-hosted LLM inference in production.",
+      advanced:
+        "PagedAttention stores KV-cache in non-contiguous memory pages, eliminating internal fragmentation that wastes 60-80% of memory in naive implementations. Continuous batching adds new requests to running batches without waiting for completion. Supports speculative decoding, AWQ/GPTQ quantization, and multi-GPU tensor parallelism.",
+    },
+    seeAlso: ["llm", "fine-tuning"],
+  },
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
