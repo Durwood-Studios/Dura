@@ -1,0 +1,314 @@
+---
+title: "The Training Loop"
+description: "Forward pass, loss, backpropagation, and optimizer steps — the mechanics of how a model learns from your data."
+phase: 6
+module: "6-5-fine-tuning"
+order: 5
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Every fine-tuning run executes the same fundamental loop: forward pass, compute loss, backward pass, update weights. Understanding this loop means you can diagnose why training is failing, why a model is overfitting, or why the loss is not decreasing. You stop being someone who copies training scripts and starts being someone who can actually debug them.
+
+## The four steps
+
+Training a neural network repeats four steps thousands of times. Each repetition is called a **training step**.
+
+**Step 1 — Forward pass.** Feed a batch of training examples through the model. The model produces predictions (next-token probabilities for each position in the sequence).
+
+**Step 2 — Loss computation.** Compare the model's predictions to the correct answers from your training data. The loss function produces a single number that measures how wrong the model is. Lower is better.
+
+**Step 3 — Backward pass (backpropagation).** Calculate how much each trainable parameter contributed to the loss. This produces gradients — the direction and magnitude each parameter should change.
+
+**Step 4 — Optimizer step.** Update the trainable parameters using the gradients. The optimizer (typically AdamW) applies the updates with momentum and learning rate scaling.
+
+```javascript
+// The training loop in pseudocode
+function trainModel(model, dataset, config) {
+  const optimizer = createOptimizer(model.trainableParams(), config.learningRate);
+  const scheduler = createScheduler(optimizer, config);
+  let globalStep = 0;
+
+  for (let epoch = 0; epoch < config.epochs; epoch++) {
+    const batches = createBatches(dataset, config.batchSize);
+
+    for (const batch of batches) {
+      // Step 1: Forward pass
+      const predictions = model.forward(batch.inputs);
+
+      // Step 2: Compute loss
+      const loss = crossEntropyLoss(predictions, batch.labels);
+
+      // Step 3: Backward pass — compute gradients
+      const gradients = backward(loss, model.trainableParams());
+
+      // Step 4: Update weights
+      optimizer.step(gradients);
+      scheduler.step();
+      optimizer.zeroGrad(); // Reset gradients for next step
+
+      globalStep++;
+      if (globalStep % 10 === 0) {
+        console.log(`Step ${globalStep} | Loss: ${loss.toFixed(4)}`);
+      }
+    }
+
+    console.log(`Epoch ${epoch + 1}/${config.epochs} complete`);
+  }
+}
+```
+
+## Loss functions for language models
+
+For causal language models (the type you fine-tune for chat), the loss function is **cross-entropy loss**. It measures how far the model's predicted probability distribution is from the correct next token.
+
+```javascript
+// Cross-entropy loss — the core metric in LLM training
+function crossEntropyLoss(predictedProbs, actualTokenIndex) {
+  // The model outputs a probability for each token in the vocabulary
+  // Loss = -log(probability assigned to the correct token)
+  const probOfCorrect = predictedProbs[actualTokenIndex];
+  return -Math.log(probOfCorrect);
+}
+
+// Example: vocabulary of 5 tokens, correct answer is token 2
+const vocab = ["the", "cat", "sat", "on", "mat"];
+
+// Good prediction — model is confident about the right answer
+const goodPrediction = [0.05, 0.05, 0.8, 0.05, 0.05];
+console.log(`Good prediction loss: ${crossEntropyLoss(goodPrediction, 2).toFixed(4)}`);
+// Loss ≈ 0.22 (low = good)
+
+// Bad prediction — model is confident about the wrong answer
+const badPrediction = [0.6, 0.15, 0.05, 0.1, 0.1];
+console.log(`Bad prediction loss: ${crossEntropyLoss(badPrediction, 2).toFixed(4)}`);
+// Loss ≈ 3.00 (high = bad)
+
+// Uniform prediction — model has no idea
+const uniformPrediction = [0.2, 0.2, 0.2, 0.2, 0.2];
+console.log(`Uniform prediction loss: ${crossEntropyLoss(uniformPrediction, 2).toFixed(4)}`);
+// Loss ≈ 1.61 (medium)
+
+// Sequence loss is averaged across all token positions
+function sequenceLoss(tokenPredictions, correctTokens) {
+  let totalLoss = 0;
+  for (let i = 0; i < correctTokens.length; i++) {
+    totalLoss += crossEntropyLoss(tokenPredictions[i], correctTokens[i]);
+  }
+  return totalLoss / correctTokens.length;
+}
+
+const seqPredictions = [goodPrediction, badPrediction, uniformPrediction];
+const correctTokens = [2, 2, 2];
+console.log(`\nAverage sequence loss: ${sequenceLoss(seqPredictions, correctTokens).toFixed(4)}`);
+```
+
+## Learning rate and batch size
+
+The learning rate controls how large each parameter update is. Too high and the model overshoots — loss spikes and never recovers. Too low and training takes forever or gets stuck. The sweet spot for LoRA fine-tuning is typically between 1e-4 and 3e-4.
+
+```javascript
+// Simulating how learning rate affects training
+function simulateTraining(learningRate, steps) {
+  // Simplified loss landscape — a convex bowl
+  let position = 5.0; // Start far from the minimum (0.0)
+  const losses = [];
+
+  for (let step = 0; step < steps; step++) {
+    const loss = position * position; // Loss = position^2
+    const gradient = 2 * position; // Derivative of x^2
+    position -= learningRate * gradient;
+    losses.push(loss);
+  }
+
+  return losses;
+}
+
+const learningRates = [
+  { lr: 0.001, label: "Too low (0.001)" },
+  { lr: 0.1, label: "Good (0.1)" },
+  { lr: 0.6, label: "Too high (0.6)" },
+];
+
+learningRates.forEach(({ lr, label }) => {
+  const losses = simulateTraining(lr, 20);
+  const finalLoss = losses[losses.length - 1];
+  const converged = finalLoss < 0.01;
+  console.log(
+    `${label}: final loss = ${finalLoss.toFixed(6)} ${converged ? "(converged)" : "(NOT converged)"}`
+  );
+});
+```
+
+Batch size affects both training stability and memory usage. Larger batches produce smoother gradient estimates but require more memory. Gradient accumulation lets you simulate larger batches without increasing memory.
+
+## Overfitting and early stopping
+
+Overfitting means the model memorizes training examples instead of learning general patterns. With small fine-tuning datasets (200-500 examples), overfitting is the primary risk. You detect it by tracking loss on a held-out validation set.
+
+```javascript
+// Detecting overfitting by comparing train and validation loss
+function detectOverfitting(trainLosses, valLosses) {
+  const results = [];
+
+  for (let epoch = 0; epoch < trainLosses.length; epoch++) {
+    const trainLoss = trainLosses[epoch];
+    const valLoss = valLosses[epoch];
+    const gap = valLoss - trainLoss;
+    const isOverfitting = gap > 0.3 && epoch > 0 && valLoss > valLosses[epoch - 1];
+
+    results.push({
+      epoch: epoch + 1,
+      trainLoss: trainLoss.toFixed(3),
+      valLoss: valLoss.toFixed(3),
+      gap: gap.toFixed(3),
+      status: isOverfitting ? "OVERFITTING" : "OK",
+    });
+  }
+
+  return results;
+}
+
+// Simulated training — validation loss starts rising after epoch 3
+const trainLosses = [2.1, 1.4, 0.9, 0.5, 0.3, 0.1, 0.05];
+const valLosses = [2.2, 1.5, 1.0, 0.8, 0.9, 1.1, 1.4];
+
+const analysis = detectOverfitting(trainLosses, valLosses);
+console.log("Epoch | Train | Val   | Gap   | Status");
+console.log("------|-------|-------|-------|--------");
+analysis.forEach((r) => {
+  console.log(`  ${r.epoch}   | ${r.trainLoss} | ${r.valLoss} | ${r.gap} | ${r.status}`);
+});
+
+// Find the best checkpoint
+const bestEpoch = valLosses.indexOf(Math.min(...valLosses)) + 1;
+console.log(`\nBest checkpoint: epoch ${bestEpoch} (lowest validation loss)`);
+console.log("Early stopping would save the model at this point.");
+```
+
+## Epochs in practice
+
+For LoRA fine-tuning, 1-3 epochs is typical. With small datasets, even a single epoch might overfit. Monitor validation loss and stop when it starts rising — the number of epochs you set is a maximum, not a target.
+
+```javascript
+// Practical training configuration with early stopping
+const trainingPlan = {
+  dataset: { trainExamples: 400, valExamples: 50 },
+  batchSize: 4,
+  gradientAccumulation: 4,
+  effectiveBatch: 4 * 4, // 16
+  maxEpochs: 5,
+  earlyStoppingPatience: 2, // Stop if val loss does not improve for 2 evaluations
+  evalEverySteps: 25,
+};
+
+const stepsPerEpoch = Math.ceil(trainingPlan.dataset.trainExamples / trainingPlan.effectiveBatch);
+const totalSteps = stepsPerEpoch * trainingPlan.maxEpochs;
+const evalCount = Math.floor(totalSteps / trainingPlan.evalEverySteps);
+
+console.log(`Steps per epoch: ${stepsPerEpoch}`);
+console.log(`Max total steps: ${totalSteps}`);
+console.log(`Evaluation checkpoints: ${evalCount}`);
+console.log(
+  `Early stopping: will halt if no improvement for ${trainingPlan.earlyStoppingPatience} evals`
+);
+console.log(`\nRealistic outcome: training stops around epoch 2-3 for a dataset this size.`);
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate a complete training loop with loss tracking and early stopping.
+
+function simulateFineTuning(config) {
+const { trainSize, valSize, batchSize, epochs, learningRate, patience } = config;
+const stepsPerEpoch = Math.ceil(trainSize / batchSize);
+
+let trainLoss = 3.0; // Starting loss
+let bestValLoss = Infinity;
+let patienceCounter = 0;
+let bestEpoch = 0;
+
+for (let epoch = 1; epoch <= epochs; epoch++) {
+// Simulate training — loss decreases with some noise
+for (let step = 0; step < stepsPerEpoch; step++) {
+trainLoss _= (1 - learningRate);
+trainLoss += (Math.random() - 0.5) _ 0.05; // noise
+trainLoss = Math.max(trainLoss, 0.01);
+}
+
+    // TODO: Simulate validation loss
+    // Validation loss should decrease for first ~2 epochs, then start rising
+    // Hint: valLoss = trainLoss + 0.1 + (epoch > 2 ? (epoch - 2) * 0.15 : 0)
+    let valLoss = 0; // Replace with your calculation
+
+    console.log("Epoch " + epoch + " | Train: " + trainLoss.toFixed(3) + " | Val: " + valLoss.toFixed(3));
+
+    // TODO: Implement early stopping
+    // If valLoss < bestValLoss: update bestValLoss and bestEpoch, reset patienceCounter
+    // Else: increment patienceCounter
+    // If patienceCounter >= patience: print "Early stopping!" and break
+
+}
+
+console.log("\\nBest model from epoch " + bestEpoch);
+}
+
+simulateFineTuning({
+trainSize: 400,
+valSize: 50,
+batchSize: 16,
+epochs: 8,
+learningRate: 0.05,
+patience: 2,
+});
+// Should stop around epoch 4-5 due to early stopping`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does the backward pass (backpropagation) compute?"
+  options={[
+    "The predicted output tokens for the input sequence",
+    "The gradients — how much each trainable parameter contributed to the loss",
+    "The optimal learning rate for the next step",
+    "The validation loss on the held-out dataset",
+  ]}
+  answer={1}
+  explanation="Backpropagation computes gradients by tracing how each parameter influenced the final loss. These gradients tell the optimizer which direction and how much to adjust each parameter."
+/>
+
+<Quiz
+  question="How do you detect that a model is overfitting during fine-tuning?"
+  options={[
+    "Training loss stops decreasing",
+    "Validation loss starts increasing while training loss continues to decrease",
+    "The model generates shorter responses",
+    "GPU memory usage spikes",
+  ]}
+  answer={1}
+  explanation="Overfitting is detected when the gap between training and validation loss grows — the model is memorizing training examples instead of learning general patterns. Early stopping saves the checkpoint with the lowest validation loss."
+/>
+
+<FillBlank
+  question="The optimizer used in most LLM fine-tuning is ______, which combines adaptive learning rates with weight decay."
+  answer="AdamW"
+/>
+
+## What you learned
+
+- The training loop repeats four steps: **forward pass** (predict), **loss computation** (measure error), **backward pass** (compute gradients), and **optimizer step** (update weights).
+- **Cross-entropy loss** measures how well the model predicts the correct next token — lower loss means better predictions across the training data.
+- **Overfitting** is the primary risk with small datasets — monitor validation loss and use **early stopping** to save the best checkpoint before the model starts memorizing.

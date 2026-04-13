@@ -1,0 +1,385 @@
+---
+title: "Evaluation"
+description: "Measuring fine-tuned model quality with perplexity, BLEU, ROUGE, human evaluation, and task-specific benchmarks."
+phase: 6
+module: "6-5-fine-tuning"
+order: 6
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+A fine-tuned model that scores well on training loss might still produce garbage in production. Training loss tells you the model learned your data — evaluation tells you the model learned the right things. Without a rigorous evaluation pipeline, you cannot know whether your fine-tuned model is actually better than the base model with a good prompt. Evaluation is how you avoid shipping a model that confidently does the wrong thing.
+
+## Perplexity: the foundational metric
+
+Perplexity measures how surprised the model is by the correct answer. A perplexity of 1 means the model perfectly predicts every token. A perplexity of 100 means the model is choosing between roughly 100 equally likely tokens at each position.
+
+```javascript
+// Computing perplexity from cross-entropy loss
+function calculatePerplexity(crossEntropyLoss) {
+  // Perplexity = e^(average cross-entropy loss)
+  return Math.exp(crossEntropyLoss);
+}
+
+// Lower loss = lower perplexity = better model
+const examples = [
+  { label: "Well-trained model", loss: 1.5 },
+  { label: "Undertrained model", loss: 3.0 },
+  { label: "Random predictions", loss: 5.0 },
+  { label: "Fine-tuned on domain", loss: 0.8 },
+];
+
+console.log("Model Performance Comparison:");
+console.log("-----------------------------");
+examples.forEach((ex) => {
+  const ppl = calculatePerplexity(ex.loss);
+  console.log(`${ex.label}: loss=${ex.loss.toFixed(1)}, perplexity=${ppl.toFixed(1)}`);
+});
+
+console.log("\nInterpretation:");
+console.log("Perplexity 4-10: Excellent for domain-specific fine-tuning");
+console.log("Perplexity 10-30: Decent general performance");
+console.log("Perplexity 50+: Model is struggling, needs more/better data");
+```
+
+Perplexity is useful for tracking training progress and comparing checkpoints, but it does not tell you whether the output is actually good for your task. A model can have low perplexity and still produce unhelpful responses.
+
+## BLEU and ROUGE: text similarity metrics
+
+BLEU (Bilingual Evaluation Understudy) measures how many n-grams in the model's output match a reference answer. ROUGE (Recall-Oriented Understudy for Gisting Evaluation) measures how many n-grams in the reference appear in the output. BLEU focuses on precision; ROUGE focuses on recall.
+
+```javascript
+// Simplified BLEU score computation
+function computeBLEU(candidate, reference) {
+  const candidateTokens = candidate.toLowerCase().split(/\s+/);
+  const referenceTokens = reference.toLowerCase().split(/\s+/);
+
+  // Unigram precision — what fraction of candidate words appear in reference
+  let matches = 0;
+  const refCounts = {};
+  referenceTokens.forEach((t) => {
+    refCounts[t] = (refCounts[t] || 0) + 1;
+  });
+
+  const usedCounts = {};
+  candidateTokens.forEach((token) => {
+    if (refCounts[token] && (!usedCounts[token] || usedCounts[token] < refCounts[token])) {
+      matches++;
+      usedCounts[token] = (usedCounts[token] || 0) + 1;
+    }
+  });
+
+  const precision = matches / candidateTokens.length;
+
+  // Brevity penalty — penalize outputs shorter than the reference
+  const brevityPenalty =
+    candidateTokens.length >= referenceTokens.length
+      ? 1.0
+      : Math.exp(1 - referenceTokens.length / candidateTokens.length);
+
+  return { precision, brevityPenalty, score: precision * brevityPenalty };
+}
+
+// Simplified ROUGE-1 (unigram recall)
+function computeROUGE(candidate, reference) {
+  const candidateTokens = new Set(candidate.toLowerCase().split(/\s+/));
+  const referenceTokens = reference.toLowerCase().split(/\s+/);
+
+  let matches = 0;
+  referenceTokens.forEach((token) => {
+    if (candidateTokens.has(token)) matches++;
+  });
+
+  return { recall: matches / referenceTokens.length };
+}
+
+const reference = "The function validates user input and returns a boolean indicating success";
+const candidates = [
+  "The function validates user input and returns a boolean indicating success", // exact match
+  "This function checks user input and gives back true or false for success", // paraphrase
+  "It validates input", // too brief
+];
+
+candidates.forEach((candidate, i) => {
+  const bleu = computeBLEU(candidate, reference);
+  const rouge = computeROUGE(candidate, reference);
+  console.log(`\nCandidate ${i + 1}: "${candidate}"`);
+  console.log(`  BLEU: ${bleu.score.toFixed(3)} (precision: ${bleu.precision.toFixed(3)})`);
+  console.log(`  ROUGE-1 recall: ${rouge.recall.toFixed(3)}`);
+});
+```
+
+## Task-specific evaluation
+
+Generic metrics like BLEU only go so far. For most fine-tuning tasks, you need custom evaluation that measures what you actually care about.
+
+```javascript
+// Building task-specific evaluation for a code review model
+function evaluateCodeReviewModel(modelOutputs, goldStandard) {
+  const metrics = {
+    formatCompliance: 0, // Does output match expected JSON structure?
+    severityAccuracy: 0, // Does it assign correct severity?
+    issueRecall: 0, // Does it find all known issues?
+    issuePrecision: 0, // Are flagged issues real problems?
+    totalExamples: modelOutputs.length,
+  };
+
+  for (let i = 0; i < modelOutputs.length; i++) {
+    const output = modelOutputs[i];
+    const gold = goldStandard[i];
+
+    // Check format compliance
+    try {
+      const parsed = JSON.parse(output.response);
+      if (parsed.issues && parsed.severity && parsed.suggestion) {
+        metrics.formatCompliance++;
+      }
+    } catch {
+      // Invalid JSON = format failure
+    }
+
+    // Check severity accuracy
+    if (output.predictedSeverity === gold.severity) {
+      metrics.severityAccuracy++;
+    }
+
+    // Check issue detection
+    const foundIssues = new Set(output.detectedIssues || []);
+    const goldIssues = new Set(gold.issues || []);
+    let hits = 0;
+    goldIssues.forEach((issue) => {
+      if (foundIssues.has(issue)) hits++;
+    });
+    metrics.issueRecall += goldIssues.size > 0 ? hits / goldIssues.size : 1;
+    metrics.issuePrecision += foundIssues.size > 0 ? hits / foundIssues.size : 1;
+  }
+
+  const n = metrics.totalExamples;
+  return {
+    formatCompliance: ((metrics.formatCompliance / n) * 100).toFixed(1) + "%",
+    severityAccuracy: ((metrics.severityAccuracy / n) * 100).toFixed(1) + "%",
+    issueRecall: ((metrics.issueRecall / n) * 100).toFixed(1) + "%",
+    issuePrecision: ((metrics.issuePrecision / n) * 100).toFixed(1) + "%",
+  };
+}
+
+const outputs = [
+  {
+    response: '{"issues":["no null check"],"severity":"medium","suggestion":"Add validation"}',
+    predictedSeverity: "medium",
+    detectedIssues: ["no null check"],
+  },
+  {
+    response:
+      '{"issues":["eval usage","no sanitization"],"severity":"high","suggestion":"Remove eval"}',
+    predictedSeverity: "high",
+    detectedIssues: ["eval usage", "no sanitization"],
+  },
+  { response: "This code looks fine.", predictedSeverity: "low", detectedIssues: [] },
+];
+
+const goldStandard = [
+  { severity: "medium", issues: ["no null check", "missing return type"] },
+  { severity: "high", issues: ["eval usage", "no sanitization"] },
+  { severity: "low", issues: [] },
+];
+
+const results = evaluateCodeReviewModel(outputs, goldStandard);
+console.log("Evaluation Results:");
+Object.entries(results).forEach(([metric, value]) => {
+  console.log(`  ${metric}: ${value}`);
+});
+```
+
+## A/B testing: the ultimate evaluation
+
+Automated metrics approximate quality. The ground truth is: does the fine-tuned model produce better outputs than the base model for real user inputs? A/B testing answers this directly.
+
+```javascript
+// A/B testing framework for comparing base vs fine-tuned model
+function runABTest(testCases, baseModelResponses, fineTunedResponses) {
+  const results = { baseWins: 0, fineTunedWins: 0, ties: 0 };
+  const details = [];
+
+  for (let i = 0; i < testCases.length; i++) {
+    const criteria = evaluateResponse(testCases[i], baseModelResponses[i], fineTunedResponses[i]);
+
+    if (criteria.fineTunedScore > criteria.baseScore) {
+      results.fineTunedWins++;
+      details.push({ input: testCases[i].input.slice(0, 40), winner: "fine-tuned" });
+    } else if (criteria.baseScore > criteria.fineTunedScore) {
+      results.baseWins++;
+      details.push({ input: testCases[i].input.slice(0, 40), winner: "base" });
+    } else {
+      results.ties++;
+      details.push({ input: testCases[i].input.slice(0, 40), winner: "tie" });
+    }
+  }
+
+  return { results, details };
+}
+
+function evaluateResponse(testCase, baseResponse, fineTunedResponse) {
+  let baseScore = 0;
+  let fineTunedScore = 0;
+
+  // Criterion 1: correct format
+  if (isValidFormat(baseResponse, testCase.expectedFormat)) baseScore += 2;
+  if (isValidFormat(fineTunedResponse, testCase.expectedFormat)) fineTunedScore += 2;
+
+  // Criterion 2: contains required keywords
+  const baseKeywords = testCase.requiredKeywords.filter((k) => baseResponse.includes(k)).length;
+  const ftKeywords = testCase.requiredKeywords.filter((k) => fineTunedResponse.includes(k)).length;
+  baseScore += baseKeywords;
+  fineTunedScore += ftKeywords;
+
+  return { baseScore, fineTunedScore };
+}
+
+function isValidFormat(response, format) {
+  if (format === "json") {
+    try {
+      JSON.parse(response);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+const testCases = [
+  {
+    input: "Review: function add(a,b) { return a+b }",
+    expectedFormat: "json",
+    requiredKeywords: ["type", "suggestion"],
+  },
+  {
+    input: "Review: eval(userInput)",
+    expectedFormat: "json",
+    requiredKeywords: ["security", "eval"],
+  },
+];
+
+const baseResponses = [
+  "The function adds two numbers. It could use type checking.",
+  '{"type":"security","suggestion":"Avoid eval with user input.","security":"high","eval":"dangerous"}',
+];
+
+const fineTunedResponses = [
+  '{"issues":["no type checking"],"severity":"low","suggestion":"Add parameter type validation."}',
+  '{"issues":["eval with user input"],"severity":"critical","suggestion":"Replace eval with a safe parser. eval executes arbitrary code, creating a security vulnerability."}',
+];
+
+const { results, details } = runABTest(testCases, baseResponses, fineTunedResponses);
+console.log("A/B Test Results:");
+console.log(`  Base model wins: ${results.baseWins}`);
+console.log(`  Fine-tuned wins: ${results.fineTunedWins}`);
+console.log(`  Ties: ${results.ties}`);
+details.forEach((d) => console.log(`  "${d.input}..." → ${d.winner}`));
+```
+
+## Building an eval dataset
+
+Your evaluation dataset must be separate from training data. Aim for 50-100 examples that cover the full range of inputs your model will see in production — common cases, edge cases, adversarial inputs.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build an evaluation pipeline that compares a fine-tuned model
+// against a base model across multiple metrics.
+
+function evaluateModels(evalSet) {
+const metrics = { base: { format: 0, accuracy: 0, total: 0 }, finetuned: { format: 0, accuracy: 0, total: 0 } };
+
+for (const example of evalSet) {
+metrics.base.total++;
+metrics.finetuned.total++;
+
+    // TODO: Check format compliance for both models
+    // A response is format-compliant if it can be parsed as JSON
+    // Increment metrics.base.format or metrics.finetuned.format accordingly
+
+    // TODO: Check accuracy for both models
+    // A response is accurate if the parsed JSON contains a "severity" field
+    // matching example.expectedSeverity
+
+}
+
+// TODO: Calculate and print percentages for each metric
+// Format: "Base model — Format: X%, Accuracy: Y%"
+// Format: "Fine-tuned — Format: X%, Accuracy: Y%"
+console.log("Implement the evaluation logic above");
+}
+
+const evalSet = [
+{
+input: "Review: let x = null; x.toString();",
+expectedSeverity: "high",
+baseResponse: "This will throw a null reference error.",
+finetunedResponse: '{"issues":["null dereference"],"severity":"high","suggestion":"Add null check before calling methods."}',
+},
+{
+input: "Review: const PI = 3.14159;",
+expectedSeverity: "low",
+baseResponse: '{"issues":[],"severity":"low","suggestion":"Code looks correct."}',
+finetunedResponse: '{"issues":["consider using Math.PI"],"severity":"low","suggestion":"Use Math.PI for precision."}',
+},
+{
+input: "Review: password = 'admin123';",
+expectedSeverity: "critical",
+baseResponse: "Hardcoded passwords are bad practice.",
+finetunedResponse: '{"issues":["hardcoded credential"],"severity":"critical","suggestion":"Use environment variables for secrets."}',
+},
+];
+
+evaluateModels(evalSet);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does perplexity measure in a language model?"
+  options={[
+    "How many parameters the model has",
+    "How surprised the model is by the correct next token — lower means better predictions",
+    "The speed at which the model generates tokens",
+    "The number of training examples needed for convergence",
+  ]}
+  answer={1}
+  explanation="Perplexity is e^(cross-entropy loss). A perplexity of 10 means the model is effectively choosing between 10 equally likely tokens at each position. Lower perplexity means the model assigns higher probability to correct tokens."
+/>
+
+<Quiz
+  question="Why is A/B testing important even when automated metrics look good?"
+  options={[
+    "Automated metrics are always inaccurate",
+    "A/B testing is faster to run than automated metrics",
+    "Automated metrics approximate quality but cannot capture whether outputs are actually useful for real tasks",
+    "A/B testing does not require a held-out evaluation dataset",
+  ]}
+  answer={2}
+  explanation="Automated metrics like BLEU and perplexity measure surface-level text properties. A model can score well on these metrics while producing outputs that are unhelpful for the actual task. A/B testing with real inputs reveals whether the fine-tuned model genuinely improves on the base model."
+/>
+
+<FillBlank
+  question="BLEU measures n-gram ______ (what fraction of the output appears in the reference), while ROUGE measures recall."
+  answer="precision"
+/>
+
+## What you learned
+
+- **Perplexity** (e^loss) tracks training progress but does not guarantee output quality — a model can have low perplexity and still produce unhelpful responses.
+- **BLEU and ROUGE** measure text overlap with reference answers — useful baselines, but they miss semantic correctness and task-specific quality.
+- **Task-specific evaluation and A/B testing** are the definitive measures — build custom metrics for your use case and compare the fine-tuned model directly against the base model on real inputs.

@@ -1,0 +1,393 @@
+---
+title: "Deployment"
+description: "Serving fine-tuned models in production with vLLM, TGI, Ollama, quantization, and API wrappers."
+phase: 6
+module: "6-5-fine-tuning"
+order: 7
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+A fine-tuned model sitting on your laptop is worthless. It needs to serve requests reliably, at acceptable latency, within your budget. The deployment stack you choose determines your cost per request, maximum throughput, and operational complexity. Getting this wrong means either burning money on over-provisioned infrastructure or watching users wait 30 seconds for a response.
+
+## The serving landscape
+
+Three tools dominate open-source model serving. Each targets a different scale and use case.
+
+**vLLM** — High-throughput serving for production. Uses PagedAttention to efficiently manage GPU memory across concurrent requests. Handles batching automatically. The go-to choice for serving models at scale.
+
+**Text Generation Inference (TGI)** — HuggingFace's production server. Similar to vLLM with built-in support for HuggingFace model formats. Provides an OpenAI-compatible API out of the box.
+
+**Ollama** — Local model serving. Downloads, quantizes, and serves models with a single command. Designed for development and personal use, not production scale.
+
+```javascript
+// Comparing serving options for different deployment scenarios
+const servingOptions = [
+  {
+    name: "vLLM",
+    targetScale: "Production (100+ req/sec)",
+    gpuRequired: true,
+    features: [
+      "PagedAttention",
+      "Continuous batching",
+      "Tensor parallelism",
+      "OpenAI-compatible API",
+    ],
+    setupComplexity: "medium",
+    costPerMonth: "$500-5000 (cloud GPU)",
+    bestFor: "High-throughput production APIs",
+  },
+  {
+    name: "TGI (Text Generation Inference)",
+    targetScale: "Production (50+ req/sec)",
+    gpuRequired: true,
+    features: ["HuggingFace native", "Flash attention", "Quantization", "OpenAI-compatible API"],
+    setupComplexity: "medium",
+    costPerMonth: "$500-5000 (cloud GPU)",
+    bestFor: "Teams already using HuggingFace ecosystem",
+  },
+  {
+    name: "Ollama",
+    targetScale: "Local/Dev (1-5 req/sec)",
+    gpuRequired: false,
+    features: ["One-command setup", "Auto-quantization", "REST API", "Model library"],
+    setupComplexity: "low",
+    costPerMonth: "$0 (runs on your machine)",
+    bestFor: "Development, testing, personal projects",
+  },
+];
+
+servingOptions.forEach((option) => {
+  console.log(`\n${option.name}`);
+  console.log(`  Scale: ${option.targetScale}`);
+  console.log(`  GPU required: ${option.gpuRequired}`);
+  console.log(`  Best for: ${option.bestFor}`);
+  console.log(`  Features: ${option.features.join(", ")}`);
+});
+```
+
+## Quantization for deployment
+
+Training happens in fp16 or fp32 for numerical precision. Deployment can use lower precision — 8-bit, 4-bit, or even 2-bit — to shrink the model and speed up inference. The tradeoff is a small quality loss that is often imperceptible.
+
+```javascript
+// Quantization impact on model size and performance
+function analyzeQuantization(modelParams) {
+  const configs = [
+    { name: "FP16 (training precision)", bitsPerParam: 16, qualityLoss: "none" },
+    { name: "INT8 (8-bit)", bitsPerParam: 8, qualityLoss: "minimal (<1%)" },
+    { name: "INT4 (4-bit GPTQ/AWQ)", bitsPerParam: 4, qualityLoss: "small (1-3%)" },
+    { name: "INT4 (4-bit GGUF)", bitsPerParam: 4, qualityLoss: "small (1-3%)" },
+    { name: "INT2 (2-bit)", bitsPerParam: 2, qualityLoss: "noticeable (5-10%)" },
+  ];
+
+  console.log(`Model: ${(modelParams / 1e9).toFixed(0)}B parameters\n`);
+
+  configs.forEach((config) => {
+    const sizeGB = (modelParams * config.bitsPerParam) / 8 / 1e9;
+    const tokensPerSec = Math.round(40 * (16 / config.bitsPerParam)); // Rough estimate
+    console.log(`${config.name}`);
+    console.log(`  Size: ${sizeGB.toFixed(1)} GB`);
+    console.log(`  Speed: ~${tokensPerSec} tokens/sec (single GPU)`);
+    console.log(`  Quality loss: ${config.qualityLoss}`);
+  });
+}
+
+analyzeQuantization(7e9);
+```
+
+The most common quantization formats are GPTQ (GPU-optimized), AWQ (activation-aware, slightly better quality), and GGUF (CPU-friendly, used by Ollama and llama.cpp). For production GPU serving, GPTQ or AWQ with vLLM is the standard choice.
+
+## Building an API wrapper
+
+Regardless of which serving backend you use, your application talks to the model through an API. Most serving tools expose an OpenAI-compatible endpoint, which means your application code stays the same regardless of the backend.
+
+```javascript
+// API wrapper that works with any OpenAI-compatible endpoint
+// (vLLM, TGI, Ollama, and OpenAI itself all use this format)
+
+async function queryModel(prompt, config) {
+  const { baseUrl, model, maxTokens, temperature } = config;
+
+  const requestBody = {
+    model: model,
+    messages: [
+      { role: "system", content: "You are a code review assistant. Respond in JSON." },
+      { role: "user", content: prompt },
+    ],
+    max_tokens: maxTokens || 500,
+    temperature: temperature || 0.1,
+  };
+
+  try {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      throw new Error(`API returned ${response.status}: ${await response.text()}`);
+    }
+
+    const data = await response.json();
+    return {
+      content: data.choices[0].message.content,
+      usage: data.usage,
+      latencyMs: data.usage?.total_time_ms || null,
+    };
+  } catch (error) {
+    console.error("Model query failed:", error.message);
+    return { content: null, error: error.message };
+  }
+}
+
+// Same code works with different backends — just change the config
+const configs = {
+  localOllama: { baseUrl: "http://localhost:11434", model: "my-finetuned-model", maxTokens: 500 },
+  productionVLLM: {
+    baseUrl: "https://api.mycompany.com",
+    model: "code-reviewer-v2",
+    maxTokens: 500,
+  },
+  fallbackOpenAI: { baseUrl: "https://api.openai.com", model: "gpt-4o-mini", maxTokens: 500 },
+};
+
+// Demonstrate the request format (not actually calling APIs)
+console.log("Request to vLLM endpoint:");
+console.log(
+  JSON.stringify(
+    {
+      model: configs.productionVLLM.model,
+      messages: [
+        { role: "system", content: "You are a code review assistant. Respond in JSON." },
+        { role: "user", content: "Review: function add(a,b) { return a + b }" },
+      ],
+      max_tokens: 500,
+      temperature: 0.1,
+    },
+    null,
+    2
+  )
+);
+```
+
+## Deployment architecture
+
+A production deployment typically includes a load balancer, multiple model replicas, a request queue, and health checks. The model server handles the heavy compute; your application server handles business logic.
+
+```javascript
+// Production deployment configuration
+const deploymentConfig = {
+  infrastructure: {
+    modelServer: {
+      tool: "vLLM",
+      gpus: 2, // A100 80GB or H100
+      replicas: 3, // For redundancy and throughput
+      maxConcurrentRequests: 256,
+      quantization: "awq", // 4-bit for efficiency
+    },
+    loadBalancer: {
+      type: "round-robin",
+      healthCheckInterval: 10, // seconds
+      healthCheckPath: "/health",
+    },
+    queue: {
+      maxQueueLength: 1000,
+      timeoutSeconds: 30,
+      retryAttempts: 2,
+    },
+  },
+
+  monitoring: {
+    metrics: [
+      "requests_per_second",
+      "p50_latency_ms",
+      "p99_latency_ms",
+      "gpu_utilization_percent",
+      "queue_depth",
+      "error_rate",
+    ],
+    alerts: [
+      { metric: "p99_latency_ms", threshold: 5000, action: "page" },
+      { metric: "error_rate", threshold: 0.05, action: "page" },
+      { metric: "gpu_utilization_percent", threshold: 95, action: "warn" },
+    ],
+  },
+
+  scaling: {
+    minReplicas: 2,
+    maxReplicas: 8,
+    scaleUpThreshold: "p99_latency > 3000ms for 5 minutes",
+    scaleDownThreshold: "gpu_utilization < 30% for 15 minutes",
+  },
+};
+
+console.log("Deployment Architecture:");
+console.log(`  Serving: ${deploymentConfig.infrastructure.modelServer.tool}`);
+console.log(`  GPUs per replica: ${deploymentConfig.infrastructure.modelServer.gpus}`);
+console.log(`  Replicas: ${deploymentConfig.infrastructure.modelServer.replicas}`);
+console.log(`  Quantization: ${deploymentConfig.infrastructure.modelServer.quantization}`);
+console.log(`\nMonitored metrics: ${deploymentConfig.monitoring.metrics.length}`);
+console.log(`Alert rules: ${deploymentConfig.monitoring.alerts.length}`);
+console.log(
+  `Auto-scaling: ${deploymentConfig.scaling.minReplicas}-${deploymentConfig.scaling.maxReplicas} replicas`
+);
+```
+
+## Merging LoRA adapters
+
+Before deployment, you typically merge your LoRA adapter back into the base model. This eliminates the adapter overhead during inference — the merged model runs at the same speed as the original base model.
+
+```javascript
+// LoRA merge decision tree
+function shouldMergeAdapter(scenario) {
+  if (scenario.needsMultipleAdapters) {
+    return {
+      merge: false,
+      reason: "Keep adapters separate to swap between tasks at runtime",
+      deploymentNote: "vLLM and TGI support loading multiple LoRA adapters",
+    };
+  }
+
+  if (scenario.singleTask) {
+    return {
+      merge: true,
+      reason: "Single-task deployment — merge for zero adapter overhead",
+      deploymentNote: "Export merged model in safetensors format",
+    };
+  }
+
+  return {
+    merge: true,
+    reason: "Default: merge for simpler deployment and slightly faster inference",
+    deploymentNote: "Merged model behaves identically to base + adapter",
+  };
+}
+
+const scenarios = [
+  { name: "Code review API", singleTask: true, needsMultipleAdapters: false },
+  {
+    name: "Multi-tenant SaaS (different styles per customer)",
+    singleTask: false,
+    needsMultipleAdapters: true,
+  },
+  { name: "Internal chatbot", singleTask: true, needsMultipleAdapters: false },
+];
+
+scenarios.forEach((s) => {
+  const decision = shouldMergeAdapter(s);
+  console.log(`\n${s.name}`);
+  console.log(`  Merge adapter: ${decision.merge}`);
+  console.log(`  Reason: ${decision.reason}`);
+  console.log(`  Note: ${decision.deploymentNote}`);
+});
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Design a deployment configuration for a fine-tuned model.
+// Calculate costs and capacity for different infrastructure options.
+
+function planDeployment(requirements) {
+const { requestsPerDay, maxLatencyMs, budget } = requirements;
+const requestsPerSecond = requestsPerDay / 86400;
+
+const options = [
+{
+name: "Ollama on local machine",
+maxRPS: 2,
+latencyP99: 8000,
+monthlyCost: 0,
+setup: "Download model, run ollama serve",
+},
+{
+name: "Single A100 with vLLM",
+maxRPS: 50,
+latencyP99: 800,
+monthlyCost: 2000,
+setup: "Cloud GPU instance + vLLM container",
+},
+{
+name: "2x A100 with vLLM + load balancer",
+maxRPS: 100,
+latencyP99: 500,
+monthlyCost: 4500,
+setup: "Kubernetes cluster with GPU nodes",
+},
+];
+
+console.log("Requirements:");
+console.log(" " + requestsPerDay + " requests/day (" + requestsPerSecond.toFixed(1) + " req/sec)");
+console.log(" Max latency: " + maxLatencyMs + "ms");
+console.log(" Monthly budget: $" + budget + "\\n");
+
+// TODO: Filter options that meet all requirements
+// 1. maxRPS must be >= requestsPerSecond
+// 2. latencyP99 must be <= maxLatencyMs
+// 3. monthlyCost must be <= budget
+
+// TODO: Print viable options, sorted by cost (cheapest first)
+// Format: "✓ [name] — $[cost]/mo, [latencyP99]ms p99, [maxRPS] max RPS"
+
+// TODO: Print non-viable options with reason why they fail
+// Format: "✗ [name] — [reason]"
+
+console.log("Implement the filtering logic above");
+}
+
+planDeployment({
+requestsPerDay: 50000, // ~0.58 req/sec
+maxLatencyMs: 2000,
+budget: 3000,
+});`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the primary advantage of vLLM over Ollama for production deployments?"
+  options={[
+    "vLLM is free while Ollama requires a license",
+    "vLLM uses PagedAttention for efficient GPU memory management and handles concurrent request batching at high throughput",
+    "vLLM does not require a GPU while Ollama does",
+    "vLLM automatically fine-tunes the model during serving",
+  ]}
+  answer={1}
+  explanation="vLLM is designed for production-scale serving with features like PagedAttention (efficient memory allocation for variable-length sequences), continuous batching (processing multiple requests simultaneously), and tensor parallelism across GPUs."
+/>
+
+<Quiz
+  question="Why would you merge a LoRA adapter into the base model before deployment?"
+  options={[
+    "To reduce the model's parameter count",
+    "To eliminate adapter overhead and simplify deployment — the merged model runs at base model speed",
+    "Merging improves the model's accuracy on new tasks",
+    "LoRA adapters cannot be used during inference",
+  ]}
+  answer={1}
+  explanation="Merging a LoRA adapter into the base model produces a single set of weights with zero adapter overhead. The merged model runs at the same speed as the original base model and is simpler to deploy since there is only one file to manage."
+/>
+
+<FillBlank
+  question="The quantization format used by Ollama and llama.cpp for CPU-friendly inference is called ______."
+  answer="GGUF"
+/>
+
+## What you learned
+
+- **vLLM** (production throughput), **TGI** (HuggingFace native), and **Ollama** (local dev) cover the full spectrum of serving needs — all expose OpenAI-compatible APIs.
+- **Quantization** (8-bit, 4-bit) shrinks models by 2-4x with minimal quality loss, making deployment cheaper and faster.
+- **Merge LoRA adapters** into the base model for single-task deployments to eliminate overhead, or keep them separate when you need to swap between multiple fine-tuned behaviors.

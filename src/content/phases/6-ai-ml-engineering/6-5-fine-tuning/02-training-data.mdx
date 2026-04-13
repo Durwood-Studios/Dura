@@ -1,0 +1,398 @@
+---
+title: "Training Data"
+description: "How to collect, clean, and format training data for fine-tuning LLMs — JSONL format, message pairs, and quality over quantity."
+phase: 6
+module: "6-5-fine-tuning"
+order: 2
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+A fine-tuned model is only as good as its training data. Feed it sloppy, contradictory, or poorly formatted examples and you get a model that confidently produces sloppy, contradictory, poorly formatted output. Data preparation is where most fine-tuning projects succeed or fail — not in hyperparameter tuning, not in model selection. Getting the data right is the unsexy work that determines everything.
+
+## The JSONL format
+
+Fine-tuning APIs (OpenAI, Together, Anyscale, and most open-source tools) expect data in JSONL — one JSON object per line. Each object represents a single conversation with system, user, and assistant messages.
+
+```javascript
+// A single training example in the chat completion format
+const trainingExample = {
+  messages: [
+    {
+      role: "system",
+      content:
+        "You are a code reviewer. Respond with a JSON object containing: issues (array), severity (low/medium/high), and suggestion (string).",
+    },
+    {
+      role: "user",
+      content: "Review this function:\nfunction add(a, b) { return a + b; }",
+    },
+    {
+      role: "assistant",
+      content: JSON.stringify({
+        issues: ["No type checking on parameters", "No JSDoc documentation"],
+        severity: "low",
+        suggestion: "Add parameter validation and a JSDoc comment describing the function.",
+      }),
+    },
+  ],
+};
+
+// JSONL = one JSON object per line, no trailing comma
+console.log(JSON.stringify(trainingExample));
+```
+
+Each line in the file is a complete, self-contained training example. No commas between lines. No wrapping array. The file extension is `.jsonl`.
+
+## Collecting quality data
+
+The minimum bar for useful fine-tuning data is around 50-100 examples for simple format changes, 200-500 for style transfer, and 1000+ for complex behavioral changes. But 200 excellent examples beat 2000 mediocre ones every time.
+
+Sources of training data:
+
+- **Production logs.** If you already have a system using an LLM with prompt engineering, your best examples are the outputs humans approved or corrected.
+- **Manual creation.** Subject matter experts write ideal input/output pairs. Expensive but highest quality.
+- **Synthetic generation.** Use a stronger model (GPT-4, Claude) to generate examples, then have humans review and correct them.
+
+```javascript
+// Building a training dataset from production logs
+function buildTrainingSet(productionLogs) {
+  const examples = [];
+
+  for (const log of productionLogs) {
+    // Only keep examples where a human approved the output
+    if (!log.humanApproved) continue;
+
+    // Only keep examples where the output matches our format spec
+    if (!validateOutputFormat(log.output)) continue;
+
+    examples.push({
+      messages: [
+        { role: "system", content: log.systemPrompt },
+        { role: "user", content: log.userInput },
+        { role: "assistant", content: log.approvedOutput },
+      ],
+    });
+  }
+
+  return examples;
+}
+
+function validateOutputFormat(output) {
+  try {
+    const parsed = JSON.parse(output);
+    // Check required fields exist
+    return parsed.issues && parsed.severity && parsed.suggestion;
+  } catch {
+    return false;
+  }
+}
+
+// Simulated production logs
+const logs = [
+  {
+    systemPrompt: "You are a code reviewer.",
+    userInput: "Review: let x = 1;",
+    approvedOutput:
+      '{"issues":["use const"],"severity":"low","suggestion":"Use const for values that do not change."}',
+    humanApproved: true,
+  },
+  {
+    systemPrompt: "You are a code reviewer.",
+    userInput: "Review: eval(input)",
+    approvedOutput:
+      '{"issues":["eval is dangerous"],"severity":"high","suggestion":"Never use eval with user input."}',
+    humanApproved: true,
+  },
+  {
+    systemPrompt: "You are a code reviewer.",
+    userInput: "Review: x++",
+    approvedOutput: "This is bad code",
+    humanApproved: false,
+  },
+];
+
+const trainingSet = buildTrainingSet(logs);
+console.log("Usable examples:", trainingSet.length);
+console.log(JSON.stringify(trainingSet[0], null, 2));
+```
+
+## Cleaning and deduplication
+
+Dirty data introduces noise that the model learns. Clean ruthlessly.
+
+```javascript
+// Data cleaning pipeline
+function cleanDataset(examples) {
+  let cleaned = examples;
+
+  // Step 1: Remove exact duplicates
+  const seen = new Set();
+  cleaned = cleaned.filter((ex) => {
+    const key = JSON.stringify(ex.messages);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  console.log(`After dedup: ${cleaned.length} examples`);
+
+  // Step 2: Remove near-duplicates (same user message, different assistant response)
+  const userMessages = new Map();
+  cleaned = cleaned.filter((ex) => {
+    const userMsg = ex.messages.find((m) => m.role === "user")?.content;
+    if (userMessages.has(userMsg)) {
+      // Keep the longer, more detailed response
+      const existing = userMessages.get(userMsg);
+      const existingLen =
+        existing.messages.find((m) => m.role === "assistant")?.content.length || 0;
+      const currentLen = ex.messages.find((m) => m.role === "assistant")?.content.length || 0;
+      if (currentLen > existingLen) {
+        userMessages.set(userMsg, ex);
+      }
+      return false;
+    }
+    userMessages.set(userMsg, ex);
+    return true;
+  });
+  console.log(`After near-dedup: ${cleaned.length} examples`);
+
+  // Step 3: Remove examples with empty or too-short responses
+  cleaned = cleaned.filter((ex) => {
+    const assistant = ex.messages.find((m) => m.role === "assistant");
+    return assistant && assistant.content.length > 20;
+  });
+  console.log(`After quality filter: ${cleaned.length} examples`);
+
+  return cleaned;
+}
+
+const rawExamples = [
+  {
+    messages: [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi there, how can I help?" },
+    ],
+  },
+  {
+    messages: [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi there, how can I help?" },
+    ],
+  }, // exact dupe
+  {
+    messages: [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hey!" },
+    ],
+  }, // near-dupe, shorter
+  {
+    messages: [
+      { role: "user", content: "Explain closures" },
+      {
+        role: "assistant",
+        content: "A closure is a function that captures variables from its enclosing scope.",
+      },
+    ],
+  },
+  {
+    messages: [
+      { role: "user", content: "Test" },
+      { role: "assistant", content: "ok" },
+    ],
+  }, // too short
+];
+
+const result = cleanDataset(rawExamples);
+console.log("Final dataset:", result.length, "examples");
+```
+
+## Data augmentation
+
+When you have limited examples, augmentation creates valid variations without compromising quality. Rephrase user inputs while keeping assistant outputs identical. Vary the complexity of inputs. Add edge cases that test boundary conditions.
+
+```javascript
+// Simple augmentation: rephrase user inputs
+function augmentExamples(examples, rephrasings) {
+  const augmented = [...examples];
+
+  for (const example of examples) {
+    const userMsg = example.messages.find((m) => m.role === "user");
+    if (!userMsg) continue;
+
+    // Apply each rephrasing pattern
+    for (const rephrase of rephrasings) {
+      const newUserContent = rephrase(userMsg.content);
+      if (newUserContent !== userMsg.content) {
+        augmented.push({
+          messages: example.messages.map((m) =>
+            m.role === "user" ? { ...m, content: newUserContent } : m
+          ),
+        });
+      }
+    }
+  }
+
+  return augmented;
+}
+
+// Rephrasing functions — in production, use a stronger LLM for this
+const rephrasings = [
+  (text) => "Please " + text.charAt(0).toLowerCase() + text.slice(1),
+  (text) => text + " Be thorough.",
+  (text) => "I need help: " + text,
+];
+
+const base = [
+  {
+    messages: [
+      { role: "user", content: "Review this code for bugs." },
+      {
+        role: "assistant",
+        content: "I found 2 issues: missing null check on line 3, unused variable on line 7.",
+      },
+    ],
+  },
+];
+
+const augmented = augmentExamples(base, rephrasings);
+console.log(`Base: ${base.length} → Augmented: ${augmented.length}`);
+augmented.forEach((ex) => {
+  console.log("User:", ex.messages.find((m) => m.role === "user").content);
+});
+```
+
+## Writing to JSONL
+
+```javascript
+// Convert array of examples to JSONL string
+function toJsonl(examples) {
+  return examples.map((ex) => JSON.stringify(ex)).join("\n");
+}
+
+// Split into train/validation sets (90/10)
+function splitDataset(examples, validationRatio = 0.1) {
+  const shuffled = [...examples].sort(() => Math.random() - 0.5);
+  const splitIndex = Math.floor(shuffled.length * (1 - validationRatio));
+  return {
+    train: shuffled.slice(0, splitIndex),
+    validation: shuffled.slice(splitIndex),
+  };
+}
+
+const dataset = [
+  {
+    messages: [
+      { role: "system", content: "You classify sentiment." },
+      { role: "user", content: "I love this!" },
+      { role: "assistant", content: "positive" },
+    ],
+  },
+  {
+    messages: [
+      { role: "system", content: "You classify sentiment." },
+      { role: "user", content: "Terrible experience." },
+      { role: "assistant", content: "negative" },
+    ],
+  },
+  {
+    messages: [
+      { role: "system", content: "You classify sentiment." },
+      { role: "user", content: "It was okay." },
+      { role: "assistant", content: "neutral" },
+    ],
+  },
+];
+
+const { train, validation } = splitDataset(dataset);
+console.log("Train JSONL:");
+console.log(toJsonl(train));
+console.log("\nValidation JSONL:");
+console.log(toJsonl(validation));
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a complete data preparation pipeline.
+// Given raw conversation logs, clean them and output valid JSONL.
+
+function prepareFinetuningData(rawLogs) {
+// Step 1: Convert raw logs to the messages format
+const examples = rawLogs.map(log => ({
+messages: [
+{ role: "system", content: "You are a helpful coding assistant." },
+{ role: "user", content: log.question },
+{ role: "assistant", content: log.answer }
+]
+}));
+
+// Step 2: TODO — Remove duplicates (by user question)
+// Hint: use a Set or Map to track seen questions
+
+// Step 3: TODO — Filter out examples where the answer is shorter than 30 characters
+
+// Step 4: TODO — Convert to JSONL string (one JSON.stringify per line)
+
+return examples; // Replace with your JSONL string
+}
+
+const rawLogs = [
+{ question: "What is a closure?", answer: "A closure is a function that retains access to variables from its outer scope even after that scope has finished executing." },
+{ question: "What is a closure?", answer: "Closures capture outer variables." }, // duplicate, shorter
+{ question: "Explain promises", answer: "A Promise represents a value that may not be available yet but will be resolved at some point, or rejected with an error." },
+{ question: "Hi", answer: "Hello!" }, // too short
+{ question: "What is hoisting?", answer: "Hoisting is JavaScript's behavior of moving variable and function declarations to the top of their scope during the compilation phase." },
+];
+
+const result = prepareFinetuningData(rawLogs);
+console.log(result);
+// Should output 3 lines of valid JSONL (closure, promises, hoisting)`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why is JSONL used instead of a regular JSON array for training data?"
+  options={[
+    "JSONL files are smaller because they use compression",
+    "Each line is an independent example, enabling streaming and parallel processing",
+    "JSON arrays cannot contain nested objects",
+    "JSONL is the only format that supports Unicode text",
+  ]}
+  answer={1}
+  explanation="JSONL (one JSON object per line) allows tools to stream data line by line without loading the entire file into memory. Each line is self-contained, making it easy to shuffle, split, and validate."
+/>
+
+<Quiz
+  question="What matters more for fine-tuning quality: the number of examples or their quality?"
+  options={[
+    "Number — you always need at least 10,000 examples",
+    "Quality — 200 excellent examples outperform 2,000 noisy ones",
+    "Neither — the model architecture determines quality",
+    "They matter equally and cannot be traded off",
+  ]}
+  answer={1}
+  explanation="Quality dominates quantity in fine-tuning. Noisy, contradictory, or poorly formatted examples teach the model bad patterns. A small set of clean, consistent examples produces better results than a large messy dataset."
+/>
+
+<FillBlank
+  question="Each training example contains three message roles: system, user, and ______."
+  answer="assistant"
+/>
+
+## What you learned
+
+- Fine-tuning data uses **JSONL format** with system/user/assistant message triples — one complete conversation per line.
+- Data quality beats quantity: **clean, deduplicate, and validate** every example before training, and filter out short or inconsistent responses.
+- **Data augmentation** (rephrasing inputs, adding edge cases) stretches a small dataset, but the assistant outputs must remain high-quality and consistent.

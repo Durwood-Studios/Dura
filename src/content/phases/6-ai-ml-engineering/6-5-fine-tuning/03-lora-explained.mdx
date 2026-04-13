@@ -1,0 +1,278 @@
+---
+title: "LoRA Explained"
+description: "Low-Rank Adaptation — how freezing most model weights and training small adapter matrices makes fine-tuning practical and affordable."
+phase: 6
+module: "6-5-fine-tuning"
+order: 3
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Construction"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+A 7-billion parameter model has 7 billion numbers that define its behavior. Full fine-tuning means updating all of them — requiring multiple high-end GPUs and hours of compute time. LoRA (Low-Rank Adaptation) lets you fine-tune by updating less than 1% of those parameters while achieving comparable results. This is the technique that made fine-tuning accessible to individual developers and small teams instead of only large companies.
+
+## The core idea: low-rank decomposition
+
+When you fine-tune a neural network, you adjust its weight matrices. A weight matrix in a transformer might be 4096 x 4096 — that is 16.7 million numbers in a single layer, and a model has dozens of layers. LoRA's insight is that the change you need to make to these weights during fine-tuning has a much lower "rank" than the full matrix. Instead of updating the entire matrix, you decompose the update into two small matrices.
+
+```javascript
+// Visualizing what LoRA does mathematically
+// Original weight matrix W is huge (d x d)
+// Instead of learning a new W' = W + deltaW where deltaW is also d x d,
+// LoRA learns deltaW = A * B where A is (d x r) and B is (r x d), r << d
+
+function simulateLoRA() {
+  const d = 4096; // Original dimension
+  const r = 8; // LoRA rank (typically 4, 8, 16, 32)
+
+  const originalParams = d * d;
+  const loraParams = d * r + r * d;
+  const ratio = ((loraParams / originalParams) * 100).toFixed(2);
+
+  console.log(
+    `Original weight matrix: ${d} x ${d} = ${originalParams.toLocaleString()} parameters`
+  );
+  console.log(
+    `LoRA matrices: (${d} x ${r}) + (${r} x ${d}) = ${loraParams.toLocaleString()} parameters`
+  );
+  console.log(`LoRA trains ${ratio}% of the original parameters`);
+  console.log(`Memory savings: ${(100 - parseFloat(ratio)).toFixed(2)}%`);
+}
+
+simulateLoRA();
+```
+
+The rank `r` is the key hyperparameter. A rank of 8 means you are learning two matrices — one that is 4096x8 and another that is 8x4096. Their product is a 4096x4096 update, but you only stored and trained 65,536 numbers instead of 16.7 million. Across all layers in a model, this adds up to enormous savings.
+
+## How LoRA works in practice
+
+During training, the original model weights are frozen — they do not change at all. LoRA injects small trainable matrices alongside specific layers (typically the attention layers). The forward pass computes: output = W*x + (A*B)\*x, where W is frozen and A, B are the small trainable LoRA matrices.
+
+```javascript
+// Simplified LoRA forward pass
+function loraForward(input, frozenWeight, loraA, loraB, scalingFactor) {
+  // Original path — frozen, no gradient updates
+  const originalOutput = matMul(frozenWeight, input);
+
+  // LoRA path — small trainable adapters
+  const loraDown = matMul(loraB, input); // Project down to low rank
+  const loraUp = matMul(loraA, loraDown); // Project back up
+  const scaledLora = scale(loraUp, scalingFactor);
+
+  // Combined output
+  return add(originalOutput, scaledLora);
+}
+
+// Simple matrix multiply for demonstration (1D vectors as stand-in)
+function matMul(weights, input) {
+  return weights.map((row) => row.reduce((sum, w, i) => sum + w * (input[i] || 0), 0));
+}
+
+function scale(vector, factor) {
+  return vector.map((v) => v * factor);
+}
+
+function add(a, b) {
+  return a.map((val, i) => val + (b[i] || 0));
+}
+
+// Demo with tiny dimensions
+const frozenW = [
+  [0.5, 0.3],
+  [0.1, 0.7],
+]; // 2x2 frozen weights
+const loraA = [[0.1], [0.2]]; // 2x1 (up-projection)
+const loraB = [[0.3, 0.4]]; // 1x2 (down-projection)
+const input = [1.0, 0.5];
+
+const result = loraForward(input, frozenW, loraA, loraB, 0.5);
+console.log("Output with LoRA adapter:", result);
+```
+
+After training, you can either keep the adapter separate (swap adapters for different tasks) or merge it back into the original weights for zero-overhead inference.
+
+## LoRA vs QLoRA
+
+QLoRA (Quantized LoRA) takes things further by loading the frozen base model in 4-bit quantized form. The base model uses roughly a quarter of the memory, and only the LoRA adapter matrices remain in full precision for training.
+
+```javascript
+// Memory comparison across fine-tuning approaches
+function compareMemoryUsage(modelParams) {
+  const bytesPerParam = {
+    fullPrecision: 4, // float32 = 4 bytes
+    halfPrecision: 2, // float16 = 2 bytes
+    quantized4bit: 0.5, // 4-bit = 0.5 bytes
+  };
+
+  const loraRatio = 0.01; // LoRA typically trains ~1% of params
+
+  const approaches = {
+    "Full fine-tuning (fp32)": {
+      trainableGB: (modelParams * bytesPerParam.fullPrecision) / 1e9,
+      // Optimizer states (AdamW) need 2x the trainable params
+      optimizerGB: (modelParams * bytesPerParam.fullPrecision * 2) / 1e9,
+    },
+    "Full fine-tuning (fp16)": {
+      trainableGB: (modelParams * bytesPerParam.halfPrecision) / 1e9,
+      optimizerGB: (modelParams * bytesPerParam.halfPrecision * 2) / 1e9,
+    },
+    "LoRA (fp16 base + fp32 adapters)": {
+      trainableGB: (modelParams * loraRatio * bytesPerParam.fullPrecision) / 1e9,
+      baseModelGB: (modelParams * bytesPerParam.halfPrecision) / 1e9,
+      optimizerGB: (modelParams * loraRatio * bytesPerParam.fullPrecision * 2) / 1e9,
+    },
+    "QLoRA (4-bit base + fp32 adapters)": {
+      trainableGB: (modelParams * loraRatio * bytesPerParam.fullPrecision) / 1e9,
+      baseModelGB: (modelParams * bytesPerParam.quantized4bit) / 1e9,
+      optimizerGB: (modelParams * loraRatio * bytesPerParam.fullPrecision * 2) / 1e9,
+    },
+  };
+
+  console.log(`Model: ${(modelParams / 1e9).toFixed(0)}B parameters\n`);
+
+  Object.entries(approaches).forEach(([name, mem]) => {
+    const total = (mem.trainableGB || 0) + (mem.baseModelGB || 0) + (mem.optimizerGB || 0);
+    console.log(`${name}`);
+    console.log(`  Total GPU memory: ~${total.toFixed(1)} GB`);
+  });
+}
+
+compareMemoryUsage(7e9); // 7B parameter model
+```
+
+QLoRA made it possible to fine-tune a 7B model on a single consumer GPU with 24GB VRAM. Before QLoRA, you needed 80GB+ GPUs that cost thousands of dollars per month.
+
+## Choosing LoRA hyperparameters
+
+The main decisions are: which layers to target (attention layers are standard), the rank `r` (8 or 16 for most tasks), the alpha scaling factor (typically 2x the rank), and dropout (0.05-0.1 to prevent overfitting).
+
+```javascript
+// Common LoRA configurations
+const configs = {
+  minimal: {
+    rank: 4,
+    alpha: 8,
+    targetModules: ["q_proj", "v_proj"],
+    dropout: 0.05,
+    trainableParams: "~0.2%",
+    useCase: "Simple format/style changes with plenty of data",
+  },
+  standard: {
+    rank: 16,
+    alpha: 32,
+    targetModules: ["q_proj", "k_proj", "v_proj", "o_proj"],
+    dropout: 0.1,
+    trainableParams: "~0.8%",
+    useCase: "Most fine-tuning tasks — good balance of capacity and efficiency",
+  },
+  aggressive: {
+    rank: 64,
+    alpha: 128,
+    targetModules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    dropout: 0.1,
+    trainableParams: "~3%",
+    useCase: "Complex behavioral changes, domain-specific reasoning",
+  },
+};
+
+Object.entries(configs).forEach(([name, config]) => {
+  console.log(`\n${name.toUpperCase()} config (rank=${config.rank}, alpha=${config.alpha})`);
+  console.log(`  Targets: ${config.targetModules.join(", ")}`);
+  console.log(`  Trainable: ${config.trainableParams}`);
+  console.log(`  Use case: ${config.useCase}`);
+});
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Calculate LoRA parameter counts for different configurations
+// and determine which setup fits within a given GPU memory budget.
+
+function calculateLoRAFit(modelBillionParams, gpuMemoryGB) {
+const modelParams = modelBillionParams \* 1e9;
+const results = [];
+
+const configs = [
+{ name: "QLoRA r=8", rank: 8, quantBits: 4, targetLayers: 32, hiddenDim: 4096 },
+{ name: "QLoRA r=16", rank: 16, quantBits: 4, targetLayers: 32, hiddenDim: 4096 },
+{ name: "LoRA r=16", rank: 16, quantBits: 16, targetLayers: 32, hiddenDim: 4096 },
+{ name: "Full FT fp16", rank: null, quantBits: 16, targetLayers: 32, hiddenDim: 4096 },
+];
+
+for (const config of configs) {
+// TODO: Calculate memory for each config
+// Base model memory = modelParams _ (quantBits / 8) / 1e9 GB
+// LoRA adapter memory (if rank exists):
+// adapterParams = targetLayers _ 2 _ hiddenDim _ rank _ 2 (A and B matrices, 2 attention layers each)
+// adapterMemGB = adapterParams _ 4 / 1e9 (fp32 for adapters)
+// Optimizer memory = trainableParams _ 4 _ 2 / 1e9 (AdamW stores 2 states)
+// For full FT: trainableParams = modelParams
+// For LoRA: trainableParams = adapterParams
+
+    let baseMemGB = 0;   // Replace
+    let adapterMemGB = 0; // Replace
+    let optimizerMemGB = 0; // Replace
+    let totalGB = baseMemGB + adapterMemGB + optimizerMemGB;
+    let fitsInGPU = totalGB <= gpuMemoryGB;
+
+    results.push({ name: config.name, totalGB: totalGB.toFixed(1), fits: fitsInGPU });
+
+}
+
+console.log("GPU Memory Budget: " + gpuMemoryGB + " GB");
+console.log("Model: " + modelBillionParams + "B parameters\\n");
+results.forEach(r => {
+console.log(r.name + ": " + r.totalGB + " GB " + (r.fits ? "✓ FITS" : "✗ TOO LARGE"));
+});
+}
+
+calculateLoRAFit(7, 24); // 7B model, 24GB GPU (e.g., RTX 4090)`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does LoRA freeze during fine-tuning?"
+  options={[
+    "The learning rate and batch size",
+    "The original pretrained model weights",
+    "The training data order",
+    "The output vocabulary",
+  ]}
+  answer={1}
+  explanation="LoRA freezes all original model weights and only trains small adapter matrices (A and B) that are injected alongside specific layers. This is what makes it parameter-efficient."
+/>
+
+<Quiz
+  question="What is the primary advantage of QLoRA over standard LoRA?"
+  options={[
+    "It trains more parameters for better quality",
+    "It loads the frozen base model in 4-bit, drastically reducing GPU memory",
+    "It eliminates the need for training data",
+    "It trains faster by skipping the backward pass",
+  ]}
+  answer={1}
+  explanation="QLoRA quantizes the frozen base model to 4-bit precision, reducing its memory footprint by roughly 4x compared to fp16. Only the small LoRA adapter matrices remain in full precision for training."
+/>
+
+<FillBlank
+  question="LoRA decomposes weight updates into two small matrices of rank r, so the update deltaW equals A times ______."
+  answer="B"
+/>
+
+## What you learned
+
+- LoRA **freezes all original weights** and trains only small adapter matrices (A and B), reducing trainable parameters to roughly 1% of the model.
+- The **rank** hyperparameter controls adapter capacity — rank 8-16 works for most tasks, while higher ranks handle more complex behavioral changes.
+- **QLoRA** loads the frozen base model in 4-bit quantization, making it possible to fine-tune 7B+ models on a single consumer GPU with 24GB VRAM.

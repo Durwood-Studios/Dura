@@ -1,0 +1,213 @@
+---
+title: "Fine-Tuning Project: End to End"
+description: "Prepare data, configure LoRA, train, evaluate, and serve. The complete fine-tuning workflow."
+phase: 6
+module: "6-5-fine-tuning"
+order: 8
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+The previous seven lessons taught each piece of fine-tuning in isolation. This lesson puts them together into the end-to-end workflow you will actually run when you fine-tune a model for production. Every step has a decision point, and the decisions compound.
+
+## The pipeline
+
+```text
+1. Define the task
+2. Collect and format training data (JSONL)
+3. Split: train / validation / test
+4. Choose base model + LoRA config
+5. Train with early stopping
+6. Evaluate on test set
+7. Compare to base model
+8. Deploy or iterate
+```
+
+## Step 1: Define the task
+
+Fine-tuning works best for well-defined, narrow tasks. "Make the model better" is not a task. "Convert customer emails into structured support tickets with category, priority, and summary" is a task.
+
+Write down: input format, expected output format, 10 example pairs. If you cannot write 10 examples by hand, you do not understand the task well enough to fine-tune for it.
+
+## Step 2: Prepare JSONL data
+
+```javascript
+const trainingExample = {
+  messages: [
+    {
+      role: "system",
+      content:
+        "Convert customer emails into support tickets. Return JSON with category, priority (low/medium/high), and a one-sentence summary.",
+    },
+    {
+      role: "user",
+      content: "Hi, my order #4521 hasn't arrived and it's been 2 weeks. This is urgent.",
+    },
+    {
+      role: "assistant",
+      content:
+        '{"category":"shipping","priority":"high","summary":"Order #4521 not delivered after 2 weeks."}',
+    },
+  ],
+};
+```
+
+Each line in the JSONL file is one complete conversation. Aim for 100-500 high-quality examples. Quality beats quantity.
+
+## Step 3: Train/validation/test split
+
+```javascript
+function splitData(examples, trainRatio = 0.8, valRatio = 0.1) {
+  const shuffled = [...examples].sort(() => Math.random() - 0.5);
+  const trainEnd = Math.floor(shuffled.length * trainRatio);
+  const valEnd = trainEnd + Math.floor(shuffled.length * valRatio);
+  return {
+    train: shuffled.slice(0, trainEnd),
+    validation: shuffled.slice(trainEnd, valEnd),
+    test: shuffled.slice(valEnd),
+  };
+}
+```
+
+Train on train, tune hyperparameters on validation, report final metrics on test. Never touch the test set until the very end.
+
+## Step 4: Configure LoRA
+
+Key parameters:
+
+- **rank (r):** 8-64. Higher rank = more capacity but more parameters. Start at 16.
+- **alpha:** Usually 2× rank. Controls the scaling of the adapter.
+- **target modules:** Which layers to adapt. Usually attention layers (q_proj, v_proj).
+- **dropout:** 0.05-0.1 to prevent overfitting.
+
+## Step 5: Train with monitoring
+
+Watch the validation loss. If it stops decreasing (or starts increasing) while training loss keeps dropping, you are overfitting. Stop early.
+
+Key hyperparameters:
+
+- **Learning rate:** 1e-4 to 5e-5 for LoRA. Lower than full fine-tuning.
+- **Batch size:** As large as GPU memory allows.
+- **Epochs:** 1-5 for most tasks. More data → fewer epochs.
+
+## Step 6: Evaluate
+
+Run the test set through both the base model and the fine-tuned model. Compare:
+
+```javascript
+function evaluateModel(testSet, modelFn) {
+  let correct = 0;
+  for (const example of testSet) {
+    const prediction = modelFn(example.input);
+    if (matchesExpected(prediction, example.expected)) correct++;
+  }
+  return { accuracy: correct / testSet.length, total: testSet.length };
+}
+```
+
+If the fine-tuned model is not measurably better on the test set, the fine-tuning did not work. Go back to data quality.
+
+## Step 7: Deploy or iterate
+
+If metrics are good: quantize (4-bit or 8-bit), serve with vLLM or Ollama, monitor in production. If not: collect more/better data, adjust hyperparameters, try a different base model.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a function that validates a JSONL training file: each line must parse as JSON, have a messages array, and each message must have role and content fields."
+  initialCode={`function validateJSONL(lines) {
+  const errors = [];
+  for (let i = 0; i < lines.length; i++) {
+    // Validate each line
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+const lines = [
+'{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}',
+'{"messages":[{"role":"user"}]}',
+'not json',
+];
+
+console.log(validateJSONL(lines));`}
+  solution={`function validateJSONL(lines) {
+const errors = [];
+for (let i = 0; i < lines.length; i++) {
+try {
+const obj = JSON.parse(lines[i]);
+if (!Array.isArray(obj.messages)) {
+errors.push(\`Line \${i + 1}: missing messages array\`);
+continue;
+}
+for (const msg of obj.messages) {
+if (!msg.role || !msg.content) {
+errors.push(\`Line \${i + 1}: message missing role or content\`);
+}
+}
+} catch {
+errors.push(\`Line \${i + 1}: invalid JSON\`);
+}
+}
+return { valid: errors.length === 0, errors };
+}
+
+const lines = [
+'{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}',
+'{"messages":[{"role":"user"}]}',
+'not json',
+];
+
+console.log(validateJSONL(lines));`}
+testCases={["validateJSONL catches errors"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What should you do if validation loss increases while training loss decreases?",
+      options: [
+        "Train longer",
+        "Stop training — the model is overfitting",
+        "Increase the learning rate",
+        "Add more layers",
+      ],
+      correct: 1,
+      explanation:
+        "Diverging train/validation loss is the classic sign of overfitting. Stop early and evaluate.",
+    },
+    {
+      type: "multiple-choice",
+      question: "How many high-quality examples are typically needed for LoRA fine-tuning?",
+      options: ["10", "100-500", "1 million", "It depends only on model size"],
+      correct: 1,
+      explanation:
+        "LoRA is parameter-efficient — 100-500 high-quality examples often suffice for well-defined tasks.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The fine-tuning pipeline: define task → prepare ___ → train with ___ stopping → evaluate → deploy."
+  answers={["JSONL", "early"]}
+  hints={["The data format.", "Stop before overfitting."]}
+/>
+
+## What you learned
+
+- The fine-tuning pipeline: define task → JSONL data → train/val/test split → LoRA config → train → evaluate → deploy.
+- Watch validation loss for overfitting. If it increases while training loss drops, stop early.
+- Always compare the fine-tuned model against the base model on a held-out test set. No improvement = back to data.
