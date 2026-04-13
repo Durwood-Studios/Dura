@@ -1,0 +1,298 @@
+---
+title: "Building MCP Resources"
+description: "Expose data to AI models through resource URIs, templates, and dynamic content — giving models read access to your systems."
+phase: 6
+module: "6-4-mcp-development"
+order: 4
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Tools let models take actions. Resources let models read data. When a model needs to understand your project structure, read a configuration file, or examine database records, resources are the mechanism. They work like read-only endpoints — the model requests a URI and gets content back. Resources keep your MCP server organized by separating "things the model reads" from "things the model does."
+
+## Resource URIs
+
+Every MCP resource is identified by a URI. The scheme is flexible — you can use standard schemes like `file://` and `https://`, or define custom schemes that make sense for your domain.
+
+```javascript
+// Examples of resource URIs
+const resources = [
+  "file:///project/README.md", // a local file
+  "file:///project/src/config.ts", // source code
+  "db://users/schema", // database schema (custom scheme)
+  "db://users/recent?limit=10", // recent records
+  "https://api.example.com/status", // external API
+  "config://app/settings", // application config (custom scheme)
+];
+```
+
+The URI is what the client sends when it wants to read a resource. Your server maps URIs to handler functions that return the content.
+
+## Registering static resources
+
+The simplest resources return fixed content. Here is how you register a resource with the MCP SDK:
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+const server = new McpServer({
+  name: "project-server",
+  version: "1.0.0",
+});
+
+// A static resource that returns the project's README
+server.resource(
+  "project-readme",
+  "file:///project/README.md",
+  "The project README with setup instructions and architecture overview",
+  async () => {
+    const content = await fs.readFile("/project/README.md", "utf-8");
+    return {
+      contents: [
+        {
+          uri: "file:///project/README.md",
+          mimeType: "text/markdown",
+          text: content,
+        },
+      ],
+    };
+  }
+);
+```
+
+The handler returns a `contents` array. Each entry has a `uri`, a `mimeType`, and either `text` (for text content) or `blob` (base64-encoded binary data).
+
+## Resource templates with variables
+
+Often you need a family of related resources — every user profile, every database table, every file in a directory. Resource templates use URI patterns with variables:
+
+```javascript
+// A template that resolves any user profile by ID
+server.resource(
+  "user-profile",
+  "db://users/{userId}",
+  "User profile data by user ID",
+  async (uri, { userId }) => {
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [userId]);
+
+    if (!user) {
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify({ error: "User not found" }),
+          },
+        ],
+      };
+    }
+
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(user, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+// A template for any table's schema
+server.resource(
+  "table-schema",
+  "db://schema/{tableName}",
+  "Database table schema including columns and types",
+  async (uri, { tableName }) => {
+    const columns = await db.all(`PRAGMA table_info(${tableName})`);
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(columns, null, 2),
+        },
+      ],
+    };
+  }
+);
+```
+
+When the client requests `db://users/42`, the SDK matches the template, extracts `userId = "42"`, and calls your handler.
+
+## Dynamic resource content
+
+Resources do not have to be static files. They can compute content on the fly — aggregating data, formatting reports, or reflecting system state:
+
+```javascript
+server.resource(
+  "system-status",
+  "status://system/health",
+  "Current system health including uptime, memory, and active connections",
+  async () => {
+    const uptime = process.uptime();
+    const memory = process.memoryUsage();
+    const activeConnections = await db.get(
+      "SELECT COUNT(*) as count FROM connections WHERE active = true"
+    );
+
+    const report = {
+      uptime: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
+      memoryMB: Math.round(memory.heapUsed / 1024 / 1024),
+      activeConnections: activeConnections.count,
+      timestamp: new Date().toISOString(),
+    };
+
+    return {
+      contents: [
+        {
+          uri: "status://system/health",
+          mimeType: "application/json",
+          text: JSON.stringify(report, null, 2),
+        },
+      ],
+    };
+  }
+);
+```
+
+## Listing resources
+
+When a client calls `resources/list`, the server returns all available resources with their URIs and descriptions. Templates appear with their variable patterns so the client knows what URIs are valid.
+
+```javascript
+// Response to resources/list
+{
+  "resources": [
+    {
+      "uri": "file:///project/README.md",
+      "name": "project-readme",
+      "description": "The project README",
+      "mimeType": "text/markdown"
+    }
+  ],
+  "resourceTemplates": [
+    {
+      "uriTemplate": "db://users/{userId}",
+      "name": "user-profile",
+      "description": "User profile data by user ID",
+      "mimeType": "application/json"
+    }
+  ]
+}
+```
+
+The model uses this listing to know what data it can access. Good names and descriptions help the model pick the right resource, just like with tools.
+
+## Resources vs. tools
+
+Use resources when the model needs to **read** data without side effects. Use tools when the model needs to **act** — create, update, delete, or compute something. If the operation is idempotent and read-only, make it a resource. If it changes state or takes parameters that are not part of a URI pattern, make it a tool.
+
+```javascript
+// Resource: reading data (no side effects)
+"db://users/{userId}"; // read a user profile
+"file:///project/package.json"; // read a config file
+
+// Tool: taking action (side effects)
+"create_user"; // creates a database record
+"send_email"; // sends an email
+"run_query"; // executes arbitrary SQL
+```
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a function createResourceResponse(uri, mimeType, data) that returns a valid MCP resource response. The data parameter is a JavaScript object that should be JSON-stringified. Then call it for a user profile at 'db://users/42'."
+  initialCode={`function createResourceResponse(uri, mimeType, data) {
+  // Return a valid MCP resource response
+}
+
+const response = createResourceResponse(
+"db://users/42",
+"application/json",
+{ id: 42, name: "Ada Lovelace", email: "ada@example.com" }
+);
+
+console.log(JSON.stringify(response, null, 2));`}
+  solution={`function createResourceResponse(uri, mimeType, data) {
+return {
+contents: [
+{
+uri,
+mimeType,
+text: JSON.stringify(data, null, 2)
+}
+]
+};
+}
+
+const response = createResourceResponse(
+"db://users/42",
+"application/json",
+{ id: 42, name: "Ada Lovelace", email: "ada@example.com" }
+);
+
+console.log(JSON.stringify(response, null, 2));`}
+testCases={["response has contents array with uri, mimeType, and text"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "How do MCP resource templates handle variable URIs like different user IDs?",
+      options: [
+        "Query parameters only",
+        "URI patterns with {variable} placeholders",
+        "Separate resource registration per ID",
+        "Wildcard glob patterns",
+      ],
+      correct: 1,
+      explanation:
+        "Resource templates use URI patterns with curly-brace variables like db://users/{userId}. The SDK extracts the variable values and passes them to your handler.",
+    },
+    {
+      type: "multiple-choice",
+      question: "When should you use a resource instead of a tool?",
+      options: [
+        "When the operation is complex",
+        "When the operation is read-only with no side effects",
+        "When the operation requires authentication",
+        "When the operation returns JSON",
+      ],
+      correct: 1,
+      explanation:
+        "Resources are for read-only, side-effect-free data access. If the operation changes state or has side effects, use a tool instead.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="MCP resource content entries include a ___ (the address), a ___ (like 'application/json'), and either ___ or blob for the data."
+  answers={["uri", "mimeType", "text"]}
+  hints={[
+    "The address of the resource.",
+    "The content type header.",
+    "The string field for text data.",
+  ]}
+/>
+
+## What you learned
+
+- MCP resources expose **read-only data** via URIs with schemes like `file://`, `db://`, or custom schemes you define.
+- **Resource templates** use `{variable}` patterns in URIs to serve families of related resources from a single handler.
+- Resources return **contents** arrays with `uri`, `mimeType`, and `text` (or `blob` for binary) — keeping data reads separate from action-taking tools.

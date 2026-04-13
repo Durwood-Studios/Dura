@@ -1,0 +1,407 @@
+---
+title: "MCP Project: Build a Complete Server"
+description: "Build a production-ready MCP server in JavaScript that connects to a real API, defines tools, handles requests, and returns structured results."
+phase: 6
+module: "6-4-mcp-development"
+order: 8
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+You have learned the protocol, the architecture, the capability types, and the security patterns. Now you build the real thing. This lesson walks through creating a complete MCP server from scratch — one that connects to an external API, exposes tools and resources, handles errors properly, and follows the security practices from the previous lesson. By the end, you will have a working server that any MCP client can connect to.
+
+## Project: a task management MCP server
+
+We will build an MCP server that wraps a todo/task API. The server will expose tools for creating, listing, and completing tasks, plus a resource for reading project status. This pattern — wrapping an existing API as an MCP server — is the most common real-world use case.
+
+## Step 1: project setup
+
+Start with a new Node.js project and install the MCP SDK:
+
+```javascript
+// package.json
+{
+  "name": "task-mcp-server",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": { "task-mcp-server": "./index.js" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  }
+}
+```
+
+The `type: "module"` enables ES module imports. The `bin` field makes it easy to run via `npx`.
+
+## Step 2: the API client
+
+First, create a simple API client. We will use an in-memory store for this example, but in production you would replace this with real API calls:
+
+```javascript
+// tasks.js — the data layer
+const tasks = new Map();
+let nextId = 1;
+
+export function createTask(title, project = "default") {
+  const task = {
+    id: nextId++,
+    title,
+    project,
+    completed: false,
+    createdAt: new Date().toISOString(),
+  };
+  tasks.set(task.id, task);
+  return task;
+}
+
+export function listTasks(project = null) {
+  const all = Array.from(tasks.values());
+  if (project) {
+    return all.filter((t) => t.project === project);
+  }
+  return all;
+}
+
+export function completeTask(id) {
+  const task = tasks.get(id);
+  if (!task) {
+    throw new Error(`Task ${id} not found`);
+  }
+  task.completed = true;
+  return task;
+}
+
+export function getProjectSummary(project = "default") {
+  const projectTasks = listTasks(project);
+  const completed = projectTasks.filter((t) => t.completed).length;
+  return {
+    project,
+    total: projectTasks.length,
+    completed,
+    pending: projectTasks.length - completed,
+    completionRate:
+      projectTasks.length > 0 ? Math.round((completed / projectTasks.length) * 100) : 0,
+  };
+}
+```
+
+## Step 3: define the MCP server
+
+Now wire the data layer into MCP tools, resources, and a prompt:
+
+```javascript
+// index.js — the MCP server
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createTask, listTasks, completeTask, getProjectSummary } from "./tasks.js";
+
+const server = new McpServer({
+  name: "task-manager",
+  version: "1.0.0",
+});
+
+// Tool: create a new task
+server.tool(
+  "create_task",
+  "Create a new task in a project. Use when the user wants to add a todo item.",
+  {
+    title: { type: "string", description: "The task title" },
+    project: { type: "string", description: "Project name (optional, defaults to 'default')" },
+  },
+  async ({ title, project }) => {
+    if (!title || title.trim().length === 0) {
+      return {
+        content: [{ type: "text", text: "Error: task title cannot be empty" }],
+        isError: true,
+      };
+    }
+
+    try {
+      const task = createTask(title.trim(), project);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Created task #${task.id}: "${task.title}" in project "${task.project}"`,
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Failed to create task: ${error.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: list tasks
+server.tool(
+  "list_tasks",
+  "List all tasks, optionally filtered by project. Use when the user wants to see their todos.",
+  {
+    project: { type: "string", description: "Filter by project name (optional)" },
+  },
+  async ({ project }) => {
+    try {
+      const tasks = listTasks(project);
+
+      if (tasks.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: project ? `No tasks found in project "${project}".` : "No tasks found.",
+            },
+          ],
+        };
+      }
+
+      const formatted = tasks
+        .map((t) => `${t.completed ? "[x]" : "[ ]"} #${t.id} ${t.title} (${t.project})`)
+        .join("\n");
+
+      return {
+        content: [{ type: "text", text: formatted }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Failed to list tasks: ${error.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: complete a task
+server.tool(
+  "complete_task",
+  "Mark a task as completed by its ID. Use when the user says they finished a task.",
+  {
+    id: { type: "number", description: "The task ID to mark as completed" },
+  },
+  async ({ id }) => {
+    try {
+      const task = completeTask(id);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Completed task #${task.id}: "${task.title}"`,
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Failed to complete task: ${error.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+```
+
+## Step 4: add a resource and a prompt
+
+```javascript
+// Resource: project summary
+server.resource(
+  "project-summary",
+  "tasks://summary/{project}",
+  "Summary statistics for a project including completion rate",
+  async (uri, { project }) => {
+    const summary = getProjectSummary(project);
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(summary, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+// Prompt: daily standup
+server.prompt(
+  "daily_standup",
+  "Generate a daily standup report for a project",
+  {
+    project: { type: "string", description: "Project name", required: true },
+  },
+  async ({ project }) => {
+    const tasks = listTasks(project);
+    const summary = getProjectSummary(project);
+
+    const pending = tasks
+      .filter((t) => !t.completed)
+      .map((t) => `- ${t.title}`)
+      .join("\n");
+    const done = tasks
+      .filter((t) => t.completed)
+      .map((t) => `- ${t.title}`)
+      .join("\n");
+
+    return {
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Generate a brief daily standup update for the "${project}" project.
+
+Completed tasks:
+${done || "- None yet"}
+
+Pending tasks:
+${pending || "- None"}
+
+Overall: ${summary.completionRate}% complete (${summary.completed}/${summary.total})
+
+Format as: What was done, what is next, and any blockers.`,
+          },
+        },
+      ],
+    };
+  }
+);
+```
+
+## Step 5: connect the transport and run
+
+```javascript
+// At the bottom of index.js
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  // Server is now running, listening on stdin
+}
+
+main().catch((error) => {
+  console.error("Server failed to start:", error);
+  process.exit(1);
+});
+```
+
+## Step 6: configure a client
+
+Add the server to your MCP client configuration:
+
+```javascript
+// For Claude Desktop: claude_desktop_config.json
+{
+  "mcpServers": {
+    "tasks": {
+      "command": "node",
+      "args": ["/path/to/task-mcp-server/index.js"]
+    }
+  }
+}
+```
+
+Now when you open Claude Desktop (or any MCP client with this config), you can say "Add a task to buy groceries" and the model will call your `create_task` tool. Ask "What are my tasks?" and it calls `list_tasks`. The protocol handles discovery, routing, and result formatting automatically.
+
+## What makes this production-ready
+
+The server above works, but a production version should add: input length limits on task titles, rate limiting on create operations, audit logging on every tool call, and proper error messages that do not leak internal details. Apply the patterns from the security lesson to harden any server before exposing it to real users.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a tool handler function called handleCreateTask that takes { title, project } as arguments. It should: (1) return isError if title is empty, (2) return a success message with the title and project, (3) catch any errors and return them with isError: true."
+  initialCode={`function handleCreateTask({ title, project = "default" }) {
+  // Implement the tool handler
+}
+
+console.log(handleCreateTask({ title: "Buy groceries", project: "personal" }));
+console.log(handleCreateTask({ title: "" }));
+console.log(handleCreateTask({ title: "Test task" }));`}
+  solution={`function handleCreateTask({ title, project = "default" }) {
+if (!title || title.trim().length === 0) {
+return {
+content: [{ type: "text", text: "Error: task title cannot be empty" }],
+isError: true
+};
+}
+
+try {
+return {
+content: [{
+type: "text",
+text: "Created task: \\"" + title.trim() + "\\" in project \\"" + project + "\\""
+}]
+};
+} catch (error) {
+return {
+content: [{ type: "text", text: "Failed: " + error.message }],
+isError: true
+};
+}
+}
+
+console.log(handleCreateTask({ title: "Buy groceries", project: "personal" }));
+console.log(handleCreateTask({ title: "" }));
+console.log(handleCreateTask({ title: "Test task" }));`}
+testCases={["returns content for valid input, isError for empty title"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What is the most common real-world pattern for building MCP servers?",
+      options: [
+        "Building custom AI models",
+        "Wrapping an existing API to expose it as MCP tools",
+        "Replacing REST APIs entirely",
+        "Creating standalone databases",
+      ],
+      correct: 1,
+      explanation:
+        "The most common MCP pattern is wrapping an existing API — you take something that already works (a database, a SaaS API, a file system) and expose it through standardized MCP tools.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What does the StdioServerTransport do in the project's main function?",
+      options: [
+        "Opens a web server on port 3000",
+        "Connects the MCP server to stdin/stdout for local communication",
+        "Sends data to a cloud endpoint",
+        "Creates a WebSocket connection",
+      ],
+      correct: 1,
+      explanation:
+        "StdioServerTransport connects the MCP server to the process's standard input and output, allowing a client (like Claude Desktop) to communicate with it as a local child process.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="To run a local MCP server, you create a ___ transport, call server.___ to attach it, and configure the client with the ___ and args to launch the server process."
+  answers={["StdioServerTransport", "connect", "command"]}
+  hints={[
+    "The local transport class.",
+    "The method that attaches transport to server.",
+    "The executable path in client config.",
+  ]}
+/>
+
+## What you learned
+
+- A complete MCP server combines **tools** (actions), **resources** (data), and **prompts** (templates) backed by a real data layer or API.
+- The pattern of **wrapping an existing API** as MCP tools is the most practical and common approach to MCP server development.
+- Production servers need **input validation**, **error handling with isError**, and the security practices from the previous lesson applied to every handler.

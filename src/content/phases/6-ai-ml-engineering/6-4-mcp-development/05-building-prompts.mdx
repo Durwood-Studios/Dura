@@ -1,0 +1,306 @@
+---
+title: "Building MCP Prompts"
+description: "Create reusable prompt templates with arguments that enable prompt management at scale through the Model Context Protocol."
+phase: 6
+module: "6-4-mcp-development"
+order: 5
+estimatedMinutes: 8
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Prompt engineering is not a one-time exercise — it is an ongoing discipline. Teams accumulate dozens of carefully crafted prompts for code review, data analysis, content generation, and debugging. Without a system, these prompts live in scattered documents, Slack messages, and individual workflows. MCP prompts formalize this. They let your server expose reusable prompt templates that any MCP client can discover and invoke, turning ad hoc prompting into managed infrastructure.
+
+## What MCP prompts are
+
+An MCP prompt is a server-side template that generates structured messages. Unlike tools (which execute code) and resources (which return data), prompts return **message arrays** — the same format models consume as conversation input. They accept arguments that parameterize the output.
+
+```javascript
+// A prompt template produces messages for the model
+const codeReviewPrompt = {
+  name: "review_code",
+  description: "Generate a structured code review for a given file",
+  arguments: [
+    {
+      name: "code",
+      description: "The source code to review",
+      required: true,
+    },
+    {
+      name: "language",
+      description: "Programming language of the code",
+      required: false,
+    },
+  ],
+};
+```
+
+When a client invokes this prompt, the server generates a message array that guides the model's behavior — setting the right context, tone, and structure for the task.
+
+## Registering prompts
+
+The MCP SDK provides a `prompt` method for registering prompt templates:
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+const server = new McpServer({
+  name: "dev-tools-server",
+  version: "1.0.0",
+});
+
+server.prompt(
+  "review_code",
+  "Generate a thorough code review with actionable feedback",
+  {
+    code: { type: "string", description: "Source code to review", required: true },
+    language: { type: "string", description: "Programming language", required: false },
+    focus: {
+      type: "string",
+      description: "Area to focus on: security, performance, or readability",
+      required: false,
+    },
+  },
+  async ({ code, language = "javascript", focus = "readability" }) => {
+    return {
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Review the following ${language} code with a focus on ${focus}. Provide specific, actionable feedback organized by severity (critical, warning, suggestion).
+
+\`\`\`${language}
+${code}
+\`\`\`
+
+Structure your review as:
+1. Summary (one sentence)
+2. Critical issues (must fix)
+3. Warnings (should fix)
+4. Suggestions (nice to have)
+5. What the code does well`,
+          },
+        },
+      ],
+    };
+  }
+);
+```
+
+The handler returns a `messages` array where each entry has a `role` ("user" or "assistant") and `content`. The client feeds these messages into the model's conversation, and the model responds accordingly.
+
+## Dynamic prompt generation
+
+Prompts can incorporate live data from your systems. This is where prompts become powerful — they combine template structure with real-time context:
+
+```javascript
+server.prompt(
+  "explain_error",
+  "Analyze an error with full context from the project",
+  {
+    errorMessage: {
+      type: "string",
+      description: "The error message or stack trace",
+      required: true,
+    },
+  },
+  async ({ errorMessage }) => {
+    // Pull relevant context dynamically
+    const recentLogs = await getRecentLogs(10);
+    const packageJson = await fs.readFile("./package.json", "utf-8");
+    const deps = JSON.parse(packageJson).dependencies;
+
+    return {
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `I encountered this error:
+
+\`\`\`
+${errorMessage}
+\`\`\`
+
+Here are the last 10 log entries for context:
+${recentLogs.map((l) => `- ${l}`).join("\n")}
+
+Project dependencies: ${Object.keys(deps).join(", ")}
+
+Explain what likely caused this error, how to fix it, and how to prevent it in the future.`,
+          },
+        },
+      ],
+    };
+  }
+);
+```
+
+The prompt template stays consistent while the context adapts to the current state of the system. Every developer on the team gets the same structured analysis, not just whoever remembered the right prompt.
+
+## Multi-turn prompt templates
+
+Prompts can include multiple messages to set up a conversation pattern. Pre-filling an assistant message establishes the format the model should follow:
+
+```javascript
+server.prompt(
+  "summarize_pr",
+  "Summarize a pull request diff for review",
+  {
+    diff: { type: "string", description: "The git diff content", required: true },
+    prTitle: { type: "string", description: "Pull request title", required: true },
+  },
+  async ({ diff, prTitle }) => {
+    return {
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Summarize this pull request titled "${prTitle}". Focus on what changed, why it likely changed, and any risks.
+
+\`\`\`diff
+${diff}
+\`\`\``,
+          },
+        },
+        {
+          role: "assistant",
+          content: {
+            type: "text",
+            text: "## PR Summary\n\n**Changes:**\n",
+          },
+        },
+      ],
+    };
+  }
+);
+```
+
+The prefilled assistant message steers the model into the right output format without explicit instructions. This technique is effective for ensuring consistent, structured responses.
+
+## Listing and discovering prompts
+
+Clients call `prompts/list` to discover available prompts, and `prompts/get` to invoke one:
+
+```javascript
+// Response to prompts/list
+{
+  "prompts": [
+    {
+      "name": "review_code",
+      "description": "Generate a thorough code review with actionable feedback",
+      "arguments": [
+        { "name": "code", "required": true },
+        { "name": "language", "required": false },
+        { "name": "focus", "required": false }
+      ]
+    },
+    {
+      "name": "explain_error",
+      "description": "Analyze an error with full context from the project",
+      "arguments": [
+        { "name": "errorMessage", "required": true }
+      ]
+    }
+  ]
+}
+```
+
+In Claude Desktop and other clients, prompts often appear as slash commands or menu items. The user selects one, fills in the arguments, and the client sends the generated messages to the model.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a function createPromptResponse(role, templateText, variables) that takes a role, a template string, and a variables object, replaces all {{key}} placeholders in the template with values from variables, and returns a valid MCP prompt response with a single message."
+  initialCode={`function createPromptResponse(role, templateText, variables) {
+  // Replace {{key}} placeholders and return MCP prompt response
+}
+
+const response = createPromptResponse(
+"user",
+"Review this {{language}} function:\\n\\n\`\`\`\\n{{code}}\\n\`\`\`",
+{ language: "JavaScript", code: "function add(a, b) { return a + b; }" }
+);
+
+console.log(JSON.stringify(response, null, 2));`}
+  solution={`function createPromptResponse(role, templateText, variables) {
+let text = templateText;
+for (const [key, value] of Object.entries(variables)) {
+text = text.replaceAll("{{" + key + "}}", value);
+}
+return {
+messages: [
+{
+role,
+content: { type: "text", text }
+}
+]
+};
+}
+
+const response = createPromptResponse(
+"user",
+"Review this {{language}} function:\\n\\n\`\`\`\\n{{code}}\\n\`\`\`",
+{ language: "JavaScript", code: "function add(a, b) { return a + b; }" }
+);
+
+console.log(JSON.stringify(response, null, 2));`}
+testCases={["response has messages array with role and content"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What do MCP prompts return, unlike tools and resources?",
+      options: [
+        "JSON data",
+        "Binary content",
+        "Message arrays with role and content",
+        "HTTP responses",
+      ],
+      correct: 2,
+      explanation:
+        "MCP prompts return message arrays — each with a role ('user' or 'assistant') and content — that are fed directly into the model's conversation.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Why would you include a prefilled assistant message in a prompt template?",
+      options: [
+        "To cache the model's response",
+        "To steer the model into a specific output format",
+        "To bypass rate limits",
+        "To authenticate the request",
+      ],
+      correct: 1,
+      explanation:
+        "A prefilled assistant message establishes the format the model should follow, ensuring consistent and structured responses without explicit formatting instructions.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="MCP prompts return ___ arrays where each entry has a ___ (like 'user' or 'assistant') and ___."
+  answers={["messages", "role", "content"]}
+  hints={["The return format.", "Who is speaking.", "What they say."]}
+/>
+
+## What you learned
+
+- MCP prompts are **reusable templates** that generate structured message arrays, turning ad hoc prompting into managed infrastructure.
+- Prompts accept **arguments** and can pull **dynamic context** from live systems, combining consistent structure with real-time data.
+- **Multi-turn templates** with prefilled assistant messages steer models into specific output formats without explicit instructions.

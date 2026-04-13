@@ -1,0 +1,226 @@
+---
+title: "MCP Architecture"
+description: "The Server-Client-Model triangle, transport layers, capabilities negotiation, and the session lifecycle that makes MCP work."
+phase: 6
+module: "6-4-mcp-development"
+order: 2
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Knowing that MCP exists is step one. Understanding how its pieces fit together is what lets you debug connection failures, design efficient servers, and reason about what happens when your tool call takes three seconds to return. The architecture is simple — three roles, a transport layer, and a handshake — but the details matter when you are building production integrations.
+
+## The three roles
+
+MCP has three distinct participants that form a triangle:
+
+**MCP Server** — a process that exposes tools, resources, and prompts. It does the actual work: querying a database, calling an API, reading files. It never talks to the model directly.
+
+**MCP Client** — the intermediary. It connects to one or more servers, discovers their capabilities, and relays requests. Claude Desktop, Claude Code, and IDE extensions all act as MCP clients.
+
+**Model (Host)** — the AI model that decides which tools to call based on the conversation. It sees the tool definitions the client collected from servers and generates tool-call requests.
+
+```javascript
+// The flow of a single tool call
+// 1. User asks: "What's the weather in Portland?"
+// 2. Model sees available tools, generates:
+const modelRequest = {
+  tool: "get_weather",
+  arguments: { city: "Portland" },
+};
+
+// 3. Client receives this, sends JSON-RPC to the weather server:
+const rpcRequest = {
+  jsonrpc: "2.0",
+  id: 42,
+  method: "tools/call",
+  params: { name: "get_weather", arguments: { city: "Portland" } },
+};
+
+// 4. Server executes, returns result to client
+// 5. Client passes result back to model
+// 6. Model incorporates result into its response to the user
+```
+
+The client is the broker. It never executes tools itself and the model never connects to servers directly. This separation is intentional — it means servers do not need to know anything about the model, and the model does not need to know anything about transport details.
+
+## Transport layers
+
+MCP is transport-agnostic. The JSON-RPC messages can travel over different channels depending on the deployment:
+
+**stdio** — the server runs as a local subprocess. The client writes JSON to the server's stdin and reads from its stdout. This is how Claude Desktop runs local MCP servers. Zero network overhead, maximum simplicity.
+
+**HTTP with SSE (Server-Sent Events)** — the client sends requests via HTTP POST and receives responses (and server-initiated notifications) through an SSE stream. Good for remote servers where you want a persistent connection.
+
+**Streamable HTTP** — a newer transport where each request is a standalone HTTP POST, with optional SSE for streaming responses. Stateless by default, which makes it easier to deploy behind load balancers.
+
+```javascript
+// stdio transport: client spawns server as a child process
+const { spawn } = require("child_process");
+const server = spawn("node", ["./my-mcp-server.js"]);
+
+// Client writes JSON-RPC to stdin
+server.stdin.write(
+  JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "my-client", version: "1.0.0" },
+    },
+  }) + "\n"
+);
+
+// Client reads JSON-RPC from stdout
+server.stdout.on("data", (data) => {
+  const response = JSON.parse(data.toString());
+  console.log("Server responded:", response);
+});
+```
+
+## Capabilities negotiation
+
+When a client first connects to a server, they perform an **initialize** handshake. The client sends its supported protocol version and capabilities. The server responds with its own capabilities — which of tools, resources, and prompts it supports.
+
+```javascript
+// Client sends initialize request
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-03-26",
+    "capabilities": {},
+    "clientInfo": { "name": "claude-desktop", "version": "1.4.0" }
+  }
+}
+
+// Server responds with its capabilities
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2025-03-26",
+    "capabilities": {
+      "tools": {},
+      "resources": { "subscribe": true },
+      "prompts": {}
+    },
+    "serverInfo": { "name": "weather-server", "version": "2.1.0" }
+  }
+}
+```
+
+After the server responds, the client sends an `initialized` notification to confirm the handshake is complete. Only then can the client call `tools/list`, `resources/list`, or `prompts/list` to discover what is available.
+
+## Session lifecycle
+
+A full MCP session follows this sequence:
+
+1. **Connect** — client establishes the transport (spawns process, opens HTTP connection)
+2. **Initialize** — client and server exchange versions and capabilities
+3. **Discover** — client calls `tools/list`, `resources/list`, `prompts/list`
+4. **Operate** — client relays tool calls, resource reads, and prompt requests
+5. **Shutdown** — client sends a shutdown request or closes the transport
+
+```javascript
+// The lifecycle as method calls
+const lifecycle = [
+  "initialize", // handshake
+  "notifications/initialized", // confirm
+  "tools/list", // discover available tools
+  "resources/list", // discover available resources
+  "tools/call", // actual work (repeated many times)
+  "tools/call",
+  "shutdown", // clean exit (or transport closes)
+];
+```
+
+Servers can also push notifications to clients — for example, `notifications/tools/list_changed` tells the client to re-fetch the tool list because the server added or removed a tool at runtime.
+
+## How Claude Code discovers servers
+
+Claude Code reads its MCP configuration from a settings file. Each entry specifies how to launch or connect to a server. On startup, Claude Code initializes each server, lists its capabilities, and makes them available to the model. When the model generates a tool call, Claude Code routes it to the correct server, waits for the result, and feeds it back.
+
+This is why you can add a new MCP server to Claude Code by adding a single config entry — the protocol handles everything else.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a function createInitializeRequest(clientName, clientVersion) that returns a valid MCP initialize JSON-RPC request object using protocol version '2025-03-26'."
+  initialCode={`function createInitializeRequest(clientName, clientVersion) {
+  // Return a valid initialize request object
+}
+
+const req = createInitializeRequest("my-app", "1.0.0");
+console.log(JSON.stringify(req, null, 2));`}
+  solution={`function createInitializeRequest(clientName, clientVersion) {
+return {
+jsonrpc: "2.0",
+id: 1,
+method: "initialize",
+params: {
+protocolVersion: "2025-03-26",
+capabilities: {},
+clientInfo: { name: clientName, version: clientVersion }
+}
+};
+}
+
+const req = createInitializeRequest("my-app", "1.0.0");
+console.log(JSON.stringify(req, null, 2));`}
+testCases={["returns object with method 'initialize' and clientInfo"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "In MCP architecture, which component directly connects to servers?",
+      options: ["The AI model", "The MCP client", "The user's browser", "The transport layer"],
+      correct: 1,
+      explanation:
+        "The MCP client is the intermediary that connects to servers, discovers capabilities, and relays requests between the model and servers.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What must happen before a client can call tools/list on a server?",
+      options: [
+        "The server must register with a central registry",
+        "The initialize handshake must complete",
+        "The model must approve the connection",
+        "The server must send a heartbeat",
+      ],
+      correct: 1,
+      explanation:
+        "The client and server must complete the initialize/initialized handshake before any capability discovery or tool calls can happen.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="MCP's three transport options are ___ (local process I/O), ___ (persistent event stream), and streamable ___ (stateless requests)."
+  answers={["stdio", "SSE", "HTTP"]}
+  hints={["Standard input/output.", "Server-Sent ___.", "The protocol of the web."]}
+/>
+
+## What you learned
+
+- MCP has three roles: **servers** (expose capabilities), **clients** (broker connections), and **models** (decide what to call).
+- The protocol runs over **stdio**, **SSE**, or **streamable HTTP** depending on deployment needs.
+- Every session starts with an **initialize handshake** where client and server exchange protocol versions and capabilities before any work begins.

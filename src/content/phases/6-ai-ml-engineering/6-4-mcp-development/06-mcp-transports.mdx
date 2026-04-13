@@ -1,0 +1,250 @@
+---
+title: "MCP Transports"
+description: "stdio for local processes, SSE for persistent connections, streamable HTTP for stateless deployment — choose the right transport for your MCP server."
+phase: 6
+module: "6-4-mcp-development"
+order: 6
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+The MCP protocol defines what messages look like. The transport defines how they travel. Picking the wrong transport means fighting deployment constraints — trying to run a stdio server in the cloud, or deploying an HTTP server when all you need is a local process. Each transport has distinct security properties, performance characteristics, and operational requirements. Understanding these trade-offs is essential before you ship an MCP server.
+
+## stdio: local process communication
+
+The **stdio** transport runs the MCP server as a child process. The client writes JSON-RPC messages to the server's stdin and reads responses from its stdout. This is the simplest transport and the one Claude Desktop uses for local servers.
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
+const server = new McpServer({
+  name: "local-tools",
+  version: "1.0.0",
+});
+
+server.tool("hello", "Say hello", {}, async () => ({
+  content: [{ type: "text", text: "Hello from stdio!" }],
+}));
+
+// Connect via stdio — reads from stdin, writes to stdout
+const transport = new StdioServerTransport();
+await server.connect(transport);
+```
+
+The client configuration tells the host application how to spawn the process:
+
+```javascript
+// Claude Desktop config for a stdio server
+{
+  "mcpServers": {
+    "local-tools": {
+      "command": "node",
+      "args": ["./local-tools-server.js"],
+      "env": { "API_KEY": "sk-abc123" }
+    }
+  }
+}
+```
+
+**When to use stdio:** local development, CLI-based workflows, personal automation. The server has the same filesystem access and permissions as the user running it. No network exposure.
+
+**Limitations:** only works locally. The client must be able to spawn the server process. Cannot be shared across machines without additional infrastructure.
+
+## SSE: server-sent events
+
+The **SSE transport** uses HTTP for bidirectional communication. The client opens a persistent SSE connection to receive server-initiated messages (responses, notifications) and sends requests via HTTP POST to a separate endpoint.
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import express from "express";
+
+const app = express();
+const server = new McpServer({
+  name: "remote-tools",
+  version: "1.0.0",
+});
+
+server.tool(
+  "search",
+  "Search documents",
+  {
+    query: { type: "string", description: "Search query" },
+  },
+  async ({ query }) => ({
+    content: [{ type: "text", text: `Results for: ${query}` }],
+  })
+);
+
+// SSE endpoint for the persistent connection
+app.get("/sse", async (req, res) => {
+  const transport = new SSEServerTransport("/messages", res);
+  await server.connect(transport);
+});
+
+// POST endpoint for client requests
+app.post("/messages", async (req, res) => {
+  // Transport handles routing the message
+  await transport.handlePostMessage(req, res);
+});
+
+app.listen(3001, () => {
+  console.log("MCP SSE server running on port 3001");
+});
+```
+
+**When to use SSE:** remote servers, team-shared tools, web-based clients. The persistent connection supports server-initiated notifications (resource changes, progress updates).
+
+**Limitations:** requires a long-lived HTTP connection. Stateful — harder to scale behind load balancers. Some corporate proxies and firewalls interfere with SSE streams.
+
+## Streamable HTTP: stateless requests
+
+The **streamable HTTP** transport is the newest option. Each request is a standalone HTTP POST. The server can respond with a simple JSON response or upgrade to an SSE stream for long-running operations. No persistent connection required.
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
+
+const app = express();
+
+app.post("/mcp", async (req, res) => {
+  const server = new McpServer({
+    name: "stateless-tools",
+    version: "1.0.0",
+  });
+
+  server.tool("ping", "Health check", {}, async () => ({
+    content: [{ type: "text", text: "pong" }],
+  }));
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined, // stateless mode
+  });
+
+  await server.connect(transport);
+  await transport.handleRequest(req, res);
+});
+
+app.listen(3002, () => {
+  console.log("MCP HTTP server running on port 3002");
+});
+```
+
+**When to use streamable HTTP:** production deployments, serverless functions, load-balanced environments. Works behind reverse proxies and CDNs. Each request is independent, so horizontal scaling is straightforward.
+
+**Limitations:** no persistent connection means no server-initiated notifications (unless the client polls or re-opens an SSE stream). Slightly more overhead per request than stdio.
+
+## Choosing the right transport
+
+The decision comes down to where the server runs and who uses it:
+
+```javascript
+// Decision matrix
+const transportChoice = {
+  "local dev, single user": "stdio",
+  "remote server, persistent": "SSE",
+  "cloud/serverless, scalable": "streamable HTTP",
+  "CLI tool integration": "stdio",
+  "web app integration": "streamable HTTP",
+  "team-shared dev tools": "SSE or streamable HTTP",
+};
+```
+
+| Factor                    | stdio      | SSE        | Streamable HTTP      |
+| ------------------------- | ---------- | ---------- | -------------------- |
+| Network required          | No         | Yes        | Yes                  |
+| Server-initiated messages | Via stdout | Yes (push) | Only via SSE upgrade |
+| Horizontal scaling        | N/A        | Hard       | Easy                 |
+| Serverless compatible     | No         | No         | Yes                  |
+| Setup complexity          | Lowest     | Medium     | Medium               |
+
+## Security implications
+
+Each transport has different security characteristics. stdio inherits the user's local permissions — no network attack surface but full filesystem access. SSE and HTTP expose network endpoints that need authentication, TLS, and rate limiting. We cover these in detail in the security lesson.
+
+```javascript
+// Security considerations per transport
+const security = {
+  stdio: "Inherits user permissions. No network exposure. Trust the local user.",
+  sse: "Needs TLS, auth tokens, CORS headers. Open to network attacks.",
+  http: "Same as SSE, plus: stateless means auth on every request.",
+};
+```
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a function recommendTransport(requirements) that takes an object with boolean fields (isLocal, needsScaling, needsServerPush, isServerless) and returns the recommended transport name as a string: 'stdio', 'SSE', or 'streamable HTTP'."
+  initialCode={`function recommendTransport(requirements) {
+  // Return the best transport based on requirements
+}
+
+console.log(recommendTransport({ isLocal: true, needsScaling: false, needsServerPush: false, isServerless: false }));
+console.log(recommendTransport({ isLocal: false, needsScaling: true, needsServerPush: false, isServerless: true }));
+console.log(recommendTransport({ isLocal: false, needsScaling: false, needsServerPush: true, isServerless: false }));`}
+  solution={`function recommendTransport(requirements) {
+if (requirements.isLocal) {
+return "stdio";
+}
+if (requirements.isServerless || requirements.needsScaling) {
+return "streamable HTTP";
+}
+if (requirements.needsServerPush) {
+return "SSE";
+}
+return "streamable HTTP";
+}
+
+console.log(recommendTransport({ isLocal: true, needsScaling: false, needsServerPush: false, isServerless: false }));
+console.log(recommendTransport({ isLocal: false, needsScaling: true, needsServerPush: false, isServerless: true }));
+console.log(recommendTransport({ isLocal: false, needsScaling: false, needsServerPush: true, isServerless: false }));`}
+testCases={["returns stdio for local, streamable HTTP for serverless, SSE for server push"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Which transport does Claude Desktop use to run local MCP servers?",
+      options: ["SSE", "WebSocket", "stdio", "Streamable HTTP"],
+      correct: 2,
+      explanation:
+        "Claude Desktop spawns local MCP servers as child processes and communicates via stdio — writing JSON-RPC to stdin and reading from stdout.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Which transport is best suited for serverless deployment behind a load balancer?",
+      options: ["stdio", "SSE", "Streamable HTTP", "WebSocket"],
+      correct: 2,
+      explanation:
+        "Streamable HTTP is stateless by default — each request is independent, making it ideal for serverless functions and horizontally scaled deployments.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The three MCP transports are ___ (local process I/O), ___ (persistent event stream), and ___ HTTP (stateless, scalable)."
+  answers={["stdio", "SSE", "streamable"]}
+  hints={["Standard input/output.", "Server-Sent Events.", "The newest, stateless transport."]}
+/>
+
+## What you learned
+
+- **stdio** is the simplest transport — the server runs as a local child process with no network exposure, ideal for personal tools and CLI integration.
+- **SSE** maintains a persistent connection for server-initiated messages, suitable for remote team-shared servers.
+- **Streamable HTTP** is stateless and horizontally scalable, the best fit for production cloud deployments and serverless functions.

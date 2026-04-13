@@ -497,4 +497,151 @@ export const PHASE_6_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["agent-loop", "safety", "cost"]
   ),
+
+  // ── Module 6-4: MCP Development ──────────────────────────────────────────
+  q(
+    "6-4-q1",
+    "6-4",
+    "multiple-choice",
+    "What does MCP stand for?",
+    [
+      "Model Compression Protocol",
+      "Model Context Protocol",
+      "Multi-Channel Processing",
+      "Machine Control Program",
+    ],
+    1,
+    "MCP is the Model Context Protocol — a standard for connecting AI models to external tools, data, and prompts.",
+    "easy",
+    ["mcp"]
+  ),
+  q(
+    "6-4-q2",
+    "6-4",
+    "multiple-choice",
+    "What transport protocol does MCP use at the message level?",
+    ["REST", "GraphQL", "JSON-RPC 2.0", "gRPC"],
+    2,
+    "MCP uses JSON-RPC 2.0 as its message format, carried over stdio, SSE, or HTTP transports.",
+    "easy",
+    ["json-rpc", "mcp"]
+  ),
+  q(
+    "6-4-q3",
+    "6-4",
+    "multiple-choice",
+    "What are the three main primitives an MCP server can expose?",
+    [
+      "GET, POST, DELETE",
+      "Tools, resources, and prompts",
+      "Input, output, and error",
+      "Read, write, and execute",
+    ],
+    1,
+    "MCP servers expose tools (actions), resources (data), and prompts (templates).",
+    "easy",
+    ["mcp", "primitives"]
+  ),
+  q(
+    "6-4-q4",
+    "6-4",
+    "true-false",
+    "True or false: MCP tools are defined using JSON Schema for their input parameters.",
+    ["True", "False"],
+    0,
+    "Tool definitions include a name, description, and inputSchema following JSON Schema for parameter validation.",
+    "easy",
+    ["tool", "json-schema", "mcp"]
+  ),
+  q(
+    "6-4-q5",
+    "6-4",
+    "multiple-choice",
+    "Which MCP transport is typically used by Claude Desktop for local servers?",
+    ["HTTP", "WebSocket", "stdio", "gRPC"],
+    2,
+    "stdio (standard input/output) is used for local process communication — the client spawns the server and communicates via stdin/stdout.",
+    "medium",
+    ["stdio", "transport", "mcp"]
+  ),
+  q(
+    "6-4-q6",
+    "6-4",
+    "multiple-choice",
+    "What is a resource URI in MCP?",
+    [
+      "A URL that always points to a website",
+      "A unique identifier for a piece of data the server exposes, which the model can read",
+      "A database connection string",
+      "An API authentication token",
+    ],
+    1,
+    "Resource URIs identify data sources (files, database records, API responses) that the model can access through the server.",
+    "medium",
+    ["resource", "uri", "mcp"]
+  ),
+  q(
+    "6-4-q7",
+    "6-4",
+    "multiple-choice",
+    "Why is input validation critical for MCP tool handlers?",
+    [
+      "It makes tools faster",
+      "The model generates the input — it can be malformed, out-of-range, or contain injection attempts",
+      "JSON Schema handles all validation automatically",
+      "It's optional for trusted clients",
+    ],
+    1,
+    "LLM-generated inputs can be unexpected. Validate types, ranges, and patterns before executing any tool action.",
+    "medium",
+    ["validation", "security", "mcp"]
+  ),
+  q(
+    "6-4-q8",
+    "6-4",
+    "multiple-choice",
+    "What is capabilities negotiation in MCP?",
+    [
+      "A pricing negotiation between client and server",
+      "Client and server exchange which features they support during the initialization handshake",
+      "A way to reduce token usage",
+      "An authentication mechanism",
+    ],
+    1,
+    "During initialization, client and server declare their capabilities (tools, resources, prompts, sampling) so each knows what the other supports.",
+    "hard",
+    ["capabilities", "initialization", "mcp"]
+  ),
+  q(
+    "6-4-q9",
+    "6-4",
+    "multiple-choice",
+    "What is the principle of least privilege in the context of MCP tools?",
+    [
+      "Give the model access to everything for best results",
+      "Only expose the minimum tools and permissions the model needs for its task",
+      "Use the cheapest model available",
+      "Limit the number of prompts",
+    ],
+    1,
+    "Least privilege limits blast radius. A tool that only needs read access should never have write or delete permissions.",
+    "hard",
+    ["security", "least-privilege", "mcp"]
+  ),
+  q(
+    "6-4-q10",
+    "6-4",
+    "multiple-choice",
+    "When should you use SSE transport instead of stdio for an MCP server?",
+    [
+      "Always — SSE is always better",
+      "When the server needs to be accessible over the network (remote/web deployment) rather than locally spawned",
+      "When you need faster local communication",
+      "Only for Python servers",
+    ],
+    1,
+    "stdio is for local process communication. SSE and HTTP are for network-accessible servers (web deployments, shared infrastructure).",
+    "hard",
+    ["sse", "transport", "mcp"]
+  ),
 ];

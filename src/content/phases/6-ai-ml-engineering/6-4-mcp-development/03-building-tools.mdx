@@ -1,0 +1,290 @@
+---
+title: "Building MCP Tools"
+description: "Define tools with JSON Schema inputs, implement handlers, return structured results, and handle errors — the core of MCP server development."
+phase: 6
+module: "6-4-mcp-development"
+order: 3
+estimatedMinutes: 10
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Tools are the most common reason to build an MCP server. They let AI models take actions — query a database, create a file, call an API, run a calculation. When a model sees a well-described tool, it can decide when and how to use it based on the user's request. The quality of your tool definitions directly determines how reliably the model will use them.
+
+## Anatomy of a tool definition
+
+Every MCP tool has three parts: a **name**, a **description**, and an **inputSchema**. The name is a unique identifier. The description tells the model what the tool does and when to use it. The inputSchema is a JSON Schema object that defines the expected arguments.
+
+```javascript
+// A tool definition for getting weather data
+const weatherTool = {
+  name: "get_weather",
+  description:
+    "Get the current weather for a given city. Use this when the user asks about weather conditions, temperature, or forecasts for a specific location.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      city: {
+        type: "string",
+        description: "The city name, e.g. 'Portland' or 'San Francisco'",
+      },
+      units: {
+        type: "string",
+        enum: ["fahrenheit", "celsius"],
+        description: "Temperature units. Defaults to fahrenheit.",
+      },
+    },
+    required: ["city"],
+  },
+};
+```
+
+The description is the most important part. The model reads it to decide whether to call the tool. Be specific about when the tool should be used and what it returns. Vague descriptions lead to unreliable tool use.
+
+## Implementing tool handlers
+
+When the MCP SDK receives a `tools/call` request, it routes it to your handler function. The handler receives the tool name and arguments, does the work, and returns a result.
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+const server = new McpServer({
+  name: "weather-server",
+  version: "1.0.0",
+});
+
+// Register a tool with its handler
+server.tool(
+  "get_weather",
+  "Get current weather for a city",
+  {
+    city: { type: "string", description: "City name" },
+    units: { type: "string", enum: ["fahrenheit", "celsius"] },
+  },
+  async ({ city, units = "fahrenheit" }) => {
+    const response = await fetch(
+      `https://api.weather.example/current?city=${encodeURIComponent(city)}&units=${units}`
+    );
+    const data = await response.json();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${city}: ${data.temperature}°${units === "celsius" ? "C" : "F"}, ${data.condition}`,
+        },
+      ],
+    };
+  }
+);
+```
+
+The return value must follow MCP's content format — an array of content blocks. The most common type is `text`, but you can also return `image` (base64-encoded) or `resource` (embedded resource data).
+
+## A database query tool
+
+Here is a more practical example — a tool that queries a SQLite database:
+
+```javascript
+server.tool(
+  "query_database",
+  "Run a read-only SQL query against the application database. Only SELECT statements are allowed.",
+  {
+    sql: {
+      type: "string",
+      description: "A SELECT SQL query to execute",
+    },
+  },
+  async ({ sql }) => {
+    // Validate: only allow SELECT statements
+    const trimmed = sql.trim().toUpperCase();
+    if (!trimmed.startsWith("SELECT")) {
+      return {
+        content: [{ type: "text", text: "Error: Only SELECT queries are allowed." }],
+        isError: true,
+      };
+    }
+
+    try {
+      const rows = await db.all(sql);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(rows, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Query error: ${error.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+```
+
+Notice the `isError: true` field. This tells the model the tool call failed, so it can inform the user or try a different approach instead of treating error text as a successful result.
+
+## Error handling patterns
+
+MCP distinguishes between two kinds of errors. **Protocol errors** (invalid JSON-RPC, unknown method) are returned as JSON-RPC error responses. **Tool execution errors** (bad input, API failure) are returned as normal results with `isError: true`.
+
+```javascript
+// Protocol error — the MCP SDK handles this automatically
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "error": {
+    "code": -32601,
+    "message": "Method not found"
+  }
+}
+
+// Tool execution error — you return this from your handler
+{
+  "content": [
+    { "type": "text", "text": "Failed to fetch weather: API rate limit exceeded" }
+  ],
+  "isError": true
+}
+```
+
+Always handle errors in your tool handlers. An unhandled exception will crash the server. Wrap async operations in try/catch and return meaningful error messages that help the model (and the user) understand what went wrong.
+
+## Listing tools
+
+When a client sends `tools/list`, the server returns all registered tools with their definitions. The model uses these definitions to understand what is available.
+
+```javascript
+// The server responds to tools/list with:
+{
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get current weather for a city",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "city": { "type": "string" }
+        },
+        "required": ["city"]
+      }
+    },
+    {
+      "name": "query_database",
+      "description": "Run a read-only SQL query",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sql": { "type": "string" }
+        },
+        "required": ["sql"]
+      }
+    }
+  ]
+}
+```
+
+Write descriptions as if you are explaining the tool to a colleague who has never seen your codebase. That colleague is the model.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a function createToolDefinition(name, description, properties, required) that returns a valid MCP tool definition object with a proper inputSchema. Then create a tool called 'search_users' that takes a 'query' string (required) and a 'limit' number (optional)."
+  initialCode={`function createToolDefinition(name, description, properties, required) {
+  // Return a valid MCP tool definition
+}
+
+const tool = createToolDefinition(
+"search_users",
+"Search for users by name or email",
+{
+query: { type: "string", description: "Search term" },
+limit: { type: "number", description: "Max results to return" }
+},
+["query"]
+);
+
+console.log(JSON.stringify(tool, null, 2));`}
+  solution={`function createToolDefinition(name, description, properties, required) {
+return {
+name,
+description,
+inputSchema: {
+type: "object",
+properties,
+required
+}
+};
+}
+
+const tool = createToolDefinition(
+"search_users",
+"Search for users by name or email",
+{
+query: { type: "string", description: "Search term" },
+limit: { type: "number", description: "Max results to return" }
+},
+["query"]
+);
+
+console.log(JSON.stringify(tool, null, 2));`}
+testCases={["tool has name, description, and inputSchema with properties"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "What is the most important part of an MCP tool definition for reliable model usage?",
+      options: ["The name", "The inputSchema", "The description", "The handler function"],
+      correct: 2,
+      explanation:
+        "The description is what the model reads to decide when and how to use the tool. A vague description leads to unreliable tool use.",
+    },
+    {
+      type: "multiple-choice",
+      question: "How should a tool handler report that an API call failed?",
+      options: [
+        "Throw an unhandled exception",
+        "Return an empty result",
+        "Return content with isError: true",
+        "Send a JSON-RPC error response",
+      ],
+      correct: 2,
+      explanation:
+        "Tool execution errors should be returned as normal results with isError: true and a meaningful error message. This tells the model the call failed without crashing the server.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Every MCP tool definition has three parts: a ___, a ___, and an ___ that defines expected arguments using JSON Schema."
+  answers={["name", "description", "inputSchema"]}
+  hints={[
+    "The identifier.",
+    "What tells the model when to use it.",
+    "The schema for input arguments.",
+  ]}
+/>
+
+## What you learned
+
+- MCP tools are defined with a **name**, **description**, and **inputSchema** (JSON Schema) that tells the model what arguments to provide.
+- Tool handlers execute the work and return **content blocks** — text, images, or embedded resources — with an optional `isError` flag for failures.
+- Good **descriptions** are critical — they are the model's only guide for deciding when and how to use each tool.
