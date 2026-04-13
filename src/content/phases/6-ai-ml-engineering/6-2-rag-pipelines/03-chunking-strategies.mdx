@@ -1,0 +1,275 @@
+---
+title: "Chunking Strategies"
+description: "How you split documents determines whether retrieval finds the right answer or a useless fragment."
+phase: 6
+module: "6-2-rag-pipelines"
+order: 3
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+You cannot embed an entire 50-page document as a single vector. Embedding models have token limits (typically 512-8192 tokens), and even if you could embed the whole thing, a single vector cannot capture every topic in a long document. Chunking splits documents into smaller pieces so each chunk represents one coherent idea. Get this wrong, and your retrieval step returns fragments that are either too vague to be useful or too small to make sense.
+
+## The chunking problem
+
+Imagine searching for "How do I reset my password?" in a knowledge base. If a chunk contains the full password reset instructions, retrieval works perfectly. If the instructions got split across two chunks — one with the steps and another with the prerequisites — neither chunk alone answers the question. Chunking strategy directly controls retrieval quality.
+
+### Fixed-size chunking
+
+The simplest approach: split text every N characters (or tokens), with an optional overlap.
+
+```javascript
+function fixedSizeChunk(text, chunkSize = 500, overlap = 50) {
+  const chunks = [];
+  let start = 0;
+
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length);
+    chunks.push(text.slice(start, end));
+    start += chunkSize - overlap;
+  }
+
+  return chunks;
+}
+
+const text = "A".repeat(1200);
+const chunks = fixedSizeChunk(text, 500, 50);
+console.log(chunks.length); // 3 chunks
+console.log(chunks[0].length); // 500
+```
+
+**Pros:** Dead simple, predictable chunk sizes, easy to reason about.
+**Cons:** Splits sentences mid-word, breaks paragraphs at arbitrary points. A chunk might start with "...tion process requires admin access" — useless without the beginning.
+
+### Overlap
+
+Overlap is the safety net. By repeating the last N characters of one chunk at the start of the next, you reduce the chance that a critical sentence gets split and lost. Typical overlap: 10-20% of chunk size.
+
+```javascript
+// Without overlap: chunk boundary splits a key sentence
+// Chunk 1: "...To reset your password, first go to"
+// Chunk 2: "the settings page and click Security."
+
+// With 100-char overlap:
+// Chunk 1: "...To reset your password, first go to"
+// Chunk 2: "...password, first go to the settings page and click Security."
+// Now both chunks contain the full instruction
+```
+
+### Recursive character splitting
+
+The most popular strategy in production (used by LangChain and similar frameworks). Instead of splitting at a fixed size, it tries a hierarchy of separators in order of preference:
+
+1. Split on `\n\n` (paragraph breaks) — best boundary
+2. If chunks are still too large, split on `\n` (line breaks)
+3. If still too large, split on `. ` (sentences)
+4. Last resort: split on ` ` (words)
+
+```javascript
+function recursiveChunk(text, maxSize = 500, overlap = 50) {
+  const separators = ["\n\n", "\n", ". ", " "];
+
+  function split(text, sepIndex) {
+    if (text.length <= maxSize) return [text];
+    if (sepIndex >= separators.length) {
+      // Last resort: hard cut
+      return fixedSizeChunk(text, maxSize, overlap);
+    }
+
+    const sep = separators[sepIndex];
+    const parts = text.split(sep);
+    const chunks = [];
+    let current = "";
+
+    for (const part of parts) {
+      const candidate = current ? current + sep + part : part;
+      if (candidate.length > maxSize && current) {
+        chunks.push(current);
+        current = part;
+      } else {
+        current = candidate;
+      }
+    }
+
+    if (current) chunks.push(current);
+
+    // Recurse on chunks that are still too large
+    return chunks.flatMap((chunk) =>
+      chunk.length > maxSize ? split(chunk, sepIndex + 1) : [chunk]
+    );
+  }
+
+  return split(text, 0);
+}
+```
+
+This produces chunks that respect natural boundaries. Paragraphs stay together, sentences stay whole, and hard character splits only happen as a last resort.
+
+### Semantic chunking
+
+The most sophisticated approach: use the content's meaning to decide where to split. One method computes sentence embeddings and starts a new chunk when the similarity between consecutive sentences drops below a threshold — indicating a topic shift.
+
+```javascript
+// Conceptual — requires an embedding function
+function semanticChunkBoundaries(sentences, embeddings, threshold = 0.75) {
+  const boundaries = [0];
+
+  for (let i = 1; i < sentences.length; i++) {
+    const similarity = cosineSimilarity(embeddings[i - 1], embeddings[i]);
+    if (similarity < threshold) {
+      boundaries.push(i); // Topic shift detected
+    }
+  }
+
+  return boundaries;
+}
+```
+
+Semantic chunking produces the best retrieval results but costs more (you need embeddings just for chunking) and adds complexity. Use it when retrieval quality justifies the overhead.
+
+### Chunk size tradeoffs
+
+| Chunk size              | Retrieval                             | Context                                   |
+| ----------------------- | ------------------------------------- | ----------------------------------------- |
+| Small (100-200 chars)   | High precision, finds exact sentences | Low — may lack surrounding context        |
+| Medium (500-1000 chars) | Good balance for most use cases       | Usually enough to be self-contained       |
+| Large (1500-3000 chars) | Lower precision, more noise           | Rich context, but dilutes relevance score |
+
+The sweet spot for most RAG systems is **500-1000 characters** (roughly 100-250 tokens). Start there and adjust based on eval results.
+
+### Preserving metadata through chunking
+
+Each chunk should inherit metadata from its parent document plus its own position:
+
+```javascript
+function chunkWithMetadata(document, chunks) {
+  return chunks.map((text, index) => ({
+    text,
+    metadata: {
+      ...document.metadata,
+      chunkIndex: index,
+      totalChunks: chunks.length,
+    },
+  }));
+}
+```
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a recursive chunker that splits on paragraph breaks first, then sentences, then spaces. Each chunk should be at most maxSize characters."
+  initialCode={`function recursiveChunk(text, maxSize = 200) {
+  // Split on "\\n\\n" first, then ". ", then " "
+  // Return an array of chunks, each <= maxSize
+}
+
+const doc = "Paragraph one about RAG pipelines. It has multiple sentences.\\n\\nParagraph two covers chunking. This is important for retrieval quality. Proper chunking ensures each piece is self-contained.\\n\\nParagraph three is short.";
+
+const chunks = recursiveChunk(doc, 120);
+chunks.forEach((c, i) => console.log("Chunk " + i + " (" + c.length + "):", c));`}
+  solution={`function recursiveChunk(text, maxSize = 200) {
+if (text.length <= maxSize) return [text.trim()].filter(Boolean);
+
+const separators = ["\\n\\n", ". ", " "];
+
+for (const sep of separators) {
+const parts = text.split(sep);
+if (parts.length <= 1) continue;
+
+    const chunks = [];
+    let current = "";
+
+    for (const part of parts) {
+      const addition = sep === ". " ? part + "." : part;
+      const candidate = current ? current + sep + part : addition;
+
+      if (candidate.length > maxSize && current) {
+        chunks.push(current.trim());
+        current = addition;
+      } else {
+        current = candidate;
+      }
+    }
+    if (current.trim()) chunks.push(current.trim());
+
+    return chunks.flatMap((c) =>
+      c.length > maxSize ? recursiveChunk(c, maxSize) : [c]
+    );
+
+}
+
+// Hard split as last resort
+const chunks = [];
+for (let i = 0; i < text.length; i += maxSize) {
+chunks.push(text.slice(i, i + maxSize).trim());
+}
+return chunks.filter(Boolean);
+}
+
+const doc = "Paragraph one about RAG pipelines. It has multiple sentences.\\n\\nParagraph two covers chunking. This is important for retrieval quality. Proper chunking ensures each piece is self-contained.\\n\\nParagraph three is short.";
+
+const chunks = recursiveChunk(doc, 120);
+chunks.forEach((c, i) => console.log("Chunk " + i + " (" + c.length + "):", c));`}
+testCases={["All chunks are within maxSize", "Paragraph boundaries are respected when possible"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What is the main risk of using very small chunk sizes?",
+      options: [
+        "Chunks are too expensive to embed",
+        "Chunks lose surrounding context and may not be self-contained",
+        "The vector database cannot store small chunks",
+        "Small chunks break embedding models",
+      ],
+      correct: 1,
+      explanation:
+        "Small chunks may contain only a sentence fragment, losing the surrounding context needed to answer a question. The retrieval hit is precise but the content is insufficient.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Why does recursive character splitting try paragraph breaks before sentence breaks?",
+      options: [
+        "Paragraphs are faster to process",
+        "Paragraph breaks are the strongest natural boundary for topic coherence",
+        "Embedding models require paragraph-sized inputs",
+        "It reduces the total number of chunks",
+      ],
+      correct: 1,
+      explanation:
+        "Paragraphs typically contain one coherent idea. Splitting on paragraph breaks preserves topical coherence better than splitting mid-paragraph on sentences.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Chunk ___ prevents critical sentences from being lost at boundaries. Recursive splitting tries ___ breaks first, then sentences, then words. The typical sweet spot for chunk size is ___-1000 characters."
+  answers={["overlap", "paragraph", "500"]}
+  hints={[
+    "Repeated text between chunks.",
+    "Strongest natural boundary.",
+    "A number in the hundreds.",
+  ]}
+/>
+
+## What you learned
+
+- Chunking splits documents into embeddable pieces — too small loses context, too large dilutes relevance. The sweet spot is 500-1000 characters.
+- Recursive character splitting is the production default: it prefers paragraph breaks, falls back to sentences, and hard-splits only as a last resort.
+- Overlap (10-20% of chunk size) prevents important sentences from being lost at chunk boundaries.

@@ -183,4 +183,161 @@ export const PHASE_6_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["hallucination", "rag", "mitigation"]
   ),
+
+  // ── Module 6-2: RAG Pipelines ────────────────────────────────────────────
+  q(
+    "6-2-q1",
+    "6-2",
+    "multiple-choice",
+    "What does RAG stand for?",
+    [
+      "Randomized Attention Generation",
+      "Retrieval-Augmented Generation",
+      "Recursive Algorithm for Graphs",
+      "Real-time Automated Grading",
+    ],
+    1,
+    "RAG retrieves relevant documents, augments the prompt with them, and generates a grounded response.",
+    "easy",
+    ["rag"]
+  ),
+  q(
+    "6-2-q2",
+    "6-2",
+    "multiple-choice",
+    "What is the purpose of chunking documents in a RAG pipeline?",
+    [
+      "To reduce storage costs",
+      "To split documents into pieces that fit the embedding model and provide focused context",
+      "To encrypt the documents",
+      "To convert documents to a different format",
+    ],
+    1,
+    "Chunks must be small enough to embed and retrieve meaningfully, but large enough to preserve context.",
+    "easy",
+    ["chunking", "rag"]
+  ),
+  q(
+    "6-2-q3",
+    "6-2",
+    "multiple-choice",
+    "What is an embedding in the context of RAG?",
+    [
+      "A compressed file format",
+      "A high-dimensional vector that captures the semantic meaning of text",
+      "A type of database index",
+      "An encryption key",
+    ],
+    1,
+    "Embeddings are dense vectors where similar meanings produce similar vectors, enabling semantic search.",
+    "easy",
+    ["embedding", "vector"]
+  ),
+  q(
+    "6-2-q4",
+    "6-2",
+    "true-false",
+    "True or false: cosine similarity measures how close two embedding vectors are in meaning.",
+    ["True", "False"],
+    0,
+    "Cosine similarity compares the angle between vectors. Closer to 1 = more similar in meaning.",
+    "easy",
+    ["cosine-similarity", "embedding"]
+  ),
+  q(
+    "6-2-q5",
+    "6-2",
+    "multiple-choice",
+    "What is the main advantage of hybrid search (keyword + semantic) over pure semantic search?",
+    [
+      "It's faster",
+      "It catches exact matches that semantic search misses and vice versa",
+      "It uses less storage",
+      "It eliminates the need for embeddings",
+    ],
+    1,
+    "Hybrid search combines keyword matching (exact terms) with semantic matching (meaning), improving recall.",
+    "medium",
+    ["hybrid-search", "retrieval"]
+  ),
+  q(
+    "6-2-q6",
+    "6-2",
+    "multiple-choice",
+    "What does a reranker do in a RAG pipeline?",
+    [
+      "Re-sorts the initial retrieval results by relevance using a more expensive model",
+      "Removes duplicate results",
+      "Translates results to a different language",
+      "Compresses the retrieved text",
+    ],
+    0,
+    "Rerankers (like Cohere Rerank or cross-encoders) score each result with higher accuracy than the initial embedding search.",
+    "medium",
+    ["reranker", "retrieval"]
+  ),
+  q(
+    "6-2-q7",
+    "6-2",
+    "multiple-choice",
+    "What is the RAGAS metric 'faithfulness'?",
+    [
+      "Whether the model follows instructions",
+      "Whether the generated answer is factually supported by the retrieved context",
+      "Whether the user is satisfied",
+      "Whether the system is fast",
+    ],
+    1,
+    "Faithfulness checks if claims in the answer can be traced back to the provided context documents.",
+    "medium",
+    ["ragas", "evaluation", "faithfulness"]
+  ),
+  q(
+    "6-2-q8",
+    "6-2",
+    "multiple-choice",
+    "What is HyDE (Hypothetical Document Embeddings)?",
+    [
+      "A type of database",
+      "Generate a hypothetical answer first, embed that, then search — matching answers to answers",
+      "A way to hide documents from retrieval",
+      "An encryption technique for embeddings",
+    ],
+    1,
+    "HyDE generates a hypothetical answer to the query, embeds it, and uses that embedding for retrieval — often improving recall.",
+    "hard",
+    ["hyde", "advanced-rag"]
+  ),
+  q(
+    "6-2-q9",
+    "6-2",
+    "multiple-choice",
+    "Why is chunk overlap used in text splitting?",
+    [
+      "To increase storage usage",
+      "To ensure context at chunk boundaries isn't lost — information split across chunks stays accessible",
+      "To create duplicate entries for backup",
+      "To speed up embedding generation",
+    ],
+    1,
+    "Overlap ensures that sentences split at boundaries are present in at least one chunk, preventing context loss.",
+    "hard",
+    ["chunking", "overlap"]
+  ),
+  q(
+    "6-2-q10",
+    "6-2",
+    "multiple-choice",
+    "In a RAG pipeline, what is the most common reason for poor answer quality?",
+    [
+      "The LLM is too small",
+      "The retrieval step returns irrelevant documents",
+      "The system prompt is too long",
+      "The temperature is too high",
+    ],
+    1,
+    "Garbage in, garbage out. If retrieval returns wrong documents, even the best LLM produces wrong answers.",
+    "hard",
+    ["retrieval", "quality"]
+  ),
 ];

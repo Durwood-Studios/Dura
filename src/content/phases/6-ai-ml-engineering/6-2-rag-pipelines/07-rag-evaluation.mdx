@@ -1,0 +1,267 @@
+---
+title: "RAG Evaluation"
+description: "Measuring whether your RAG pipeline actually works. Faithfulness, relevance, precision, and recall."
+phase: 6
+module: "6-2-rag-pipelines"
+order: 7
+estimatedMinutes: 9
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+You built a RAG pipeline. It returns answers. But are they **correct** answers? Without evaluation, you are guessing. Every change — a different chunking strategy, a new embedding model, adjusted top-K — could improve or degrade quality, and you would not know which. RAG evaluation gives you metrics so you can iterate with confidence instead of vibes.
+
+## The two things that can go wrong
+
+RAG has two failure modes:
+
+1. **Bad retrieval** — the pipeline retrieves irrelevant chunks, so the LLM gets garbage context.
+2. **Bad generation** — the pipeline retrieves good chunks, but the LLM ignores them or adds information that is not in the context (hallucination).
+
+Good evaluation measures both independently.
+
+## RAGAS framework concepts
+
+RAGAS (Retrieval Augmented Generation Assessment) is the standard framework for RAG evaluation. It defines four core metrics:
+
+### Faithfulness
+
+_Is the answer supported by the retrieved context?_
+
+Faithfulness checks whether every claim in the generated answer can be traced back to the retrieved documents. An answer that is factually correct but not grounded in the context still scores poorly — because the model pulled the answer from its training data, not from your documents.
+
+```javascript
+function evaluateFaithfulness(answer, context) {
+  // Break answer into individual claims
+  const claims = extractClaims(answer);
+
+  // Check each claim against the context
+  const supported = claims.filter((claim) => isClaimSupportedByContext(claim, context));
+
+  return supported.length / claims.length; // 0 to 1
+}
+
+function extractClaims(answer) {
+  // Split answer into individual factual statements
+  return answer
+    .split(/\.\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 10);
+}
+
+function isClaimSupportedByContext(claim, context) {
+  // Simplified: check keyword overlap between claim and context
+  const claimWords = new Set(claim.toLowerCase().split(/\W+/));
+  const contextWords = new Set(context.toLowerCase().split(/\W+/));
+  const overlap = [...claimWords].filter((w) => contextWords.has(w)).length;
+  return overlap / claimWords.size > 0.5;
+}
+```
+
+**Score:** 1.0 means every claim is grounded in context. 0.3 means 70% of claims are unsupported hallucinations.
+
+### Context relevance
+
+_Is the retrieved context actually relevant to the question?_
+
+If the user asks about refund policies but the retriever returns shipping documents, context relevance is low — even if the LLM somehow produces a decent answer.
+
+```javascript
+function evaluateContextRelevance(question, retrievedChunks) {
+  // Score each chunk's relevance to the question
+  const scores = retrievedChunks.map((chunk) => {
+    const qWords = new Set(question.toLowerCase().split(/\W+/));
+    const cWords = chunk.toLowerCase().split(/\W+/);
+    const relevant = cWords.filter((w) => qWords.has(w)).length;
+    return relevant / Math.max(cWords.length, 1);
+  });
+
+  // Average relevance across all retrieved chunks
+  return scores.reduce((sum, s) => sum + s, 0) / scores.length;
+}
+```
+
+Low context relevance means your retrieval strategy needs work — better embeddings, different chunking, hybrid search, or reranking.
+
+### Answer relevance
+
+_Does the answer actually address the question?_
+
+An answer might be faithful to the context and factually correct, but if it does not answer what was asked, it fails. "Tell me about refund timelines" answered with "Our refund policy was last updated in March" is relevant to the topic but not to the specific question.
+
+### Precision and recall
+
+**Context precision:** Of the chunks retrieved, what fraction are actually relevant? High precision means no wasted context window tokens.
+
+**Context recall:** Of all the relevant chunks in the entire knowledge base, what fraction did the retriever find? High recall means you are not missing important information.
+
+```javascript
+function contextPrecision(retrievedChunks, relevantChunks) {
+  const relevant = retrievedChunks.filter((chunk) => relevantChunks.includes(chunk));
+  return relevant.length / retrievedChunks.length;
+}
+
+function contextRecall(retrievedChunks, relevantChunks) {
+  const found = relevantChunks.filter((chunk) => retrievedChunks.includes(chunk));
+  return found.length / relevantChunks.length;
+}
+
+// Example
+const retrieved = ["chunk_A", "chunk_B", "chunk_C", "chunk_D", "chunk_E"];
+const actuallyRelevant = ["chunk_A", "chunk_C", "chunk_F"];
+
+console.log("Precision:", contextPrecision(retrieved, actuallyRelevant)); // 2/5 = 0.4
+console.log("Recall:", contextRecall(retrieved, actuallyRelevant)); // 2/3 = 0.67
+```
+
+**Precision vs recall tradeoff:** Returning more chunks (higher top-K) increases recall but decreases precision. Returning fewer chunks does the opposite. The right balance depends on your use case — legal Q&A favors recall (do not miss anything), customer support favors precision (do not confuse the user with irrelevant info).
+
+## Building an eval dataset
+
+Metrics are useless without test data. An eval dataset consists of question-answer-context triples:
+
+```javascript
+const evalDataset = [
+  {
+    question: "What is the refund window?",
+    expectedAnswer: "30 days from purchase date",
+    relevantChunks: ["chunk_refund_policy_p2", "chunk_refund_policy_p3"],
+  },
+  {
+    question: "How do I reset my password?",
+    expectedAnswer: "Go to Settings > Security > Reset Password",
+    relevantChunks: ["chunk_auth_guide_p5"],
+  },
+];
+```
+
+Start with 20-50 question-answer pairs that cover your most important use cases. Curate them manually — synthetic datasets generated by LLMs are useful for scale but tend to miss edge cases. Expand to 200+ as your pipeline matures.
+
+### Running evaluations
+
+```javascript
+async function evaluateRAGPipeline(pipeline, evalDataset) {
+  const results = [];
+
+  for (const testCase of evalDataset) {
+    const { retrievedChunks, generatedAnswer } = await pipeline.run(testCase.question);
+
+    const faithfulness = evaluateFaithfulness(generatedAnswer, retrievedChunks.join(" "));
+    const relevance = evaluateContextRelevance(testCase.question, retrievedChunks);
+    const precision = contextPrecision(
+      retrievedChunks.map((c) => c.id),
+      testCase.relevantChunks
+    );
+
+    results.push({
+      question: testCase.question,
+      faithfulness,
+      relevance,
+      precision,
+    });
+  }
+
+  // Aggregate scores
+  const avg = (arr) => arr.reduce((s, v) => s + v, 0) / arr.length;
+  return {
+    avgFaithfulness: avg(results.map((r) => r.faithfulness)),
+    avgRelevance: avg(results.map((r) => r.relevance)),
+    avgPrecision: avg(results.map((r) => r.precision)),
+    details: results,
+  };
+}
+```
+
+Run evals before and after every pipeline change. If faithfulness drops, your generation prompt needs work. If relevance drops, your retrieval needs work. Metrics tell you exactly where to invest your effort.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement contextPrecision and contextRecall functions. Given arrays of retrieved chunk IDs and relevant chunk IDs, compute the precision and recall."
+  initialCode={`function contextPrecision(retrieved, relevant) {
+  // What fraction of retrieved chunks are actually relevant?
+}
+
+function contextRecall(retrieved, relevant) {
+// What fraction of all relevant chunks were retrieved?
+}
+
+const retrieved = ["A", "B", "C", "D"];
+const relevant = ["A", "C", "E", "F"];
+
+console.log("Precision:", contextPrecision(retrieved, relevant));
+console.log("Recall:", contextRecall(retrieved, relevant));`}
+  solution={`function contextPrecision(retrieved, relevant) {
+const relevantSet = new Set(relevant);
+const hits = retrieved.filter((id) => relevantSet.has(id)).length;
+return retrieved.length > 0 ? hits / retrieved.length : 0;
+}
+
+function contextRecall(retrieved, relevant) {
+const retrievedSet = new Set(retrieved);
+const found = relevant.filter((id) => retrievedSet.has(id)).length;
+return relevant.length > 0 ? found / relevant.length : 0;
+}
+
+const retrieved = ["A", "B", "C", "D"];
+const relevant = ["A", "C", "E", "F"];
+
+console.log("Precision:", contextPrecision(retrieved, relevant)); // 0.5
+console.log("Recall:", contextRecall(retrieved, relevant)); // 0.5`}
+testCases={["Precision is 0.5 for the given example", "Recall is 0.5 for the given example"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What does faithfulness measure in RAG evaluation?",
+      options: [
+        "Whether the retriever found the right documents",
+        "Whether every claim in the answer is supported by the retrieved context",
+        "Whether the answer is factually correct according to Wikipedia",
+        "Whether the user liked the answer",
+      ],
+      correct: 1,
+      explanation:
+        "Faithfulness checks that the generated answer is grounded in the retrieved context — not in the model's training data. Every claim should trace back to a retrieved chunk.",
+    },
+    {
+      type: "multiple-choice",
+      question: "If context relevance is low but faithfulness is high, what is the problem?",
+      options: [
+        "The LLM is hallucinating",
+        "The retriever is returning irrelevant documents but the LLM is working with whatever it gets",
+        "The eval dataset is wrong",
+        "The embedding model is too large",
+      ],
+      correct: 1,
+      explanation:
+        "Low context relevance means retrieval is returning wrong chunks. High faithfulness means the LLM is being faithful to those wrong chunks. Fix retrieval — the generation side is working correctly.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Faithfulness measures whether the answer is supported by the ___. Context ___ measures what fraction of retrieved chunks are actually relevant. Start your eval dataset with ___-50 manually curated question-answer pairs."
+  answers={["context", "precision", "20"]}
+  hints={["The retrieved documents.", "Not recall.", "A small number to start."]}
+/>
+
+## What you learned
+
+- RAG has two failure modes: bad retrieval (wrong context) and bad generation (ignoring context or hallucinating). Evaluate both independently.
+- RAGAS metrics — faithfulness, context relevance, precision, and recall — give you targeted signals about what to fix in your pipeline.
+- Build a curated eval dataset of 20-50 question-answer-context triples, run evals before and after every change, and let the metrics guide your iteration.

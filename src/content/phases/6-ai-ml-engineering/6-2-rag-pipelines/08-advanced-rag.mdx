@@ -1,0 +1,327 @@
+---
+title: "Advanced RAG"
+description: "Query decomposition, HyDE, multi-step retrieval, and other techniques that push RAG beyond basic similarity search."
+phase: 6
+module: "6-2-rag-pipelines"
+order: 8
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Basic RAG — embed the query, retrieve top-K, stuff into prompt — handles straightforward questions well. But real users ask complex, multi-part, or poorly worded questions. "Compare our Q1 and Q2 revenue, and explain what drove the difference" requires multiple retrievals and reasoning. Advanced RAG techniques close this gap between what users actually ask and what simple retrieval can handle.
+
+## Query decomposition
+
+Complex questions often contain multiple sub-questions. Instead of searching once with the full query, decompose it and search for each part independently.
+
+```javascript
+function decomposeQuery(query) {
+  // In production: use an LLM to decompose
+  // "Compare Q1 and Q2 revenue and explain the difference"
+  // becomes:
+  const subQueries = [
+    "What was Q1 revenue?",
+    "What was Q2 revenue?",
+    "What factors influenced revenue changes between Q1 and Q2?",
+  ];
+  return subQueries;
+}
+
+async function decomposedRetrieval(query, vectorStore, embedFn) {
+  const subQueries = decomposeQuery(query);
+
+  const allChunks = [];
+  const seen = new Set();
+
+  for (const subQuery of subQueries) {
+    const embedding = await embedFn(subQuery);
+    const results = vectorStore.query(embedding, 3);
+
+    for (const result of results) {
+      if (!seen.has(result.id)) {
+        seen.add(result.id);
+        allChunks.push(result);
+      }
+    }
+  }
+
+  return allChunks;
+}
+```
+
+Decomposition retrieves documents for each sub-question, deduplicates, and provides broader coverage than a single query. The LLM then synthesizes the final answer from all retrieved context.
+
+## HyDE: Hypothetical Document Embeddings
+
+When the user asks "How do I fix error E-4021?", their question is short and sparse. The actual answer in your docs is a detailed paragraph. Short queries and long documents live in different parts of embedding space — their vectors are not as close as you would like.
+
+HyDE solves this by asking the LLM to **generate a hypothetical answer first** (without retrieval), then embedding that hypothetical answer instead of the original query. A fake paragraph about fixing E-4021 is closer in embedding space to the real paragraph about fixing E-4021 than the original question was.
+
+```javascript
+async function hydeRetrieval(query, llm, embedFn, vectorStore) {
+  // Step 1: Generate a hypothetical answer (no retrieval yet)
+  const hypothetical = await llm.generate(
+    `Answer this question as if you had the documentation. ` +
+      `Do not say you don't know. Write a detailed paragraph.\n\n` +
+      `Question: ${query}`
+  );
+
+  // Step 2: Embed the hypothetical answer (not the query)
+  const embedding = await embedFn(hypothetical);
+
+  // Step 3: Search with the hypothetical embedding
+  const results = vectorStore.query(embedding, 5);
+
+  // Step 4: Use the REAL retrieved docs (not the hypothetical) for generation
+  return results;
+}
+```
+
+The hypothetical answer may contain hallucinations — that is fine. You are only using it as a **search query**, not as the final answer. The real retrieved documents ground the final generation.
+
+## Multi-step retrieval
+
+Some questions require reasoning chains. The answer to step 1 determines what to search for in step 2.
+
+```javascript
+async function multiStepRetrieval(query, vectorStore, llm, embedFn) {
+  // Step 1: Initial retrieval
+  const queryEmb = await embedFn(query);
+  const initialResults = vectorStore.query(queryEmb, 5);
+
+  // Step 2: Use initial results to generate a follow-up query
+  const context = initialResults.map((r) => r.metadata.text).join("\n");
+  const followUp = await llm.generate(
+    `Based on this context:\n${context}\n\n` +
+      `Original question: ${query}\n\n` +
+      `What additional information would help answer this completely? ` +
+      `Write a specific search query.`
+  );
+
+  // Step 3: Retrieve again with the follow-up query
+  const followUpEmb = await embedFn(followUp);
+  const additionalResults = vectorStore.query(followUpEmb, 3);
+
+  // Combine and deduplicate
+  const seen = new Set(initialResults.map((r) => r.id));
+  const combined = [...initialResults];
+  for (const result of additionalResults) {
+    if (!seen.has(result.id)) {
+      combined.push(result);
+    }
+  }
+
+  return combined;
+}
+```
+
+This is a form of **agentic RAG** — the system reasons about what it needs and takes multiple retrieval actions. Limit the number of steps (2-3 max) to control latency and cost.
+
+## Parent document retrieval
+
+When you chunk a document into small pieces for precise retrieval, you sometimes lose the surrounding context. Parent document retrieval stores **small chunks for searching** but returns the **larger parent chunk** for context.
+
+```javascript
+function buildParentChildIndex(document, smallChunkSize, parentChunkSize) {
+  // Create large parent chunks
+  const parentChunks = chunkText(document, parentChunkSize);
+
+  // Create small child chunks within each parent
+  const index = [];
+  parentChunks.forEach((parent, parentIdx) => {
+    const children = chunkText(parent, smallChunkSize);
+    children.forEach((child, childIdx) => {
+      index.push({
+        childText: child,
+        parentText: parent,
+        parentId: `parent_${parentIdx}`,
+        childId: `child_${parentIdx}_${childIdx}`,
+      });
+    });
+  });
+
+  return index;
+}
+
+function chunkText(text, size) {
+  const chunks = [];
+  for (let i = 0; i < text.length; i += size) {
+    chunks.push(text.slice(i, i + size));
+  }
+  return chunks;
+}
+
+// Search matches small child chunks (precise)
+// But you return the parent chunk (more context)
+function parentRetrieval(queryEmbedding, childIndex, topK = 3) {
+  // Find matching children, then return their parents
+  const matches = searchChildren(queryEmbedding, childIndex, topK);
+  const parentIds = [...new Set(matches.map((m) => m.parentId))];
+  return parentIds.map((id) => childIndex.find((c) => c.parentId === id).parentText);
+}
+```
+
+This gives you the precision of small chunks (200 characters for search) with the context of large chunks (2000 characters for the LLM).
+
+## Semantic caching
+
+If 100 users ask variations of the same question today, do you really need to run the full pipeline 100 times? Semantic caching embeds each query and checks if a similar query was recently answered. If the cache hits (similarity above threshold), return the cached answer.
+
+```javascript
+class SemanticCache {
+  constructor(threshold = 0.95) {
+    this.entries = [];
+    this.threshold = threshold;
+  }
+
+  get(queryEmbedding) {
+    for (const entry of this.entries) {
+      const similarity = cosineSimilarity(queryEmbedding, entry.queryEmbedding);
+      if (similarity >= this.threshold) {
+        return entry.answer;
+      }
+    }
+    return null; // Cache miss
+  }
+
+  set(queryEmbedding, answer) {
+    this.entries.push({ queryEmbedding, answer, timestamp: Date.now() });
+  }
+}
+```
+
+Set the threshold high (0.92-0.97) to avoid returning cached answers for different questions. Expire entries based on time or when the underlying documents change.
+
+## Metadata filtering
+
+Not all documents are equal for every query. Metadata filtering narrows the search space **before** vector comparison, improving both speed and relevance.
+
+```javascript
+async function filteredRetrieval(query, queryEmbedding, vectorStore, filters) {
+  // Only search within matching documents
+  const results = vectorStore.query(queryEmbedding, 5, {
+    category: filters.category, // "engineering" vs "marketing"
+    dateAfter: filters.dateAfter, // Only recent docs
+    accessLevel: filters.accessLevel, // RBAC filtering
+  });
+
+  return results;
+}
+
+// Example: user asks about Q1 2026 metrics
+// Filter to docs from Q1 2026 before searching
+const results = await filteredRetrieval("What were our key metrics?", queryEmbedding, vectorStore, {
+  category: "metrics",
+  dateAfter: "2026-01-01",
+});
+```
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a parent document retrieval system. Store small child chunks for searching but return the parent chunk text. Given a matching child ID, look up and return its parent."
+  initialCode={`function buildIndex(document, parentSize, childSize) {
+  // Split document into parent chunks
+  // Split each parent into children
+  // Return array of { childText, parentText, parentId, childId }
+}
+
+function getParentForChild(index, childId) {
+// Given a child ID, return the parent text
+}
+
+const doc = "Section A covers authentication and login flows. It explains OAuth and tokens in detail. Section B covers database design patterns. It includes normalization and indexing strategies.";
+
+const index = buildIndex(doc, 90, 30);
+console.log("Index entries:", index.length);
+console.log("Parent for first child:", getParentForChild(index, index[0].childId));`}
+  solution={`function buildIndex(document, parentSize, childSize) {
+const parents = [];
+for (let i = 0; i < document.length; i += parentSize) {
+parents.push(document.slice(i, i + parentSize));
+}
+
+const index = [];
+parents.forEach((parent, pIdx) => {
+for (let i = 0; i < parent.length; i += childSize) {
+const child = parent.slice(i, i + childSize);
+index.push({
+childText: child,
+parentText: parent,
+parentId: "parent*" + pIdx,
+childId: "child*" + pIdx + "\_" + Math.floor(i / childSize),
+});
+}
+});
+
+return index;
+}
+
+function getParentForChild(index, childId) {
+const entry = index.find((e) => e.childId === childId);
+return entry ? entry.parentText : null;
+}
+
+const doc = "Section A covers authentication and login flows. It explains OAuth and tokens in detail. Section B covers database design patterns. It includes normalization and indexing strategies.";
+
+const index = buildIndex(doc, 90, 30);
+console.log("Index entries:", index.length);
+console.log("Parent for first child:", getParentForChild(index, index[0].childId));`}
+testCases={["getParentForChild returns the correct parent text", "Index contains more children than parents"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "How does HyDE improve retrieval for short queries?",
+      options: [
+        "It makes the embedding model faster",
+        "It generates a hypothetical answer whose embedding is closer in vector space to the real document",
+        "It caches previous results",
+        "It splits the query into keywords",
+      ],
+      correct: 1,
+      explanation:
+        "HyDE generates a fake answer paragraph that is structurally similar to real documents. Its embedding lands closer to relevant docs in vector space than the short original query would.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What is the benefit of parent document retrieval?",
+      options: [
+        "It reduces the number of embeddings needed",
+        "Small chunks give precise search hits while parent chunks provide richer context for generation",
+        "It eliminates the need for reranking",
+        "It works without a vector database",
+      ],
+      correct: 1,
+      explanation:
+        "You search against small, precise chunks but return their larger parent chunks to the LLM. This combines search precision with generation context.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="HyDE generates a ___ answer to use as a search query instead of the original question. Parent document retrieval searches ___ chunks but returns ___ chunks for context. Semantic caching avoids redundant pipeline runs for similar queries."
+  answers={["hypothetical", "small", "large"]}
+  hints={["Not real — generated by the LLM.", "Precise for matching.", "Rich for context."]}
+/>
+
+## What you learned
+
+- Query decomposition, HyDE, and multi-step retrieval handle complex or poorly worded queries that basic similarity search cannot resolve.
+- Parent document retrieval decouples search granularity (small, precise chunks) from generation context (large, rich chunks).
+- Semantic caching and metadata filtering improve performance — cache repeated queries and narrow search scope with metadata before vector comparison.

@@ -1,0 +1,315 @@
+---
+title: "Vector Databases"
+description: "Where embeddings live. Choosing and using a vector database for fast similarity search at scale."
+phase: 6
+module: "6-2-rag-pipelines"
+order: 5
+estimatedMinutes: 10
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+You have 100,000 embedded chunks. A user asks a question, you embed it, and now you need to find the 5 most similar chunks. Brute-force comparison — computing cosine similarity against every single vector — works for 1,000 chunks but collapses at scale. Vector databases solve this with specialized indexes that find approximate nearest neighbors in milliseconds, even across millions of vectors.
+
+## What a vector database does
+
+A vector database stores vectors alongside metadata and supports fast similarity search. The core operations are:
+
+1. **Upsert** — insert or update a vector with its metadata
+2. **Query** — given a vector, find the K nearest neighbors
+3. **Filter** — narrow search by metadata (e.g., only search documents from 2026)
+4. **Delete** — remove vectors by ID or metadata filter
+
+```javascript
+// Conceptual interface — all vector DBs expose something like this
+const vectorDB = {
+  async upsert(id, vector, metadata) {
+    /* store */
+  },
+  async query(vector, topK, filter) {
+    /* search */
+  },
+  async delete(filter) {
+    /* remove */
+  },
+};
+```
+
+## The major options in 2026
+
+### Pinecone (managed, serverless)
+
+Fully managed — no infrastructure to run. You create an index, upsert vectors, and query. Pinecone handles scaling, replication, and indexing.
+
+```javascript
+// Pinecone client usage pattern
+async function searchPinecone(index, queryVector, topK = 5) {
+  const results = await index.query({
+    vector: queryVector,
+    topK,
+    includeMetadata: true,
+    filter: { source: { $eq: "knowledge-base" } },
+  });
+
+  return results.matches.map((match) => ({
+    text: match.metadata.text,
+    score: match.score,
+    source: match.metadata.source,
+  }));
+}
+```
+
+**Best for:** Teams that do not want to manage infrastructure. Serverless pricing scales to zero.
+
+### Qdrant (open-source, self-hosted or cloud)
+
+Written in Rust, fast, and feature-rich. Supports complex filtering, payload indexing, and hybrid search out of the box. Can run locally in Docker or as a managed cloud service.
+
+```javascript
+// Qdrant client usage pattern
+async function searchQdrant(client, collectionName, queryVector) {
+  const results = await client.search(collectionName, {
+    vector: queryVector,
+    limit: 5,
+    filter: {
+      must: [{ key: "category", match: { value: "documentation" } }],
+    },
+    with_payload: true,
+  });
+
+  return results.map((point) => ({
+    text: point.payload.text,
+    score: point.score,
+  }));
+}
+```
+
+**Best for:** Teams that want full control, complex filtering, or on-premise deployment.
+
+### pgvector (PostgreSQL extension)
+
+Adds vector columns and similarity search to PostgreSQL. If you already use Postgres (and if you use Supabase, you do), pgvector lets you store vectors alongside your relational data without adding another database.
+
+```javascript
+// pgvector via Supabase — vectors live in your existing Postgres
+async function searchPgvector(supabase, queryEmbedding, topK = 5) {
+  const { data, error } = await supabase.rpc("match_documents", {
+    query_embedding: queryEmbedding,
+    match_count: topK,
+    filter_source: "docs",
+  });
+
+  if (error) throw new Error(error.message);
+
+  return data.map((row) => ({
+    text: row.content,
+    score: row.similarity,
+    source: row.source,
+  }));
+}
+
+// The Postgres function (created via migration):
+// CREATE FUNCTION match_documents(query_embedding vector(1536), match_count int)
+// RETURNS TABLE(content text, similarity float, source text)
+// AS $$ SELECT content, 1 - (embedding <=> query_embedding) AS similarity, source
+//    FROM documents ORDER BY embedding <=> query_embedding LIMIT match_count; $$
+```
+
+**Best for:** Supabase users, small-to-medium datasets (under 1M vectors), teams that want one fewer service to manage.
+
+### ChromaDB (open-source, embedded)
+
+Designed for prototyping and local development. Runs in-process or as a lightweight server. Great for getting started, but not designed for production scale.
+
+**Best for:** Local development, prototyping, learning.
+
+## How vector search works: HNSW
+
+Most vector databases use **HNSW (Hierarchical Navigable Small World)** indexing. Instead of comparing your query against every vector, HNSW builds a graph where similar vectors are connected. Searching traverses this graph, hopping between neighbors to quickly converge on the nearest vectors.
+
+```javascript
+// Conceptual: HNSW vs brute force
+const bruteForce = {
+  search(query, vectors) {
+    // Compare against ALL vectors — O(n)
+    return vectors
+      .map((v, i) => ({ index: i, score: cosineSimilarity(query, v) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+  },
+};
+
+const hnsw = {
+  search(query, graph) {
+    // Start at a random node, greedily hop to closer neighbors
+    // Explores ~log(n) nodes instead of all n — much faster
+    // Returns approximate (not exact) nearest neighbors
+  },
+};
+```
+
+HNSW returns **approximate** nearest neighbors. It might miss the absolute closest vector but finds very close ones in O(log n) time instead of O(n). For RAG, this tradeoff is excellent — you care about "relevant enough," not "the single most relevant."
+
+## Schema design
+
+A well-designed vector store schema includes the vector, the source text, and filterable metadata:
+
+```javascript
+// Schema for a RAG vector store
+const documentSchema = {
+  id: "doc_chunk_0042",         // Unique identifier
+  vector: [0.023, -0.041, ...], // The embedding (1536 dims)
+  payload: {
+    text: "Refunds are processed within 7 business days...",
+    source: "policies/refunds.md",
+    chunkIndex: 3,
+    category: "policy",
+    lastUpdated: "2026-03-15",
+  },
+};
+```
+
+Index metadata fields you will filter on (category, source, date). Do not index fields you only display in results (text content). Filtering narrows the search space before vector comparison, making queries faster and more relevant.
+
+## When to use each
+
+| Criteria     | Pinecone               | Qdrant                  | pgvector               | ChromaDB   |
+| ------------ | ---------------------- | ----------------------- | ---------------------- | ---------- |
+| Managed?     | Yes                    | Cloud or self-host      | Your Postgres          | Self-host  |
+| Scale        | Millions+              | Millions+               | Hundreds of thousands  | Thousands  |
+| Filtering    | Good                   | Excellent               | SQL-powered            | Basic      |
+| Cost at rest | Serverless (free tier) | Free (self-host)        | Included in DB         | Free       |
+| Best use     | Production SaaS        | Production with control | Already using Postgres | Prototypes |
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Build a simple in-memory vector store with upsert, query (brute-force cosine similarity), and metadata filtering."
+  initialCode={`class VectorStore {
+  constructor() {
+    this.vectors = [];
+  }
+
+upsert(id, vector, metadata) {
+// Add or update a vector
+}
+
+query(queryVector, topK = 3, filter = {}) {
+// Return top-K most similar vectors
+// Apply metadata filter if provided
+}
+}
+
+const store = new VectorStore();
+store.upsert("doc1", [0.9, 0.1, 0.2], { text: "Password reset", category: "auth" });
+store.upsert("doc2", [0.1, 0.9, 0.1], { text: "Shipping info", category: "logistics" });
+store.upsert("doc3", [0.2, 0.1, 0.9], { text: "Refund policy", category: "billing" });
+
+console.log(store.query([0.85, 0.05, 0.15], 2));`}
+  solution={`class VectorStore {
+constructor() {
+this.vectors = [];
+}
+
+upsert(id, vector, metadata) {
+const existing = this.vectors.findIndex((v) => v.id === id);
+const entry = { id, vector, metadata };
+if (existing >= 0) {
+this.vectors[existing] = entry;
+} else {
+this.vectors.push(entry);
+}
+}
+
+query(queryVector, topK = 3, filter = {}) {
+let candidates = this.vectors;
+
+    for (const [key, value] of Object.entries(filter)) {
+      candidates = candidates.filter((v) => v.metadata[key] === value);
+    }
+
+    return candidates
+      .map((v) => ({
+        id: v.id,
+        metadata: v.metadata,
+        score: this.cosine(queryVector, v.vector),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+
+}
+
+cosine(a, b) {
+let dot = 0, nA = 0, nB = 0;
+for (let i = 0; i < a.length; i++) {
+dot += a[i] _ b[i];
+nA += a[i] _ a[i];
+nB += b[i] _ b[i];
+}
+return dot / (Math.sqrt(nA) _ Math.sqrt(nB));
+}
+}
+
+const store = new VectorStore();
+store.upsert("doc1", [0.9, 0.1, 0.2], { text: "Password reset", category: "auth" });
+store.upsert("doc2", [0.1, 0.9, 0.1], { text: "Shipping info", category: "logistics" });
+store.upsert("doc3", [0.2, 0.1, 0.9], { text: "Refund policy", category: "billing" });
+
+console.log(store.query([0.85, 0.05, 0.15], 2));`}
+testCases={["query returns password reset as top result", "upsert updates existing entries"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What does HNSW indexing trade off for speed?",
+      options: [
+        "Storage space",
+        "Exact nearest neighbors — it returns approximate results",
+        "Metadata filtering",
+        "Support for cosine similarity",
+      ],
+      correct: 1,
+      explanation:
+        "HNSW finds approximate nearest neighbors in O(log n) time instead of exact nearest neighbors in O(n) time. For RAG, approximate results are good enough.",
+    },
+    {
+      type: "multiple-choice",
+      question: "When is pgvector the best choice for a vector database?",
+      options: [
+        "When you need billions of vectors",
+        "When you already use PostgreSQL and have under a million vectors",
+        "When you need the fastest possible query time",
+        "When you are prototyping locally",
+      ],
+      correct: 1,
+      explanation:
+        "pgvector avoids adding a new service — vectors live in your existing Postgres. It works well for small to medium datasets but does not scale like dedicated vector DBs.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="HNSW stands for Hierarchical Navigable ___ World. It returns ___ nearest neighbors in O(log n) time. Metadata ___ narrows the search space before vector comparison."
+  answers={["Small", "approximate", "filtering"]}
+  hints={["Describes the graph structure.", "Not exact.", "Reducing candidates by attributes."]}
+/>
+
+## What you learned
+
+- Vector databases store embeddings and support fast similarity search using indexes like HNSW, which trades exact results for O(log n) speed.
+- Pinecone (managed), Qdrant (self-hosted), pgvector (Postgres extension), and ChromaDB (prototyping) each fit different team needs and scale requirements.
+- Schema design should include the vector, source text, and filterable metadata fields to enable scoped queries.

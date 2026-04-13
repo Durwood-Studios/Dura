@@ -1,0 +1,288 @@
+---
+title: "Retrieval Strategies"
+description: "Similarity search is just the beginning. Hybrid search, reranking, and MMR make retrieval actually good."
+phase: 6
+module: "6-2-rag-pipelines"
+order: 6
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+The retrieval step is where most RAG pipelines fail or succeed. A perfect embedding model and a fast vector database still produce bad answers if the retrieval strategy returns the wrong chunks. Vanilla similarity search misses keyword-specific queries, returns redundant results, and ranks by embedding distance alone — which is not always the best proxy for usefulness. Production RAG systems layer multiple strategies to get retrieval right.
+
+## Vanilla similarity search
+
+The baseline: embed the query, find the top-K vectors by cosine similarity, return those chunks.
+
+```javascript
+async function similaritySearch(queryEmbedding, vectorStore, topK = 5) {
+  const results = vectorStore.query(queryEmbedding, topK);
+  return results.map((r) => ({
+    text: r.metadata.text,
+    score: r.score,
+  }));
+}
+```
+
+This works surprisingly well for natural-language questions. But it has blind spots:
+
+- **Exact terms matter.** If the user searches for "error code E-4021," semantic similarity may not find the exact document that mentions that code. Keywords matter here.
+- **Redundant results.** The top 5 results might all be paraphrases of the same paragraph. Five redundant chunks waste context window tokens.
+- **Ranking by embedding distance alone.** The most "similar" chunk is not always the most "useful" chunk. A chunk that broadly discusses the topic might score higher than one that directly answers the question.
+
+## Hybrid search: keyword + semantic
+
+Hybrid search runs both a keyword search (BM25 or full-text) and a semantic search, then merges the results. This catches both exact-match queries and meaning-based queries.
+
+```javascript
+function hybridSearch(query, queryEmbedding, documents, topK = 5) {
+  // Keyword scoring (simplified BM25-like TF scoring)
+  const queryTerms = query.toLowerCase().split(/\W+/).filter(Boolean);
+
+  const keywordScores = documents.map((doc) => {
+    const text = doc.text.toLowerCase();
+    const hits = queryTerms.filter((term) => text.includes(term)).length;
+    return { id: doc.id, keywordScore: hits / queryTerms.length };
+  });
+
+  // Semantic scoring (cosine similarity)
+  const semanticScores = documents.map((doc) => ({
+    id: doc.id,
+    semanticScore: cosineSimilarity(queryEmbedding, doc.embedding),
+  }));
+
+  // Merge with weighted combination
+  const alpha = 0.5; // Balance between keyword and semantic
+  const merged = documents.map((doc) => {
+    const kw = keywordScores.find((k) => k.id === doc.id).keywordScore;
+    const sem = semanticScores.find((s) => s.id === doc.id).semanticScore;
+    return {
+      id: doc.id,
+      text: doc.text,
+      score: alpha * kw + (1 - alpha) * sem,
+    };
+  });
+
+  return merged.sort((a, b) => b.score - a.score).slice(0, topK);
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0,
+    nA = 0,
+    nB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    nA += a[i] * a[i];
+    nB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(nA) * Math.sqrt(nB));
+}
+```
+
+The `alpha` parameter controls the balance. For technical docs with error codes and version numbers, lean toward keywords (alpha = 0.7). For conversational Q&A, lean toward semantic (alpha = 0.3). Most systems start at 0.5 and tune based on eval results.
+
+## Reranking
+
+Reranking is a second pass over retrieved results using a more powerful model. The first pass (vector search) is fast but approximate. The reranker is slower but more accurate — it reads both the query and each candidate chunk together and scores their relevance.
+
+```javascript
+async function rerankResults(query, candidates, topK = 3) {
+  // In production: call Cohere Rerank API or run a cross-encoder model
+  // The reranker sees (query, document) pairs and scores relevance
+
+  const scored = await Promise.all(
+    candidates.map(async (candidate) => {
+      // Simplified: production rerankers use transformer cross-encoders
+      const relevanceScore = scoreRelevance(query, candidate.text);
+      return { ...candidate, rerankScore: relevanceScore };
+    })
+  );
+
+  return scored.sort((a, b) => b.rerankScore - a.rerankScore).slice(0, topK);
+}
+
+function scoreRelevance(query, text) {
+  // Simple keyword overlap as a stand-in for a real reranker
+  const qWords = new Set(query.toLowerCase().split(/\W+/));
+  const tWords = text.toLowerCase().split(/\W+/);
+  const overlap = tWords.filter((w) => qWords.has(w)).length;
+  return overlap / Math.max(tWords.length, 1);
+}
+```
+
+**Why reranking works:** Vector search uses bi-encoders — query and document are encoded separately. Rerankers use cross-encoders — query and document are encoded **together**, allowing the model to see interactions between them. Cross-encoders are 10-100x slower but significantly more accurate.
+
+The pattern is: retrieve 20-50 candidates with fast vector search, then rerank to pick the best 3-5.
+
+## Maximal Marginal Relevance (MMR)
+
+MMR solves the redundancy problem. Instead of returning the 5 most similar chunks (which might all say the same thing), MMR balances **relevance to the query** with **diversity among results**.
+
+```javascript
+function mmrSelect(queryEmbedding, candidates, topK = 5, lambda = 0.7) {
+  const selected = [];
+  const remaining = [...candidates];
+
+  while (selected.length < topK && remaining.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const relevance = cosineSimilarity(queryEmbedding, remaining[i].embedding);
+
+      // Max similarity to any already-selected result
+      const redundancy =
+        selected.length > 0
+          ? Math.max(...selected.map((s) => cosineSimilarity(remaining[i].embedding, s.embedding)))
+          : 0;
+
+      // MMR score: balance relevance vs diversity
+      const mmrScore = lambda * relevance - (1 - lambda) * redundancy;
+
+      if (mmrScore > bestScore) {
+        bestScore = mmrScore;
+        bestIdx = i;
+      }
+    }
+
+    selected.push(remaining.splice(bestIdx, 1)[0]);
+  }
+
+  return selected;
+}
+```
+
+Lambda controls the tradeoff: 1.0 = pure relevance (no diversity), 0.0 = pure diversity (no relevance). Most systems use 0.5-0.7. The result: each chunk adds **new information** to the context, covering more aspects of the user's question.
+
+## Putting it all together
+
+A production retrieval pipeline typically stacks these strategies:
+
+```javascript
+async function retrieve(query, queryEmbedding, vectorStore, topK = 5) {
+  // Step 1: Hybrid search — broad recall
+  const candidates = hybridSearch(query, queryEmbedding, vectorStore, 20);
+
+  // Step 2: Rerank — precision over the candidates
+  const reranked = await rerankResults(query, candidates, 10);
+
+  // Step 3: MMR — diversity in the final set
+  const diverse = mmrSelect(queryEmbedding, reranked, topK, 0.7);
+
+  return diverse;
+}
+```
+
+Retrieve broadly (20+ candidates), rerank for precision (10), then select for diversity (5). Each step narrows the funnel while improving result quality.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a simplified hybrid search that combines keyword overlap and cosine similarity scores. Use alpha to weight the two scores."
+  initialCode={`function cosineSimilarity(a, b) {
+  let dot = 0, nA = 0, nB = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; nA += a[i]*a[i]; nB += b[i]*b[i]; }
+  return dot / (Math.sqrt(nA) * Math.sqrt(nB));
+}
+
+function hybridSearch(query, queryEmbedding, docs, alpha = 0.5, topK = 2) {
+// 1. Compute keyword score: fraction of query terms found in doc text
+// 2. Compute semantic score: cosine similarity
+// 3. Combine: alpha _ keyword + (1 - alpha) _ semantic
+// 4. Return top-K results sorted by combined score
+}
+
+const docs = [
+{ text: "Error code E-4021 occurs during login", embedding: [0.3, 0.7, 0.1] },
+{ text: "Login authentication handles user sessions", embedding: [0.8, 0.1, 0.2] },
+{ text: "E-4021 is a network timeout error in auth", embedding: [0.4, 0.6, 0.2] },
+];
+
+console.log(hybridSearch("error E-4021", [0.35, 0.65, 0.15], docs, 0.6, 2));`}
+  solution={`function cosineSimilarity(a, b) {
+let dot = 0, nA = 0, nB = 0;
+for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; nA += a[i]*a[i]; nB += b[i]_b[i]; }
+return dot / (Math.sqrt(nA) _ Math.sqrt(nB));
+}
+
+function hybridSearch(query, queryEmbedding, docs, alpha = 0.5, topK = 2) {
+const terms = query.toLowerCase().split(/\\W+/).filter(Boolean);
+
+const scored = docs.map((doc) => {
+const text = doc.text.toLowerCase();
+const hits = terms.filter((t) => text.includes(t)).length;
+const keywordScore = hits / terms.length;
+const semanticScore = cosineSimilarity(queryEmbedding, doc.embedding);
+const combined = alpha _ keywordScore + (1 - alpha) _ semanticScore;
+return { text: doc.text, keywordScore, semanticScore, combined };
+});
+
+return scored.sort((a, b) => b.combined - a.combined).slice(0, topK);
+}
+
+const docs = [
+{ text: "Error code E-4021 occurs during login", embedding: [0.3, 0.7, 0.1] },
+{ text: "Login authentication handles user sessions", embedding: [0.8, 0.1, 0.2] },
+{ text: "E-4021 is a network timeout error in auth", embedding: [0.4, 0.6, 0.2] },
+];
+
+console.log(hybridSearch("error E-4021", [0.35, 0.65, 0.15], docs, 0.6, 2));`}
+testCases={["E-4021 documents rank highest due to keyword match boost"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Why is hybrid search better than pure semantic search for queries with specific error codes or IDs?",
+      options: [
+        "Hybrid search is faster",
+        "The keyword component catches exact term matches that semantic similarity might miss",
+        "Hybrid search uses less memory",
+        "Semantic search cannot handle numbers",
+      ],
+      correct: 1,
+      explanation:
+        "Semantic embeddings capture meaning, not exact strings. A specific error code like 'E-4021' might not have distinct semantic meaning. The keyword component ensures exact matches rank highly.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What problem does Maximal Marginal Relevance (MMR) solve?",
+      options: [
+        "Slow query times",
+        "Redundant results — it ensures diversity so each chunk adds new information",
+        "Missing metadata",
+        "Embedding model errors",
+      ],
+      correct: 1,
+      explanation:
+        "Without MMR, the top-K results may all be paraphrases of the same content. MMR penalizes redundancy, ensuring each selected chunk covers a different aspect of the answer.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Hybrid search combines ___ search and semantic search. Reranking uses a ___-encoder that reads the query and document together. MMR balances relevance with ___ to avoid redundant results."
+  answers={["keyword", "cross", "diversity"]}
+  hints={["BM25-style text matching.", "Not a bi-encoder.", "The opposite of redundancy."]}
+/>
+
+## What you learned
+
+- Hybrid search combines keyword matching (catches exact terms) with semantic similarity (catches meaning), covering blind spots of each approach alone.
+- Reranking with cross-encoders is a precision pass: retrieve broadly, then rerank the top candidates for accuracy.
+- MMR ensures diversity in results by penalizing chunks that are too similar to already-selected ones, maximizing information coverage in the context window.

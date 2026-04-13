@@ -1,0 +1,247 @@
+---
+title: "Document Loading"
+description: "Ingesting PDFs, HTML, and markdown into your RAG pipeline. Text extraction is harder than it looks."
+phase: 6
+module: "6-2-rag-pipelines"
+order: 2
+estimatedMinutes: 9
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-1"]
+  swebok: ["Software Design"]
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Your RAG pipeline is only as good as the documents you feed it. If the loader drops tables, strips headings, or mangles code blocks, every downstream step — chunking, embedding, retrieval — inherits that corruption. Document loading is the unsexy foundation that determines whether your chatbot returns accurate answers or confidently quotes garbled text.
+
+## The document loading problem
+
+Raw documents come in dozens of formats: PDF, HTML, markdown, DOCX, plain text, CSVs, even Notion exports. Each format has its own quirks:
+
+- **PDF** — The worst offender. PDFs are a visual format, not a text format. Text can be embedded as vectors, images, or even individual glyphs with no logical ordering. Tables in PDFs are especially painful because columns may be encoded as independent text runs.
+- **HTML** — Better than PDF, but you need to strip navigation, footers, ads, and boilerplate to extract the actual content. A naive approach gives you "Home | About | Contact | Privacy Policy" mixed into your knowledge base.
+- **Markdown** — The cleanest source. Headings, lists, and code blocks have semantic meaning. If you can convince your team to write docs in markdown, your RAG pipeline will thank you.
+
+### What a document loader produces
+
+Every loader should output a consistent structure: the extracted text plus metadata about where it came from.
+
+```javascript
+// A loaded document — text plus metadata
+const loadedDocument = {
+  text: "Our return policy allows refunds within 30 days...",
+  metadata: {
+    source: "policies/returns.pdf",
+    page: 3,
+    title: "Return Policy",
+    lastModified: "2026-03-15",
+    format: "pdf",
+  },
+};
+```
+
+Metadata is critical. When your chatbot answers a question, users want to know **where** the answer came from. Without metadata, you cannot provide citations or trace errors back to their source document.
+
+### Loading strategies by format
+
+**Plain text and markdown** are straightforward — read the file, preserve structure:
+
+```javascript
+async function loadMarkdown(filePath) {
+  const fs = await import("node:fs/promises");
+  const content = await fs.readFile(filePath, "utf-8");
+
+  // Extract title from first heading
+  const titleMatch = content.match(/^#\s+(.+)$/m);
+  const title = titleMatch ? titleMatch[1] : filePath.split("/").pop();
+
+  return {
+    text: content,
+    metadata: {
+      source: filePath,
+      title,
+      format: "markdown",
+    },
+  };
+}
+```
+
+**HTML** requires extraction. Libraries like `cheerio` (server-side) or the DOM API (browser) let you target the main content and strip boilerplate:
+
+```javascript
+function extractFromHTML(html, source) {
+  // Strip script, style, nav, footer, header tags
+  const stripped = html
+    .replace(/<(script|style|nav|footer|header)[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return {
+    text: stripped,
+    metadata: { source, format: "html" },
+  };
+}
+```
+
+**PDF** is the hard case. In production, you would use a library like `pdf-parse` or a service like AWS Textract or Azure Document Intelligence. The key insight: always inspect your extracted text before trusting it.
+
+```javascript
+// Pseudocode — pdf-parse handles the binary parsing
+async function loadPDF(filePath) {
+  // In production: const pdf = require("pdf-parse");
+  // const data = await pdf(buffer);
+  // For illustration, assume extracted text:
+  const pages = [
+    { pageNumber: 1, text: "Chapter 1: Introduction to RAG..." },
+    { pageNumber: 2, text: "Section 1.1: Document Formats..." },
+  ];
+
+  return pages.map((page) => ({
+    text: page.text,
+    metadata: {
+      source: filePath,
+      page: page.pageNumber,
+      format: "pdf",
+    },
+  }));
+}
+```
+
+### Common pitfalls
+
+1. **Encoding issues** — Not all files are UTF-8. Check for BOM markers and handle Latin-1/Windows-1252 gracefully.
+2. **Duplicate content** — Headers and footers repeated on every PDF page. Detect and strip them.
+3. **Tables** — PDF tables rarely extract correctly. Consider converting tables to markdown format or key-value pairs.
+4. **Images with text** — OCR is a separate pipeline. If critical text lives in images, you need an OCR step (Tesseract, cloud vision APIs).
+5. **Stale documents** — Track `lastModified` timestamps so you can re-index when documents change, not on every pipeline run.
+
+### Building a multi-format loader
+
+A practical loader dispatches based on file extension and normalizes everything into the same shape:
+
+```javascript
+async function loadDocument(filePath) {
+  const ext = filePath.split(".").pop().toLowerCase();
+
+  const loaders = {
+    md: loadMarkdown,
+    txt: loadPlainText,
+    html: loadHTML,
+    pdf: loadPDF,
+  };
+
+  const loader = loaders[ext];
+  if (!loader) {
+    throw new Error(`Unsupported format: .${ext}`);
+  }
+
+  const result = await loader(filePath);
+
+  // Normalize: always return an array
+  return Array.isArray(result) ? result : [result];
+}
+```
+
+The pattern is simple: detect format, extract text, preserve metadata, normalize output. Every document becomes a `{ text, metadata }` object that the chunking step can consume without caring about the original format.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write a loadDocument function that handles .md and .txt files. For .md files, extract the title from the first # heading. Return { text, metadata } with source, title, and format fields."
+  initialCode={`function loadDocument(filePath, content) {
+  // Determine format from file extension
+  // For .md: extract title from first # heading
+  // For .txt: use filename as title
+  // Return { text, metadata: { source, title, format } }
+}
+
+// Test with markdown
+const md = "# User Guide\\nThis explains how to use the app.";
+console.log(loadDocument("docs/guide.md", md));
+
+// Test with plain text
+const txt = "Plain text content here.";
+console.log(loadDocument("notes/readme.txt", txt));`}
+  solution={`function loadDocument(filePath, content) {
+const ext = filePath.split(".").pop().toLowerCase();
+const fileName = filePath.split("/").pop();
+
+if (ext === "md") {
+const titleMatch = content.match(/^#\\s+(.+)$/m);
+const title = titleMatch ? titleMatch[1] : fileName;
+return {
+text: content,
+metadata: { source: filePath, title, format: "markdown" },
+};
+}
+
+if (ext === "txt") {
+return {
+text: content,
+metadata: { source: filePath, title: fileName, format: "text" },
+};
+}
+
+throw new Error("Unsupported format: ." + ext);
+}
+
+const md = "# User Guide\\nThis explains how to use the app.";
+console.log(loadDocument("docs/guide.md", md));
+
+const txt = "Plain text content here.";
+console.log(loadDocument("notes/readme.txt", txt));`}
+testCases={["loadDocument returns correct metadata for markdown", "loadDocument returns correct metadata for text"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Why is PDF the hardest format to load for RAG?",
+      options: [
+        "PDFs are too large",
+        "PDFs store visual layout, not logical text structure",
+        "PDFs cannot contain text",
+        "PDFs require authentication to open",
+      ],
+      correct: 1,
+      explanation:
+        "PDFs are a visual format. Text may be stored as individual glyphs without logical ordering, making extraction unreliable — especially for tables.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Why should document loaders preserve metadata like source and page number?",
+      options: [
+        "To make files smaller",
+        "To enable citations and traceability in RAG responses",
+        "To speed up embedding",
+        "Metadata is required by vector databases",
+      ],
+      correct: 1,
+      explanation:
+        "Metadata lets you cite sources in answers and trace errors back to the original document. Without it, you cannot tell users where an answer came from.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Document loaders convert raw files into a consistent structure of ___ plus ___. The hardest format to extract text from is ___ because it stores visual layout rather than logical structure."
+  answers={["text", "metadata", "PDF"]}
+  hints={["The main content.", "Information about the source.", "A common document format."]}
+/>
+
+## What you learned
+
+- Document loaders normalize PDFs, HTML, and markdown into `{ text, metadata }` objects that downstream pipeline steps can consume uniformly.
+- Metadata (source, page, title, timestamps) is essential for citations, traceability, and incremental re-indexing.
+- PDF extraction is unreliable by nature — always inspect extracted text and handle tables, images, and encoding issues explicitly.
