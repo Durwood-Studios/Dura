@@ -46,6 +46,7 @@ function correctAsArray(correct: number | number[]): number[] {
 }
 
 export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactElement {
+  const safeQuestions = questions ?? [];
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState<number[]>([]);
   const [submitted, setSubmitted] = useState(false);
@@ -56,8 +57,16 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
   const setQuizScore = useProgressStore((s) => s.setQuizScore);
   const currentLesson = useProgressStore((s) => s.current);
 
-  const total = questions.length;
-  const question = questions[index];
+  if (safeQuestions.length === 0) {
+    return (
+      <div className="my-8 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
+        Quiz: No questions provided.
+      </div>
+    );
+  }
+
+  const total = safeQuestions.length;
+  const question = safeQuestions[index];
   const type: QuizQuestionType = question.type ?? "multiple-choice";
   const isMulti = type === "multiple-select";
   const correctOptions = correctAsArray(question.correct);
@@ -110,7 +119,7 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
     const slugs = new Set<string>();
     for (const record of history) {
       if (record.correct) continue;
-      const q = questions[record.questionIndex];
+      const q = safeQuestions[record.questionIndex];
       for (const slug of q.terms ?? []) slugs.add(slug);
     }
     return Array.from(slugs);

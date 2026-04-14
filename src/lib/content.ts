@@ -118,6 +118,37 @@ export async function loadLesson(
   }
 }
 
+/** Enumerate all lesson params for generateStaticParams. */
+export async function listAllLessonParams(): Promise<
+  { phaseId: string; moduleId: string; lessonId: string }[]
+> {
+  const params: { phaseId: string; moduleId: string; lessonId: string }[] = [];
+  try {
+    if (!(await fileExists(CONTENT_ROOT))) return params;
+    const phases = await fs.readdir(CONTENT_ROOT, { withFileTypes: true });
+    for (const phaseEntry of phases) {
+      if (!phaseEntry.isDirectory()) continue;
+      const phaseId = phaseEntry.name.split("-")[0];
+      const phaseDir = path.join(CONTENT_ROOT, phaseEntry.name);
+      const modules = await fs.readdir(phaseDir, { withFileTypes: true });
+      for (const modEntry of modules) {
+        if (!modEntry.isDirectory()) continue;
+        const moduleId = modEntry.name.match(/^(\d+-\d+)/)?.[1] ?? modEntry.name.split("-")[0];
+        const modDir = path.join(phaseDir, modEntry.name);
+        const files = await fs.readdir(modDir);
+        for (const file of files) {
+          if (!file.endsWith(".mdx")) continue;
+          const lessonId = file.split("-")[0];
+          params.push({ phaseId, moduleId, lessonId });
+        }
+      }
+    }
+  } catch (error) {
+    console.error("[content] listAllLessonParams failed", error);
+  }
+  return params;
+}
+
 export async function listLessons(phaseId: string, moduleId: string): Promise<LessonMeta[]> {
   try {
     const phaseDir = await findPhaseDir(phaseId);

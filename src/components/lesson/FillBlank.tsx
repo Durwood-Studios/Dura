@@ -24,11 +24,13 @@ const REVEAL_AFTER_ATTEMPTS = 2;
  * shake-on-wrong animation, and answer reveal after two failed attempts.
  */
 export function FillBlank({ prompt, answers, hints = [] }: FillBlankProps): React.ReactElement {
-  const segments = useMemo(() => prompt.split("___"), [prompt]);
+  const safePrompt = prompt ?? "";
+  const safeAnswers = answers ?? [];
+  const segments = useMemo(() => safePrompt.split("___"), [safePrompt]);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
-  const [values, setValues] = useState<string[]>(() => answers.map(() => ""));
+  const [values, setValues] = useState<string[]>(() => safeAnswers.map(() => ""));
   const [blanks, setBlanks] = useState<BlankState[]>(() =>
-    answers.map(() => ({ attempts: 0, status: "idle", revealed: false }))
+    safeAnswers.map(() => ({ attempts: 0, status: "idle", revealed: false }))
   );
 
   const allCorrect = blanks.every((b) => b.status === "correct");
@@ -58,13 +60,13 @@ export function FillBlank({ prompt, answers, hints = [] }: FillBlankProps): Reac
     let nextValues = values;
     const nextBlanks = blanks.map((b, i) => {
       if (b.status === "correct" || b.revealed) return b;
-      const isCorrect = values[i].trim().toLowerCase() === answers[i].trim().toLowerCase();
+      const isCorrect = values[i].trim().toLowerCase() === safeAnswers[i].trim().toLowerCase();
       const attempts = b.attempts + 1;
       if (isCorrect) {
         return { attempts, status: "correct" as const, revealed: false };
       }
       if (attempts >= REVEAL_AFTER_ATTEMPTS) {
-        nextValues = nextValues.map((v, j) => (j === i ? answers[i] : v));
+        nextValues = nextValues.map((v, j) => (j === i ? safeAnswers[i] : v));
         return { attempts, status: "correct" as const, revealed: true };
       }
       return { attempts, status: "wrong" as const, revealed: false };
@@ -75,7 +77,7 @@ export function FillBlank({ prompt, answers, hints = [] }: FillBlankProps): Reac
       type: "fill-blank",
       correct: nextBlanks.filter((b) => b.status === "correct" && !b.revealed).length,
       revealed: nextBlanks.filter((b) => b.revealed).length,
-      total: answers.length,
+      total: safeAnswers.length,
     });
     // focus the next still-wrong blank
     const nextWrong = nextBlanks.findIndex((b) => b.status !== "correct");
@@ -88,7 +90,7 @@ export function FillBlank({ prompt, answers, hints = [] }: FillBlankProps): Reac
         {segments.map((seg, i) => (
           <span key={i}>
             {seg}
-            {i < answers.length && (
+            {i < safeAnswers.length && (
               <span className="relative inline-flex items-center">
                 <input
                   ref={(el) => {
