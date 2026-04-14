@@ -146,7 +146,12 @@ export function SettingsClient(): React.ReactElement {
             max={240}
             step={5}
             value={prefs.dailyGoalMinutes}
-            onChange={(e) => void update({ dailyGoalMinutes: Number(e.target.value) })}
+            onChange={(e) => {
+              const val = Number(e.target.value);
+              if (!Number.isNaN(val) && val >= 5 && val <= 240) {
+                void update({ dailyGoalMinutes: val });
+              }
+            }}
             className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-sm"
           />
         </SettingRow>

@@ -19,13 +19,18 @@ export function CertificateLookup({ hash }: CertificateLookupProps): React.React
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      const cert = await getCertificateByHash(hash);
-      if (cancelled) return;
-      if (cert) {
-        setCertificate(cert);
-        setState("found");
-      } else {
-        setState("missing");
+      try {
+        const cert = await getCertificateByHash(hash);
+        if (cancelled) return;
+        if (cert) {
+          setCertificate(cert);
+          setState("found");
+        } else {
+          setState("missing");
+        }
+      } catch (error) {
+        console.error("[CertificateLookup] Failed to load:", error);
+        if (!cancelled) setState("missing");
       }
     };
     void load();

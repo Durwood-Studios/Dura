@@ -15,10 +15,14 @@ export function CertificateList(): React.ReactElement {
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      const all = await getAllCertificates();
-      if (cancelled) return;
-      setCerts(all.sort((a, b) => b.completedAt - a.completedAt));
-      setState("ready");
+      try {
+        const all = await getAllCertificates();
+        if (cancelled) return;
+        setCerts(all.sort((a, b) => b.completedAt - a.completedAt));
+      } catch (error) {
+        console.error("[CertificateList] Failed to load:", error);
+      }
+      if (!cancelled) setState("ready");
     };
     void load();
     return () => {

@@ -62,22 +62,26 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
   };
 
   const addToDeck = async () => {
-    const existing = await getCardByTermSlug(slug);
-    if (existing) {
+    try {
+      const existing = await getCardByTermSlug(slug);
+      if (existing) {
+        setInDeck(true);
+        return;
+      }
+      const card = createCard({
+        id: generateId("card"),
+        front: term.term,
+        back: term.definitions[tier],
+        termSlug: slug,
+      });
+      await putCard(card);
       setInDeck(true);
-      return;
+      setJustAdded(true);
+      setTimeout(() => setJustAdded(false), 1800);
+      void track("flashcard_rated", { source: "vocab-tooltip", slug });
+    } catch (error) {
+      console.error("[VocabTooltip] Failed to add to deck:", error);
     }
-    const card = createCard({
-      id: generateId("card"),
-      front: term.term,
-      back: term.definitions[tier],
-      termSlug: slug,
-    });
-    await putCard(card);
-    setInDeck(true);
-    setJustAdded(true);
-    setTimeout(() => setJustAdded(false), 1800);
-    void track("flashcard_rated", { source: "vocab-tooltip", slug });
   };
 
   return (

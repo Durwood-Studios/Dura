@@ -1,6 +1,6 @@
 "use client";
 
-import { Trophy, Sparkles } from "lucide-react";
+import { Trophy, Sparkles, Flame } from "lucide-react";
 import { useToastsStore } from "@/stores/toasts";
 import { cn } from "@/lib/utils";
 
@@ -24,8 +24,9 @@ export function ToastLayer(): React.ReactElement {
         >
           {t.kind === "xp" && <Sparkles className="h-4 w-4" aria-hidden />}
           {t.kind === "level-up" && <Trophy className="h-4 w-4" aria-hidden />}
+          {t.kind === "streak" && <Flame className="h-4 w-4" aria-hidden />}
           {t.kind === "xp" && (
-            <span className="font-mono text-sm font-semibold">+{t.amount} XP</span>
+            <span className="font-mono text-sm font-semibold">+{t.amount ?? 0} XP</span>
           )}
           {t.kind === "level-up" && (
             <span className="text-sm font-semibold">Level up — {t.message}</span>
