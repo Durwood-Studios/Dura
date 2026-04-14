@@ -22,8 +22,13 @@ export const useGoalsStore = create<GoalsState>((set, get) => ({
 
   load: async () => {
     set({ loading: true });
-    const all = await getAllGoals();
-    set({ goals: all, loading: false, hydrated: true });
+    try {
+      const all = await getAllGoals();
+      set({ goals: all, loading: false, hydrated: true });
+    } catch (error) {
+      console.error("[goals] Failed to hydrate:", error);
+      set({ loading: false, hydrated: true });
+    }
   },
 
   add: async (goal) => {

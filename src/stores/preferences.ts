@@ -14,8 +14,13 @@ export const usePreferencesStore = create<PreferencesState>((set) => ({
   hydrated: false,
 
   hydrate: async () => {
-    const stored = await getPreferences();
-    set({ prefs: stored, hydrated: true });
+    try {
+      const stored = await getPreferences();
+      set({ prefs: stored, hydrated: true });
+    } catch (error) {
+      console.error("[preferences] Failed to hydrate:", error);
+      set({ hydrated: true });
+    }
   },
 
   update: async (patch) => {
