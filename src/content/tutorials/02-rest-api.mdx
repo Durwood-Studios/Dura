@@ -1,0 +1,552 @@
+---
+title: "Build a REST API with Next.js"
+description: "Create a complete REST API with CRUD operations, validation, error handling, and data persistence."
+slug: "rest-api"
+difficulty: "intermediate"
+estimatedMinutes: 50
+steps: 10
+tags: ["api", "nextjs", "rest", "typescript", "backend"]
+---
+
+## Overview
+
+In this tutorial, you'll build a complete REST API for a bookmarks manager. You'll create endpoints for creating, reading, updating, and deleting bookmarks — with proper validation, error handling, and typed responses.
+
+**What you'll learn:**
+
+- Next.js App Router API routes
+- TypeScript-first API design
+- Request validation with Zod
+- Proper HTTP status codes and error responses
+- Structuring a scalable API layer
+
+## Step 1: Define Your Data Model
+
+Start by defining what a bookmark looks like. Create `src/types/bookmark.ts`:
+
+```typescript
+export interface Bookmark {
+  id: string;
+  url: string;
+  title: string;
+  description: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateBookmarkInput {
+  url: string;
+  title: string;
+  description?: string;
+  tags?: string[];
+}
+
+export interface UpdateBookmarkInput {
+  url?: string;
+  title?: string;
+  description?: string;
+  tags?: string[];
+}
+```
+
+<Checkpoint
+  id="data-model"
+  label="Data Model"
+  status="active"
+  challenge="Why do we separate Bookmark from CreateBookmarkInput?"
+  answer="because create doesn't need id or timestamps"
+>
+  Separate your API input types from your stored data types.
+</Checkpoint>
+
+## Step 2: In-Memory Data Store
+
+For this tutorial, we'll use an in-memory store. In production, you'd swap this for a database.
+
+Create `src/lib/bookmarks-store.ts`:
+
+```typescript
+import type { Bookmark, CreateBookmarkInput, UpdateBookmarkInput } from "@/types/bookmark";
+
+const bookmarks: Map<string, Bookmark> = new Map();
+
+let idCounter = 0;
+
+function generateId(): string {
+  idCounter += 1;
+  return `bm_${idCounter}_${Date.now()}`;
+}
+
+export function getAllBookmarks(): Bookmark[] {
+  return Array.from(bookmarks.values()).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
+
+export function getBookmarkById(id: string): Bookmark | undefined {
+  return bookmarks.get(id);
+}
+
+export function createBookmark(input: CreateBookmarkInput): Bookmark {
+  const now = new Date().toISOString();
+  const bookmark: Bookmark = {
+    id: generateId(),
+    url: input.url,
+    title: input.title,
+    description: input.description ?? "",
+    tags: input.tags ?? [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  bookmarks.set(bookmark.id, bookmark);
+  return bookmark;
+}
+
+export function updateBookmark(id: string, input: UpdateBookmarkInput): Bookmark | null {
+  const existing = bookmarks.get(id);
+  if (!existing) return null;
+
+  const updated: Bookmark = {
+    ...existing,
+    ...input,
+    updatedAt: new Date().toISOString(),
+  };
+  bookmarks.set(id, updated);
+  return updated;
+}
+
+export function deleteBookmark(id: string): boolean {
+  return bookmarks.delete(id);
+}
+
+export function searchBookmarks(query: string): Bookmark[] {
+  const lower = query.toLowerCase();
+  return getAllBookmarks().filter(
+    (b) =>
+      b.title.toLowerCase().includes(lower) ||
+      b.description.toLowerCase().includes(lower) ||
+      b.tags.some((t) => t.toLowerCase().includes(lower))
+  );
+}
+```
+
+<Checkpoint
+  id="store"
+  label="Data Store"
+  status="active"
+  challenge="What data structure provides O(1) lookup by key?"
+  answer="Map"
+>
+  The store is decoupled from the API layer — easy to swap for a real database later.
+</Checkpoint>
+
+## Step 3: Create the List/Create Endpoint
+
+Create `src/app/api/bookmarks/route.ts`:
+
+```typescript
+import { NextResponse } from "next/server";
+import { getAllBookmarks, createBookmark } from "@/lib/bookmarks-store";
+
+// GET /api/bookmarks — list all bookmarks
+export async function GET(request: Request): Promise<NextResponse> {
+  const { searchParams } = new URL(request.url);
+  const query = searchParams.get("q");
+
+  if (query) {
+    const { searchBookmarks } = await import("@/lib/bookmarks-store");
+    const results = searchBookmarks(query);
+    return NextResponse.json({ data: results, count: results.length });
+  }
+
+  const bookmarks = getAllBookmarks();
+  return NextResponse.json({ data: bookmarks, count: bookmarks.length });
+}
+
+// POST /api/bookmarks — create a new bookmark
+export async function POST(request: Request): Promise<NextResponse> {
+  try {
+    const body = await request.json();
+
+    // Validate required fields
+    if (!body.url || typeof body.url !== "string") {
+      return NextResponse.json({ error: "url is required and must be a string" }, { status: 400 });
+    }
+
+    if (!body.title || typeof body.title !== "string") {
+      return NextResponse.json(
+        { error: "title is required and must be a string" },
+        { status: 400 }
+      );
+    }
+
+    // Validate URL format
+    try {
+      new URL(body.url);
+    } catch {
+      return NextResponse.json({ error: "url must be a valid URL" }, { status: 400 });
+    }
+
+    const bookmark = createBookmark({
+      url: body.url,
+      title: body.title,
+      description: body.description,
+      tags: body.tags,
+    });
+
+    return NextResponse.json({ data: bookmark }, { status: 201 });
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+}
+```
+
+Test with curl:
+
+```bash
+# Create a bookmark
+curl -X POST http://localhost:3000/api/bookmarks \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://nextjs.org", "title": "Next.js", "tags": ["framework"]}'
+
+# List all bookmarks
+curl http://localhost:3000/api/bookmarks
+```
+
+<Checkpoint
+  id="list-create"
+  label="List & Create Endpoints"
+  status="active"
+  challenge="What HTTP status code should a successful POST return?"
+  answer="201"
+>
+  Two endpoints down: list and create.
+</Checkpoint>
+
+## Step 4: Single Bookmark Endpoint (Read/Update/Delete)
+
+Create `src/app/api/bookmarks/[id]/route.ts`:
+
+```typescript
+import { NextResponse } from "next/server";
+import { getBookmarkById, updateBookmark, deleteBookmark } from "@/lib/bookmarks-store";
+
+interface RouteParams {
+  params: Promise<{ id: string }>;
+}
+
+// GET /api/bookmarks/:id
+export async function GET(_request: Request, { params }: RouteParams): Promise<NextResponse> {
+  const { id } = await params;
+  const bookmark = getBookmarkById(id);
+
+  if (!bookmark) {
+    return NextResponse.json({ error: "Bookmark not found" }, { status: 404 });
+  }
+
+  return NextResponse.json({ data: bookmark });
+}
+
+// PATCH /api/bookmarks/:id
+export async function PATCH(request: Request, { params }: RouteParams): Promise<NextResponse> {
+  const { id } = await params;
+
+  try {
+    const body = await request.json();
+
+    if (body.url) {
+      try {
+        new URL(body.url);
+      } catch {
+        return NextResponse.json({ error: "url must be a valid URL" }, { status: 400 });
+      }
+    }
+
+    const updated = updateBookmark(id, body);
+
+    if (!updated) {
+      return NextResponse.json({ error: "Bookmark not found" }, { status: 404 });
+    }
+
+    return NextResponse.json({ data: updated });
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+}
+
+// DELETE /api/bookmarks/:id
+export async function DELETE(_request: Request, { params }: RouteParams): Promise<NextResponse> {
+  const { id } = await params;
+  const deleted = deleteBookmark(id);
+
+  if (!deleted) {
+    return NextResponse.json({ error: "Bookmark not found" }, { status: 404 });
+  }
+
+  return new NextResponse(null, { status: 204 });
+}
+```
+
+<Checkpoint
+  id="crud"
+  label="Full CRUD"
+  status="active"
+  challenge="What HTTP status code means 'No Content' (used after successful delete)?"
+  answer="204"
+>
+  All four CRUD operations are implemented.
+</Checkpoint>
+
+## Step 5: Add Validation with Zod
+
+Manual validation gets messy fast. Zod makes it declarative:
+
+```typescript
+import { z } from "zod";
+
+export const createBookmarkSchema = z.object({
+  url: z.string().url("Must be a valid URL"),
+  title: z.string().min(1, "Title is required").max(200),
+  description: z.string().max(1000).optional(),
+  tags: z.array(z.string().max(50)).max(10).optional(),
+});
+
+export const updateBookmarkSchema = z.object({
+  url: z.string().url("Must be a valid URL").optional(),
+  title: z.string().min(1).max(200).optional(),
+  description: z.string().max(1000).optional(),
+  tags: z.array(z.string().max(50)).max(10).optional(),
+});
+
+// Usage in your route:
+const result = createBookmarkSchema.safeParse(body);
+if (!result.success) {
+  return NextResponse.json(
+    { error: "Validation failed", details: result.error.flatten() },
+    { status: 400 }
+  );
+}
+const bookmark = createBookmark(result.data);
+```
+
+**Why Zod?**
+
+- Type inference — `z.infer<typeof createBookmarkSchema>` gives you the TypeScript type
+- Detailed error messages — tells the client exactly what's wrong
+- Composable — reuse schemas across endpoints
+
+<Checkpoint
+  id="validation"
+  label="Zod Validation"
+  status="active"
+  challenge="What Zod method validates without throwing an error?"
+  answer="safeParse"
+>
+  Schema-based validation keeps your API routes clean.
+</Checkpoint>
+
+## Step 6: Consistent Error Responses
+
+Create a helper for standardized error responses:
+
+```typescript
+// src/lib/api-response.ts
+import { NextResponse } from "next/server";
+
+interface ApiError {
+  error: string;
+  code?: string;
+  details?: unknown;
+}
+
+export function apiError(
+  message: string,
+  status: number,
+  details?: unknown
+): NextResponse<ApiError> {
+  return NextResponse.json({ error: message, ...(details ? { details } : {}) }, { status });
+}
+
+export function notFound(resource = "Resource"): NextResponse<ApiError> {
+  return apiError(`${resource} not found`, 404);
+}
+
+export function badRequest(message: string, details?: unknown): NextResponse<ApiError> {
+  return apiError(message, 400, details);
+}
+```
+
+Now your routes read cleaner:
+
+```typescript
+if (!bookmark) return notFound("Bookmark");
+if (!result.success) return badRequest("Validation failed", result.error.flatten());
+```
+
+<Checkpoint id="error-responses" label="Error Responses" status="active">
+  Consistent error formatting makes your API predictable and debuggable.
+</Checkpoint>
+
+## Step 7: Add Search and Filtering
+
+Enhance the GET endpoint with query parameters:
+
+```typescript
+// GET /api/bookmarks?q=react&tag=framework&sort=title&order=asc
+
+export async function GET(request: Request): Promise<NextResponse> {
+  const { searchParams } = new URL(request.url);
+  const query = searchParams.get("q");
+  const tag = searchParams.get("tag");
+  const sort = searchParams.get("sort") ?? "createdAt";
+  const order = searchParams.get("order") ?? "desc";
+
+  let results = query ? searchBookmarks(query) : getAllBookmarks();
+
+  // Filter by tag
+  if (tag) {
+    results = results.filter((b) => b.tags.some((t) => t.toLowerCase() === tag.toLowerCase()));
+  }
+
+  // Sort
+  results.sort((a, b) => {
+    const aVal = a[sort as keyof Bookmark] ?? "";
+    const bVal = b[sort as keyof Bookmark] ?? "";
+    const comparison = String(aVal).localeCompare(String(bVal));
+    return order === "asc" ? comparison : -comparison;
+  });
+
+  return NextResponse.json({
+    data: results,
+    count: results.length,
+    filters: { query, tag, sort, order },
+  });
+}
+```
+
+<Checkpoint id="search" label="Search & Filter" status="active">
+  Users can now search, filter by tag, and sort results.
+</Checkpoint>
+
+## Step 8: Rate Limiting (Simple Version)
+
+Protect your API from abuse with a basic rate limiter:
+
+```typescript
+// src/lib/rate-limit.ts
+const requests = new Map<string, { count: number; resetAt: number }>();
+
+export function checkRateLimit(
+  ip: string,
+  limit = 60,
+  windowMs = 60000
+): { allowed: boolean; remaining: number } {
+  const now = Date.now();
+  const record = requests.get(ip);
+
+  if (!record || now > record.resetAt) {
+    requests.set(ip, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, remaining: limit - 1 };
+  }
+
+  record.count += 1;
+
+  if (record.count > limit) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  return { allowed: true, remaining: limit - record.count };
+}
+```
+
+Apply it in your route:
+
+```typescript
+const ip = request.headers.get("x-forwarded-for") ?? "unknown";
+const { allowed, remaining } = checkRateLimit(ip);
+
+if (!allowed) {
+  return NextResponse.json(
+    { error: "Too many requests" },
+    {
+      status: 429,
+      headers: { "Retry-After": "60" },
+    }
+  );
+}
+```
+
+<Checkpoint id="rate-limit" label="Rate Limiting" status="active">
+  Your API is now protected against request flooding.
+</Checkpoint>
+
+## Step 9: Test Your API
+
+Create a simple test script to verify all endpoints:
+
+```bash
+# Create bookmarks
+curl -s -X POST http://localhost:3000/api/bookmarks \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://react.dev","title":"React Docs","tags":["react","docs"]}'
+
+curl -s -X POST http://localhost:3000/api/bookmarks \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://nextjs.org","title":"Next.js","tags":["nextjs","framework"]}'
+
+# List all
+curl -s http://localhost:3000/api/bookmarks | jq .
+
+# Search
+curl -s "http://localhost:3000/api/bookmarks?q=react" | jq .
+
+# Filter by tag
+curl -s "http://localhost:3000/api/bookmarks?tag=framework" | jq .
+
+# Update
+curl -s -X PATCH http://localhost:3000/api/bookmarks/bm_1_* \
+  -H "Content-Type: application/json" \
+  -d '{"description":"Official React documentation"}'
+
+# Delete
+curl -s -X DELETE http://localhost:3000/api/bookmarks/bm_2_*
+
+# Verify deletion
+curl -s http://localhost:3000/api/bookmarks | jq .count
+```
+
+<Checkpoint id="testing" label="API Testing" status="active">
+  Always test your API with real requests before shipping.
+</Checkpoint>
+
+## Step 10: What's Next
+
+You've built a complete REST API. Here's how to extend it:
+
+**Database integration:**
+
+- Replace the in-memory store with Supabase or SQLite
+- Add database migrations
+- Implement pagination (`?page=1&limit=20`)
+
+**Authentication:**
+
+- Add API key authentication
+- Implement JWT tokens for user sessions
+- Scope bookmarks to authenticated users
+
+**Advanced features:**
+
+- Add OpenAPI/Swagger documentation
+- Implement CORS configuration
+- Add request logging and monitoring
+- Cache frequently accessed bookmarks
+
+<Checkpoint id="api-complete" label="Tutorial Complete" status="active">
+  You've built a production-quality API pattern. This same structure scales to any resource.
+</Checkpoint>
+
+---
+
+**What you built:** A REST API with full CRUD, validation, search, filtering, consistent error handling, and rate limiting — the foundation for any backend feature.
