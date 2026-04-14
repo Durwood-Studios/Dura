@@ -15,12 +15,14 @@ import {
   GraduationCap,
   Lightbulb,
   Wrench,
+  Compass,
 } from "lucide-react";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/assess", label: "Assess", icon: Compass },
   { href: "/paths", label: "Paths", icon: BookOpen },
   { href: "/review", label: "Review", icon: Repeat },
   { href: "/dictionary", label: "Dictionary", icon: BookMarked },
