@@ -8,7 +8,7 @@ interface CodeBlockProps {
 
 /**
  * Server component. Highlights at render time using Shiki — no runtime
- * highlighter ships to the client.
+ * highlighter ships to the client. Uses dual themes for light/dark mode.
  */
 export async function CodeBlock({
   children,
@@ -19,7 +19,11 @@ export async function CodeBlock({
   try {
     html = await codeToHtml(children.trim(), {
       lang: language,
-      theme: "github-light",
+      themes: {
+        light: "github-light",
+        dark: "github-dark",
+      },
+      defaultColor: false,
     });
   } catch (error) {
     console.error("[code] highlight failed", error);
@@ -34,7 +38,7 @@ export async function CodeBlock({
         </figcaption>
       )}
       <div
-        className="overflow-x-auto p-4 text-[14px] leading-relaxed [&_pre]:!bg-transparent"
+        className="shiki-wrapper overflow-x-auto p-4 text-[14px] leading-relaxed [&_pre]:!bg-transparent"
         dangerouslySetInnerHTML={{ __html: html }}
       />
     </figure>

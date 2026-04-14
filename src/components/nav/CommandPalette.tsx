@@ -166,21 +166,21 @@ export function CommandPalette(): React.ReactElement | null {
       <div
         role="dialog"
         aria-label="Search"
-        className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-[#E5E5E5] bg-white shadow-2xl"
+        className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-2xl"
         onKeyDown={handleKeyDown}
       >
         {/* Input */}
-        <div className="flex items-center gap-3 border-b border-[#E5E5E5] px-4 py-3">
-          <Search className="h-5 w-5 text-neutral-400" />
+        <div className="flex items-center gap-3 border-b border-[var(--color-border)] px-4 py-3">
+          <Search className="h-5 w-5 text-[var(--color-text-muted)]" />
           <input
             ref={inputRef}
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search pages, phases, dictionary…"
-            className="flex-1 bg-transparent text-sm text-neutral-900 outline-none placeholder:text-neutral-400"
+            className="flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-muted)]"
           />
-          <kbd className="rounded border border-[#E5E5E5] px-1.5 py-0.5 font-mono text-[10px] text-neutral-400">
+          <kbd className="rounded border border-[var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
             ESC
           </kbd>
         </div>
@@ -188,7 +188,7 @@ export function CommandPalette(): React.ReactElement | null {
         {/* Results */}
         <ul className="max-h-80 overflow-y-auto py-2">
           {allResults.length === 0 && query.length > 0 && (
-            <li className="px-4 py-6 text-center text-sm text-neutral-400">
+            <li className="px-4 py-6 text-center text-sm text-[var(--color-text-muted)]">
               No results for &ldquo;{query}&rdquo;
             </li>
           )}
@@ -205,7 +205,9 @@ export function CommandPalette(): React.ReactElement | null {
                 )}
               >
                 <span className="flex-1">{result.label}</span>
-                <span className="text-[10px] text-neutral-400">{result.category}</span>
+                <span className="text-[10px] text-[var(--color-text-muted)]">
+                  {result.category}
+                </span>
                 <ArrowRight className="h-3.5 w-3.5 text-neutral-300" />
               </button>
             </li>

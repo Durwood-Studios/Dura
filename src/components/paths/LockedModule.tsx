@@ -13,10 +13,10 @@ export function LockedModule({ moduleTitle, prerequisite }: LockedModuleProps): 
   return (
     <div className="mx-auto max-w-md py-16 text-center">
       <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-neutral-100">
-        <Lock className="h-7 w-7 text-neutral-400" />
+        <Lock className="h-7 w-7 text-[var(--color-text-muted)]" />
       </div>
-      <h2 className="text-2xl font-semibold text-neutral-900">{moduleTitle}</h2>
-      <p className="mt-2 text-sm text-neutral-500">
+      <h2 className="text-2xl font-semibold text-[var(--color-text-primary)]">{moduleTitle}</h2>
+      <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
         Complete the mastery assessment for{" "}
         <strong className="text-neutral-700">{prerequisite.title}</strong> to unlock this module.
       </p>

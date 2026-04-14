@@ -171,7 +171,7 @@ export function ParsonsPanel({
               onDragEnd={onDragEnd}
               onClick={() => moveToTarget(id)}
               className={cn(
-                "rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-left font-mono text-sm text-[var(--color-text-primary)] shadow-sm transition hover:border-emerald-400",
+                "rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-2 text-left font-mono text-sm text-[var(--color-text-primary)] shadow-sm transition hover:border-emerald-400",
                 draggingId === id && "opacity-50"
               )}
             >
@@ -203,7 +203,7 @@ export function ParsonsPanel({
               onDragEnd={onDragEnd}
               style={{ paddingLeft: `${p.indent * 20}px` }}
               className={cn(
-                "flex items-center gap-2 rounded-lg border bg-white px-3 py-2 font-mono text-sm shadow-sm transition",
+                "flex items-center gap-2 rounded-lg border bg-[var(--color-bg-surface)] px-3 py-2 font-mono text-sm shadow-sm transition",
                 result === "correct" && "border-emerald-500 bg-emerald-50",
                 result === "wrong" && "border-rose-500 bg-rose-50",
                 result === "idle" && "border-[var(--color-border)]",

@@ -140,7 +140,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
                       className={cn(
                         "rounded px-1.5 py-0.5 text-[10px] font-medium transition",
                         tier === t.value
-                          ? "bg-white text-emerald-700 shadow-sm"
+                          ? "bg-[var(--color-bg-surface)] text-emerald-700 shadow-sm"
                           : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
                       )}
                     >

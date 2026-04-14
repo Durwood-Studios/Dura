@@ -85,12 +85,14 @@ export default async function HowToGuidePage({ params }: PageProps): Promise<Rea
           <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
             {guide.meta.difficulty}
           </span>
-          <span className="text-sm text-neutral-400">
+          <span className="text-sm text-[var(--color-text-muted)]">
             {guide.meta.estimatedMinutes} min · {guide.meta.steps} steps
           </span>
         </div>
-        <h1 className="text-3xl font-semibold text-neutral-900">{guide.meta.title}</h1>
-        <p className="mt-2 text-neutral-500">{guide.meta.description}</p>
+        <h1 className="text-3xl font-semibold text-[var(--color-text-primary)]">
+          {guide.meta.title}
+        </h1>
+        <p className="mt-2 text-[var(--color-text-secondary)]">{guide.meta.description}</p>
       </div>
 
       <article>{guide.content}</article>

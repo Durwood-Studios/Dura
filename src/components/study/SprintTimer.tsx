@@ -70,7 +70,7 @@ export function SprintTimer(): React.ReactElement | null {
             type="button"
             onClick={pause}
             aria-label="Pause"
-            className="rounded p-0.5 hover:bg-white/40"
+            className="rounded p-0.5 hover:bg-[var(--color-bg-surface)]/40"
           >
             <Pause className="h-3 w-3" />
           </button>
@@ -82,7 +82,7 @@ export function SprintTimer(): React.ReactElement | null {
             type="button"
             onClick={reset}
             aria-label="Reset"
-            className="rounded p-0.5 hover:bg-white/40"
+            className="rounded p-0.5 hover:bg-[var(--color-bg-surface)]/40"
           >
             <RotateCcw className="h-3 w-3" />
           </button>

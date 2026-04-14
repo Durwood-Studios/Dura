@@ -56,8 +56,10 @@ const DIFFICULTY_COLORS: Record<string, string> = {
 export default function TutorialsPage(): React.ReactElement {
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
-      <h1 className="mb-2 text-3xl font-semibold text-neutral-900">Project Tutorials</h1>
-      <p className="mb-8 text-neutral-500">
+      <h1 className="mb-2 text-3xl font-semibold text-[var(--color-text-primary)]">
+        Project Tutorials
+      </h1>
+      <p className="mb-8 text-[var(--color-text-secondary)]">
         Build real projects from scratch with guided, step-by-step instructions and interactive
         checkpoints.
       </p>
@@ -67,7 +69,7 @@ export default function TutorialsPage(): React.ReactElement {
           <Link
             key={tutorial.slug}
             href={`/tutorials/${tutorial.slug}`}
-            className="group flex gap-5 rounded-xl border border-[#E5E5E5] bg-white p-5 transition hover:border-emerald-300 hover:shadow-sm"
+            className="group flex gap-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 transition hover:border-emerald-300 hover:shadow-sm"
           >
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-lg font-bold text-emerald-600">
               {i + 1}
@@ -79,12 +81,14 @@ export default function TutorialsPage(): React.ReactElement {
                 >
                   {tutorial.difficulty}
                 </span>
-                <span className="text-xs text-neutral-400">{tutorial.minutes} min</span>
+                <span className="text-xs text-[var(--color-text-muted)]">
+                  {tutorial.minutes} min
+                </span>
               </div>
-              <h2 className="mb-1 text-lg font-semibold text-neutral-900 group-hover:text-emerald-700">
+              <h2 className="mb-1 text-lg font-semibold text-[var(--color-text-primary)] group-hover:text-emerald-700">
                 {tutorial.title}
               </h2>
-              <p className="text-sm text-neutral-500">{tutorial.description}</p>
+              <p className="text-sm text-[var(--color-text-secondary)]">{tutorial.description}</p>
             </div>
           </Link>
         ))}

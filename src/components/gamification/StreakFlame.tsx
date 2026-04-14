@@ -20,7 +20,7 @@ export function StreakFlame({ days, className }: StreakFlameProps): React.ReactE
       aria-hidden
       className={cn(
         "h-4 w-4",
-        level === "cold" && "text-neutral-400",
+        level === "cold" && "text-[var(--color-text-muted)]",
         level === "warm" && "text-amber-500",
         level === "strong" && "streak-flame-pulse text-amber-500",
         level === "elite" && "streak-flame-pulse streak-flame-elite",

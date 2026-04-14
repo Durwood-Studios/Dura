@@ -80,12 +80,14 @@ export default async function TutorialPage({ params }: PageProps): Promise<React
           <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
             {tutorial.meta.difficulty}
           </span>
-          <span className="text-sm text-neutral-400">
+          <span className="text-sm text-[var(--color-text-muted)]">
             {tutorial.meta.estimatedMinutes} min · {tutorial.meta.steps} steps
           </span>
         </div>
-        <h1 className="text-3xl font-semibold text-neutral-900">{tutorial.meta.title}</h1>
-        <p className="mt-2 text-neutral-500">{tutorial.meta.description}</p>
+        <h1 className="text-3xl font-semibold text-[var(--color-text-primary)]">
+          {tutorial.meta.title}
+        </h1>
+        <p className="mt-2 text-[var(--color-text-secondary)]">{tutorial.meta.description}</p>
       </div>
 
       <article>{tutorial.content}</article>

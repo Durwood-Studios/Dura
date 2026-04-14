@@ -2,7 +2,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 
 export function CardSkeleton(): React.ReactElement {
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-[#E5E5E5] bg-white p-5 shadow-sm">
+    <div className="flex flex-col gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 shadow-sm">
       <Skeleton className="h-4 w-24" />
       <Skeleton className="h-6 w-3/4" />
       <Skeleton className="h-4 w-full" />
@@ -45,7 +45,7 @@ export function ListSkeleton({ rows = 6 }: { rows?: number }): React.ReactElemen
       {Array.from({ length: rows }, (_, i) => (
         <li
           key={i}
-          className="flex items-center gap-3 rounded-lg border border-[#F0F0F0] bg-white px-4 py-3"
+          className="flex items-center gap-3 rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-3"
         >
           <Skeleton className="h-9 w-9 rounded-full" />
           <div className="flex flex-1 flex-col gap-2">
@@ -71,7 +71,7 @@ export function GridSkeleton({ count = 6 }: { count?: number }): React.ReactElem
 
 export function StatSkeleton(): React.ReactElement {
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-[#E5E5E5] bg-white p-4">
+    <div className="flex flex-col gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4">
       <Skeleton className="h-3 w-16" />
       <Skeleton className="h-8 w-24" />
       <Skeleton className="h-3 w-20" />
@@ -81,7 +81,7 @@ export function StatSkeleton(): React.ReactElement {
 
 export function TermSkeleton(): React.ReactElement {
   return (
-    <div className="flex flex-col gap-2 border-b border-[#F0F0F0] py-4">
+    <div className="flex flex-col gap-2 border-b border-[var(--color-border-subtle)] py-4">
       <Skeleton className="h-5 w-40" />
       <Skeleton className="h-4 w-full" />
       <Skeleton className="h-4 w-5/6" />

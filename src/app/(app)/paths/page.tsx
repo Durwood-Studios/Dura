@@ -11,8 +11,10 @@ export const metadata: Metadata = {
 export default function PathsPage(): React.ReactElement {
   return (
     <main className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
-      <h1 className="mb-2 text-3xl font-semibold text-neutral-900">Learning Paths</h1>
-      <p className="mb-8 text-neutral-500">
+      <h1 className="mb-2 text-3xl font-semibold text-[var(--color-text-primary)]">
+        Learning Paths
+      </h1>
+      <p className="mb-8 text-[var(--color-text-secondary)]">
         Pick any phase. Each one builds on the last, but you can jump in wherever you&apos;re ready.
       </p>
 
@@ -21,7 +23,7 @@ export default function PathsPage(): React.ReactElement {
           <Link
             key={phase.id}
             href={`/paths/${phase.id}`}
-            className="group flex gap-5 rounded-xl border border-[#E5E5E5] bg-white p-5 transition hover:border-emerald-300 hover:shadow-sm"
+            className="group flex gap-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 transition hover:border-emerald-300 hover:shadow-sm"
           >
             <div
               className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl text-xl font-bold"
@@ -30,12 +32,14 @@ export default function PathsPage(): React.ReactElement {
               {phase.id}
             </div>
             <div className="flex-1">
-              <h2 className="mb-1 text-lg font-semibold text-neutral-900 group-hover:text-emerald-700">
+              <h2 className="mb-1 text-lg font-semibold text-[var(--color-text-primary)] group-hover:text-emerald-700">
                 {phase.title}
               </h2>
-              <p className="mb-2 text-sm text-neutral-500 italic">{phase.tagline}</p>
-              <p className="text-sm text-neutral-500">{phase.description}</p>
-              <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-neutral-400">
+              <p className="mb-2 text-sm text-[var(--color-text-secondary)] italic">
+                {phase.tagline}
+              </p>
+              <p className="text-sm text-[var(--color-text-secondary)]">{phase.description}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-[var(--color-text-muted)]">
                 <span>{phase.moduleCount} modules</span>
                 <span>{phase.lessonCount} lessons</span>
                 <span>~{phase.estimatedHours} hours</span>

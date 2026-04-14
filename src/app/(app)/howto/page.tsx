@@ -89,8 +89,10 @@ const DIFFICULTY_COLORS: Record<string, string> = {
 export default function HowToPage(): React.ReactElement {
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
-      <h1 className="mb-2 text-3xl font-semibold text-neutral-900">How-To Guides</h1>
-      <p className="mb-8 text-neutral-500">
+      <h1 className="mb-2 text-3xl font-semibold text-[var(--color-text-primary)]">
+        How-To Guides
+      </h1>
+      <p className="mb-8 text-[var(--color-text-secondary)]">
         Practical, step-by-step guides with interactive checkpoints. Complete them at your own pace.
       </p>
 
@@ -99,10 +101,10 @@ export default function HowToPage(): React.ReactElement {
           <Link
             key={guide.slug}
             href={`/howto/${guide.slug}`}
-            className="group rounded-xl border border-[#E5E5E5] bg-white p-5 transition hover:border-emerald-300 hover:shadow-sm"
+            className="group rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 transition hover:border-emerald-300 hover:shadow-sm"
           >
             <div className="mb-3 flex items-center gap-2">
-              <span className="text-sm font-medium text-neutral-400">
+              <span className="text-sm font-medium text-[var(--color-text-muted)]">
                 {String(i + 1).padStart(2, "0")}
               </span>
               <span
@@ -110,12 +112,12 @@ export default function HowToPage(): React.ReactElement {
               >
                 {guide.difficulty}
               </span>
-              <span className="text-xs text-neutral-400">{guide.minutes} min</span>
+              <span className="text-xs text-[var(--color-text-muted)]">{guide.minutes} min</span>
             </div>
-            <h2 className="mb-1 text-lg font-semibold text-neutral-900 group-hover:text-emerald-700">
+            <h2 className="mb-1 text-lg font-semibold text-[var(--color-text-primary)] group-hover:text-emerald-700">
               {guide.title}
             </h2>
-            <p className="text-sm text-neutral-500">{guide.description}</p>
+            <p className="text-sm text-[var(--color-text-secondary)]">{guide.description}</p>
           </Link>
         ))}
       </div>

@@ -19,7 +19,7 @@ const TABS = [
 export function MobileBottomTabs(): React.ReactElement {
   const pathname = usePathname();
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-30 flex h-16 border-t border-[#E5E5E5] bg-white/95 backdrop-blur-xl lg:hidden">
+    <nav className="fixed inset-x-0 bottom-0 z-30 flex h-16 border-t border-[var(--color-border)] bg-[var(--color-bg-surface)]/95 backdrop-blur-xl lg:hidden">
       {TABS.map(({ href, label, icon: Icon }) => {
         const active = pathname === href || pathname.startsWith(href + "/");
         return (
@@ -28,7 +28,7 @@ export function MobileBottomTabs(): React.ReactElement {
             href={href}
             className={cn(
               "flex flex-1 flex-col items-center justify-center gap-1 text-[11px] font-medium",
-              active ? "text-emerald-600" : "text-neutral-500"
+              active ? "text-emerald-600" : "text-[var(--color-text-secondary)]"
             )}
           >
             <span className="relative">
@@ -87,14 +87,14 @@ export function MobileDrawer(): React.ReactElement | null {
         onClick={() => close(false)}
         className="absolute inset-0 bg-black/40"
       />
-      <div className="absolute inset-y-0 left-0 flex w-72 flex-col bg-white px-4 py-4 shadow-xl">
+      <div className="absolute inset-y-0 left-0 flex w-72 flex-col bg-[var(--color-bg-surface)] px-4 py-4 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <span className="text-xl font-semibold">DURA</span>
           <button
             type="button"
             onClick={() => close(false)}
             aria-label="Close"
-            className="rounded-lg p-2 text-neutral-600 hover:bg-[#F5F5F4]"
+            className="rounded-lg p-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
           >
             <X className="h-5 w-5" />
           </button>
@@ -105,7 +105,7 @@ export function MobileDrawer(): React.ReactElement | null {
               key={href}
               href={href}
               onClick={() => close(false)}
-              className="rounded-lg px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-[#F5F5F4]"
+              className="rounded-lg px-3 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
             >
               {label}
             </Link>
