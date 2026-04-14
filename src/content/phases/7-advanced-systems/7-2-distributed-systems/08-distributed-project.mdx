@@ -1,0 +1,447 @@
+---
+title: "Distributed Project"
+description: "Design a distributed key-value store from scratch, reasoning through partitioning, replication, consistency, and failure handling tradeoffs."
+phase: 7
+module: "7-2-distributed-systems"
+order: 8
+estimatedMinutes: 15
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - key-value-store
+  - quorum
+  - failover
+  - read-repair
+  - anti-entropy
+---
+
+## Why this matters
+
+Designing a distributed key-value store forces you to make every tradeoff covered in this module: how to partition data across nodes, how many replicas to maintain, which consistency model to enforce, and how to handle node failures. These are the same decisions engineers at Amazon (Dynamo), Meta (RocksDB), and Apple (FoundationDB) face. Working through a concrete design cements your understanding of distributed systems far more than reading about abstract principles.
+
+## The requirements
+
+You are designing a distributed key-value store with these requirements: support GET and PUT operations, store data across multiple nodes for fault tolerance, continue operating when individual nodes fail, and provide tunable consistency (the client chooses strong or eventual on a per-request basis).
+
+## Step 1: partitioning strategy
+
+We use consistent hashing with virtual nodes. Each physical node gets 256 virtual positions on the hash ring. This ensures even data distribution and minimal data movement when nodes join or leave. Each key is hashed to a position on the ring and assigned to the next node clockwise.
+
+```javascript
+// The partitioning layer of our distributed KV store
+class PartitionRing {
+  constructor(vnodeCount) {
+    this.vnodeCount = vnodeCount;
+    this.ring = new Map();
+    this.sorted = [];
+    this.physicalNodes = new Set();
+  }
+
+  hash(str) {
+    let h = 0;
+    for (const c of String(str)) {
+      h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    }
+    return h;
+  }
+
+  addNode(nodeId) {
+    this.physicalNodes.add(nodeId);
+    for (let i = 0; i < this.vnodeCount; i++) {
+      const pos = this.hash(`${nodeId}:vnode:${i}`);
+      this.ring.set(pos, nodeId);
+      this.sorted.push(pos);
+    }
+    this.sorted.sort((a, b) => a - b);
+  }
+
+  // Get N distinct physical nodes responsible for this key
+  getNodes(key, replicaCount) {
+    const keyHash = this.hash(key);
+    const nodes = [];
+    const seen = new Set();
+
+    // Walk clockwise until we have enough distinct physical nodes
+    let startIdx = 0;
+    for (let i = 0; i < this.sorted.length; i++) {
+      if (this.sorted[i] >= keyHash) {
+        startIdx = i;
+        break;
+      }
+    }
+
+    for (let i = 0; i < this.sorted.length && nodes.length < replicaCount; i++) {
+      const idx = (startIdx + i) % this.sorted.length;
+      const nodeId = this.ring.get(this.sorted[idx]);
+      if (!seen.has(nodeId)) {
+        seen.add(nodeId);
+        nodes.push(nodeId);
+      }
+    }
+
+    return nodes;
+  }
+}
+
+const ring = new PartitionRing(256);
+ring.addNode("node-1");
+ring.addNode("node-2");
+ring.addNode("node-3");
+ring.addNode("node-4");
+ring.addNode("node-5");
+
+// Each key maps to 3 replicas on distinct physical nodes
+console.log("user:alice →", ring.getNodes("user:alice", 3));
+console.log("user:bob →", ring.getNodes("user:bob", 3));
+console.log("config:app →", ring.getNodes("config:app", 3));
+```
+
+## Step 2: replication
+
+Each key is replicated to N nodes (we choose N=3). Writes go to all 3 replicas. The write succeeds when W replicas acknowledge it. Reads query R replicas and return the value with the highest version. With N=3, setting W=2 and R=2 guarantees at least one overlap between write and read sets (W + R > N), ensuring strong consistency when the client requests it.
+
+```javascript
+// Replication and quorum logic
+class ReplicatedStore {
+  constructor(replicaCount, writeQuorum, readQuorum) {
+    this.n = replicaCount;
+    this.w = writeQuorum;
+    this.r = readQuorum;
+    this.nodes = new Map(); // nodeId → { data, alive }
+  }
+
+  addNode(nodeId) {
+    this.nodes.set(nodeId, { data: new Map(), alive: true });
+  }
+
+  put(key, value, targetNodes) {
+    const version = Date.now();
+    let acks = 0;
+    const results = [];
+
+    for (const nodeId of targetNodes) {
+      const node = this.nodes.get(nodeId);
+      if (!node || !node.alive) {
+        results.push({ node: nodeId, status: "unreachable" });
+        continue;
+      }
+
+      node.data.set(key, { value, version });
+      acks++;
+      results.push({ node: nodeId, status: "ok" });
+    }
+
+    const success = acks >= this.w;
+    return { success, acks, required: this.w, results };
+  }
+
+  get(key, targetNodes, consistencyLevel) {
+    const r = consistencyLevel === "strong" ? this.r : 1;
+    const responses = [];
+
+    for (const nodeId of targetNodes) {
+      const node = this.nodes.get(nodeId);
+      if (!node || !node.alive) continue;
+
+      const entry = node.data.get(key);
+      if (entry) {
+        responses.push({ nodeId, ...entry });
+      }
+
+      if (responses.length >= r) break;
+    }
+
+    if (responses.length < r) {
+      return { success: false, error: "Not enough replicas responded" };
+    }
+
+    // Return the value with the highest version
+    responses.sort((a, b) => b.version - a.version);
+    return { success: true, value: responses[0].value, version: responses[0].version };
+  }
+}
+
+const store = new ReplicatedStore(3, 2, 2);
+store.addNode("node-1");
+store.addNode("node-2");
+store.addNode("node-3");
+
+const targets = ["node-1", "node-2", "node-3"];
+
+// Write with quorum
+const writeResult = store.put("session:abc", { userId: 42 }, targets);
+console.log("Write:", writeResult);
+
+// Strong read — queries 2 replicas
+const readResult = store.get("session:abc", targets, "strong");
+console.log("Strong read:", readResult);
+
+// Eventual read — queries just 1 replica (faster)
+const fastRead = store.get("session:abc", targets, "eventual");
+console.log("Eventual read:", fastRead);
+```
+
+## Step 3: failure handling
+
+When a node fails, the system must continue operating. We use three strategies: **sloppy quorum** (temporarily write to a backup node when a primary is down), **read repair** (if a read detects stale data on a replica, update it), and **anti-entropy** (background process that periodically compares replicas and fixes inconsistencies).
+
+```javascript
+// Failure handling: read repair and hinted handoff
+class ResilientKVStore {
+  constructor() {
+    this.nodes = new Map();
+    this.hintedHandoffs = []; // writes stored for downed nodes
+  }
+
+  addNode(id) {
+    this.nodes.set(id, { data: new Map(), alive: true });
+  }
+
+  failNode(id) {
+    const node = this.nodes.get(id);
+    if (node) node.alive = false;
+  }
+
+  recoverNode(id) {
+    const node = this.nodes.get(id);
+    if (node) {
+      node.alive = true;
+      // Replay hinted handoffs
+      const hints = this.hintedHandoffs.filter((h) => h.targetNode === id);
+      for (const hint of hints) {
+        node.data.set(hint.key, { value: hint.value, version: hint.version });
+        console.log(`Replayed hint for ${hint.key} to ${id}`);
+      }
+      this.hintedHandoffs = this.hintedHandoffs.filter((h) => h.targetNode !== id);
+    }
+  }
+
+  put(key, value, targetNodes) {
+    const version = Date.now();
+    let acks = 0;
+
+    for (const nodeId of targetNodes) {
+      const node = this.nodes.get(nodeId);
+      if (!node || !node.alive) {
+        // Hinted handoff — save for later delivery
+        this.hintedHandoffs.push({ targetNode: nodeId, key, value, version });
+        console.log(`Hinted handoff stored for ${nodeId}`);
+        continue;
+      }
+      node.data.set(key, { value, version });
+      acks++;
+    }
+
+    return { acks, hintsStored: targetNodes.length - acks };
+  }
+
+  readRepair(key, targetNodes) {
+    // Find the most recent version across all alive replicas
+    let newest = null;
+    const staleNodes = [];
+
+    for (const nodeId of targetNodes) {
+      const node = this.nodes.get(nodeId);
+      if (!node || !node.alive) continue;
+
+      const entry = node.data.get(key);
+      if (!entry) {
+        staleNodes.push(nodeId);
+        continue;
+      }
+
+      if (!newest || entry.version > newest.version) {
+        // Previous newest is now stale
+        if (newest) staleNodes.push(newest.nodeId);
+        newest = { ...entry, nodeId };
+      } else {
+        staleNodes.push(nodeId);
+      }
+    }
+
+    // Repair stale replicas
+    if (newest) {
+      for (const nodeId of staleNodes) {
+        const node = this.nodes.get(nodeId);
+        if (node && node.alive) {
+          node.data.set(key, { value: newest.value, version: newest.version });
+          console.log(`Read repair: updated ${nodeId} for key ${key}`);
+        }
+      }
+    }
+
+    return { repairedNodes: staleNodes.length, newestVersion: newest?.version };
+  }
+}
+
+const kvStore = new ResilientKVStore();
+kvStore.addNode("A");
+kvStore.addNode("B");
+kvStore.addNode("C");
+
+// Normal write to all three
+kvStore.put("config", "v1", ["A", "B", "C"]);
+
+// Node C goes down
+kvStore.failNode("C");
+
+// Write with hinted handoff
+const result = kvStore.put("config", "v2", ["A", "B", "C"]);
+console.log("Write during failure:", result);
+// A and B updated, C gets a hint
+
+// Node C recovers — hints are replayed
+kvStore.recoverNode("C");
+
+// Read repair catches any remaining inconsistencies
+const repairResult = kvStore.readRepair("config", ["A", "B", "C"]);
+console.log("Read repair:", repairResult);
+```
+
+## Step 4: putting it all together
+
+The complete system combines consistent hashing for partitioning, quorum reads/writes for consistency, hinted handoffs for availability during failures, and read repair for convergence. The client can choose per-request whether they want strong consistency (higher latency, more replicas queried) or eventual consistency (lower latency, fewer replicas queried).
+
+```javascript
+// The complete distributed KV store interface
+class DistributedKVStore {
+  constructor(config) {
+    this.replicaCount = config.replicaCount || 3;
+    this.writeQuorum = config.writeQuorum || 2;
+    this.readQuorum = config.readQuorum || 2;
+    this.ring = new PartitionRing(256);
+    this.nodeData = new Map();
+  }
+
+  addNode(nodeId) {
+    this.ring.addNode(nodeId);
+    this.nodeData.set(nodeId, new Map());
+  }
+
+  put(key, value) {
+    const targets = this.ring.getNodes(key, this.replicaCount);
+    const version = Date.now();
+    let acks = 0;
+
+    for (const node of targets) {
+      this.nodeData.get(node).set(key, { value, version });
+      acks++;
+    }
+
+    return {
+      success: acks >= this.writeQuorum,
+      replicas: targets,
+      acks,
+    };
+  }
+
+  get(key, consistency) {
+    const targets = this.ring.getNodes(key, this.replicaCount);
+    const quorum = consistency === "strong" ? this.readQuorum : 1;
+    const responses = [];
+
+    for (const node of targets) {
+      const entry = this.nodeData.get(node).get(key);
+      if (entry) responses.push(entry);
+      if (responses.length >= quorum) break;
+    }
+
+    if (responses.length === 0) return { success: false };
+
+    responses.sort((a, b) => b.version - a.version);
+    return { success: true, value: responses[0].value };
+  }
+}
+
+// Usage — PartitionRing is defined in Step 1 above
+// const db = new DistributedKVStore({ replicaCount: 3, writeQuorum: 2, readQuorum: 2 });
+// db.addNode("us-east-1a");
+// db.addNode("us-east-1b");
+// db.addNode("us-west-2a");
+// db.put("user:1", { name: "Alice", email: "alice@example.com" });
+// db.get("user:1", "strong");
+
+console.log("Distributed KV store design complete.");
+console.log("Components: consistent hashing → quorum replication → failure handling");
+console.log("Tradeoffs: W + R > N for strong consistency, W=1 R=1 for speed");
+```
+
+## Design tradeoffs summary
+
+Every decision involves a tradeoff. More replicas improve durability but cost more storage and write latency. Higher quorums improve consistency but reduce availability during partial failures. Consistent hashing minimizes data movement but adds complexity over simple modulo hashing. Hinted handoffs improve availability but temporarily reduce consistency. There is no universally correct configuration — the right design depends on your workload, latency requirements, and failure tolerance.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Design challenge: implement a quorum calculator.
+// Given N (replica count), determine the minimum W and R values
+// for different consistency levels.
+
+function quorumConfig(n, level) {
+// level: "strong" | "eventual" | "write-heavy" | "read-heavy"
+//
+// "strong": W + R > N, balanced (W = floor(N/2)+1, R = floor(N/2)+1)
+// "eventual": W = 1, R = 1 (fast but may read stale)
+// "write-heavy": minimize W (W=1), maximize R (R=N) so reads always see latest
+// "read-heavy": maximize W (W=N), minimize R (R=1) so any replica has latest
+//
+// Return { w, r, description }
+}
+
+// Tests
+const strong = quorumConfig(5, "strong");
+console.log(strong.w === 3 && strong.r === 3); // true
+console.log(strong.w + strong.r > 5); // true — guarantees overlap
+
+const eventual = quorumConfig(5, "eventual");
+console.log(eventual.w === 1 && eventual.r === 1); // true
+
+const writeHeavy = quorumConfig(5, "write-heavy");
+console.log(writeHeavy.w === 1 && writeHeavy.r === 5); // true
+
+const readHeavy = quorumConfig(5, "read-heavy");
+console.log(readHeavy.w === 5 && readHeavy.r === 1); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In a system with N=3 replicas, W=2 write quorum, and R=2 read quorum, what happens if one node is down?"
+  options={[
+    "Both reads and writes fail because a node is missing",
+    "Writes succeed (2 of 3 nodes respond) and reads succeed (2 of 3 respond)",
+    "Writes succeed but reads fail",
+    "The system must wait for the node to recover before processing any requests",
+  ]}
+  answer={1}
+  explanation="With N=3, W=2, R=2, the system needs 2 out of 3 nodes for both reads and writes. One node being down leaves 2 alive, which exactly meets both quorums. If two nodes go down, neither reads nor writes would succeed."
+/>
+
+<Quiz
+  question="Why does a hinted handoff improve availability during node failures?"
+  options={[
+    "It reduces the number of replicas needed",
+    "It stores writes destined for a downed node on a temporary node, replaying them when the node recovers",
+    "It prevents network partitions from occurring",
+    "It automatically promotes a follower to leader",
+  ]}
+  answer={1}
+  explanation="When a target node is down, the write is stored as a 'hint' on another node. When the failed node recovers, the hints are replayed to bring it up to date. This allows writes to succeed even when a replica is temporarily unavailable."
+/>
+
+<FillBlank
+  question="For quorum consistency in a system with N replicas, the relationship W + R > ______ must hold, where W is the write quorum and R is the read quorum."
+  answer="N"
+/>
+
+## What you learned
+
+- A distributed key-value store combines consistent hashing (partitioning), quorum-based replication (consistency), and failure-handling mechanisms (hinted handoff, read repair) into a cohesive system
+- Tunable consistency lets clients choose per-request between strong consistency (W + R > N, higher latency) and eventual consistency (W=1, R=1, lower latency)
+- Every design decision is a tradeoff — more replicas increase durability but cost latency, higher quorums improve consistency but reduce availability during failures

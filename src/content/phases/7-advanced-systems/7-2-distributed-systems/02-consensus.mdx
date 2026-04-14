@@ -1,0 +1,270 @@
+---
+title: "Consensus"
+description: "Learn why distributed consensus is hard and how the Raft algorithm solves it with leader election, log replication, and safety guarantees."
+phase: 7
+module: "7-2-distributed-systems"
+order: 2
+estimatedMinutes: 14
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - consensus
+  - raft
+  - leader-election
+  - log-replication
+  - term
+---
+
+## Why this matters
+
+When multiple servers need to agree on the same sequence of operations — which transaction committed first, who holds the lock, what the current configuration is — they need consensus. Without a consensus protocol, distributed databases cannot guarantee that data is consistent across replicas. Raft is the algorithm behind etcd, CockroachDB, TiKV, and Consul. Understanding it teaches you how real distributed databases survive server failures without losing data.
+
+## The consensus problem
+
+Imagine three servers that must all agree on the same ordered log of commands. Clients send commands to any server. The servers must ensure that all of them apply the same commands in the same order, even if one server crashes or a network message is lost.
+
+This is the consensus problem: getting a group of unreliable nodes to agree on a shared state. The difficulty is that any node can fail at any moment, messages can arrive out of order, and the network can partition.
+
+```javascript
+// The problem: three nodes must agree on the same log
+class NaiveCluster {
+  constructor() {
+    this.nodes = [
+      { id: 0, log: [], alive: true },
+      { id: 1, log: [], alive: true },
+      { id: 2, log: [], alive: true },
+    ];
+  }
+
+  // Without consensus, concurrent writes create divergent logs
+  appendWithoutConsensus(nodeId, command) {
+    this.nodes[nodeId].log.push(command);
+    // Other nodes don't know about this command!
+  }
+
+  showLogs() {
+    return this.nodes.map((n) => ({
+      node: n.id,
+      log: [...n.log],
+    }));
+  }
+}
+
+const cluster = new NaiveCluster();
+cluster.appendWithoutConsensus(0, "SET x=1");
+cluster.appendWithoutConsensus(1, "SET x=2");
+cluster.appendWithoutConsensus(2, "SET x=3");
+
+console.log("Divergent logs:", JSON.stringify(cluster.showLogs(), null, 2));
+// Each node has a different log — this is the problem consensus solves
+```
+
+## Raft: leader election
+
+Raft solves consensus by electing a single **leader** that coordinates all writes. Every node is in one of three states: **follower**, **candidate**, or **leader**. Time is divided into **terms** — monotonically increasing integers that act as logical clocks.
+
+A follower becomes a candidate when it has not heard from a leader within a randomized timeout (the election timeout). The candidate increments its term, votes for itself, and sends vote requests to all other nodes. If it receives votes from a majority, it becomes the leader for that term.
+
+```javascript
+// Simplified Raft node with leader election
+class RaftNode {
+  constructor(id, clusterSize) {
+    this.id = id;
+    this.state = "follower"; // follower | candidate | leader
+    this.currentTerm = 0;
+    this.votedFor = null;
+    this.log = [];
+    this.clusterSize = clusterSize;
+    this.votesReceived = 0;
+  }
+
+  startElection() {
+    this.state = "candidate";
+    this.currentTerm++;
+    this.votedFor = this.id;
+    this.votesReceived = 1; // vote for self
+    console.log(`Node ${this.id}: starting election for term ${this.currentTerm}`);
+    return {
+      type: "RequestVote",
+      term: this.currentTerm,
+      candidateId: this.id,
+      lastLogIndex: this.log.length - 1,
+      lastLogTerm: this.log.length > 0 ? this.log[this.log.length - 1].term : 0,
+    };
+  }
+
+  handleVoteRequest(request) {
+    // Grant vote if: request term >= our term AND we haven't voted yet this term
+    if (request.term > this.currentTerm) {
+      this.currentTerm = request.term;
+      this.state = "follower";
+      this.votedFor = null;
+    }
+
+    const grantVote =
+      request.term >= this.currentTerm &&
+      (this.votedFor === null || this.votedFor === request.candidateId);
+
+    if (grantVote) {
+      this.votedFor = request.candidateId;
+    }
+
+    return { term: this.currentTerm, voteGranted: grantVote };
+  }
+
+  receiveVote(response) {
+    if (response.voteGranted) {
+      this.votesReceived++;
+      const majority = Math.floor(this.clusterSize / 2) + 1;
+      if (this.votesReceived >= majority && this.state === "candidate") {
+        this.state = "leader";
+        console.log(`Node ${this.id}: elected leader for term ${this.currentTerm}`);
+      }
+    }
+  }
+}
+
+// Simulate an election in a 3-node cluster
+const nodes = [new RaftNode(0, 3), new RaftNode(1, 3), new RaftNode(2, 3)];
+
+// Node 0 times out and starts an election
+const voteRequest = nodes[0].startElection();
+
+// Nodes 1 and 2 receive the vote request
+const vote1 = nodes[1].handleVoteRequest(voteRequest);
+const vote2 = nodes[2].handleVoteRequest(voteRequest);
+
+// Node 0 counts votes
+nodes[0].receiveVote(vote1);
+nodes[0].receiveVote(vote2);
+
+console.log(`Node 0 state: ${nodes[0].state}`); // "leader"
+console.log(`Node 0 term: ${nodes[0].currentTerm}`); // 1
+```
+
+## Raft: log replication
+
+Once a leader is elected, all client writes go through it. The leader appends the command to its own log, then sends **AppendEntries** RPCs to all followers. When a majority of nodes have written the entry to their logs, the leader considers it **committed** and applies it to its state machine.
+
+```javascript
+// Log replication after leader election
+class RaftLeader {
+  constructor(id, followerCount) {
+    this.id = id;
+    this.log = [];
+    this.commitIndex = -1;
+    this.followerAcks = new Map();
+    this.followerCount = followerCount;
+    this.currentTerm = 1;
+  }
+
+  clientWrite(command) {
+    const entry = {
+      term: this.currentTerm,
+      index: this.log.length,
+      command,
+    };
+    this.log.push(entry);
+    this.followerAcks.set(entry.index, 1); // leader counts as 1 ack
+    console.log(`Leader appended: "${command}" at index ${entry.index}`);
+    return entry;
+  }
+
+  receiveAck(entryIndex) {
+    const acks = (this.followerAcks.get(entryIndex) || 0) + 1;
+    this.followerAcks.set(entryIndex, acks);
+
+    const majority = Math.floor((this.followerCount + 1) / 2) + 1;
+    if (acks >= majority && entryIndex > this.commitIndex) {
+      this.commitIndex = entryIndex;
+      console.log(`Entry ${entryIndex} committed (${acks}/${this.followerCount + 1} acks)`);
+      return true;
+    }
+    return false;
+  }
+}
+
+const leader = new RaftLeader(0, 2); // 1 leader + 2 followers = 3 nodes
+const entry = leader.clientWrite("SET balance=100");
+
+// Follower 1 acknowledges
+leader.receiveAck(entry.index);
+// Follower 2 acknowledges — now we have majority (3/3)
+leader.receiveAck(entry.index);
+
+console.log(`Commit index: ${leader.commitIndex}`); // 0
+console.log(`Log: ${JSON.stringify(leader.log)}`);
+```
+
+## Term numbers and safety
+
+Term numbers prevent stale leaders from corrupting data. If a leader is partitioned from the cluster, the remaining nodes elect a new leader with a higher term. When the old leader reconnects, it sees the higher term and steps down to follower. Raft guarantees that for any given term, at most one leader exists, and committed entries are never lost — even across leader changes. This is the **Leader Completeness Property**: any newly elected leader already has all committed entries in its log.
+
+## Why consensus matters for databases
+
+Distributed databases like CockroachDB use Raft to replicate every write across multiple nodes. Each range of data has its own Raft group. This means a database can survive the loss of any minority of nodes without losing a single committed transaction. Consensus is the foundation that makes strongly consistent distributed databases possible.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a simplified Raft vote counter.
+// Given a cluster size and an array of vote responses,
+// determine if the candidate wins the election.
+
+function electionResult(clusterSize, votes) {
+// votes is an array of booleans (true = vote granted)
+// The candidate always votes for itself (count starts at 1)
+// Return "elected" if majority reached, "failed" otherwise
+// Majority = floor(clusterSize / 2) + 1
+}
+
+// Tests
+console.log(electionResult(3, [true, true]) === "elected"); // 3 votes (self + 2)
+console.log(electionResult(3, [true, false]) === "elected"); // 2 votes = majority of 3
+console.log(electionResult(5, [true, false]) === "failed"); // 2 votes < majority of 5
+console.log(electionResult(5, [true, true, true]) === "elected"); // 4 votes
+console.log(electionResult(5, [false, false, false, false]) === "failed"); // 1 vote`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why does Raft use randomized election timeouts?"
+  options={[
+    "To reduce CPU usage during idle periods",
+    "To prevent all nodes from starting elections simultaneously and splitting votes",
+    "To ensure the fastest node always becomes leader",
+    "To synchronize clocks across the cluster",
+  ]}
+  answer={1}
+  explanation="If all followers had the same timeout, they would all become candidates at the same time and split the vote, potentially preventing any candidate from reaching a majority. Randomized timeouts stagger election starts so one candidate typically wins quickly."
+/>
+
+<Quiz
+  question="When is a log entry considered committed in Raft?"
+  options={[
+    "When the leader writes it to its own log",
+    "When all nodes in the cluster have acknowledged it",
+    "When a majority of nodes have acknowledged it",
+    "When the client receives a success response",
+  ]}
+  answer={2}
+  explanation="Raft commits an entry once a majority (quorum) of nodes have written it to their logs. This means the entry survives even if a minority of nodes fail. Waiting for all nodes would make the system unavailable if any single node was down."
+/>
+
+<FillBlank
+  question="In Raft, time is divided into ______, which are monotonically increasing integers used to detect stale leaders."
+  answer="terms"
+/>
+
+## What you learned
+
+- Distributed consensus solves the problem of getting unreliable nodes to agree on the same ordered sequence of operations
+- Raft achieves consensus through leader election (randomized timeouts, majority vote) and log replication (entries committed when acknowledged by a quorum)
+- Term numbers and the Leader Completeness Property guarantee that committed data is never lost, even when leaders change

@@ -1,0 +1,254 @@
+---
+title: "Why Distributed Systems"
+description: "Understand the CAP theorem, consistency models, and the fundamental tradeoffs that make distributed systems one of the hardest areas in computing."
+phase: 7
+module: "7-2-distributed-systems"
+order: 1
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - cap-theorem
+  - consistency
+  - availability
+  - partition-tolerance
+  - eventual-consistency
+---
+
+## Why this matters
+
+Every large-scale application you use daily — search engines, social media, banking — runs on multiple machines. A single server has hard limits: CPU cores, RAM, disk I/O, and a maximum number of concurrent connections. When your system needs to serve millions of users, survive hardware failures, or store petabytes of data, you must distribute work across many nodes. But distribution introduces a new class of problems that simply do not exist on a single machine. Understanding these tradeoffs is what separates engineers who design systems that scale from those who build systems that collapse under pressure.
+
+## The CAP theorem
+
+In 2000, Eric Brewer conjectured (later proved by Gilbert and Lynch) that a distributed data store can provide at most two out of three guarantees simultaneously:
+
+- **Consistency (C):** Every read receives the most recent write or an error. All nodes see the same data at the same time.
+- **Availability (A):** Every request receives a non-error response, even if some nodes are down. The system always responds.
+- **Partition tolerance (P):** The system continues to operate despite network partitions — messages between nodes being dropped or delayed.
+
+Network partitions are not optional in real networks. They happen. Cables get cut, switches fail, cloud availability zones lose connectivity. Since you must tolerate partitions, the real choice is between **CP** (consistency + partition tolerance) and **AP** (availability + partition tolerance).
+
+```javascript
+// Simulating the CAP tradeoff in a two-node system
+class DistributedStore {
+  constructor() {
+    this.nodes = [
+      { id: "node-a", data: {}, isReachable: true },
+      { id: "node-b", data: {}, isReachable: true },
+    ];
+    this.mode = "CP"; // or "AP"
+  }
+
+  write(key, value) {
+    const primary = this.nodes[0];
+    primary.data[key] = value;
+
+    const replica = this.nodes[1];
+    if (!replica.isReachable) {
+      if (this.mode === "CP") {
+        // CP: reject the write — consistency over availability
+        throw new Error("Cannot replicate: partition detected. Write rejected.");
+      } else {
+        // AP: accept the write — availability over consistency
+        console.log("Warning: write accepted but replica is stale");
+        return { status: "accepted", consistent: false };
+      }
+    }
+
+    // No partition: both guarantees are easy
+    replica.data[key] = value;
+    return { status: "accepted", consistent: true };
+  }
+
+  read(key, nodeIndex) {
+    const node = this.nodes[nodeIndex];
+    if (!node.isReachable && this.mode === "CP") {
+      throw new Error("Node unreachable. Refusing stale read.");
+    }
+    return node.data[key];
+  }
+}
+
+// Demonstrate the tradeoff
+const store = new DistributedStore();
+store.write("user:1", { name: "Alice" });
+
+// Simulate a network partition
+store.nodes[1].isReachable = false;
+
+// CP mode: this write throws an error (consistent but unavailable)
+store.mode = "CP";
+try {
+  store.write("user:1", { name: "Alice Updated" });
+} catch (e) {
+  console.log("CP mode:", e.message);
+}
+
+// AP mode: this write succeeds but nodes diverge
+store.mode = "AP";
+const result = store.write("user:1", { name: "Alice Updated" });
+console.log("AP mode:", result);
+```
+
+## Consistency models
+
+"Consistency" is not a single concept. Different systems offer different guarantees along a spectrum:
+
+**Strong consistency** — after a write completes, all subsequent reads see that write. This is what a single-machine database gives you. In a distributed system, achieving it requires coordination (round trips between nodes), which adds latency and reduces availability during partitions.
+
+**Eventual consistency** — if no new writes occur, all replicas will eventually converge to the same value. There is no bound on how long "eventually" takes. DynamoDB, Cassandra, and DNS all use eventual consistency. It is fast and available, but your application must handle reading stale data.
+
+**Causal consistency** — if operation A causally precedes operation B (B read A's result, or the same client did A then B), then every node sees A before B. Unrelated operations can appear in any order. This is a practical middle ground — stronger than eventual, weaker than strong, but much cheaper to implement than strong consistency.
+
+```javascript
+// Demonstrating consistency models with timestamps
+class ConsistencySimulator {
+  constructor(model) {
+    this.model = model;
+    this.replicas = [
+      { id: "r1", store: new Map(), clock: 0 },
+      { id: "r2", store: new Map(), clock: 0 },
+      { id: "r3", store: new Map(), clock: 0 },
+    ];
+  }
+
+  write(key, value) {
+    const timestamp = Date.now();
+    // Primary replica always gets the write immediately
+    this.replicas[0].store.set(key, { value, timestamp });
+    this.replicas[0].clock++;
+
+    if (this.model === "strong") {
+      // Block until ALL replicas acknowledge
+      for (const replica of this.replicas.slice(1)) {
+        replica.store.set(key, { value, timestamp });
+        replica.clock++;
+      }
+      return { confirmed: true, replicasUpdated: 3 };
+    }
+
+    if (this.model === "eventual") {
+      // Return immediately — replicas sync later (simulated)
+      setTimeout(() => {
+        for (const replica of this.replicas.slice(1)) {
+          replica.store.set(key, { value, timestamp });
+        }
+      }, Math.random() * 1000);
+      return { confirmed: true, replicasUpdated: 1 };
+    }
+
+    return { confirmed: true, model: this.model };
+  }
+
+  read(key, replicaIndex) {
+    const entry = this.replicas[replicaIndex].store.get(key);
+    return entry ? entry.value : undefined;
+  }
+}
+
+const strong = new ConsistencySimulator("strong");
+strong.write("score", 100);
+// All replicas immediately return 100
+console.log("Strong R1:", strong.read("score", 0)); // 100
+console.log("Strong R2:", strong.read("score", 1)); // 100
+console.log("Strong R3:", strong.read("score", 2)); // 100
+```
+
+## When to stay on one machine
+
+Distribution is not always the answer. A single modern server can handle remarkable workloads — tens of thousands of concurrent connections, terabytes of storage, millions of rows in PostgreSQL. The complexity cost of going distributed is enormous: network failures, clock skew, split-brain scenarios, operational overhead of managing clusters. If your data fits on one machine and your traffic fits on one machine, staying on one machine is the correct engineering decision. Distributed systems are a response to scale requirements, not an architectural aspiration.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a simple CAP-aware key-value store that switches behavior
+// based on whether it prioritizes consistency or availability.
+// When a partition is active and mode is "CP", reads and writes
+// should throw. When mode is "AP", operations succeed on the
+// local node only.
+
+class CAPStore {
+constructor(mode) {
+this.mode = mode; // "CP" or "AP"
+this.local = {};
+this.remote = {};
+this.partitioned = false;
+}
+
+simulatePartition() {
+this.partitioned = true;
+}
+
+healPartition() {
+this.partitioned = false;
+// Sync local to remote on heal
+Object.assign(this.remote, this.local);
+}
+
+write(key, value) {
+// Implement: handle CP vs AP behavior during partitions
+}
+
+read(key) {
+// Implement: return value, respecting mode and partition state
+}
+}
+
+// Tests
+const cp = new CAPStore("CP");
+cp.write("x", 1);
+console.log(cp.read("x") === 1); // true
+
+cp.simulatePartition();
+try { cp.write("y", 2); console.log(false); } catch(e) { console.log(true); } // true — CP rejects
+
+const ap = new CAPStore("AP");
+ap.write("x", 1);
+ap.simulatePartition();
+ap.write("y", 2);
+console.log(ap.read("y") === 2); // true — AP accepts locally`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In the CAP theorem, why is partition tolerance not truly optional?"
+  options={[
+    "It is optional — you can choose consistency and availability instead",
+    "Network partitions are inevitable in distributed systems, so you must tolerate them",
+    "Partition tolerance is only needed for systems with more than 100 nodes",
+    "Modern cloud providers have eliminated network partitions entirely",
+  ]}
+  answer={1}
+  explanation="Network partitions (dropped or delayed messages between nodes) happen in every real network. Since you cannot prevent them, your system must tolerate them, making the practical choice between CP and AP."
+/>
+
+<Quiz
+  question="Which consistency model allows replicas to temporarily return different values for the same key?"
+  options={[
+    "Strong consistency",
+    "Linearizable consistency",
+    "Eventual consistency",
+    "Strict consistency",
+  ]}
+  answer={2}
+  explanation="Eventual consistency allows replicas to diverge temporarily. They will converge to the same value eventually, but there is no guarantee about how quickly. Strong and linearizable consistency require all reads to reflect the latest write immediately."
+/>
+
+<FillBlank
+  question="The CAP theorem states that a distributed system can guarantee at most ______ of the three properties: consistency, availability, and partition tolerance."
+  answer="two"
+/>
+
+## What you learned
+
+- The CAP theorem forces a choice between consistency and availability when network partitions occur, and partitions are inevitable in real systems
+- Consistency models form a spectrum from strong (all nodes agree immediately) to eventual (nodes converge over time), each with different latency and availability tradeoffs
+- Distributed systems add enormous complexity — staying on a single machine is the right choice until scale genuinely demands distribution

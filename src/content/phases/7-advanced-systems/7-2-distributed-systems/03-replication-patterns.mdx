@@ -1,0 +1,326 @@
+---
+title: "Replication Patterns"
+description: "Explore leader-follower, multi-leader, and leaderless replication strategies, plus CRDTs for conflict-free data convergence."
+phase: 7
+module: "7-2-distributed-systems"
+order: 3
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - replication
+  - leader-follower
+  - multi-leader
+  - leaderless
+  - crdt
+---
+
+## Why this matters
+
+Replication — keeping copies of data on multiple machines — is how distributed systems survive hardware failures and reduce latency by placing data closer to users. But every replication strategy involves tradeoffs between consistency, write throughput, failure tolerance, and complexity. Choosing the wrong replication pattern for your workload leads to data loss, conflict nightmares, or performance bottlenecks. Understanding these patterns lets you evaluate databases and design systems that match your actual requirements.
+
+## State machine replication
+
+The fundamental insight behind replication is the **state machine approach**: if every replica starts in the same initial state and applies the same operations in the same order, they will all reach the same final state. The challenge is ensuring all replicas see the same operations in the same order — which is exactly what consensus protocols like Raft solve.
+
+```javascript
+// State machine replication: same operations, same order, same result
+class StateMachine {
+  constructor(id) {
+    this.id = id;
+    this.state = { balance: 0 };
+    this.appliedOps = [];
+  }
+
+  apply(operation) {
+    this.appliedOps.push(operation);
+    switch (operation.type) {
+      case "deposit":
+        this.state.balance += operation.amount;
+        break;
+      case "withdraw":
+        this.state.balance -= operation.amount;
+        break;
+    }
+  }
+}
+
+// Two replicas applying the same operations in the same order
+const replica1 = new StateMachine("node-a");
+const replica2 = new StateMachine("node-b");
+
+const operations = [
+  { type: "deposit", amount: 100 },
+  { type: "withdraw", amount: 30 },
+  { type: "deposit", amount: 50 },
+];
+
+for (const op of operations) {
+  replica1.apply(op);
+  replica2.apply(op);
+}
+
+console.log(`Replica 1 balance: ${replica1.state.balance}`); // 120
+console.log(`Replica 2 balance: ${replica2.state.balance}`); // 120
+console.log(`States match: ${replica1.state.balance === replica2.state.balance}`);
+```
+
+## Leader-follower replication
+
+The most common pattern. One node is the **leader** (primary) — all writes go through it. The leader streams changes to **followers** (replicas), which apply them in order. Reads can go to any node, but reading from a follower may return stale data if replication lags behind.
+
+PostgreSQL streaming replication, MySQL replication, and MongoDB replica sets all use leader-follower. It is simple and well-understood, but the leader is a bottleneck for writes and a single point of failure until a new leader is elected.
+
+```javascript
+// Leader-follower replication simulator
+class LeaderFollowerCluster {
+  constructor(followerCount) {
+    this.leader = { id: "leader", data: new Map(), log: [] };
+    this.followers = Array.from({ length: followerCount }, (_, i) => ({
+      id: `follower-${i}`,
+      data: new Map(),
+      replicationOffset: 0,
+    }));
+  }
+
+  write(key, value) {
+    // All writes go to the leader
+    const entry = { key, value, sequence: this.leader.log.length };
+    this.leader.log.push(entry);
+    this.leader.data.set(key, value);
+    return entry;
+  }
+
+  replicateToFollower(followerIndex) {
+    const follower = this.followers[followerIndex];
+    // Follower catches up from where it left off
+    while (follower.replicationOffset < this.leader.log.length) {
+      const entry = this.leader.log[follower.replicationOffset];
+      follower.data.set(entry.key, entry.value);
+      follower.replicationOffset++;
+    }
+  }
+
+  readFromFollower(followerIndex, key) {
+    return this.followers[followerIndex].data.get(key);
+  }
+
+  getReplicationLag(followerIndex) {
+    return this.leader.log.length - this.followers[followerIndex].replicationOffset;
+  }
+}
+
+const cluster = new LeaderFollowerCluster(2);
+cluster.write("user:1", "Alice");
+cluster.write("user:2", "Bob");
+
+// Follower 0 hasn't replicated yet — stale read
+console.log("Before replication:", cluster.readFromFollower(0, "user:1")); // undefined
+console.log("Replication lag:", cluster.getReplicationLag(0)); // 2
+
+// Replicate and read again
+cluster.replicateToFollower(0);
+console.log("After replication:", cluster.readFromFollower(0, "user:1")); // "Alice"
+console.log("Replication lag:", cluster.getReplicationLag(0)); // 0
+```
+
+## Multi-leader replication
+
+Multiple nodes accept writes independently. Each leader replicates its changes to the others. This reduces write latency for geographically distributed systems — a user in Tokyo writes to the Tokyo leader, a user in London writes to the London leader. But it introduces **write conflicts**: what happens when two leaders modify the same record simultaneously?
+
+Conflict resolution strategies include last-writer-wins (simple but lossy), merge functions (application-specific), and CRDTs (automatic, conflict-free).
+
+## Leaderless replication
+
+In leaderless systems (like Dynamo-style databases), clients write to multiple nodes in parallel and read from multiple nodes. A write succeeds if **w** out of **n** nodes acknowledge it. A read succeeds if **r** out of **n** nodes respond. As long as `w + r > n`, at least one node in every read set has the latest write.
+
+```javascript
+// Quorum reads and writes in a leaderless system
+class LeaderlessStore {
+  constructor(n) {
+    this.n = n; // total nodes
+    this.nodes = Array.from({ length: n }, (_, i) => ({
+      id: i,
+      store: new Map(),
+    }));
+  }
+
+  write(key, value, timestamp) {
+    const w = Math.floor(this.n / 2) + 1; // write quorum
+    let acks = 0;
+
+    // Write to first w nodes (in reality, picked based on hashing)
+    for (let i = 0; i < this.n && acks < w; i++) {
+      this.nodes[i].store.set(key, { value, timestamp });
+      acks++;
+    }
+
+    return { success: acks >= w, acks, required: w };
+  }
+
+  read(key) {
+    const r = Math.floor(this.n / 2) + 1; // read quorum
+    const responses = [];
+
+    for (let i = 0; i < this.n && responses.length < r; i++) {
+      const entry = this.nodes[i].store.get(key);
+      if (entry) responses.push(entry);
+    }
+
+    if (responses.length === 0) return undefined;
+
+    // Return the value with the highest timestamp
+    responses.sort((a, b) => b.timestamp - a.timestamp);
+    return responses[0].value;
+  }
+}
+
+const store = new LeaderlessStore(5);
+store.write("item:1", "v1", 1000);
+store.write("item:1", "v2", 2000); // newer write to quorum
+
+console.log("Read result:", store.read("item:1")); // "v2"
+```
+
+## CRDTs: conflict-free replicated data types
+
+CRDTs are data structures designed so that concurrent updates from different replicas can always be merged without conflicts. The key property is **commutativity** — the order in which updates are applied does not matter.
+
+A **G-Counter** (grow-only counter) is the simplest CRDT. Each node maintains its own count. The global count is the sum of all node counts. Two nodes can increment independently and merge by taking the max of each node's count.
+
+```javascript
+// G-Counter CRDT — conflict-free distributed counter
+class GCounter {
+  constructor(nodeId, nodeCount) {
+    this.nodeId = nodeId;
+    this.counts = new Array(nodeCount).fill(0);
+  }
+
+  increment() {
+    this.counts[this.nodeId]++;
+  }
+
+  value() {
+    return this.counts.reduce((sum, c) => sum + c, 0);
+  }
+
+  merge(other) {
+    // Take the max of each slot — always converges, order doesn't matter
+    for (let i = 0; i < this.counts.length; i++) {
+      this.counts[i] = Math.max(this.counts[i], other.counts[i]);
+    }
+  }
+}
+
+const counterA = new GCounter(0, 3);
+const counterB = new GCounter(1, 3);
+
+counterA.increment();
+counterA.increment();
+counterB.increment();
+counterB.increment();
+counterB.increment();
+
+console.log("A sees:", counterA.value()); // 2
+console.log("B sees:", counterB.value()); // 3
+
+// Merge in either direction — same result
+counterA.merge(counterB);
+counterB.merge(counterA);
+
+console.log("A after merge:", counterA.value()); // 5
+console.log("B after merge:", counterB.value()); // 5
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a PN-Counter CRDT (positive-negative counter).
+// It uses two G-Counters internally: one for increments, one for decrements.
+// The value is increments - decrements.
+// The merge takes element-wise max of both internal counters.
+
+class PNCounter {
+constructor(nodeId, nodeCount) {
+this.nodeId = nodeId;
+this.positive = new Array(nodeCount).fill(0);
+this.negative = new Array(nodeCount).fill(0);
+}
+
+increment() {
+// Implement
+}
+
+decrement() {
+// Implement
+}
+
+value() {
+// Implement: sum of positive - sum of negative
+}
+
+merge(other) {
+// Implement: element-wise max of both positive and negative arrays
+}
+}
+
+// Tests
+const a = new PNCounter(0, 2);
+const b = new PNCounter(1, 2);
+
+a.increment(); a.increment(); a.increment(); // +3
+a.decrement(); // -1
+b.increment(); // +1
+b.decrement(); b.decrement(); // -2
+
+console.log(a.value() === 2); // 3 - 1 = 2
+console.log(b.value() === -1); // 1 - 2 = -1
+
+a.merge(b);
+b.merge(a);
+console.log(a.value() === 1); // (3+1) - (1+2) = 1
+console.log(b.value() === 1); // same after merge`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In leader-follower replication, what is the main risk of reading from a follower?"
+  options={[
+    "Followers cannot process read queries",
+    "The follower may return stale data due to replication lag",
+    "Followers use a different data format than the leader",
+    "Reading from followers causes write conflicts",
+  ]}
+  answer={1}
+  explanation="Replication from leader to follower is asynchronous in most setups. The follower may not have received the latest writes yet, so reads can return stale (outdated) data. This is the tradeoff for spreading read load across replicas."
+/>
+
+<Quiz
+  question="What property makes CRDTs conflict-free?"
+  options={[
+    "They use locks to prevent concurrent access",
+    "They reject writes during network partitions",
+    "Their merge operation is commutative — order of updates does not matter",
+    "They require a leader node to coordinate writes",
+  ]}
+  answer={2}
+  explanation="CRDTs are designed so that their merge operation produces the same result regardless of the order in which updates are applied. This means replicas can accept writes independently and always converge to the same state when they sync."
+/>
+
+<FillBlank
+  question="In a leaderless quorum system with n nodes, reads and writes are consistent when w + r > ______."
+  answer="n"
+/>
+
+## What you learned
+
+- Leader-follower is the simplest replication pattern but limits write throughput to a single node and introduces replication lag for reads
+- Leaderless replication uses quorum reads and writes (w + r > n) to guarantee consistency without a single leader bottleneck
+- CRDTs enable conflict-free replication by designing data structures whose merge operations are commutative and always converge

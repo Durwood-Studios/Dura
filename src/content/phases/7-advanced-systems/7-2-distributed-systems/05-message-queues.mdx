@@ -1,0 +1,387 @@
+---
+title: "Message Queues"
+description: "Understand pub/sub patterns, delivery semantics, Kafka fundamentals, and dead letter queues for reliable asynchronous communication."
+phase: 7
+module: "7-2-distributed-systems"
+order: 5
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - pub-sub
+  - delivery-semantics
+  - kafka
+  - consumer-group
+  - dead-letter-queue
+---
+
+## Why this matters
+
+Direct service-to-service calls create tight coupling: if the downstream service is slow or down, the caller blocks or fails. Message queues decouple producers and consumers, enabling systems that handle traffic spikes, survive partial failures, and process work asynchronously. Kafka alone processes trillions of messages per day across companies like LinkedIn, Netflix, and Uber. Understanding message queue patterns and delivery guarantees is essential for building reliable distributed architectures.
+
+## The pub/sub pattern
+
+In publish/subscribe, producers publish messages to a **topic** without knowing who consumes them. Consumers subscribe to topics they care about. This decouples producers from consumers — you can add new consumers without changing the producer.
+
+```javascript
+// Simple pub/sub implementation
+class MessageBroker {
+  constructor() {
+    this.topics = new Map(); // topic → [subscriber callbacks]
+    this.messageLog = new Map(); // topic → [messages] for persistence
+  }
+
+  createTopic(name) {
+    if (!this.topics.has(name)) {
+      this.topics.set(name, []);
+      this.messageLog.set(name, []);
+    }
+  }
+
+  publish(topic, message) {
+    if (!this.topics.has(topic)) {
+      throw new Error(`Topic "${topic}" does not exist`);
+    }
+
+    const envelope = {
+      id: Math.random().toString(36).slice(2, 10),
+      topic,
+      payload: message,
+      timestamp: Date.now(),
+    };
+
+    // Persist the message
+    this.messageLog.get(topic).push(envelope);
+
+    // Deliver to all subscribers
+    const subscribers = this.topics.get(topic);
+    for (const callback of subscribers) {
+      try {
+        callback(envelope);
+      } catch (err) {
+        console.error(`Subscriber error on topic ${topic}:`, err.message);
+      }
+    }
+
+    return envelope;
+  }
+
+  subscribe(topic, callback) {
+    if (!this.topics.has(topic)) {
+      throw new Error(`Topic "${topic}" does not exist`);
+    }
+    this.topics.get(topic).push(callback);
+  }
+}
+
+const broker = new MessageBroker();
+broker.createTopic("orders");
+
+// Multiple independent consumers
+broker.subscribe("orders", (msg) => {
+  console.log("Billing service:", msg.payload.orderId);
+});
+
+broker.subscribe("orders", (msg) => {
+  console.log("Inventory service:", msg.payload.orderId);
+});
+
+broker.subscribe("orders", (msg) => {
+  console.log("Notification service:", msg.payload.orderId);
+});
+
+// One publish reaches all subscribers
+broker.publish("orders", { orderId: "ORD-001", amount: 99.99 });
+```
+
+## Delivery semantics
+
+The hardest problem in messaging is guaranteeing how many times a message is delivered:
+
+**At-most-once** — fire and forget. The message might be lost, but it is never delivered twice. Fast, but unsafe for important data. Think UDP for messages.
+
+**At-least-once** — the broker retries until the consumer acknowledges. The message is never lost, but it might be delivered multiple times. The consumer must be **idempotent** (processing the same message twice produces the same result).
+
+**Exactly-once** — each message is processed exactly one time. This is extremely hard to achieve in practice. Kafka achieves it through a combination of idempotent producers, transactional writes, and consumer offset management — but even then, it only guarantees exactly-once within the Kafka ecosystem.
+
+```javascript
+// Simulating delivery semantics
+class DeliverySimulator {
+  constructor(mode) {
+    this.mode = mode; // "at-most-once" | "at-least-once" | "exactly-once"
+    this.processed = new Set();
+    this.deliveryLog = [];
+  }
+
+  deliver(message, handler) {
+    const networkFails = Math.random() < 0.3; // 30% chance of failure
+
+    if (this.mode === "at-most-once") {
+      // Try once, don't retry
+      if (networkFails) {
+        this.deliveryLog.push({ id: message.id, result: "lost" });
+        return;
+      }
+      handler(message);
+      this.deliveryLog.push({ id: message.id, result: "delivered" });
+    }
+
+    if (this.mode === "at-least-once") {
+      // Retry until success — may deliver duplicates
+      let attempts = 0;
+      let delivered = false;
+      while (!delivered) {
+        attempts++;
+        const fails = attempts < 3 && Math.random() < 0.5;
+        if (!fails) {
+          handler(message); // might be called multiple times
+          delivered = true;
+        }
+      }
+      this.deliveryLog.push({
+        id: message.id,
+        result: "delivered",
+        attempts,
+      });
+    }
+
+    if (this.mode === "exactly-once") {
+      // Deduplicate using message ID
+      if (this.processed.has(message.id)) {
+        this.deliveryLog.push({ id: message.id, result: "deduplicated" });
+        return;
+      }
+      handler(message);
+      this.processed.add(message.id);
+      this.deliveryLog.push({ id: message.id, result: "delivered" });
+    }
+  }
+}
+
+// Exactly-once uses deduplication
+const eo = new DeliverySimulator("exactly-once");
+const msg = { id: "msg-001", data: "payment" };
+
+eo.deliver(msg, (m) => console.log("Processing:", m.id));
+eo.deliver(msg, (m) => console.log("Processing:", m.id)); // duplicate
+eo.deliver(msg, (m) => console.log("Processing:", m.id)); // duplicate
+
+console.log("Delivery log:", eo.deliveryLog);
+// Only processed once; duplicates were caught
+```
+
+## Kafka concepts
+
+Kafka models messaging as a distributed, ordered, replayable log. Messages are written to **topics**, which are split into **partitions**. Each partition is an append-only log with sequential **offsets**.
+
+**Partitions** enable parallelism — different consumers can read different partitions simultaneously. Messages within a partition are strictly ordered, but there is no ordering guarantee across partitions.
+
+**Consumer groups** allow scaling consumption. Each partition is assigned to exactly one consumer within a group. If you have 4 partitions and 4 consumers in a group, each consumer handles one partition. If a consumer dies, its partitions are rebalanced to surviving consumers.
+
+```javascript
+// Simplified Kafka topic with partitions and consumer groups
+class KafkaTopic {
+  constructor(name, partitionCount) {
+    this.name = name;
+    this.partitions = Array.from({ length: partitionCount }, (_, i) => ({
+      id: i,
+      log: [],
+      offset: 0,
+    }));
+  }
+
+  // Producer writes to a partition based on key hash
+  produce(key, value) {
+    const partitionIndex = this.hashToPartition(key);
+    const partition = this.partitions[partitionIndex];
+    const offset = partition.log.length;
+    partition.log.push({ key, value, offset, timestamp: Date.now() });
+    return { partition: partitionIndex, offset };
+  }
+
+  hashToPartition(key) {
+    let hash = 0;
+    for (const char of String(key)) {
+      hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+    }
+    return hash % this.partitions.length;
+  }
+}
+
+class ConsumerGroup {
+  constructor(groupId, topic) {
+    this.groupId = groupId;
+    this.topic = topic;
+    this.offsets = new Map(); // partitionId → committed offset
+    // Initialize offsets to 0
+    for (const p of topic.partitions) {
+      this.offsets.set(p.id, 0);
+    }
+  }
+
+  consume(partitionId) {
+    const partition = this.topic.partitions[partitionId];
+    const offset = this.offsets.get(partitionId);
+
+    if (offset >= partition.log.length) return null; // no new messages
+
+    const message = partition.log[offset];
+    this.offsets.set(partitionId, offset + 1); // advance offset
+    return message;
+  }
+}
+
+const topic = new KafkaTopic("events", 3);
+
+// Produce messages — same key always goes to same partition
+topic.produce("user:alice", { action: "login" });
+topic.produce("user:alice", { action: "purchase" });
+topic.produce("user:bob", { action: "login" });
+
+const group = new ConsumerGroup("analytics", topic);
+
+// Consume from each partition
+for (let i = 0; i < topic.partitions.length; i++) {
+  let msg = group.consume(i);
+  while (msg) {
+    console.log(`Partition ${i}, offset ${msg.offset}: ${msg.key} → ${msg.value.action}`);
+    msg = group.consume(i);
+  }
+}
+```
+
+## Dead letter queues
+
+When a consumer cannot process a message after multiple retries — malformed data, a bug in the handler, a downstream dependency permanently gone — the message goes to a **dead letter queue** (DLQ). The DLQ isolates poison messages so they do not block processing of healthy messages. Engineers can later inspect the DLQ, fix the issue, and replay the messages.
+
+```javascript
+// Dead letter queue pattern
+class ReliableConsumer {
+  constructor(maxRetries) {
+    this.maxRetries = maxRetries;
+    this.dlq = [];
+  }
+
+  process(message, handler) {
+    let attempts = 0;
+    while (attempts < this.maxRetries) {
+      try {
+        handler(message);
+        return { status: "success", attempts: attempts + 1 };
+      } catch (err) {
+        attempts++;
+        console.log(`Retry ${attempts}/${this.maxRetries} for ${message.id}: ${err.message}`);
+      }
+    }
+
+    // Max retries exceeded — send to DLQ
+    this.dlq.push({
+      originalMessage: message,
+      error: "Max retries exceeded",
+      failedAt: Date.now(),
+    });
+    return { status: "dead-lettered", attempts };
+  }
+}
+
+const consumer = new ReliableConsumer(3);
+
+// This message processes fine
+consumer.process({ id: "msg-1", data: "valid" }, (msg) => {
+  console.log("Processed:", msg.id);
+});
+
+// This message always fails — goes to DLQ after 3 retries
+consumer.process({ id: "msg-2", data: null }, (msg) => {
+  if (msg.data === null) throw new Error("Null payload");
+});
+
+console.log("Dead letter queue:", consumer.dlq.length, "messages");
+console.log("DLQ contents:", consumer.dlq);
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a message broker with at-least-once delivery.
+// Messages must be retried until the consumer acknowledges them.
+// Track delivery attempts for each message.
+
+class AtLeastOnceBroker {
+constructor() {
+this.queue = [];
+this.dlq = [];
+this.maxRetries = 3;
+}
+
+enqueue(message) {
+this.queue.push({ ...message, attempts: 0 });
+}
+
+processAll(handler) {
+// Process each message in the queue.
+// If handler throws, increment attempts and retry.
+// After maxRetries, move to dlq.
+// Return { processed: number, deadLettered: number }
+}
+}
+
+// Tests
+const broker = new AtLeastOnceBroker();
+broker.enqueue({ id: "a", data: "good" });
+broker.enqueue({ id: "b", data: "bad" });
+broker.enqueue({ id: "c", data: "good" });
+
+const result = broker.processAll((msg) => {
+if (msg.data === "bad") throw new Error("Cannot process");
+return true;
+});
+
+console.log(result.processed === 2); // true
+console.log(result.deadLettered === 1); // true
+console.log(broker.dlq.length === 1); // true
+console.log(broker.dlq[0].id === "b"); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In Kafka, what guarantees ordering of messages?"
+  options={[
+    "Messages are globally ordered across all partitions",
+    "Messages are ordered within a single partition by offset",
+    "Consumer groups enforce ordering across partitions",
+    "Timestamps guarantee ordering regardless of partition",
+  ]}
+  answer={1}
+  explanation="Kafka guarantees strict ordering only within a single partition. Each message in a partition has a sequential offset. There is no ordering guarantee across different partitions. This is why keys that need ordering (like events for the same user) should be routed to the same partition."
+/>
+
+<Quiz
+  question="Why is exactly-once delivery so difficult to achieve?"
+  options={[
+    "Network hardware does not support it",
+    "It requires coordination between producer, broker, and consumer to detect and prevent duplicates",
+    "Exactly-once is actually easy — most systems just choose not to implement it",
+    "It only works with fewer than 10 messages per second",
+  ]}
+  answer={1}
+  explanation="Exactly-once requires the entire pipeline (producer, broker, consumer) to coordinate on deduplication. The producer must tag messages with unique IDs, the broker must track what has been committed, and the consumer must atomically commit its offset with its processing result. Any gap in this chain allows duplicates or losses."
+/>
+
+<FillBlank
+  question="A ______ isolates messages that repeatedly fail processing so they do not block healthy messages in the main queue."
+  answer="dead letter queue"
+/>
+
+## What you learned
+
+- Pub/sub decouples producers from consumers, allowing systems to add new consumers without modifying producers and to survive partial failures
+- Delivery semantics range from at-most-once (fast, may lose) to at-least-once (reliable, may duplicate) to exactly-once (hardest, requires end-to-end coordination)
+- Kafka models messages as partitioned, ordered, replayable logs with consumer groups for parallel processing and dead letter queues for poison message isolation

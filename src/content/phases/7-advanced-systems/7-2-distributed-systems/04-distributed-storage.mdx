@@ -1,0 +1,350 @@
+---
+title: "Distributed Storage"
+description: "Learn consistent hashing, virtual nodes, and partitioning strategies that let distributed systems spread data across many machines."
+phase: 7
+module: "7-2-distributed-systems"
+order: 4
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - consistent-hashing
+  - virtual-node
+  - partitioning
+  - hash-ring
+  - distributed-hash-table
+---
+
+## Why this matters
+
+When your dataset outgrows a single machine, you need to split it across multiple nodes. The strategy you choose for splitting — partitioning — determines whether your system handles node additions and removals gracefully or requires massive data reshuffling. Consistent hashing is used in Cassandra, DynamoDB, Memcached, and content delivery networks. Understanding partitioning strategies is essential for designing any system that scales beyond a single database server.
+
+## Why naive modulo fails
+
+The simplest partitioning approach is `hash(key) % numberOfNodes`. Key goes to the node at that index. This works until you add or remove a node.
+
+```javascript
+// Naive modulo partitioning — breaks when cluster size changes
+function naivePartition(key, nodeCount) {
+  // Simple hash: sum of character codes
+  let hash = 0;
+  for (const char of key) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return hash % nodeCount;
+}
+
+// With 3 nodes, keys go to specific nodes
+const keys = ["user:1", "user:2", "user:3", "user:4", "user:5"];
+console.log("With 3 nodes:");
+for (const key of keys) {
+  console.log(`  ${key} → node ${naivePartition(key, 3)}`);
+}
+
+// Add a 4th node — almost every key moves to a different node
+console.log("\nWith 4 nodes:");
+let moved = 0;
+for (const key of keys) {
+  const oldNode = naivePartition(key, 3);
+  const newNode = naivePartition(key, 4);
+  const didMove = oldNode !== newNode;
+  if (didMove) moved++;
+  console.log(`  ${key} → node ${newNode} ${didMove ? "(MOVED)" : "(same)"}`);
+}
+console.log(`\n${moved}/${keys.length} keys moved — massive reshuffling!`);
+```
+
+When you go from 3 nodes to 4, roughly 75% of keys map to a different node. That means 75% of your cached data is invalidated, 75% of your data needs to physically move between servers. In production, this causes a "thundering herd" — all clients simultaneously miss their cache and slam the database.
+
+## Consistent hashing
+
+Consistent hashing arranges nodes on a virtual ring (0 to 2^32 - 1). Each key is hashed to a position on the ring and assigned to the first node found by walking clockwise. When a node is added or removed, only the keys between the new node and its predecessor need to move — roughly `1/n` of total keys instead of nearly all of them.
+
+```javascript
+// Consistent hashing ring
+class HashRing {
+  constructor() {
+    this.ring = new Map(); // position → nodeId
+    this.sortedPositions = [];
+  }
+
+  hash(str) {
+    let h = 0;
+    for (const char of str) {
+      h = (h * 31 + char.charCodeAt(0)) >>> 0;
+    }
+    return h;
+  }
+
+  addNode(nodeId) {
+    const position = this.hash(nodeId);
+    this.ring.set(position, nodeId);
+    this.sortedPositions.push(position);
+    this.sortedPositions.sort((a, b) => a - b);
+  }
+
+  removeNode(nodeId) {
+    const position = this.hash(nodeId);
+    this.ring.delete(position);
+    this.sortedPositions = this.sortedPositions.filter((p) => p !== position);
+  }
+
+  getNode(key) {
+    if (this.sortedPositions.length === 0) return null;
+
+    const keyHash = this.hash(key);
+
+    // Walk clockwise to find the first node
+    for (const pos of this.sortedPositions) {
+      if (pos >= keyHash) {
+        return this.ring.get(pos);
+      }
+    }
+
+    // Wrap around to the first node on the ring
+    return this.ring.get(this.sortedPositions[0]);
+  }
+}
+
+const ring = new HashRing();
+ring.addNode("node-A");
+ring.addNode("node-B");
+ring.addNode("node-C");
+
+const testKeys = ["user:100", "user:200", "user:300", "user:400", "user:500"];
+
+console.log("Before adding node-D:");
+const before = {};
+for (const key of testKeys) {
+  before[key] = ring.getNode(key);
+  console.log(`  ${key} → ${before[key]}`);
+}
+
+ring.addNode("node-D");
+console.log("\nAfter adding node-D:");
+let movedCount = 0;
+for (const key of testKeys) {
+  const after = ring.getNode(key);
+  const didMove = before[key] !== after;
+  if (didMove) movedCount++;
+  console.log(`  ${key} → ${after} ${didMove ? "(moved)" : "(same)"}`);
+}
+console.log(`\nOnly ${movedCount}/${testKeys.length} keys moved`);
+```
+
+## Virtual nodes
+
+A single hash position per node causes uneven distribution — some nodes get far more keys than others, especially with few nodes. The solution is **virtual nodes**: each physical node gets multiple positions on the ring. A node with 150 virtual nodes has 150 positions scattered around the ring, creating much more uniform key distribution.
+
+```javascript
+// Consistent hashing with virtual nodes
+class VNodeHashRing {
+  constructor(vnodeCount) {
+    this.vnodeCount = vnodeCount;
+    this.ring = new Map();
+    this.sortedPositions = [];
+  }
+
+  hash(str) {
+    let h = 0;
+    for (const char of str) {
+      h = (h * 31 + char.charCodeAt(0)) >>> 0;
+    }
+    return h;
+  }
+
+  addNode(nodeId) {
+    for (let i = 0; i < this.vnodeCount; i++) {
+      const virtualKey = `${nodeId}#vnode${i}`;
+      const position = this.hash(virtualKey);
+      this.ring.set(position, nodeId);
+      this.sortedPositions.push(position);
+    }
+    this.sortedPositions.sort((a, b) => a - b);
+  }
+
+  getNode(key) {
+    if (this.sortedPositions.length === 0) return null;
+    const keyHash = this.hash(key);
+    for (const pos of this.sortedPositions) {
+      if (pos >= keyHash) return this.ring.get(pos);
+    }
+    return this.ring.get(this.sortedPositions[0]);
+  }
+
+  getDistribution(keys) {
+    const counts = {};
+    for (const key of keys) {
+      const node = this.getNode(key);
+      counts[node] = (counts[node] || 0) + 1;
+    }
+    return counts;
+  }
+}
+
+// Compare distribution: 1 vnode vs 150 vnodes
+const keys = Array.from({ length: 10000 }, (_, i) => `key:${i}`);
+
+const ring1 = new VNodeHashRing(1);
+ring1.addNode("A");
+ring1.addNode("B");
+ring1.addNode("C");
+
+const ring150 = new VNodeHashRing(150);
+ring150.addNode("A");
+ring150.addNode("B");
+ring150.addNode("C");
+
+console.log("1 vnode per node:", ring1.getDistribution(keys));
+console.log("150 vnodes per node:", ring150.getDistribution(keys));
+// 150 vnodes produces much more even distribution
+```
+
+## Partitioning strategies
+
+Beyond consistent hashing, there are several ways to decide which node holds which data:
+
+**Range partitioning** — divide the key space into contiguous ranges. Keys "a"–"f" go to node 1, "g"–"m" to node 2, etc. Good for range queries but prone to hot spots if certain ranges are more popular.
+
+**Hash partitioning** — hash the key and assign to a partition. Distributes evenly but destroys key ordering, making range queries expensive (they must query all partitions).
+
+**Composite partitioning** — combine both. For example, partition first by a hash of the user ID (even distribution), then sort within each partition by timestamp (efficient range queries within a user's data). Cassandra uses this approach with its partition key and clustering columns.
+
+```javascript
+// Composite partitioning: hash for distribution, range within partition
+class CompositePartitioner {
+  constructor(partitionCount) {
+    this.partitionCount = partitionCount;
+    this.partitions = Array.from({ length: partitionCount }, () => []);
+  }
+
+  hash(str) {
+    let h = 0;
+    for (const char of String(str)) {
+      h = (h * 31 + char.charCodeAt(0)) >>> 0;
+    }
+    return h;
+  }
+
+  insert(partitionKey, sortKey, value) {
+    const partition = this.hash(partitionKey) % this.partitionCount;
+    this.partitions[partition].push({ partitionKey, sortKey, value });
+    // Keep sorted within partition for efficient range queries
+    this.partitions[partition].sort((a, b) => a.sortKey - b.sortKey);
+  }
+
+  rangeQuery(partitionKey, startSort, endSort) {
+    const partition = this.hash(partitionKey) % this.partitionCount;
+    return this.partitions[partition].filter(
+      (row) =>
+        row.partitionKey === partitionKey && row.sortKey >= startSort && row.sortKey <= endSort
+    );
+  }
+}
+
+const db = new CompositePartitioner(4);
+db.insert("user:alice", 1000, { action: "login" });
+db.insert("user:alice", 2000, { action: "purchase" });
+db.insert("user:alice", 3000, { action: "logout" });
+db.insert("user:bob", 1500, { action: "login" });
+
+// Efficient range query — only scans Alice's partition
+const aliceEvents = db.rangeQuery("user:alice", 1000, 2500);
+console.log(
+  "Alice's events:",
+  aliceEvents.map((e) => e.value.action)
+);
+// ["login", "purchase"]
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a consistent hash ring with virtual nodes.
+// addNode(nodeId) should place the node at 'vnodeCount' positions.
+// getNode(key) should return the node responsible for that key.
+// removeNode(nodeId) should remove all virtual nodes for that node.
+
+class ConsistentHashRing {
+constructor(vnodeCount) {
+this.vnodeCount = vnodeCount;
+this.ring = new Map(); // position → nodeId
+this.sorted = [];
+}
+
+hash(str) {
+let h = 0;
+for (const c of str) h = (h \* 31 + c.charCodeAt(0)) >>> 0;
+return h;
+}
+
+addNode(nodeId) {
+// Add vnodeCount positions for this node
+}
+
+removeNode(nodeId) {
+// Remove all positions belonging to this node
+}
+
+getNode(key) {
+// Find the first position >= hash(key), wrapping around
+}
+}
+
+// Tests
+const ring = new ConsistentHashRing(50);
+ring.addNode("A");
+ring.addNode("B");
+
+const before = ring.getNode("test-key");
+console.log(typeof before === "string"); // true — returns a node id
+
+ring.addNode("C");
+ring.removeNode("A");
+const after = ring.getNode("test-key");
+console.log(typeof after === "string"); // true
+console.log(["B", "C"].includes(after)); // true — only B and C remain`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why does naive modulo partitioning (hash % n) cause problems when nodes are added?"
+  options={[
+    "The hash function becomes slower with more nodes",
+    "Almost every key maps to a different node, causing massive data movement",
+    "Modulo operations are not supported in distributed systems",
+    "New nodes cannot compute hash values for existing keys",
+  ]}
+  answer={1}
+  explanation="When n changes, hash(key) % n produces a different result for most keys. This means most data must be moved to different nodes, causing cache invalidation storms and heavy network traffic. Consistent hashing limits movement to roughly 1/n of keys."
+/>
+
+<Quiz
+  question="What problem do virtual nodes solve in consistent hashing?"
+  options={[
+    "They make hash computation faster",
+    "They allow more than 2^32 keys in the system",
+    "They create more uniform key distribution across physical nodes",
+    "They eliminate the need for a hash function",
+  ]}
+  answer={2}
+  explanation="With a single position per node, some nodes can end up responsible for much larger arcs of the hash ring than others. Virtual nodes give each physical node many positions scattered around the ring, averaging out the distribution and preventing hot spots."
+/>
+
+<FillBlank
+  question="In consistent hashing, when a new node is added, approximately ______ of total keys need to move, where n is the number of nodes."
+  answer="1/n"
+/>
+
+## What you learned
+
+- Naive modulo partitioning causes near-total data reshuffling when the cluster size changes; consistent hashing limits movement to roughly 1/n of keys
+- Virtual nodes improve distribution uniformity by giving each physical node multiple positions on the hash ring
+- Composite partitioning (hash for distribution, range within partitions) enables both even data spread and efficient range queries

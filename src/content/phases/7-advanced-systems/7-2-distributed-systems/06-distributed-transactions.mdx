@@ -1,0 +1,348 @@
+---
+title: "Distributed Transactions"
+description: "Understand two-phase commit, the saga pattern with choreography and orchestration, compensating transactions, and idempotency."
+phase: 7
+module: "7-2-distributed-systems"
+order: 6
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - two-phase-commit
+  - saga
+  - choreography
+  - orchestration
+  - idempotency
+---
+
+## Why this matters
+
+On a single database, transactions are straightforward: BEGIN, do work, COMMIT or ROLLBACK. But when an operation spans multiple services — deducting a payment, reserving inventory, and scheduling shipment — there is no single database to coordinate the transaction. If payment succeeds but inventory reservation fails, the system is in an inconsistent state. Distributed transactions solve this problem, but each approach has significant tradeoffs in availability, complexity, and failure modes. Choosing the wrong pattern leads to stuck orders, double charges, or lost data.
+
+## Two-phase commit (2PC)
+
+2PC is the classical approach. A **coordinator** manages the transaction across multiple participants (databases or services) in two phases:
+
+**Phase 1 (Prepare):** The coordinator asks each participant "Can you commit?" Each participant executes the transaction locally, acquires locks, and responds YES or NO.
+
+**Phase 2 (Commit/Abort):** If all participants voted YES, the coordinator sends COMMIT. If any voted NO, it sends ABORT. Participants execute accordingly and release locks.
+
+```javascript
+// Two-phase commit coordinator
+class TwoPhaseCommitCoordinator {
+  constructor(participants) {
+    this.participants = participants;
+  }
+
+  async execute(transaction) {
+    console.log("Phase 1: Preparing...");
+
+    // Phase 1 — ask all participants to prepare
+    const votes = [];
+    for (const participant of this.participants) {
+      try {
+        const vote = participant.prepare(transaction);
+        votes.push({ participant: participant.name, vote });
+        console.log(`  ${participant.name}: ${vote}`);
+      } catch (err) {
+        votes.push({ participant: participant.name, vote: "NO" });
+        console.log(`  ${participant.name}: NO (error: ${err.message})`);
+      }
+    }
+
+    const allYes = votes.every((v) => v.vote === "YES");
+
+    // Phase 2 — commit or abort
+    if (allYes) {
+      console.log("Phase 2: All voted YES — committing...");
+      for (const participant of this.participants) {
+        participant.commit(transaction);
+      }
+      return { status: "committed" };
+    } else {
+      console.log("Phase 2: At least one NO — aborting...");
+      for (const participant of this.participants) {
+        participant.abort(transaction);
+      }
+      return { status: "aborted" };
+    }
+  }
+}
+
+class Participant {
+  constructor(name, shouldFail) {
+    this.name = name;
+    this.shouldFail = shouldFail;
+    this.state = "idle";
+  }
+
+  prepare(transaction) {
+    if (this.shouldFail) {
+      throw new Error("Resource unavailable");
+    }
+    this.state = "prepared";
+    return "YES";
+  }
+
+  commit(transaction) {
+    this.state = "committed";
+    console.log(`  ${this.name}: committed`);
+  }
+
+  abort(transaction) {
+    this.state = "aborted";
+    console.log(`  ${this.name}: aborted`);
+  }
+}
+
+// Happy path — all participants agree
+const coordinator1 = new TwoPhaseCommitCoordinator([
+  new Participant("PaymentDB", false),
+  new Participant("InventoryDB", false),
+]);
+coordinator1.execute({ orderId: "ORD-001" });
+
+console.log("\n--- Now with a failure ---\n");
+
+// One participant fails — entire transaction aborts
+const coordinator2 = new TwoPhaseCommitCoordinator([
+  new Participant("PaymentDB", false),
+  new Participant("InventoryDB", true), // fails
+]);
+coordinator2.execute({ orderId: "ORD-002" });
+```
+
+## Why 2PC blocks
+
+The fatal flaw of 2PC is the coordinator as a single point of failure. If the coordinator crashes after Phase 1 but before Phase 2, all participants are stuck holding locks — they voted YES but never received COMMIT or ABORT. They cannot safely proceed in either direction. This is called the **blocking problem**, and it can freeze resources for an unbounded amount of time. In microservices architectures where availability is critical, 2PC is rarely used.
+
+## Sagas: choreography vs orchestration
+
+A **saga** breaks a distributed transaction into a sequence of local transactions, each with a **compensating transaction** that undoes its effect. If any step fails, the saga executes compensations for all completed steps in reverse order.
+
+**Choreography** — each service publishes events that trigger the next service. No central coordinator. Simple for small flows, but hard to reason about as the number of services grows.
+
+**Orchestration** — a central orchestrator tells each service what to do and handles compensations. Easier to understand and monitor, but the orchestrator is a single point of failure.
+
+```javascript
+// Saga with orchestration and compensating transactions
+class SagaOrchestrator {
+  constructor() {
+    this.steps = [];
+    this.completedSteps = [];
+  }
+
+  addStep(name, execute, compensate) {
+    this.steps.push({ name, execute, compensate });
+  }
+
+  run(context) {
+    console.log("Starting saga...");
+
+    for (const step of this.steps) {
+      try {
+        console.log(`  Executing: ${step.name}`);
+        step.execute(context);
+        this.completedSteps.push(step);
+      } catch (err) {
+        console.log(`  FAILED: ${step.name} — ${err.message}`);
+        console.log("  Running compensations...");
+        this.compensate(context);
+        return { status: "compensated", failedAt: step.name };
+      }
+    }
+
+    return { status: "completed" };
+  }
+
+  compensate(context) {
+    // Reverse order — undo most recent steps first
+    for (const step of [...this.completedSteps].reverse()) {
+      try {
+        console.log(`  Compensating: ${step.name}`);
+        step.compensate(context);
+      } catch (err) {
+        console.error(`  Compensation failed for ${step.name}: ${err.message}`);
+        // In production, log this for manual intervention
+      }
+    }
+  }
+}
+
+const orderSaga = new SagaOrchestrator();
+
+orderSaga.addStep(
+  "Reserve inventory",
+  (ctx) => {
+    ctx.inventoryReserved = true;
+  },
+  (ctx) => {
+    ctx.inventoryReserved = false;
+    console.log("    → Released inventory");
+  }
+);
+
+orderSaga.addStep(
+  "Charge payment",
+  (ctx) => {
+    ctx.paymentCharged = true;
+  },
+  (ctx) => {
+    ctx.paymentCharged = false;
+    console.log("    → Refunded payment");
+  }
+);
+
+orderSaga.addStep(
+  "Schedule shipment",
+  (ctx) => {
+    throw new Error("Shipping service unavailable");
+  },
+  (ctx) => {
+    console.log("    → Cancelled shipment");
+  }
+);
+
+const context = {};
+const result = orderSaga.run(context);
+console.log("Saga result:", result);
+console.log("Final state:", context);
+// inventory and payment were compensated
+```
+
+## Idempotency as a design principle
+
+In distributed systems, messages can be delivered more than once. Network retries, consumer restarts, and saga compensations all can cause duplicate processing. An **idempotent** operation produces the same result whether executed once or many times.
+
+The standard pattern is to assign each operation a unique **idempotency key** and check whether that key has already been processed before executing.
+
+```javascript
+// Idempotent payment processor
+class IdempotentPaymentProcessor {
+  constructor() {
+    this.processedKeys = new Map(); // idempotencyKey → result
+    this.balance = 1000;
+  }
+
+  charge(idempotencyKey, amount) {
+    // Check if we already processed this request
+    if (this.processedKeys.has(idempotencyKey)) {
+      console.log(`Duplicate detected for ${idempotencyKey} — returning cached result`);
+      return this.processedKeys.get(idempotencyKey);
+    }
+
+    // Process the charge
+    if (this.balance < amount) {
+      const result = { status: "declined", reason: "insufficient funds" };
+      this.processedKeys.set(idempotencyKey, result);
+      return result;
+    }
+
+    this.balance -= amount;
+    const result = { status: "charged", amount, newBalance: this.balance };
+    this.processedKeys.set(idempotencyKey, result);
+    return result;
+  }
+}
+
+const processor = new IdempotentPaymentProcessor();
+
+// First call processes normally
+console.log(processor.charge("pay-001", 100));
+// { status: "charged", amount: 100, newBalance: 900 }
+
+// Duplicate — returns cached result, does NOT charge again
+console.log(processor.charge("pay-001", 100));
+// { status: "charged", amount: 100, newBalance: 900 }
+
+// Different key — processes as a new charge
+console.log(processor.charge("pay-002", 200));
+// { status: "charged", amount: 200, newBalance: 700 }
+
+console.log("Final balance:", processor.balance); // 700, not 500
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a saga orchestrator for a travel booking:
+// 1. Book flight (compensate: cancel flight)
+// 2. Book hotel (compensate: cancel hotel)
+// 3. Book car rental (compensate: cancel car)
+//
+// Make step 3 fail and verify that steps 1 and 2 are compensated.
+
+class TravelSaga {
+constructor() {
+this.steps = [];
+this.completed = [];
+this.log = [];
+}
+
+addStep(name, action, compensate) {
+this.steps.push({ name, action, compensate });
+}
+
+run() {
+// Execute each step. On failure, compensate in reverse.
+// Push entries to this.log like: "execute:Book flight"
+// or "compensate:Book flight"
+// Return { success: boolean, compensated: string[] }
+}
+}
+
+// Tests
+const saga = new TravelSaga();
+saga.addStep("Book flight", () => true, () => true);
+saga.addStep("Book hotel", () => true, () => true);
+saga.addStep("Book car", () => { throw new Error("No cars available"); }, () => true);
+
+const result = saga.run();
+console.log(result.success === false);
+console.log(result.compensated.length === 2);
+console.log(result.compensated[0] === "Book hotel"); // reverse order
+console.log(result.compensated[1] === "Book flight");`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the main problem with two-phase commit (2PC)?"
+  options={[
+    "It is too fast for most distributed systems",
+    "It cannot handle more than two participants",
+    "If the coordinator crashes between phases, participants are blocked indefinitely holding locks",
+    "It does not guarantee atomicity across participants",
+  ]}
+  answer={2}
+  explanation="2PC's blocking problem occurs when the coordinator fails after sending PREPARE but before sending COMMIT or ABORT. Participants have voted YES, hold locks, and cannot proceed without hearing from the coordinator. This can freeze resources indefinitely."
+/>
+
+<Quiz
+  question="Why is idempotency critical in distributed systems?"
+  options={[
+    "It makes operations run faster",
+    "It prevents data corruption when the same operation is executed multiple times due to retries or duplicates",
+    "It eliminates the need for error handling",
+    "It allows operations to run without a network connection",
+  ]}
+  answer={1}
+  explanation="Network retries, at-least-once delivery, and saga compensations can all cause an operation to execute more than once. Idempotent operations produce the same result regardless of how many times they run, preventing double charges, duplicate records, and other data corruption."
+/>
+
+<FillBlank
+  question="In the saga pattern, a ______ transaction undoes the effect of a previously completed step when a later step fails."
+  answer="compensating"
+/>
+
+## What you learned
+
+- Two-phase commit provides atomicity across distributed participants but suffers from the blocking problem when the coordinator fails
+- Sagas replace distributed transactions with a sequence of local transactions and compensating actions, using either choreography (event-driven) or orchestration (central coordinator)
+- Idempotency keys prevent duplicate processing in systems where messages or operations may be retried

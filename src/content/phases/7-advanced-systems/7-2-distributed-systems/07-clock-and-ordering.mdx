@@ -1,0 +1,372 @@
+---
+title: "Clocks and Ordering"
+description: "Learn why physical clocks fail in distributed systems and how Lamport clocks, vector clocks, and hybrid logical clocks establish event ordering."
+phase: 7
+module: "7-2-distributed-systems"
+order: 7
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - lamport-clock
+  - vector-clock
+  - hybrid-logical-clock
+  - happens-before
+  - causal-ordering
+---
+
+## Why this matters
+
+When two events happen on different machines, which one happened first? On a single computer, the CPU provides a total ordering of operations. In a distributed system, there is no shared clock. Physical clocks on different machines drift apart — sometimes by milliseconds, sometimes by seconds. If your distributed database uses wall-clock timestamps to resolve write conflicts, clock skew can silently cause newer data to be overwritten by older data. Logical clocks solve this by establishing ordering guarantees that do not depend on synchronized hardware.
+
+## Physical clocks are unreliable
+
+Every computer has a quartz oscillator that drifts at roughly 10-100 parts per million. A server's clock can drift 10 milliseconds in 100 seconds. NTP (Network Time Protocol) corrects drift, but NTP itself has latency — corrections can jump the clock forward or backward, creating duplicate or missing timestamps.
+
+```javascript
+// Simulating clock skew between two servers
+class PhysicalClock {
+  constructor(name, driftPerSecond) {
+    this.name = name;
+    this.offset = 0;
+    this.driftPerSecond = driftPerSecond; // ms of drift per second
+  }
+
+  now(realTime) {
+    // Each server's clock drifts from real time
+    this.offset += this.driftPerSecond;
+    return realTime + this.offset;
+  }
+}
+
+const serverA = new PhysicalClock("Server A", 0.5); // drifts fast
+const serverB = new PhysicalClock("Server B", -0.3); // drifts slow
+
+// Simulate 10 seconds of operation
+for (let second = 1; second <= 10; second++) {
+  const realTime = second * 1000;
+  const timeA = serverA.now(realTime);
+  const timeB = serverB.now(realTime);
+  const skew = Math.abs(timeA - timeB);
+
+  if (second % 5 === 0) {
+    console.log(`Second ${second}: A=${timeA}ms, B=${timeB}ms, skew=${skew.toFixed(1)}ms`);
+  }
+}
+
+// The danger: last-writer-wins with skewed clocks
+const writeFromA = { value: "A's update", timestamp: serverA.now(11000) };
+const writeFromB = { value: "B's update", timestamp: serverB.now(11000) };
+
+// B wrote later in real time, but A's clock is ahead
+console.log("\nServer A timestamp:", writeFromA.timestamp);
+console.log("Server B timestamp:", writeFromB.timestamp);
+
+const winner = writeFromA.timestamp > writeFromB.timestamp ? writeFromA : writeFromB;
+console.log("LWW winner:", winner.value);
+console.log("This may be WRONG if B's write was actually more recent!");
+```
+
+## Lamport clocks
+
+Leslie Lamport solved the ordering problem in 1978 with a simple rule: each process maintains a counter. On every local event, increment the counter. When sending a message, include the counter. When receiving a message, set your counter to `max(local, received) + 1`.
+
+This gives us the **happens-before** relation: if event A's Lamport timestamp is less than event B's, then A _might_ have happened before B. But if A's timestamp equals B's, or A's is greater, you cannot conclude anything about their real order. Lamport clocks establish a **partial order**, not a total one.
+
+```javascript
+// Lamport logical clock
+class LamportClock {
+  constructor(processId) {
+    this.processId = processId;
+    this.time = 0;
+  }
+
+  // Local event: increment
+  localEvent(description) {
+    this.time++;
+    return { process: this.processId, time: this.time, event: description };
+  }
+
+  // Send: increment and return timestamp to include in message
+  send(description) {
+    this.time++;
+    return {
+      process: this.processId,
+      time: this.time,
+      event: `send: ${description}`,
+      messageTimestamp: this.time,
+    };
+  }
+
+  // Receive: max(local, received) + 1
+  receive(messageTimestamp, description) {
+    this.time = Math.max(this.time, messageTimestamp) + 1;
+    return {
+      process: this.processId,
+      time: this.time,
+      event: `receive: ${description}`,
+    };
+  }
+}
+
+const p1 = new LamportClock("P1");
+const p2 = new LamportClock("P2");
+const p3 = new LamportClock("P3");
+
+// P1 does local work
+const e1 = p1.localEvent("write x=1");
+console.log(e1); // time: 1
+
+// P1 sends to P2
+const e2 = p1.send("update x");
+console.log(e2); // time: 2
+
+// P2 does local work before receiving
+const e3 = p2.localEvent("write y=5");
+console.log(e3); // time: 1
+
+// P2 receives from P1
+const e4 = p2.receive(e2.messageTimestamp, "update x from P1");
+console.log(e4); // time: max(1, 2) + 1 = 3
+
+// P2 sends to P3
+const e5 = p2.send("sync");
+console.log(e5); // time: 4
+
+// P3 receives
+const e6 = p3.receive(e5.messageTimestamp, "sync from P2");
+console.log(e6); // time: max(0, 4) + 1 = 5
+
+// Lamport timestamps: e1(1) → e2(2) → e4(3) → e5(4) → e6(5)
+// This captures the causal chain P1 → P2 → P3
+```
+
+## Vector clocks
+
+Lamport clocks cannot tell you whether two events are causally related or concurrent. Vector clocks solve this. Each process maintains a vector of counters — one slot per process. When you increment, you only increment your own slot. When you receive a message, you take the element-wise max and then increment your slot.
+
+Two events are **concurrent** if neither vector dominates the other (each has at least one slot greater than the other's).
+
+```javascript
+// Vector clock for causal ordering
+class VectorClock {
+  constructor(processId, processCount) {
+    this.processId = processId;
+    this.vector = new Array(processCount).fill(0);
+  }
+
+  localEvent() {
+    this.vector[this.processId]++;
+    return [...this.vector];
+  }
+
+  send() {
+    this.vector[this.processId]++;
+    return [...this.vector]; // attach to message
+  }
+
+  receive(messageVector) {
+    // Element-wise max, then increment own slot
+    for (let i = 0; i < this.vector.length; i++) {
+      this.vector[i] = Math.max(this.vector[i], messageVector[i]);
+    }
+    this.vector[this.processId]++;
+    return [...this.vector];
+  }
+
+  // Compare two vector timestamps
+  static compare(a, b) {
+    let aGreater = false;
+    let bGreater = false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] > b[i]) aGreater = true;
+      if (b[i] > a[i]) bGreater = true;
+    }
+    if (aGreater && !bGreater) return "a happened before b";
+    if (bGreater && !aGreater) return "b happened before a";
+    if (!aGreater && !bGreater) return "identical";
+    return "concurrent"; // both have slots greater than the other
+  }
+}
+
+const alice = new VectorClock(0, 3);
+const bob = new VectorClock(1, 3);
+const carol = new VectorClock(2, 3);
+
+// Alice writes, sends to Bob
+const a1 = alice.send(); // [1, 0, 0]
+console.log("Alice sends:", a1);
+
+// Bob receives Alice's message and writes
+const b1 = bob.receive(a1); // [1, 1, 0]
+console.log("Bob receives:", b1);
+
+// Carol writes independently (concurrent with Bob)
+const c1 = carol.localEvent(); // [0, 0, 1]
+console.log("Carol writes:", c1);
+
+// Are Bob's and Carol's events concurrent?
+console.log("Bob vs Carol:", VectorClock.compare(b1, c1));
+// "concurrent" — neither dominates the other
+
+// Are Alice's and Bob's events ordered?
+console.log("Alice vs Bob:", VectorClock.compare(a1, b1));
+// "b happened before a" — wait, actually "a happened before b"
+// because a1=[1,0,0] and b1=[1,1,0], b dominates a
+```
+
+## Hybrid logical clocks
+
+Hybrid Logical Clocks (HLC) combine physical timestamps with a logical counter. The physical component provides a rough real-time ordering (useful for humans reading logs). The logical component resolves ties and handles clock skew. CockroachDB uses HLC to timestamp transactions — getting the usability of wall clocks with the correctness of logical ordering.
+
+```javascript
+// Hybrid Logical Clock (simplified)
+class HybridLogicalClock {
+  constructor(processId) {
+    this.processId = processId;
+    this.logicalTime = 0;
+    this.counter = 0;
+  }
+
+  now(physicalTime) {
+    if (physicalTime > this.logicalTime) {
+      this.logicalTime = physicalTime;
+      this.counter = 0;
+    } else {
+      // Physical clock hasn't advanced — use counter
+      this.counter++;
+    }
+    return { wall: this.logicalTime, counter: this.counter, process: this.processId };
+  }
+
+  receive(physicalTime, remoteTimestamp) {
+    const maxLogical = Math.max(physicalTime, this.logicalTime, remoteTimestamp.wall);
+
+    if (maxLogical === this.logicalTime && maxLogical === remoteTimestamp.wall) {
+      this.counter = Math.max(this.counter, remoteTimestamp.counter) + 1;
+    } else if (maxLogical === this.logicalTime) {
+      this.counter++;
+    } else if (maxLogical === remoteTimestamp.wall) {
+      this.counter = remoteTimestamp.counter + 1;
+    } else {
+      this.counter = 0;
+    }
+
+    this.logicalTime = maxLogical;
+    return { wall: this.logicalTime, counter: this.counter, process: this.processId };
+  }
+
+  static compare(a, b) {
+    if (a.wall !== b.wall) return a.wall - b.wall;
+    if (a.counter !== b.counter) return a.counter - b.counter;
+    return 0;
+  }
+}
+
+const hlcA = new HybridLogicalClock("A");
+const hlcB = new HybridLogicalClock("B");
+
+// Two events at "the same" physical time
+const ts1 = hlcA.now(1000);
+const ts2 = hlcA.now(1000); // same physical time — counter increments
+console.log("Event 1:", ts1); // { wall: 1000, counter: 0 }
+console.log("Event 2:", ts2); // { wall: 1000, counter: 1 }
+
+// B receives from A even though B's clock is behind
+const ts3 = hlcB.receive(999, ts2); // B's physical clock is 999, behind A
+console.log("B receives:", ts3); // wall stays at 1000, counter increments
+
+console.log("Order: ts1 < ts2:", HybridLogicalClock.compare(ts1, ts2) < 0); // true
+console.log("Order: ts2 < ts3:", HybridLogicalClock.compare(ts2, ts3) < 0); // true
+```
+
+## Why ordering matters for consistency
+
+Without reliable ordering, a distributed database might apply a DELETE before the INSERT it was supposed to follow, overwrite a newer value with an older one, or fail to detect that two operations conflict. Logical clocks provide the ordering guarantees that make consistency models (strong, causal, eventual) implementable across distributed nodes.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a Lamport clock system with 3 processes.
+// Track events and determine if event ordering is preserved.
+
+class LamportProcess {
+constructor(id) {
+this.id = id;
+this.clock = 0;
+this.history = [];
+}
+
+event(name) {
+this.clock++;
+this.history.push({ name, time: this.clock, process: this.id });
+return this.clock;
+}
+
+send(name) {
+this.clock++;
+this.history.push({ name, time: this.clock, process: this.id });
+return this.clock; // timestamp to attach to message
+}
+
+receive(senderTimestamp, name) {
+// Implement the Lamport receive rule
+// Return the new clock value
+}
+}
+
+// Tests
+const p1 = new LamportProcess("A");
+const p2 = new LamportProcess("B");
+
+p1.event("local-work"); // clock = 1
+const ts = p1.send("msg"); // clock = 2
+p2.event("local-work"); // clock = 1
+const received = p2.receive(ts, "got-msg");
+
+console.log(received > ts); // true — receiver's clock is always > sender's
+console.log(p2.clock === 3); // true — max(1, 2) + 1 = 3`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What fundamental problem do Lamport clocks solve that physical clocks cannot?"
+  options={[
+    "They make clocks more accurate",
+    "They establish causal ordering of events without requiring synchronized hardware clocks",
+    "They eliminate network latency",
+    "They allow events to happen simultaneously on different nodes",
+  ]}
+  answer={1}
+  explanation="Physical clocks drift and NTP corrections introduce jumps. Lamport clocks provide a logical timestamp that guarantees if event A causally precedes event B, then A's timestamp is less than B's — without any hardware clock synchronization."
+/>
+
+<Quiz
+  question="What can vector clocks determine that Lamport clocks cannot?"
+  options={[
+    "The exact physical time an event occurred",
+    "Whether two events are concurrent (neither causally preceded the other)",
+    "Which process is the fastest",
+    "The total number of events in the system",
+  ]}
+  answer={1}
+  explanation="Lamport clocks give a partial order but cannot distinguish 'A happened before B' from 'A and B are concurrent' when timestamps differ. Vector clocks maintain per-process counters, enabling detection of concurrent events (when neither vector dominates the other)."
+/>
+
+<FillBlank
+  question="In a Lamport clock, when a process receives a message with timestamp T, it sets its clock to max(local, T) + ______."
+  answer="1"
+/>
+
+## What you learned
+
+- Physical clocks drift and cannot reliably order events across distributed nodes, making wall-clock timestamps unsafe for conflict resolution
+- Lamport clocks provide causal ordering (if A caused B, A's timestamp is smaller) while vector clocks additionally detect concurrent events
+- Hybrid logical clocks combine physical timestamps with logical counters for both human readability and correctness in systems like CockroachDB
