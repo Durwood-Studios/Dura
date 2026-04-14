@@ -6,6 +6,7 @@ import { FocusModeProvider } from "@/components/study/FocusModeProvider";
 import { FocusExitButton } from "@/components/study/FocusExitButton";
 import { ToastLayer } from "@/components/gamification/ToastLayer";
 import { TipButton } from "@/components/support/TipButton";
+import { CommandPalette } from "@/components/nav/CommandPalette";
 
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
@@ -30,6 +31,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
       <FocusExitButton />
       <ToastLayer />
       <TipButton />
+      <CommandPalette />
     </div>
   );
 }
