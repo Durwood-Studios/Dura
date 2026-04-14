@@ -1,0 +1,332 @@
+---
+title: "Scaling to 10K Users"
+description: "What breaks first when you move from a single server to multi-server architecture, and the concrete steps to survive your first real traffic."
+phase: 9
+module: "9-2-architecture-at-scale"
+order: 2
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "evaluate"
+  sfia: 6
+  dreyfus: "proficient"
+vocabulary:
+  - load-balancer
+  - vertical-scaling
+  - horizontal-scaling
+  - connection-pool
+  - session-affinity
+---
+
+## Why this matters
+
+Most applications never need to scale past a single server. But the ones that do hit a wall fast — and the wall is almost never where you expect it. At 10K daily active users, the bottleneck is rarely CPU or memory. It is database connections, disk I/O, and session management. Understanding what breaks first saves you from the expensive mistake of scaling the wrong thing.
+
+## The single-server ceiling
+
+A single modern server can handle more than most people think. A $50/month VPS with 4 vCPUs and 8GB RAM running a Node.js application behind Nginx can serve 1,000-2,000 concurrent connections comfortably. The math changes when you add a database.
+
+```javascript
+// Model a single-server application under load
+function singleServerCapacity(config) {
+  const { cpuCores, ramGB, dbConnectionLimit, avgRequestDurationMs, avgQueryDurationMs } = config;
+
+  // Each request holds a DB connection for the duration of the query
+  // Connection pool is the first bottleneck
+  const maxConcurrentQueries = dbConnectionLimit;
+  const queriesPerSecond = Math.floor((maxConcurrentQueries * 1000) / avgQueryDurationMs);
+
+  // Node.js event loop can handle many concurrent connections
+  // but each active request consumes memory (~2KB for headers + body)
+  const maxConcurrentFromRAM = Math.floor((ramGB * 1024 * 0.6 * 1024) / 2);
+
+  // CPU-bound work limits throughput for compute-heavy endpoints
+  const maxRPSFromCPU = Math.floor((cpuCores * 1000) / avgRequestDurationMs);
+
+  const effectiveRPS = Math.min(queriesPerSecond, maxRPSFromCPU);
+  const bottleneck = queriesPerSecond < maxRPSFromCPU ? "database connections" : "CPU";
+
+  return {
+    maxConcurrentConnections: maxConcurrentFromRAM,
+    maxQueriesPerSecond: queriesPerSecond,
+    maxRPSFromCPU,
+    effectiveRPS,
+    bottleneck,
+    estimatedDAUAtComfort: Math.floor((effectiveRPS * 86400 * 0.7) / 20),
+  };
+}
+
+const typicalSetup = {
+  cpuCores: 4,
+  ramGB: 8,
+  dbConnectionLimit: 20, // Default Postgres max_connections is 100, but pooling matters
+  avgRequestDurationMs: 15,
+  avgQueryDurationMs: 5,
+};
+
+console.log(singleServerCapacity(typicalSetup));
+// You will likely see DB connections as the bottleneck
+```
+
+## What breaks at 10K DAU
+
+At 10K daily active users, you are looking at roughly 2-5 requests per second average, spiking to 15-30 during peak hours. A single server handles this easily — until something goes wrong.
+
+The real problems at this scale are not performance. They are reliability. One server means one point of failure. A deployment means downtime. A disk failure means data loss if you are not running replicas.
+
+```javascript
+// Availability calculator: what does a single server actually cost you?
+function availabilityAnalysis(config) {
+  const {
+    deployFrequencyPerWeek,
+    avgDeployDowntimeSeconds,
+    estimatedCrashesPerMonth,
+    avgRecoveryTimeMinutes,
+    plannedMaintenanceMinutesPerMonth,
+  } = config;
+
+  const monthlyDeployDowntime = deployFrequencyPerWeek * 4 * avgDeployDowntimeSeconds;
+  const monthlyUnplannedDowntime = estimatedCrashesPerMonth * avgRecoveryTimeMinutes * 60;
+  const totalDowntimeSeconds =
+    monthlyDeployDowntime + monthlyUnplannedDowntime + plannedMaintenanceMinutesPerMonth * 60;
+
+  const totalSecondsPerMonth = 30 * 24 * 60 * 60;
+  const availability = ((totalSecondsPerMonth - totalDowntimeSeconds) / totalSecondsPerMonth) * 100;
+
+  return {
+    monthlyDeployDowntimeMinutes: Math.round(monthlyDeployDowntime / 60),
+    monthlyUnplannedDowntimeMinutes: Math.round(monthlyUnplannedDowntime / 60),
+    totalDowntimeMinutes: Math.round(totalDowntimeSeconds / 60),
+    availability: availability.toFixed(3) + "%",
+    nines: -Math.log10(1 - availability / 100).toFixed(2),
+  };
+}
+
+const singleServerReality = {
+  deployFrequencyPerWeek: 3,
+  avgDeployDowntimeSeconds: 30,
+  estimatedCrashesPerMonth: 2,
+  avgRecoveryTimeMinutes: 10,
+  plannedMaintenanceMinutesPerMonth: 30,
+};
+
+console.log(availabilityAnalysis(singleServerReality));
+```
+
+## The move to multi-server
+
+The first scale-out step is separating your application server from your database server. This alone solves most 10K-user problems because the database gets dedicated resources and you can restart the app without touching data.
+
+The second step is adding a load balancer in front of two application servers. This gives you zero-downtime deploys and redundancy.
+
+```javascript
+// Cost comparison: single server vs. first scale-out
+function costComparison() {
+  const singleServer = {
+    name: "Single VPS",
+    monthlyCost: 50,
+    components: [{ name: "VPS (app + db)", cost: 50 }],
+    availability: "99.5%",
+    zeroDowntimeDeploy: false,
+    failoverTime: "manual, 10-30 minutes",
+  };
+
+  const firstScaleOut = {
+    name: "Separated + LB",
+    monthlyCost: 180,
+    components: [
+      { name: "Load balancer", cost: 20 },
+      { name: "App server 1", cost: 30 },
+      { name: "App server 2", cost: 30 },
+      { name: "Managed database", cost: 50 },
+      { name: "Managed Redis (sessions)", cost: 15 },
+      { name: "S3 for uploads", cost: 5 },
+      { name: "Monitoring", cost: 30 },
+    ],
+    availability: "99.9%",
+    zeroDowntimeDeploy: true,
+    failoverTime: "automatic, < 30 seconds",
+  };
+
+  const costIncrease = firstScaleOut.monthlyCost - singleServer.monthlyCost;
+  const percentIncrease = Math.round((costIncrease / singleServer.monthlyCost) * 100);
+
+  return {
+    singleServer,
+    firstScaleOut,
+    analysis: {
+      additionalMonthlyCost: `$${costIncrease}`,
+      percentIncrease: `${percentIncrease}%`,
+      verdict:
+        "3.6x cost increase buys you zero-downtime deploys, automatic failover, and the ability to scale app tier independently.",
+    },
+  };
+}
+
+console.log(JSON.stringify(costComparison(), null, 2));
+```
+
+## Session management is the hidden trap
+
+The moment you have two app servers behind a load balancer, sessions break. If user A logs in on server 1 and their next request hits server 2, they are logged out. You have three options: sticky sessions (fragile), shared session store (Redis), or stateless tokens (JWT). Redis-backed sessions are the most common solution because they are simple and survive server restarts.
+
+```javascript
+// Session strategy decision tree
+function recommendSessionStrategy(context) {
+  const { serverCount, usersOnline, sessionDataSizeKB, needsRevocation } = context;
+
+  if (serverCount === 1) {
+    return {
+      strategy: "In-memory sessions",
+      reason: "Single server, no sharing needed",
+      cost: "$0 additional",
+    };
+  }
+
+  if (!needsRevocation && sessionDataSizeKB < 1) {
+    return {
+      strategy: "Stateless JWT with short expiry",
+      reason: "No session store needed, but cannot revoke individual tokens",
+      cost: "$0 additional",
+      warning: "Token size grows with claims. Keep payload minimal.",
+    };
+  }
+
+  const redisMemoryMB = (usersOnline * sessionDataSizeKB) / 1024;
+  return {
+    strategy: "Redis-backed sessions",
+    reason: "Shared state across servers with instant revocation",
+    cost: redisMemoryMB < 256 ? "$15-30/mo managed Redis" : "$50-100/mo",
+    redisMemoryNeeded: `${Math.ceil(redisMemoryMB)} MB`,
+  };
+}
+
+console.log(
+  recommendSessionStrategy({
+    serverCount: 2,
+    usersOnline: 500,
+    sessionDataSizeKB: 2,
+    needsRevocation: true,
+  })
+);
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a "first scale-out" readiness checker.
+// Given current metrics, determine if and when you need to move
+// from single-server to multi-server.
+
+function scaleOutReadiness(metrics) {
+const warnings = [];
+const critical = [];
+
+// Check CPU utilization
+if (metrics.avgCPUPercent > 70) {
+critical.push("CPU averaging above 70% — spikes will cause timeouts");
+} else if (metrics.avgCPUPercent > 50) {
+warnings.push("CPU above 50% — plan scale-out within 2 months at current growth");
+}
+
+// Check DB connections
+const connectionUtilization = metrics.activeDBConnections / metrics.maxDBConnections;
+if (connectionUtilization > 0.8) {
+critical.push(
+"DB connection pool " + Math.round(connectionUtilization \* 100) +
+"% utilized — new requests will queue"
+);
+}
+
+// Check memory
+const memoryUtilization = metrics.usedMemoryGB / metrics.totalMemoryGB;
+if (memoryUtilization > 0.85) {
+critical.push("Memory above 85% — OOM killer risk");
+}
+
+// Check disk
+const diskUtilization = metrics.usedDiskGB / metrics.totalDiskGB;
+if (diskUtilization > 0.8) {
+warnings.push("Disk above 80% — plan storage expansion");
+}
+
+// Estimate months until ceiling based on growth rate
+const monthsToMaxCPU = metrics.avgCPUPercent > 0
+? Math.floor((80 - metrics.avgCPUPercent) / (metrics.monthlyGrowthPercent \* metrics.avgCPUPercent / 100))
+: Infinity;
+
+return {
+status: critical.length > 0 ? "SCALE NOW" : warnings.length > 0 ? "PLAN SCALE-OUT" : "OK",
+critical,
+warnings,
+estimatedMonthsToScaleOut: Math.max(0, monthsToMaxCPU),
+recommendation: critical.length > 0
+? "Separate DB from app server immediately. Add load balancer and second app server."
+: "Monitor weekly. Prepare infrastructure-as-code for quick scale-out.",
+};
+}
+
+// Test with a server approaching its limits
+console.log(scaleOutReadiness({
+avgCPUPercent: 55,
+activeDBConnections: 16,
+maxDBConnections: 20,
+usedMemoryGB: 5.5,
+totalMemoryGB: 8,
+usedDiskGB: 35,
+totalDiskGB: 50,
+monthlyGrowthPercent: 15,
+}));
+
+// Test with a healthy server
+console.log(scaleOutReadiness({
+avgCPUPercent: 20,
+activeDBConnections: 5,
+maxDBConnections: 20,
+usedMemoryGB: 2.1,
+totalMemoryGB: 8,
+usedDiskGB: 10,
+totalDiskGB: 50,
+monthlyGrowthPercent: 8,
+}));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="At 10K DAU on a single server, what is most likely to be the first bottleneck?"
+  options={[
+    "CPU utilization hitting 100%",
+    "Running out of RAM",
+    "Database connection pool exhaustion",
+    "Network bandwidth saturation",
+  ]}
+  answer={2}
+  explanation="Default PostgreSQL connection limits (100) combined with application pooling (often 20-30) mean DB connections saturate long before CPU or RAM. Each request holding a connection during query execution creates a hard concurrency ceiling."
+/>
+
+<Quiz
+  question="What is the primary benefit of separating your database to a dedicated server?"
+  options={[
+    "It makes queries run 10x faster",
+    "It eliminates the need for backups",
+    "It lets you scale app and data tiers independently and restart one without affecting the other",
+    "It automatically adds read replicas",
+  ]}
+  answer={2}
+  explanation="Separation of concerns is the key benefit. You can deploy app code without touching the database, the DB gets dedicated CPU and memory, and you can scale each tier based on its actual bottleneck."
+/>
+
+<FillBlank
+  question="When two app servers sit behind a load balancer, user sessions break unless you use sticky sessions, stateless tokens, or a shared session store like ______."
+  answer="Redis"
+/>
+
+## What you learned
+
+- A single server can comfortably handle 10K DAU, but the bottleneck is almost always database connections — not CPU or RAM
+- The first scale-out step is separating the database from the app server, which gives independent scaling and eliminates single-point-of-failure restarts
+- Session management is the hidden complexity of multi-server architectures — Redis-backed sessions are the most common solution for their simplicity and revocation support

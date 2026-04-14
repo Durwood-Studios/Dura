@@ -1,0 +1,565 @@
+---
+title: "Security Architecture"
+description: "Zero trust, SOC 2 compliance, penetration testing, and incident response — the security architecture decisions that protect your users and your company."
+phase: 9
+module: "9-2-architecture-at-scale"
+order: 8
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "evaluate"
+  sfia: 6
+  dreyfus: "proficient"
+vocabulary:
+  - zero-trust
+  - defense-in-depth
+  - principle-of-least-privilege
+  - incident-response
+  - threat-model
+---
+
+## Why this matters
+
+A security breach does not just cost money. It destroys trust — the kind that takes years to build and seconds to lose. As a technical leader, security is not something you delegate entirely to a security team. It is an architectural property that must be designed in from the start. The systems that survive attacks are not the ones with the best firewalls. They are the ones where every layer assumes the other layers have already been compromised.
+
+## Zero trust architecture
+
+The traditional security model was a castle with a moat: hard perimeter, soft interior. Once inside the network, everything trusted everything. Zero trust flips this. Every request, from every source, is verified. There is no "inside the network." There is only authenticated and authorized, or not.
+
+```javascript
+// Zero trust request validation model
+function validateRequest(request, policies) {
+  const checks = [];
+
+  // 1. Identity verification
+  const identityValid = request.authToken && request.authToken.expiresAt > Date.now();
+  checks.push({
+    check: "Identity",
+    passed: identityValid,
+    detail: identityValid
+      ? `Authenticated as ${request.authToken.userId}`
+      : "Missing or expired token",
+  });
+
+  // 2. Device trust
+  const deviceTrusted =
+    request.deviceFingerprint && policies.trustedDevices.includes(request.deviceFingerprint);
+  checks.push({
+    check: "Device trust",
+    passed: deviceTrusted,
+    detail: deviceTrusted ? "Known device" : "Unknown device — require MFA step-up",
+  });
+
+  // 3. Network context
+  const networkSafe = !policies.blockedCountries.includes(request.geoCountry);
+  const unusualLocation = request.geoCountry !== request.authToken?.lastKnownCountry;
+  checks.push({
+    check: "Network context",
+    passed: networkSafe,
+    detail: unusualLocation
+      ? `Unusual location: ${request.geoCountry} (normally ${request.authToken?.lastKnownCountry})`
+      : "Normal network context",
+  });
+
+  // 4. Authorization (least privilege)
+  const requiredPermission = policies.endpointPermissions[request.path];
+  const hasPermission = request.authToken?.permissions?.includes(requiredPermission);
+  checks.push({
+    check: "Authorization",
+    passed: hasPermission,
+    detail: hasPermission
+      ? `Has required permission: ${requiredPermission}`
+      : `Missing permission: ${requiredPermission}`,
+  });
+
+  // 5. Rate limiting
+  const withinRateLimit = request.requestCountLastMinute < policies.maxRequestsPerMinute;
+  checks.push({
+    check: "Rate limit",
+    passed: withinRateLimit,
+    detail: `${request.requestCountLastMinute}/${policies.maxRequestsPerMinute} requests this minute`,
+  });
+
+  const allPassed = checks.every((c) => c.passed);
+  const riskScore = checks.filter((c) => !c.passed).length * 25;
+
+  return {
+    allowed: allPassed || riskScore <= 25, // Allow one minor failure with step-up
+    riskScore,
+    checks,
+    action:
+      riskScore === 0
+        ? "ALLOW"
+        : riskScore <= 25
+          ? "ALLOW with MFA step-up"
+          : riskScore <= 50
+            ? "BLOCK and alert user"
+            : "BLOCK and alert security team",
+  };
+}
+
+console.log(
+  JSON.stringify(
+    validateRequest(
+      {
+        path: "/api/admin/users",
+        authToken: {
+          userId: "user-123",
+          expiresAt: Date.now() + 3600000,
+          permissions: ["read:users"],
+          lastKnownCountry: "US",
+        },
+        deviceFingerprint: "device-abc",
+        geoCountry: "US",
+        requestCountLastMinute: 12,
+      },
+      {
+        trustedDevices: ["device-abc", "device-def"],
+        blockedCountries: ["KP", "IR"],
+        endpointPermissions: { "/api/admin/users": "admin:users" },
+        maxRequestsPerMinute: 60,
+      }
+    ),
+    null,
+    2
+  )
+);
+```
+
+## Defense in depth
+
+Zero trust is the philosophy. Defense in depth is the implementation. Every layer of your stack has its own security controls. If the application layer is compromised, the database layer still requires separate authentication. If the database is compromised, encryption at rest means the attacker gets ciphertext.
+
+```javascript
+// Defense in depth audit
+function auditSecurityLayers(infrastructure) {
+  const layers = [
+    {
+      name: "Edge / CDN",
+      controls: [
+        { control: "DDoS protection", present: infrastructure.ddosProtection },
+        { control: "WAF rules", present: infrastructure.wafEnabled },
+        { control: "TLS 1.3", present: infrastructure.tlsVersion >= 1.3 },
+        { control: "HSTS headers", present: infrastructure.hstsEnabled },
+      ],
+    },
+    {
+      name: "Application",
+      controls: [
+        { control: "Input validation (Zod/joi)", present: infrastructure.inputValidation },
+        { control: "CSRF protection", present: infrastructure.csrfProtection },
+        { control: "Content Security Policy", present: infrastructure.cspHeaders },
+        { control: "Rate limiting", present: infrastructure.rateLimiting },
+        { control: "Dependency scanning", present: infrastructure.dependencyScanning },
+      ],
+    },
+    {
+      name: "Authentication",
+      controls: [
+        { control: "MFA available", present: infrastructure.mfaAvailable },
+        { control: "Session rotation", present: infrastructure.sessionRotation },
+        { control: "Password hashing (bcrypt/argon2)", present: infrastructure.strongHashing },
+        { control: "OAuth2/OIDC for SSO", present: infrastructure.ssoSupport },
+      ],
+    },
+    {
+      name: "Data",
+      controls: [
+        { control: "Encryption at rest", present: infrastructure.encryptionAtRest },
+        { control: "Encryption in transit", present: infrastructure.encryptionInTransit },
+        { control: "Row-level security", present: infrastructure.rowLevelSecurity },
+        { control: "Backup encryption", present: infrastructure.backupEncryption },
+        { control: "PII identification", present: infrastructure.piiTagging },
+      ],
+    },
+    {
+      name: "Infrastructure",
+      controls: [
+        { control: "Network segmentation", present: infrastructure.networkSegmentation },
+        { control: "Secrets management (Vault/KMS)", present: infrastructure.secretsManagement },
+        { control: "Audit logging", present: infrastructure.auditLogging },
+        { control: "Least-privilege IAM", present: infrastructure.leastPrivilegeIAM },
+      ],
+    },
+  ];
+
+  const results = layers.map((layer) => {
+    const passed = layer.controls.filter((c) => c.present).length;
+    const total = layer.controls.length;
+    const missing = layer.controls.filter((c) => !c.present).map((c) => c.control);
+
+    return {
+      layer: layer.name,
+      score: `${passed}/${total}`,
+      status: passed === total ? "COMPLETE" : passed >= total * 0.7 ? "ACCEPTABLE" : "GAPS",
+      missing,
+    };
+  });
+
+  const totalControls = layers.reduce((s, l) => s + l.controls.length, 0);
+  const totalPassed = results.reduce((s, r) => s + parseInt(r.score.split("/")[0]), 0);
+
+  return {
+    overallScore: `${totalPassed}/${totalControls} (${Math.round((totalPassed / totalControls) * 100)}%)`,
+    layers: results,
+    criticalGaps: results
+      .filter((r) => r.status === "GAPS")
+      .map((r) => `${r.layer}: missing ${r.missing.join(", ")}`),
+  };
+}
+
+console.log(
+  JSON.stringify(
+    auditSecurityLayers({
+      ddosProtection: true,
+      wafEnabled: false,
+      tlsVersion: 1.3,
+      hstsEnabled: true,
+      inputValidation: true,
+      csrfProtection: true,
+      cspHeaders: false,
+      rateLimiting: true,
+      dependencyScanning: false,
+      mfaAvailable: true,
+      sessionRotation: false,
+      strongHashing: true,
+      ssoSupport: false,
+      encryptionAtRest: true,
+      encryptionInTransit: true,
+      rowLevelSecurity: true,
+      backupEncryption: false,
+      piiTagging: false,
+      networkSegmentation: true,
+      secretsManagement: true,
+      auditLogging: true,
+      leastPrivilegeIAM: false,
+    }),
+    null,
+    2
+  )
+);
+```
+
+## SOC 2 readiness
+
+SOC 2 is not a product you buy. It is evidence that your security practices are consistent and auditable. The five trust service criteria are: security, availability, processing integrity, confidentiality, and privacy. Most startups start with Type I (point-in-time) and progress to Type II (over a period, usually 6-12 months).
+
+```javascript
+// SOC 2 readiness assessment
+function soc2Readiness(practices) {
+  const criteria = {
+    security: [
+      { name: "Access control policy documented", met: practices.accessControlPolicy },
+      { name: "MFA enforced for all employees", met: practices.mfaEnforced },
+      { name: "Quarterly access reviews", met: practices.quarterlyAccessReviews },
+      { name: "Vulnerability scanning", met: practices.vulnerabilityScanning },
+      { name: "Security awareness training", met: practices.securityTraining },
+      { name: "Incident response plan", met: practices.incidentResponsePlan },
+    ],
+    availability: [
+      { name: "Uptime SLA defined", met: practices.uptimeSLA },
+      { name: "Disaster recovery plan", met: practices.disasterRecovery },
+      { name: "Automated backups tested", met: practices.backupsTested },
+      { name: "Monitoring and alerting", met: practices.monitoringAlerting },
+    ],
+    confidentiality: [
+      { name: "Data classification policy", met: practices.dataClassification },
+      { name: "Encryption at rest and in transit", met: practices.encryptionComplete },
+      { name: "NDA with vendors", met: practices.vendorNDAs },
+      { name: "Data retention policy", met: practices.dataRetention },
+    ],
+  };
+
+  const results = Object.entries(criteria).map(([category, items]) => {
+    const metCount = items.filter((i) => i.met).length;
+    const gaps = items.filter((i) => !i.met).map((i) => i.name);
+    return {
+      category,
+      score: `${metCount}/${items.length}`,
+      ready: metCount === items.length,
+      gaps,
+    };
+  });
+
+  const totalMet = results.reduce((s, r) => s + parseInt(r.score.split("/")[0]), 0);
+  const totalItems = results.reduce((s, r) => s + parseInt(r.score.split("/")[1]), 0);
+
+  const readyForType1 = totalMet >= totalItems * 0.85;
+  const estimatedWeeksToReady = (totalItems - totalMet) * 2;
+
+  return {
+    overallReadiness: `${Math.round((totalMet / totalItems) * 100)}%`,
+    criteria: results,
+    readyForType1Audit: readyForType1,
+    estimatedWeeksToReady: readyForType1 ? 0 : estimatedWeeksToReady,
+    recommendation: readyForType1
+      ? "Engage auditor for Type I assessment"
+      : `Close ${totalItems - totalMet} gaps before engaging auditor (est. ${estimatedWeeksToReady} weeks)`,
+  };
+}
+
+console.log(
+  JSON.stringify(
+    soc2Readiness({
+      accessControlPolicy: true,
+      mfaEnforced: true,
+      quarterlyAccessReviews: false,
+      vulnerabilityScanning: true,
+      securityTraining: false,
+      incidentResponsePlan: true,
+      uptimeSLA: true,
+      disasterRecovery: false,
+      backupsTested: true,
+      monitoringAlerting: true,
+      dataClassification: false,
+      encryptionComplete: true,
+      vendorNDAs: true,
+      dataRetention: false,
+    }),
+    null,
+    2
+  )
+);
+```
+
+## Incident response
+
+When — not if — a security incident happens, the difference between a contained event and a catastrophe is preparation. An incident response plan has four phases: detection, containment, eradication, and recovery. The plan must exist before the incident.
+
+```javascript
+// Incident response cost estimator
+function incidentCostEstimate(incident) {
+  const costs = {};
+
+  // Detection time: every hour of undetected breach increases cost
+  costs.extendedExposure = incident.hoursToDetect * incident.recordsExposedPerHour * 150;
+  // IBM 2024 data breach report: average $165 per compromised record
+
+  // Containment
+  costs.incidentTeamHours = incident.teamSize * incident.containmentHours * 150;
+
+  // Investigation (forensics)
+  costs.forensics = incident.requiresExternalForensics ? 50000 : 5000;
+
+  // Notification (legal requirement in most jurisdictions)
+  const totalRecords = incident.hoursToDetect * incident.recordsExposedPerHour;
+  costs.notification = totalRecords > 500 ? totalRecords * 2 : 1000;
+
+  // Legal
+  costs.legal = totalRecords > 10000 ? 100000 : totalRecords > 1000 ? 25000 : 5000;
+
+  // Reputation damage (estimated as customer churn)
+  costs.reputationDamage = Math.round(incident.annualRevenue * (incident.isPublic ? 0.05 : 0.01));
+
+  // Regulatory fines
+  costs.regulatoryFines = incident.hasGDPRData
+    ? Math.min(incident.annualRevenue * 0.04, 20000000) // GDPR: up to 4% of revenue
+    : 0;
+
+  const totalCost = Object.values(costs).reduce((a, b) => a + b, 0);
+
+  // What would have prevented or reduced this?
+  const preventionInvestment = {
+    betterDetection: {
+      cost: 50000,
+      wouldHaveSaved: costs.extendedExposure * 0.7,
+      description: "SIEM + automated alerting reduces detection time by 70%",
+    },
+    incidentPlan: {
+      cost: 10000,
+      wouldHaveSaved: costs.incidentTeamHours * 0.4,
+      description: "Documented runbooks reduce containment time by 40%",
+    },
+    encryption: {
+      cost: 20000,
+      wouldHaveSaved: costs.regulatoryFines * 0.5,
+      description: "Encrypted data reduces regulatory penalties",
+    },
+  };
+
+  return {
+    totalEstimatedCost: `$${totalCost.toLocaleString()}`,
+    costBreakdown: Object.fromEntries(
+      Object.entries(costs).map(([k, v]) => [k, `$${v.toLocaleString()}`])
+    ),
+    recordsExposed: totalRecords.toLocaleString(),
+    preventionROI: preventionInvestment,
+  };
+}
+
+console.log(
+  JSON.stringify(
+    incidentCostEstimate({
+      hoursToDetect: 72, // Industry average is 197 days, let's say this team is better
+      recordsExposedPerHour: 100,
+      teamSize: 5,
+      containmentHours: 48,
+      requiresExternalForensics: true,
+      isPublic: true,
+      annualRevenue: 10000000,
+      hasGDPRData: true,
+    }),
+    null,
+    2
+  )
+);
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a threat model scoring tool.
+// Given an application's architecture, identify and prioritize threats.
+
+function threatModel(architecture) {
+const threats = [];
+
+// STRIDE threat categories
+// Spoofing, Tampering, Repudiation, Information disclosure,
+// Denial of service, Elevation of privilege
+
+// Check for spoofing risks
+if (!architecture.mfaEnabled) {
+threats.push({
+category: "Spoofing",
+threat: "Account takeover via credential stuffing",
+likelihood: "HIGH",
+impact: "HIGH",
+mitigation: "Enable MFA, implement rate limiting on auth endpoints",
+effortWeeks: 2,
+});
+}
+
+// Check for tampering risks
+if (!architecture.inputValidation) {
+threats.push({
+category: "Tampering",
+threat: "SQL injection or XSS via unvalidated input",
+likelihood: "HIGH",
+impact: "CRITICAL",
+mitigation: "Add Zod validation on all API inputs, enable CSP headers",
+effortWeeks: 3,
+});
+}
+
+// Check for information disclosure
+if (!architecture.encryptionAtRest) {
+threats.push({
+category: "Information Disclosure",
+threat: "Data exposed if database storage is compromised",
+likelihood: "MEDIUM",
+impact: "CRITICAL",
+mitigation: "Enable encryption at rest on all data stores",
+effortWeeks: 1,
+});
+}
+
+if (architecture.errorMessagesExposeStack) {
+threats.push({
+category: "Information Disclosure",
+threat: "Stack traces leak internal architecture to attackers",
+likelihood: "HIGH",
+impact: "MEDIUM",
+mitigation: "Custom error handler that returns generic messages in production",
+effortWeeks: 1,
+});
+}
+
+// Check for DoS risks
+if (!architecture.rateLimiting) {
+threats.push({
+category: "Denial of Service",
+threat: "API abuse or resource exhaustion",
+likelihood: "HIGH",
+impact: "HIGH",
+mitigation: "Add per-IP and per-user rate limiting",
+effortWeeks: 1,
+});
+}
+
+// Check for privilege escalation
+if (!architecture.rowLevelSecurity) {
+threats.push({
+category: "Elevation of Privilege",
+threat: "Users access other users' data via IDOR",
+likelihood: "HIGH",
+impact: "CRITICAL",
+mitigation: "Enable row-level security, add authorization checks to every query",
+effortWeeks: 4,
+});
+}
+
+// Score and prioritize
+const impactScore = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+const likelihoodScore = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+
+const scored = threats.map((t) => ({
+...t,
+riskScore: impactScore[t.impact] \* likelihoodScore[t.likelihood],
+})).sort((a, b) => b.riskScore - a.riskScore);
+
+const totalEffort = scored.reduce((s, t) => s + t.effortWeeks, 0);
+
+return {
+threatsIdentified: scored.length,
+criticalThreats: scored.filter((t) => t.riskScore >= 9).length,
+remediationPlan: scored.map((t, i) => ({
+priority: i + 1,
+riskScore: t.riskScore,
+threat: t.threat,
+mitigation: t.mitigation,
+effort: t.effortWeeks + " weeks",
+})),
+totalRemediationEffort: totalEffort + " weeks",
+};
+}
+
+console.log(JSON.stringify(threatModel({
+mfaEnabled: false,
+inputValidation: true,
+encryptionAtRest: true,
+errorMessagesExposeStack: true,
+rateLimiting: false,
+rowLevelSecurity: false,
+}), null, 2));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does 'zero trust' mean in security architecture?"
+  options={[
+    "Trusting no external vendors with your data",
+    "Every request from every source is verified regardless of network location — there is no trusted internal network",
+    "Encrypting all data so that even your own systems cannot read it",
+    "Running all services in isolated containers with no network access",
+  ]}
+  answer={1}
+  explanation="Zero trust eliminates the concept of a trusted internal network. Every request — whether from inside or outside the perimeter — must be authenticated and authorized. This limits blast radius when any single component is compromised."
+/>
+
+<Quiz
+  question="Why is a documented incident response plan critical even before any security incident occurs?"
+  options={[
+    "Regulatory compliance requires it before you can operate",
+    "During an active incident, decision-making quality degrades — pre-planned runbooks reduce containment time by 40%+",
+    "Insurance companies require it before issuing a cyber policy",
+    "It proves to customers that you take security seriously",
+  ]}
+  answer={1}
+  explanation="Under stress, teams make poor decisions. A pre-documented plan with clear roles, escalation paths, and containment procedures reduces response time and prevents panic-driven mistakes that extend the breach."
+/>
+
+<FillBlank
+  question="The traditional security model was a castle with a moat. Zero trust replaces this by verifying every request regardless of ______ location."
+  answer="network"
+/>
+
+## What you learned
+
+- Zero trust architecture verifies every request regardless of network origin — identity, device trust, authorization, and rate limiting are checked on every call, not just at the perimeter
+- Defense in depth layers security controls at edge, application, authentication, data, and infrastructure levels so that compromise of one layer does not cascade to others
+- Incident response planning must happen before incidents — pre-documented runbooks with clear roles reduce containment time by 40%+ and prevent panic-driven decisions during active breaches

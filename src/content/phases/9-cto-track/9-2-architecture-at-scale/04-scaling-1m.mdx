@@ -1,0 +1,380 @@
+---
+title: "Scaling to 1M Users"
+description: "Microservices, async processing, CDN, and edge computing — the architectural shift from scaling a server to scaling a system."
+phase: 9
+module: "9-2-architecture-at-scale"
+order: 4
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "evaluate"
+  sfia: 6
+  dreyfus: "proficient"
+vocabulary:
+  - microservice
+  - message-queue
+  - content-delivery-network
+  - edge-computing
+  - backpressure
+---
+
+## Why this matters
+
+At 1M users, you are no longer scaling a server. You are scaling a system. The monolith that served you well at 100K is now a deployment bottleneck — 15 teams cannot ship to the same artifact without stepping on each other. Individual features need independent scaling. A viral post that spikes notifications should not slow down checkout. This is where you decompose by business capability, introduce async processing, and push static content to the edge.
+
+## When the monolith breaks down
+
+The monolith does not break from traffic. It breaks from organizational friction. When deploys take 45 minutes, when a bug in notifications blocks the payments team from shipping, when one feature's memory leak crashes the entire application — that is when you split.
+
+```javascript
+// Monolith health assessment
+function assessMonolithHealth(metrics) {
+  const scores = {};
+
+  // Deploy velocity
+  scores.deployFrequency =
+    metrics.deploysPerWeek >= 10
+      ? { score: "healthy", detail: `${metrics.deploysPerWeek} deploys/week` }
+      : metrics.deploysPerWeek >= 3
+        ? { score: "warning", detail: "Deploy friction building" }
+        : { score: "critical", detail: "Deploy bottleneck — teams are queuing" };
+
+  // Build time
+  scores.buildTime =
+    metrics.buildTimeMinutes <= 5
+      ? { score: "healthy", detail: `${metrics.buildTimeMinutes}min builds` }
+      : metrics.buildTimeMinutes <= 15
+        ? { score: "warning", detail: "Builds slowing developer feedback loops" }
+        : { score: "critical", detail: "Build time destroying productivity" };
+
+  // Blast radius
+  scores.blastRadius =
+    metrics.incidentsFromUnrelatedChanges <= 1
+      ? { score: "healthy", detail: "Changes are well-isolated" }
+      : {
+          score: "critical",
+          detail: `${metrics.incidentsFromUnrelatedChanges} incidents from unrelated changes last quarter`,
+        };
+
+  // Team coupling
+  scores.teamCoupling =
+    metrics.teamsBlockedByOtherTeams <= 1
+      ? { score: "healthy", detail: "Teams ship independently" }
+      : {
+          score: "critical",
+          detail: `${metrics.teamsBlockedByOtherTeams} teams blocked by other teams`,
+        };
+
+  const criticalCount = Object.values(scores).filter((s) => s.score === "critical").length;
+
+  return {
+    scores,
+    recommendation:
+      criticalCount >= 2
+        ? "DECOMPOSE: Monolith is an organizational bottleneck. Extract highest-friction domains first."
+        : criticalCount === 1
+          ? "PLAN: Start designing service boundaries. Extract the critical-scoring domain within 1 quarter."
+          : "KEEP: Monolith is healthy. Do not split prematurely.",
+  };
+}
+
+console.log(
+  assessMonolithHealth({
+    deploysPerWeek: 4,
+    buildTimeMinutes: 18,
+    incidentsFromUnrelatedChanges: 3,
+    teamsBlockedByOtherTeams: 4,
+  })
+);
+```
+
+## Async processing changes everything
+
+At 1M users, you cannot do everything synchronously in a request-response cycle. Sending an email, generating a thumbnail, updating a search index, calculating analytics — these do not need to happen before the user sees a response. Message queues decouple the "accept the request" from "process the side effects."
+
+```javascript
+// Sync vs. async response time modeling
+function compareProcessingModels(operations) {
+  // Synchronous: user waits for everything
+  const syncLatency = operations.reduce((sum, op) => sum + op.durationMs, 0);
+
+  // Async: user waits only for critical path
+  const criticalOps = operations.filter((op) => op.mustBeSync);
+  const asyncLatency = criticalOps.reduce((sum, op) => sum + op.durationMs, 0);
+
+  const backgroundOps = operations.filter((op) => !op.mustBeSync);
+  const backgroundWork = backgroundOps.reduce((sum, op) => sum + op.durationMs, 0);
+
+  // Queue depth modeling: if background work takes longer than arrival rate
+  function estimateQueueDepth(opsPerSecond, processingTimeMs, workerCount) {
+    const arrivalRate = opsPerSecond;
+    const serviceRate = (workerCount * 1000) / processingTimeMs;
+    const utilization = arrivalRate / serviceRate;
+
+    if (utilization >= 1) {
+      return { status: "OVERLOADED", queueGrowthPerSecond: arrivalRate - serviceRate };
+    }
+
+    // M/M/c queue approximation for average queue length
+    const avgQueueLength = (utilization * utilization) / (1 - utilization);
+    return {
+      status: "STABLE",
+      avgQueueLength: Math.round(avgQueueLength),
+      utilization: `${(utilization * 100).toFixed(0)}%`,
+    };
+  }
+
+  return {
+    syncUserLatency: `${syncLatency}ms`,
+    asyncUserLatency: `${asyncLatency}ms`,
+    improvement: `${Math.round((1 - asyncLatency / syncLatency) * 100)}% faster for user`,
+    backgroundOperations: backgroundOps.map((op) => op.name),
+    queueEstimate: estimateQueueDepth(100, backgroundWork, 4),
+  };
+}
+
+console.log(
+  compareProcessingModels([
+    { name: "Validate input", durationMs: 5, mustBeSync: true },
+    { name: "Write to database", durationMs: 10, mustBeSync: true },
+    { name: "Send confirmation email", durationMs: 200, mustBeSync: false },
+    { name: "Generate thumbnail", durationMs: 500, mustBeSync: false },
+    { name: "Update search index", durationMs: 150, mustBeSync: false },
+    { name: "Notify followers", durationMs: 100, mustBeSync: false },
+    { name: "Log analytics event", durationMs: 30, mustBeSync: false },
+  ])
+);
+```
+
+## CDN and edge computing
+
+At 1M users, your servers are in one region but your users are everywhere. A request from Tokyo to a server in Virginia adds 150-200ms of latency before your code even runs. CDNs cache static assets at edge locations worldwide. Edge computing goes further — running actual logic at the edge.
+
+```javascript
+// CDN impact calculator
+function cdnImpact(config) {
+  const {
+    totalRequestsPerDay,
+    percentStaticContent,
+    percentCacheableAPI,
+    originLatencyMs,
+    edgeLatencyMs,
+    originCostPer10kRequests,
+    cdnCostPer10kRequests,
+  } = config;
+
+  const staticRequests = totalRequestsPerDay * percentStaticContent;
+  const cacheableAPIRequests = totalRequestsPerDay * percentCacheableAPI;
+  const edgeServedRequests = staticRequests + cacheableAPIRequests;
+  const originRequests = totalRequestsPerDay - edgeServedRequests;
+
+  // Latency improvement
+  const beforeAvgLatency = originLatencyMs;
+  const afterAvgLatency =
+    (edgeServedRequests * edgeLatencyMs + originRequests * originLatencyMs) / totalRequestsPerDay;
+
+  // Cost comparison
+  const monthlyOriginOnly = (totalRequestsPerDay * 30 * originCostPer10kRequests) / 10000;
+  const monthlyWithCDN =
+    (edgeServedRequests * 30 * cdnCostPer10kRequests) / 10000 +
+    (originRequests * 30 * originCostPer10kRequests) / 10000;
+
+  return {
+    requestDistribution: {
+      edgeServed: `${((edgeServedRequests / totalRequestsPerDay) * 100).toFixed(0)}%`,
+      origin: `${((originRequests / totalRequestsPerDay) * 100).toFixed(0)}%`,
+    },
+    latency: {
+      before: `${beforeAvgLatency}ms`,
+      after: `${Math.round(afterAvgLatency)}ms`,
+      improvement: `${Math.round((1 - afterAvgLatency / beforeAvgLatency) * 100)}%`,
+    },
+    monthlyCost: {
+      withoutCDN: `$${Math.round(monthlyOriginOnly)}`,
+      withCDN: `$${Math.round(monthlyWithCDN)}`,
+      savings: `$${Math.round(monthlyOriginOnly - monthlyWithCDN)}`,
+    },
+  };
+}
+
+console.log(
+  cdnImpact({
+    totalRequestsPerDay: 10_000_000,
+    percentStaticContent: 0.6,
+    percentCacheableAPI: 0.15,
+    originLatencyMs: 180,
+    edgeLatencyMs: 25,
+    originCostPer10kRequests: 0.05,
+    cdnCostPer10kRequests: 0.01,
+  })
+);
+```
+
+## Service decomposition strategy
+
+If you must split the monolith, extract by business domain — not by technical layer. "User Service" and "Order Service" are good boundaries. "Database Service" and "API Service" are not. The Strangler Fig pattern lets you extract one domain at a time while keeping the monolith running.
+
+```javascript
+// Service boundary analysis
+function analyzeServiceBoundaries(domains) {
+  return domains.map((domain) => {
+    // Score extraction priority
+    const changeScore = domain.changesPerMonth * 2;
+    const scaleScore = domain.needsIndependentScaling ? 10 : 0;
+    const teamScore = domain.dedicatedTeamSize >= 3 ? 8 : 0;
+    const couplingPenalty = domain.sharedTablesCount * -3;
+
+    const priority = changeScore + scaleScore + teamScore + couplingPenalty;
+
+    return {
+      name: domain.name,
+      extractionPriority: priority,
+      recommendation:
+        priority > 20 ? "EXTRACT NOW" : priority > 10 ? "PLAN EXTRACTION" : "KEEP IN MONOLITH",
+      risks: [
+        domain.sharedTablesCount > 3 && "High data coupling — plan data migration carefully",
+        domain.syncCallsToOtherDomains > 5 &&
+          "Many sync dependencies — introduce async events first",
+        domain.dedicatedTeamSize < 2 && "No dedicated team — extraction will stall",
+      ].filter(Boolean),
+    };
+  });
+}
+
+console.log(
+  analyzeServiceBoundaries([
+    {
+      name: "Notifications",
+      changesPerMonth: 12,
+      needsIndependentScaling: true,
+      dedicatedTeamSize: 3,
+      sharedTablesCount: 1,
+      syncCallsToOtherDomains: 2,
+    },
+    {
+      name: "Billing",
+      changesPerMonth: 4,
+      needsIndependentScaling: false,
+      dedicatedTeamSize: 2,
+      sharedTablesCount: 5,
+      syncCallsToOtherDomains: 8,
+    },
+    {
+      name: "Search",
+      changesPerMonth: 8,
+      needsIndependentScaling: true,
+      dedicatedTeamSize: 4,
+      sharedTablesCount: 0,
+      syncCallsToOtherDomains: 1,
+    },
+    {
+      name: "User Profile",
+      changesPerMonth: 3,
+      needsIndependentScaling: false,
+      dedicatedTeamSize: 0,
+      sharedTablesCount: 6,
+      syncCallsToOtherDomains: 3,
+    },
+  ])
+);
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a service decomposition cost estimator.
+// Compare running N features in a monolith vs. as separate services.
+
+function decompositionCostModel(features, infraCosts) {
+// Monolith cost: shared infrastructure
+const monolithCost = {
+compute: infraCosts.monolithServerCost _ infraCosts.monolithServerCount,
+database: infraCosts.sharedDBCost,
+monitoring: infraCosts.monitoringPerService,
+deploys: features.length _ 0, // shared pipeline
+networking: 0, // no inter-service calls
+};
+monolithCost.total = Object.values(monolithCost).reduce((a, b) => a + b, 0);
+
+// Microservices cost: per-service overhead
+const servicesCost = {
+compute: features.reduce((sum, f) => sum + f.estimatedMonthlyCost, 0),
+database: features.filter((f) => f.needsOwnDB).length _ infraCosts.perServiceDBCost + (features.length - features.filter((f) => f.needsOwnDB).length) _ 0,
+monitoring: features.length _ infraCosts.monitoringPerService,
+deploys: features.length _ infraCosts.ciCostPerPipeline,
+networking: features.length _ (features.length - 1) _ infraCosts.interServiceCallCost,
+};
+servicesCost.total = Object.values(servicesCost).reduce((a, b) => a + b, 0);
+
+return {
+monolith: monolithCost,
+microservices: servicesCost,
+costDifference: "$" + Math.round(servicesCost.total - monolithCost.total) + "/month",
+verdict: servicesCost.total > monolithCost.total \* 2
+? "Microservices cost is 2x+ monolith — only decompose if organizational pain justifies it"
+: servicesCost.total > monolithCost.total
+? "Moderate cost increase — decompose high-value domains only"
+: "Cost neutral or savings — decomposition is viable",
+};
+}
+
+const features = [
+{ name: "Auth", estimatedMonthlyCost: 30, needsOwnDB: true },
+{ name: "Content", estimatedMonthlyCost: 80, needsOwnDB: true },
+{ name: "Notifications", estimatedMonthlyCost: 40, needsOwnDB: false },
+{ name: "Search", estimatedMonthlyCost: 100, needsOwnDB: true },
+{ name: "Analytics", estimatedMonthlyCost: 60, needsOwnDB: true },
+];
+
+const infraCosts = {
+monolithServerCost: 100,
+monolithServerCount: 3,
+sharedDBCost: 150,
+perServiceDBCost: 50,
+monitoringPerService: 20,
+ciCostPerPipeline: 15,
+interServiceCallCost: 5,
+};
+
+console.log(JSON.stringify(decompositionCostModel(features, infraCosts), null, 2));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the primary signal that a monolith should be decomposed into services?"
+  options={[
+    "The application exceeds 100K lines of code",
+    "Response times are above 500ms on average",
+    "Teams are blocked from shipping because of shared deployment and coupled domains",
+    "The database is running at maximum capacity",
+  ]}
+  answer={2}
+  explanation="Microservices solve organizational problems, not performance problems. You can scale a monolith vertically or with read replicas. You cannot fix team coupling and deploy queues without decomposition."
+/>
+
+<Quiz
+  question="Why should async processing be introduced before microservices?"
+  options={[
+    "Async processing is required for microservices to work",
+    "It decouples side effects from the critical path, reducing user-facing latency and enabling future service extraction",
+    "Message queues are cheaper than HTTP calls between services",
+    "Synchronous communication between services is forbidden",
+  ]}
+  answer={1}
+  explanation="Moving side effects (email, thumbnails, indexing) to background queues improves latency now and creates natural service boundaries. When you later extract a service, the queue is already the interface."
+/>
+
+<FillBlank
+  question="The Strangler Fig pattern allows you to extract domains from a monolith ______ at a time while the monolith continues running."
+  answer="one"
+/>
+
+## What you learned
+
+- At 1M users, the monolith breaks from organizational friction (deploy queues, team coupling) before it breaks from traffic — decompose by business domain, not technical layer
+- Async message queues decouple side effects from the request path, cutting user-facing latency by 60-90% and creating natural service boundaries for future extraction
+- CDNs serve 60-75% of total requests from edge locations, reducing both latency and origin server costs at global scale

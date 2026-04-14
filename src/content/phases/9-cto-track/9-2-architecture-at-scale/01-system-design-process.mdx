@@ -1,0 +1,309 @@
+---
+title: "System Design Process"
+description: "A repeatable framework for turning business requirements into technical architecture: constraints, components, tradeoffs, and documentation."
+phase: 9
+module: "9-2-architecture-at-scale"
+order: 1
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "evaluate"
+  sfia: 6
+  dreyfus: "proficient"
+vocabulary:
+  - system-design
+  - constraint
+  - tradeoff
+  - throughput
+  - latency
+---
+
+## Why this matters
+
+Every architecture decision you make either enables or blocks future growth. The difference between teams that scale smoothly and teams that rewrite every 18 months is not talent — it is process. A repeatable system design framework prevents the two most expensive failure modes: overengineering a system that never needs to scale, and underengineering one that does. You need a method that forces you to quantify requirements before drawing boxes and arrows.
+
+## Requirements come first
+
+Before you sketch a single diagram, you need numbers. "We need it to be fast" is not a requirement. "P95 latency under 200ms for read operations at 500 requests per second" is a requirement.
+
+Functional requirements describe what the system does. Non-functional requirements describe how well it does it. The non-functional ones are where architecture decisions live.
+
+```javascript
+// A requirements gathering framework
+// Start every design with this template
+
+const systemRequirements = {
+  functional: [
+    "Users can upload files up to 100MB",
+    "Search returns results across all user content",
+    "Real-time notifications for shared document edits",
+  ],
+  nonFunctional: {
+    throughput: { target: 500, unit: "requests/sec", peak: 2000 },
+    latency: { p50: 50, p95: 200, p99: 500, unit: "ms" },
+    availability: { target: 99.9, unit: "percent", maxDowntimePerMonth: "43 minutes" },
+    durability: { target: 99.999999999, note: "11 nines for stored data" },
+    consistency: "eventual for reads, strong for writes within same user session",
+  },
+  constraints: {
+    budget: "$5,000/month cloud spend",
+    team: "3 backend engineers, 1 SRE",
+    timeline: "MVP in 8 weeks",
+    compliance: ["GDPR", "SOC 2 in progress"],
+  },
+};
+
+// Derive storage and compute estimates from requirements
+function estimateResources(reqs) {
+  const dailyRequests = reqs.nonFunctional.throughput.target * 86400;
+  const monthlyRequests = dailyRequests * 30;
+
+  // Assume average payload of 2KB for API responses
+  const monthlyBandwidthGB = (monthlyRequests * 2) / 1_000_000;
+
+  // Assume 10% of requests are writes creating 1KB records
+  const monthlyStorageGrowthGB = (monthlyRequests * 0.1 * 1) / 1_000_000;
+
+  return {
+    dailyRequests,
+    monthlyRequests,
+    monthlyBandwidthGB: Math.round(monthlyBandwidthGB),
+    monthlyStorageGrowthGB: monthlyStorageGrowthGB.toFixed(2),
+    yearlyStorageGrowthGB: (monthlyStorageGrowthGB * 12).toFixed(2),
+  };
+}
+
+console.log(estimateResources(systemRequirements));
+// Shows you the actual scale you are designing for
+```
+
+## From requirements to components
+
+Once you have numbers, you map them to components. Each component exists to satisfy a specific requirement. If you cannot trace a component back to a requirement, it should not exist yet.
+
+The process follows a consistent order: identify data flows, pick storage, define APIs, plan for failure.
+
+```javascript
+// Component selection based on requirements
+function selectComponents(requirements) {
+  const components = [];
+
+  // Step 1: What stores data?
+  const needsRelational = requirements.functional.some(
+    (f) => f.includes("search") || f.includes("query")
+  );
+  const needsObjectStorage = requirements.functional.some(
+    (f) => f.includes("upload") || f.includes("file")
+  );
+  const needsRealtime = requirements.functional.some(
+    (f) => f.includes("real-time") || f.includes("notification")
+  );
+
+  if (needsRelational) {
+    components.push({
+      name: "PostgreSQL",
+      role: "Primary data store",
+      satisfies: "Structured queries, ACID transactions",
+      risk: "Single point of failure without replicas",
+    });
+  }
+
+  if (needsObjectStorage) {
+    components.push({
+      name: "S3-compatible storage",
+      role: "File storage",
+      satisfies: "Large file uploads, 11-nines durability",
+      risk: "Egress costs at scale",
+    });
+  }
+
+  if (needsRealtime) {
+    components.push({
+      name: "WebSocket server or managed pub/sub",
+      role: "Real-time event delivery",
+      satisfies: "Live notifications, collaborative editing",
+      risk: "Connection state management, sticky sessions",
+    });
+  }
+
+  // Step 2: What sits between user and data?
+  const highThroughput = requirements.nonFunctional.throughput.peak > 1000;
+  if (highThroughput) {
+    components.push({
+      name: "Redis / Valkey",
+      role: "Cache layer",
+      satisfies: "Reduce DB load, improve read latency",
+      risk: "Cache invalidation complexity",
+    });
+  }
+
+  return components;
+}
+
+console.log(selectComponents(systemRequirements));
+```
+
+## Tradeoffs are the real design
+
+Every architectural choice is a tradeoff. The CAP theorem is the famous one, but real systems face dozens of smaller tradeoffs daily: simplicity vs. flexibility, cost vs. performance, time-to-market vs. technical debt.
+
+Document them explicitly. A tradeoff you made consciously is a decision. A tradeoff you made accidentally is a bug.
+
+```javascript
+// Tradeoff analysis framework
+const tradeoffMatrix = [
+  {
+    decision: "Monolith vs. microservices",
+    optionA: {
+      name: "Monolith",
+      pros: ["Simple deployment", "Easy debugging", "Lower ops cost"],
+      cons: ["Harder to scale individual components", "Larger blast radius"],
+    },
+    optionB: {
+      name: "Microservices",
+      pros: ["Independent scaling", "Team autonomy", "Isolated failures"],
+      cons: ["Network latency", "Distributed transactions", "Higher ops cost"],
+    },
+    recommendation: "Monolith",
+    reasoning:
+      "Team of 3 engineers. Microservices operational overhead exceeds benefit until team > 8.",
+    revisitWhen: "Team exceeds 8 engineers or single component needs 10x scaling",
+  },
+  {
+    decision: "SQL vs. NoSQL for primary store",
+    optionA: {
+      name: "PostgreSQL",
+      pros: ["ACID", "Rich queries", "Mature ecosystem"],
+      cons: ["Vertical scaling limits", "Schema migrations"],
+    },
+    optionB: {
+      name: "DynamoDB",
+      pros: ["Horizontal scaling", "Predictable latency", "Managed"],
+      cons: ["Limited query patterns", "Vendor lock-in", "GSI costs"],
+    },
+    recommendation: "PostgreSQL",
+    reasoning:
+      "Search and complex queries are core requirements. Optimize reads with replicas later.",
+    revisitWhen: "Write throughput exceeds single Postgres capacity (~50K writes/sec)",
+  },
+];
+
+// Score each option against your constraints
+function scoreTradeoff(tradeoff, teamSize, monthlyBudget) {
+  const scores = {};
+  [tradeoff.optionA, tradeoff.optionB].forEach((option) => {
+    let score = 0;
+    score += option.pros.length * 2;
+    score -= option.cons.length * 1.5;
+    if (teamSize < 5 && option.name === "Monolith") score += 3;
+    if (monthlyBudget < 10000 && option.cons.some((c) => c.includes("cost"))) score -= 2;
+    scores[option.name] = Math.round(score * 10) / 10;
+  });
+  return scores;
+}
+
+console.log(scoreTradeoff(tradeoffMatrix[0], 3, 5000));
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a system design requirements calculator.
+// Given a set of business inputs, output the architecture requirements.
+
+function deriveArchitectureRequirements(business) {
+// Calculate expected requests per second from DAU
+// Rule of thumb: each DAU makes ~20 requests/day
+// Peak is typically 3x average
+const avgRPS = (business.expectedDAU _ 20) / 86400;
+const peakRPS = avgRPS _ 3;
+
+// Calculate storage needs
+// Estimate average record size and write ratio
+const dailyWrites = business.expectedDAU _ business.writesPerUserPerDay;
+const monthlyStorageGB = (dailyWrites _ 30 \* business.avgRecordSizeKB) / 1_000_000;
+
+// Determine minimum availability from business type
+// E-commerce: 99.9%, SaaS: 99.95%, Healthcare/Finance: 99.99%
+const availabilityMap = {
+ecommerce: 99.9,
+saas: 99.95,
+healthcare: 99.99,
+finance: 99.99,
+};
+
+return {
+throughput: {
+averageRPS: Math.round(avgRPS),
+peakRPS: Math.round(peakRPS),
+},
+storage: {
+monthlyGrowthGB: monthlyStorageGB.toFixed(2),
+yearlyGrowthGB: (monthlyStorageGB \* 12).toFixed(2),
+},
+availability: availabilityMap[business.type] || 99.9,
+// TODO: add your own derived requirements
+// Consider: cache needs, CDN, read replicas, async processing
+};
+}
+
+// Test with a SaaS product
+const saasProduct = {
+expectedDAU: 10000,
+writesPerUserPerDay: 5,
+avgRecordSizeKB: 2,
+type: "saas",
+};
+
+console.log(deriveArchitectureRequirements(saasProduct));
+
+// Test with a high-write e-commerce platform
+const ecommerce = {
+expectedDAU: 50000,
+writesPerUserPerDay: 15,
+avgRecordSizeKB: 4,
+type: "ecommerce",
+};
+
+console.log(deriveArchitectureRequirements(ecommerce));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should you quantify non-functional requirements before choosing architecture components?"
+  options={[
+    "Because managers require documentation before approving projects",
+    "Because numbers determine which components are necessary and which are premature optimization",
+    "Because it is impossible to build software without exact specifications",
+    "Because non-functional requirements are more important than functional ones",
+  ]}
+  answer={1}
+  explanation="Concrete numbers (requests/sec, latency targets, storage growth) determine whether you need a cache, replicas, or CDN. Without numbers, you either overbuild or underbuild."
+/>
+
+<Quiz
+  question="When should a monolith be chosen over microservices?"
+  options={[
+    "Never — microservices are always the modern best practice",
+    "Only when the budget is zero",
+    "When the team is small and no single component needs independent scaling",
+    "When the application has fewer than 10 API endpoints",
+  ]}
+  answer={2}
+  explanation="Microservices add operational overhead (networking, deployment, observability) that small teams cannot absorb. A monolith with clean module boundaries is easier to split later than microservices are to merge."
+/>
+
+<FillBlank
+  question="A tradeoff you made consciously is a decision. A tradeoff you made accidentally is a ______."
+  answer="bug"
+/>
+
+## What you learned
+
+- System design starts with quantified requirements — throughput, latency, availability, and storage targets drive every component choice
+- Every architectural component must trace back to a specific requirement; if it cannot, it is premature optimization
+- Documenting tradeoffs explicitly (with "revisit when" triggers) prevents accidental decisions from becoming permanent technical debt

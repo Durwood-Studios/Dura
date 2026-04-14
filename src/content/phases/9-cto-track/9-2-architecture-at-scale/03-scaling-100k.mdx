@@ -1,0 +1,343 @@
+---
+title: "Scaling to 100K Users"
+description: "Database bottlenecks, caching strategies, and read replicas — the architectural changes that get you from 10K to 100K users without a rewrite."
+phase: 9
+module: "9-2-architecture-at-scale"
+order: 3
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "evaluate"
+  sfia: 6
+  dreyfus: "proficient"
+vocabulary:
+  - read-replica
+  - cache-invalidation
+  - connection-pooling
+  - write-amplification
+  - cache-aside
+---
+
+## Why this matters
+
+The jump from 10K to 100K users is where naive architectures die. At 10K, you can brute-force most problems with bigger hardware. At 100K, vertical scaling hits a cost cliff — doubling your database server price gives you maybe 40% more throughput. This is where you learn to think in read/write ratios, cache hit rates, and connection pool math. The decisions you make here determine whether scaling to 1M is an incremental step or a full rewrite.
+
+## The database wall
+
+At 100K DAU, you are looking at 20-50 requests per second average, spiking to 100-200 during peak. Most applications are read-heavy — 80-95% of requests are reads. The database is doing the same query thousands of times per hour, returning the same result. This is pure waste.
+
+```javascript
+// Database load analyzer
+// Input your actual query patterns to find optimization targets
+
+function analyzeDBLoad(queryPatterns) {
+  const totalQPS = queryPatterns.reduce((sum, q) => sum + q.callsPerSecond, 0);
+
+  const analysis = queryPatterns.map((q) => {
+    const percentOfTotal = ((q.callsPerSecond / totalQPS) * 100).toFixed(1);
+    const isCacheable = q.resultChangesEvery > 60; // Changes less than once per minute
+    const potentialSavings = isCacheable
+      ? Math.round(q.callsPerSecond * 0.95) // 95% cache hit rate assumption
+      : 0;
+
+    return {
+      ...q,
+      percentOfTotal: `${percentOfTotal}%`,
+      cacheable: isCacheable,
+      queriesEliminatedPerSecond: potentialSavings,
+      dbCostPerMonth: (q.callsPerSecond * 86400 * 30 * q.avgDurationMs * 0.0000001).toFixed(2),
+    };
+  });
+
+  const totalCacheable = analysis
+    .filter((a) => a.cacheable)
+    .reduce((sum, a) => sum + a.queriesEliminatedPerSecond, 0);
+
+  return {
+    currentQPS: totalQPS,
+    afterCachingQPS: totalQPS - totalCacheable,
+    reductionPercent: Math.round((totalCacheable / totalQPS) * 100),
+    queries: analysis,
+  };
+}
+
+const typicalSaaSQueries = [
+  { name: "getUserProfile", callsPerSecond: 40, avgDurationMs: 3, resultChangesEvery: 3600 },
+  { name: "getDashboardData", callsPerSecond: 25, avgDurationMs: 15, resultChangesEvery: 300 },
+  { name: "listRecentItems", callsPerSecond: 30, avgDurationMs: 8, resultChangesEvery: 60 },
+  { name: "searchContent", callsPerSecond: 10, avgDurationMs: 50, resultChangesEvery: 120 },
+  { name: "writeUserAction", callsPerSecond: 5, avgDurationMs: 10, resultChangesEvery: 0 },
+];
+
+console.log(JSON.stringify(analyzeDBLoad(typicalSaaSQueries), null, 2));
+```
+
+## Caching strategy
+
+The cache-aside pattern is your first tool. The application checks the cache before hitting the database. On a miss, it queries the database and populates the cache. The critical decision is TTL (time-to-live) — too short and you get no benefit, too long and users see stale data.
+
+```javascript
+// Cache strategy simulator
+function simulateCache(config) {
+  const {
+    requestsPerSecond,
+    cacheTTLSeconds,
+    dataChangeIntervalSeconds,
+    cacheMaxSizeMB,
+    avgItemSizeKB,
+  } = config;
+
+  // Approximate cache hit rate based on TTL and change frequency
+  // If data changes every 300s and TTL is 60s, hit rate is ~80%
+  // If data changes every 3600s and TTL is 300s, hit rate is ~95%
+  const hitRate = Math.min(0.99, 1 - cacheTTLSeconds / (dataChangeIntervalSeconds * 5));
+
+  const hitsPerSecond = Math.round(requestsPerSecond * hitRate);
+  const missesPerSecond = requestsPerSecond - hitsPerSecond;
+
+  // Estimate unique items in cache
+  const maxItems = Math.floor((cacheMaxSizeMB * 1024) / avgItemSizeKB);
+
+  // Staleness: worst case, data is TTL seconds old
+  const maxStalenessSeconds = cacheTTLSeconds;
+
+  // Cost savings: each cache hit avoids a ~5ms DB query
+  const dbQueriesAvoided = hitsPerSecond * 86400 * 30;
+  const dbTimeAvoidedHours = (dbQueriesAvoided * 5) / (1000 * 3600);
+
+  return {
+    hitRate: `${(hitRate * 100).toFixed(1)}%`,
+    hitsPerSecond,
+    missesPerSecond,
+    maxItemsInCache: maxItems,
+    maxStalenessSeconds,
+    monthlyDBQueriesAvoided: dbQueriesAvoided.toLocaleString(),
+    monthlyDBTimeAvoidedHours: Math.round(dbTimeAvoidedHours),
+  };
+}
+
+console.log(
+  simulateCache({
+    requestsPerSecond: 100,
+    cacheTTLSeconds: 300,
+    dataChangeIntervalSeconds: 3600,
+    cacheMaxSizeMB: 256,
+    avgItemSizeKB: 2,
+  })
+);
+```
+
+## Read replicas
+
+When caching is not enough — or when your queries are too varied to cache effectively — read replicas let you horizontally scale reads. The primary database handles all writes. One or more replicas receive a stream of changes and serve read queries.
+
+The tradeoff is replication lag. A write to the primary may take 10-100ms to appear on replicas. Your application must handle this.
+
+```javascript
+// Read replica routing logic
+function createQueryRouter(config) {
+  const { replicaCount, maxReplicationLagMs, writeEndpoints } = config;
+
+  // Endpoints that always go to primary (writes + read-your-own-writes)
+  const mustUsePrimary = new Set(writeEndpoints);
+
+  function routeQuery(query) {
+    // Writes always go to primary
+    if (query.type === "write") {
+      return { target: "primary", reason: "write operation" };
+    }
+
+    // If user just wrote something, read from primary for consistency
+    if (query.lastWriteTimestamp) {
+      const timeSinceWrite = Date.now() - query.lastWriteTimestamp;
+      if (timeSinceWrite < maxReplicationLagMs * 2) {
+        return {
+          target: "primary",
+          reason: `read-your-own-write (${timeSinceWrite}ms since last write)`,
+        };
+      }
+    }
+
+    // Distribute reads across replicas
+    const replicaIndex = Math.floor(Math.random() * replicaCount);
+    return {
+      target: `replica-${replicaIndex + 1}`,
+      reason: "read query routed to replica",
+    };
+  }
+
+  return routeQuery;
+}
+
+const route = createQueryRouter({
+  replicaCount: 2,
+  maxReplicationLagMs: 50,
+  writeEndpoints: ["/api/users", "/api/posts"],
+});
+
+// Simulate different scenarios
+console.log(route({ type: "read", path: "/api/feed" }));
+console.log(route({ type: "write", path: "/api/posts" }));
+console.log(route({ type: "read", path: "/api/posts", lastWriteTimestamp: Date.now() - 30 }));
+console.log(route({ type: "read", path: "/api/posts", lastWriteTimestamp: Date.now() - 5000 }));
+```
+
+## Connection pooling at scale
+
+At 100K DAU with multiple app servers, connection management becomes critical. Each app server wants 20-50 connections. With 4 app servers, that is 80-200 connections competing for a database that performs best under 100. A connection pooler like PgBouncer sits between your app servers and the database, multiplexing hundreds of application connections onto a smaller number of database connections.
+
+```javascript
+// Connection pool sizing calculator
+function calculatePoolSize(config) {
+  const { appServerCount, connectionsPerServer, dbMaxConnections, avgQueryDurationMs, targetQPS } =
+    config;
+
+  const totalAppConnections = appServerCount * connectionsPerServer;
+  const wouldExceedDB = totalAppConnections > dbMaxConnections;
+
+  // Minimum connections needed to hit target QPS
+  const minConnectionsNeeded = Math.ceil((targetQPS * avgQueryDurationMs) / 1000);
+
+  // With PgBouncer in transaction mode
+  const pgbouncerPoolSize = Math.min(
+    Math.max(minConnectionsNeeded, Math.ceil(dbMaxConnections * 0.8)),
+    dbMaxConnections
+  );
+
+  return {
+    totalAppConnections,
+    dbMaxConnections,
+    wouldExceedDB,
+    minConnectionsForTargetQPS: minConnectionsNeeded,
+    recommendedPgBouncerPool: pgbouncerPoolSize,
+    recommendation: wouldExceedDB
+      ? `PgBouncer required. ${totalAppConnections} app connections → ${pgbouncerPoolSize} DB connections.`
+      : `Direct connections OK, but PgBouncer still recommended for connection reuse.`,
+  };
+}
+
+console.log(
+  calculatePoolSize({
+    appServerCount: 4,
+    connectionsPerServer: 30,
+    dbMaxConnections: 100,
+    avgQueryDurationMs: 5,
+    targetQPS: 200,
+  })
+);
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a caching ROI calculator.
+// Given your current database metrics and a proposed caching layer,
+// calculate the cost savings, latency improvement, and breakeven point.
+
+function cachingROI(current, proposed) {
+// Current costs
+const currentDBCostPerQuery = current.dbCostPerMonth / (current.queriesPerDay \* 30);
+
+// With caching
+const cachedQueriesPerDay = current.queriesPerDay \* proposed.expectedHitRate;
+const remainingDBQueries = current.queriesPerDay - cachedQueriesPerDay;
+
+// DB cost reduction (fewer queries = can use smaller instance)
+const dbLoadReduction = cachedQueriesPerDay / current.queriesPerDay;
+const newDBCost = current.dbCostPerMonth _ (1 - dbLoadReduction _ 0.6);
+// 0.6 factor: reducing queries by 80% does not reduce cost by 80%
+// because you still need baseline capacity
+
+const totalNewCost = newDBCost + proposed.cacheCostPerMonth;
+const monthlySavings = current.dbCostPerMonth - totalNewCost;
+
+// Latency improvement
+const currentAvgLatency = current.avgQueryLatencyMs;
+const newAvgLatency =
+proposed.expectedHitRate _ proposed.cacheLatencyMs +
+(1 - proposed.expectedHitRate) _ current.avgQueryLatencyMs;
+
+return {
+currentMonthlyCost: "$" + current.dbCostPerMonth,
+    newMonthlyCost: "$" + Math.round(totalNewCost),
+monthlySavings: "$" + Math.round(monthlySavings),
+latencyBefore: currentAvgLatency + "ms",
+latencyAfter: newAvgLatency.toFixed(1) + "ms",
+latencyImprovement: Math.round((1 - newAvgLatency / currentAvgLatency) _ 100) + "%",
+breakEvenMonths: monthlySavings > 0
+? Math.ceil(proposed.implementationHours _ proposed.engineerHourlyCost / monthlySavings)
+: "Never — caching costs more than it saves at this scale",
+};
+}
+
+console.log(cachingROI(
+{
+dbCostPerMonth: 200,
+queriesPerDay: 5_000_000,
+avgQueryLatencyMs: 8,
+},
+{
+cacheCostPerMonth: 30,
+expectedHitRate: 0.85,
+cacheLatencyMs: 1,
+implementationHours: 40,
+engineerHourlyCost: 75,
+}
+));
+
+// Try with a smaller scale where caching might not be worth it
+console.log(cachingROI(
+{
+dbCostPerMonth: 50,
+queriesPerDay: 100_000,
+avgQueryLatencyMs: 5,
+},
+{
+cacheCostPerMonth: 15,
+expectedHitRate: 0.70,
+cacheLatencyMs: 1,
+implementationHours: 40,
+engineerHourlyCost: 75,
+}
+));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why is vertical scaling (bigger server) insufficient at 100K DAU?"
+  options={[
+    "Because 100K users is too many for any single machine",
+    "Because doubling server cost yields diminishing throughput returns, and a single server remains a single point of failure",
+    "Because vertical scaling is more expensive than horizontal scaling at every scale",
+    "Because cloud providers do not offer servers large enough",
+  ]}
+  answer={1}
+  explanation="Vertical scaling follows a sub-linear cost-performance curve — doubling price gives roughly 40% more throughput. Worse, no amount of CPU can fix the single-point-of-failure problem. Horizontal scaling addresses both throughput and reliability."
+/>
+
+<Quiz
+  question="What is the 'read-your-own-writes' problem with read replicas?"
+  options={[
+    "Replicas cannot process SELECT queries on recently written tables",
+    "A user writes data to the primary but reads from a replica that has not received the change yet",
+    "Write operations are accidentally sent to replicas instead of the primary",
+    "The application cache contains stale data from before the write",
+  ]}
+  answer={1}
+  explanation="Replication lag means changes on the primary may take 10-100ms to propagate to replicas. If a user creates a post and immediately views their profile, the post may not appear. Routing recent-write reads to the primary solves this."
+/>
+
+<FillBlank
+  question="A connection pooler like PgBouncer multiplexes many application connections onto fewer ______ connections."
+  answer="database"
+/>
+
+## What you learned
+
+- At 100K DAU, the database is almost always the bottleneck — caching with cache-aside pattern can eliminate 80-95% of read queries
+- Read replicas horizontally scale read throughput, but replication lag requires read-your-own-writes routing to maintain user-facing consistency
+- Connection pooling (PgBouncer) is essential when multiple app servers compete for a limited database connection pool

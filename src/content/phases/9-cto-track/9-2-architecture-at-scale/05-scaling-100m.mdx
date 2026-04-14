@@ -1,0 +1,409 @@
+---
+title: "Scaling to 100M Users"
+description: "Global distribution, database sharding, eventual consistency, and the architectural patterns that separate regional products from global platforms."
+phase: 9
+module: "9-2-architecture-at-scale"
+order: 5
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "evaluate"
+  sfia: 6
+  dreyfus: "proficient"
+vocabulary:
+  - sharding
+  - eventual-consistency
+  - partition-tolerance
+  - global-load-balancing
+  - conflict-resolution
+---
+
+## Why this matters
+
+At 100M users, physics becomes your constraint. Light takes 67ms to cross the Atlantic in fiber. No amount of code optimization fixes geography. Your database cannot be in one place because your users are everywhere. Data must be distributed, which means it will be inconsistent — at least temporarily. The systems that succeed at this scale are the ones that embrace eventual consistency as a feature, not fight it as a bug.
+
+## The geography problem
+
+A single-region architecture hits a wall when 40% of your users are on another continent. Even with a CDN handling static assets, every authenticated API call still routes to your origin region. At 100M DAU, that is hundreds of thousands of requests per second crossing oceans.
+
+```javascript
+// Multi-region latency modeling
+function modelGlobalLatency(config) {
+  const { regions, userDistribution, originRegion } = config;
+
+  // Baseline latency between regions (round-trip, ms)
+  const interRegionLatency = {
+    "us-east_eu-west": 80,
+    "us-east_ap-southeast": 200,
+    "us-east_ap-northeast": 160,
+    "eu-west_ap-southeast": 160,
+    "eu-west_ap-northeast": 130,
+    "ap-southeast_ap-northeast": 70,
+  };
+
+  function getLatency(from, to) {
+    if (from === to) return 2;
+    const key = [from, to].sort().join("_");
+    return interRegionLatency[key] || 150;
+  }
+
+  // Single-region architecture: everything goes to origin
+  const singleRegionAvg = Object.entries(userDistribution).reduce(
+    (sum, [region, percent]) => sum + getLatency(region, originRegion) * percent,
+    0
+  );
+
+  // Multi-region architecture: users hit nearest region
+  const multiRegionAvg = Object.entries(userDistribution).reduce(
+    (sum, [region, percent]) => sum + getLatency(region, region) * percent,
+    0
+  );
+
+  // Cross-region write latency (replication cost)
+  const replicationOverhead = Math.max(
+    ...Object.keys(userDistribution).map((r) => getLatency(r, originRegion))
+  );
+
+  return {
+    singleRegionAvgLatency: `${Math.round(singleRegionAvg)}ms`,
+    multiRegionAvgLatency: `${Math.round(multiRegionAvg)}ms`,
+    improvement: `${Math.round(singleRegionAvg - multiRegionAvg)}ms faster`,
+    replicationLatency: `${replicationOverhead}ms for cross-region writes`,
+    p95ForSingleRegion: `${Math.round(singleRegionAvg * 2.5)}ms`,
+    p95ForMultiRegion: `${Math.round(multiRegionAvg * 3)}ms`,
+  };
+}
+
+console.log(
+  modelGlobalLatency({
+    regions: ["us-east", "eu-west", "ap-southeast", "ap-northeast"],
+    userDistribution: {
+      "us-east": 0.35,
+      "eu-west": 0.3,
+      "ap-southeast": 0.2,
+      "ap-northeast": 0.15,
+    },
+    originRegion: "us-east",
+  })
+);
+```
+
+## Database sharding
+
+At 100M users, a single database — even with read replicas — cannot handle the write volume. Sharding splits your data across multiple independent database instances. Each shard holds a subset of the data. The shard key determines which shard holds which data.
+
+Choosing the wrong shard key is one of the most expensive mistakes in distributed systems. Resharding a live database at scale takes months.
+
+```javascript
+// Shard key analysis
+function analyzeShardKey(options) {
+  return options.map((option) => {
+    const evenDistribution = option.cardinalityEstimate > option.shardCount * 1000;
+    const hotSpotRisk = option.accessPatternSkew > 0.3;
+    const crossShardQueryPercent = option.queriesNeedingMultipleShards;
+
+    let score = 100;
+    if (!evenDistribution) score -= 30;
+    if (hotSpotRisk) score -= 25;
+    score -= crossShardQueryPercent * 0.5; // Each percent of cross-shard queries costs
+
+    return {
+      key: option.name,
+      score,
+      risks: [
+        !evenDistribution && "Low cardinality — some shards will be much larger",
+        hotSpotRisk &&
+          `Access skew ${(option.accessPatternSkew * 100).toFixed(0)}% — hot shards will throttle`,
+        crossShardQueryPercent > 20 &&
+          `${crossShardQueryPercent}% queries span shards — expensive scatter/gather`,
+      ].filter(Boolean),
+      recommendation: score >= 80 ? "GOOD" : score >= 50 ? "ACCEPTABLE" : "AVOID",
+    };
+  });
+}
+
+console.log(
+  analyzeShardKey([
+    {
+      name: "user_id",
+      cardinalityEstimate: 100_000_000,
+      shardCount: 64,
+      accessPatternSkew: 0.05,
+      queriesNeedingMultipleShards: 5,
+    },
+    {
+      name: "country_code",
+      cardinalityEstimate: 195,
+      shardCount: 64,
+      accessPatternSkew: 0.6, // US/India/China dominate
+      queriesNeedingMultipleShards: 30,
+    },
+    {
+      name: "created_date",
+      cardinalityEstimate: 3650,
+      shardCount: 64,
+      accessPatternSkew: 0.8, // Recent data accessed far more
+      queriesNeedingMultipleShards: 60,
+    },
+    {
+      name: "hash(user_id)",
+      cardinalityEstimate: 100_000_000,
+      shardCount: 64,
+      accessPatternSkew: 0.02, // Near-uniform
+      queriesNeedingMultipleShards: 5,
+    },
+  ])
+);
+```
+
+## Eventual consistency is a feature
+
+At global scale, you cannot have both perfect consistency and acceptable latency. The CAP theorem says you get to pick two of three: Consistency, Availability, Partition tolerance. Since network partitions will happen, your real choice is between consistency and availability during failures.
+
+Most user-facing features tolerate eventual consistency. A like count that is 2 seconds behind is fine. A bank balance that is 2 seconds behind is not.
+
+```javascript
+// Consistency requirements classifier
+function classifyConsistencyNeeds(features) {
+  const classified = features.map((feature) => {
+    // Determine if feature needs strong or eventual consistency
+    const isFinancial = feature.tags.includes("money") || feature.tags.includes("billing");
+    const isCounter = feature.tags.includes("counter") || feature.tags.includes("analytics");
+    const isUserGenerated = feature.tags.includes("content") || feature.tags.includes("social");
+    const isAuth = feature.tags.includes("auth") || feature.tags.includes("permission");
+
+    let consistency;
+    let maxStalenessSeconds;
+    let conflictStrategy;
+
+    if (isFinancial || isAuth) {
+      consistency = "strong";
+      maxStalenessSeconds = 0;
+      conflictStrategy = "reject — require read-before-write with locks";
+    } else if (isCounter) {
+      consistency = "eventual";
+      maxStalenessSeconds = 30;
+      conflictStrategy = "CRDT counter — merge by summing deltas";
+    } else if (isUserGenerated) {
+      consistency = "eventual";
+      maxStalenessSeconds = 5;
+      conflictStrategy = "last-writer-wins with vector clocks";
+    } else {
+      consistency = "eventual";
+      maxStalenessSeconds = 10;
+      conflictStrategy = "last-writer-wins";
+    }
+
+    return {
+      feature: feature.name,
+      consistency,
+      maxStalenessSeconds,
+      conflictStrategy,
+      canRunInAllRegions: consistency === "eventual",
+    };
+  });
+
+  const strongCount = classified.filter((c) => c.consistency === "strong").length;
+
+  return {
+    features: classified,
+    summary: {
+      strongConsistency: strongCount,
+      eventualConsistency: classified.length - strongCount,
+      recommendation:
+        strongCount <= classified.length * 0.2
+          ? "Most features are eventual — multi-region active-active is viable"
+          : "Too many strong-consistency features — consider active-passive for writes",
+    },
+  };
+}
+
+console.log(
+  JSON.stringify(
+    classifyConsistencyNeeds([
+      { name: "User profile", tags: ["content"] },
+      { name: "Payment processing", tags: ["money", "billing"] },
+      { name: "Like count", tags: ["counter", "social"] },
+      { name: "Comment thread", tags: ["content", "social"] },
+      { name: "Access control", tags: ["auth", "permission"] },
+      { name: "View count", tags: ["counter", "analytics"] },
+      { name: "Search index", tags: ["content"] },
+      { name: "Notification feed", tags: ["social"] },
+    ]),
+    null,
+    2
+  )
+);
+```
+
+## Conflict resolution at scale
+
+When the same data can be written in multiple regions simultaneously, conflicts are inevitable. You need a conflict resolution strategy defined before the conflict happens, not after.
+
+```javascript
+// Conflict resolution simulator
+function simulateConflicts(config) {
+  const { writesPerSecondGlobal, regionCount, conflictRatePercent, replicationLagMs } = config;
+
+  const conflictsPerSecond = (writesPerSecondGlobal * conflictRatePercent) / 100;
+  const conflictsPerDay = Math.round(conflictsPerSecond * 86400);
+
+  // Cost of different resolution strategies
+  const strategies = {
+    lastWriterWins: {
+      dataLossRisk: `${conflictsPerDay} potential overwrites/day`,
+      latencyImpact: "0ms — no coordination needed",
+      complexity: "Low",
+      bestFor: "Counters, caches, non-critical metadata",
+    },
+    mergeFunctions: {
+      dataLossRisk: "None if merge logic is correct",
+      latencyImpact: `${replicationLagMs}ms per merge`,
+      complexity: "High — custom merge logic per data type",
+      bestFor: "Documents, collaborative editing, shopping carts",
+    },
+    singleLeaderPerKey: {
+      dataLossRisk: "None — conflicts prevented",
+      latencyImpact: `${replicationLagMs * (regionCount - 1)}ms for non-leader regions`,
+      complexity: "Medium — need leader election per key range",
+      bestFor: "Financial data, inventory, access control",
+    },
+  };
+
+  return {
+    conflictsPerSecond: conflictsPerSecond.toFixed(1),
+    conflictsPerDay: conflictsPerDay.toLocaleString(),
+    strategies,
+    recommendation:
+      conflictsPerDay > 10000
+        ? "Invest in CRDT-based merge functions for high-conflict data types"
+        : "Last-writer-wins with audit logging is sufficient at this conflict rate",
+  };
+}
+
+console.log(
+  simulateConflicts({
+    writesPerSecondGlobal: 5000,
+    regionCount: 4,
+    conflictRatePercent: 0.1,
+    replicationLagMs: 100,
+  })
+);
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a global architecture cost and latency estimator.
+// Given user distribution and requirements, recommend region placement.
+
+function planGlobalArchitecture(usersByRegion, requirements) {
+const regionCosts = {
+"us-east": { computePer1000RPS: 800, storagePer100GB: 23 },
+"eu-west": { computePer1000RPS: 900, storagePer100GB: 26 },
+"ap-southeast": { computePer1000RPS: 950, storagePer100GB: 28 },
+"ap-northeast": { computePer1000RPS: 1000, storagePer100GB: 30 },
+};
+
+const totalUsers = Object.values(usersByRegion).reduce((a, b) => a + b, 0);
+
+// Determine which regions need full deployments
+const regionPlan = Object.entries(usersByRegion).map(([region, users]) => {
+const percentOfTotal = users / totalUsers;
+const rps = Math.round((users \* 20) / 86400); // 20 requests/DAU/day
+const costs = regionCosts[region];
+
+    const needsFullDeployment = percentOfTotal > 0.1; // > 10% of users
+    const estimatedMonthlyCost = needsFullDeployment
+      ? Math.round(
+          (rps / 1000) * costs.computePer1000RPS +
+          (requirements.storageGB * percentOfTotal / 100) * costs.storagePer100GB
+        )
+      : 0;
+
+    return {
+      region,
+      users: users.toLocaleString(),
+      percentOfTotal: (percentOfTotal * 100).toFixed(1) + "%",
+      estimatedRPS: rps,
+      deployment: needsFullDeployment ? "FULL" : "CDN ONLY",
+      estimatedMonthlyCost: "$" + estimatedMonthlyCost,
+    };
+
+});
+
+const totalMonthlyCost = regionPlan.reduce(
+(sum, r) => sum + parseInt(r.estimatedMonthlyCost.replace("$", "")),
+0
+);
+
+// Replication topology
+const fullRegions = regionPlan.filter((r) => r.deployment === "FULL");
+const replicationLinks = fullRegions.length \* (fullRegions.length - 1) / 2;
+
+return {
+regionPlan,
+totalMonthlyCost: "$" + totalMonthlyCost.toLocaleString(),
+replicationTopology: {
+fullRegions: fullRegions.length,
+replicationLinks,
+strategy: fullRegions.length <= 2
+? "Active-passive with failover"
+: "Active-active with conflict resolution",
+},
+};
+}
+
+console.log(JSON.stringify(
+planGlobalArchitecture(
+{
+"us-east": 35_000_000,
+"eu-west": 30_000_000,
+"ap-southeast": 20_000_000,
+"ap-northeast": 15_000_000,
+},
+{ storageGB: 50_000 }
+),
+null, 2
+));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why is 'country_code' a poor shard key for a global application?"
+  options={[
+    "Country codes are strings, and databases can only shard on integers",
+    "Low cardinality (195 countries) combined with extreme access skew means a few shards handle most traffic",
+    "Country codes change too frequently to be a stable shard key",
+    "Sharding by country violates GDPR data residency requirements",
+  ]}
+  answer={1}
+  explanation="With only 195 unique values across 64 shards, distribution is already uneven. Worse, countries like the US, India, and China dominate traffic, creating hot shards that throttle while other shards sit idle."
+/>
+
+<Quiz
+  question="Which consistency model is appropriate for a 'like count' feature in a globally distributed system?"
+  options={[
+    "Strong consistency — users must see exact counts at all times",
+    "Eventual consistency with CRDT counters — each region increments locally, counts merge by summing deltas",
+    "Read-your-own-writes only — users see their own likes immediately but others see stale counts",
+    "No consistency guarantee — counts are purely cosmetic",
+  ]}
+  answer={1}
+  explanation="CRDT counters allow every region to accept increments locally without coordination. Counters converge automatically by summing deltas from all regions. A few seconds of staleness is invisible to users for social counters."
+/>
+
+<FillBlank
+  question="At global scale, the real choice in the CAP theorem is between consistency and ______ during network partitions."
+  answer="availability"
+/>
+
+## What you learned
+
+- At 100M users, network latency from geography becomes the dominant constraint — multi-region deployment with data replication is unavoidable
+- Shard key selection determines whether your database scales linearly or collapses under hot spots — hash-based keys with high cardinality distribute load most evenly
+- Most user-facing features tolerate eventual consistency, and classifying each feature's consistency needs early prevents overengineering the 80% that work fine with staleness

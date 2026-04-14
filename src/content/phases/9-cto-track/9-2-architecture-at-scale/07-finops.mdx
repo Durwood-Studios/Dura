@@ -1,0 +1,440 @@
+---
+title: "FinOps"
+description: "Cloud cost management, reserved instances, spot instances, rightsizing, and the engineering practices that prevent cloud bills from eating your runway."
+phase: 9
+module: "9-2-architecture-at-scale"
+order: 7
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "evaluate"
+  sfia: 6
+  dreyfus: "proficient"
+vocabulary:
+  - finops
+  - reserved-instance
+  - spot-instance
+  - rightsizing
+  - unit-economics
+---
+
+## Why this matters
+
+Cloud bills are the silent startup killer. The convenience of "spin up anything instantly" becomes a liability when nobody tracks what is running. Companies routinely discover they are spending 30-40% of their cloud budget on resources that are idle, oversized, or forgotten. FinOps — financial operations for cloud — is the discipline of making cloud spending visible, accountable, and optimized. As a technical leader, cloud cost is as much your responsibility as uptime.
+
+## Understanding your cloud bill
+
+Cloud pricing is deliberately complex. You pay for compute by the second, storage by the GB-month, data transfer by the GB (but only egress, never ingress), and every managed service has its own unit. The first step is decomposing your bill into categories you can act on.
+
+```javascript
+// Cloud bill analyzer
+function analyzeCloudBill(lineItems) {
+  const categories = {};
+
+  lineItems.forEach((item) => {
+    if (!categories[item.category]) {
+      categories[item.category] = { total: 0, items: [] };
+    }
+    categories[item.category].total += item.monthlyCost;
+    categories[item.category].items.push(item);
+  });
+
+  // Sort categories by cost
+  const sorted = Object.entries(categories)
+    .sort(([, a], [, b]) => b.total - a.total)
+    .map(([name, data]) => ({
+      category: name,
+      monthlyCost: `$${Math.round(data.total)}`,
+      topItems: data.items
+        .sort((a, b) => b.monthlyCost - a.monthlyCost)
+        .slice(0, 3)
+        .map((i) => `${i.name}: $${Math.round(i.monthlyCost)}`),
+    }));
+
+  const totalMonthly = lineItems.reduce((sum, i) => sum + i.monthlyCost, 0);
+
+  // The top 3 categories are usually 80%+ of spend
+  const topThreePct =
+    sorted.slice(0, 3).reduce((sum, c) => sum + parseInt(c.monthlyCost.replace("$", "")), 0) /
+    totalMonthly;
+
+  return {
+    totalMonthly: `$${Math.round(totalMonthly).toLocaleString()}`,
+    annualized: `$${Math.round(totalMonthly * 12).toLocaleString()}`,
+    categories: sorted,
+    topThreeAccountFor: `${Math.round(topThreePct * 100)}% of total spend`,
+  };
+}
+
+console.log(
+  JSON.stringify(
+    analyzeCloudBill([
+      { name: "Production DB (RDS r6g.2xlarge)", category: "Database", monthlyCost: 1200 },
+      { name: "Read Replica 1", category: "Database", monthlyCost: 800 },
+      { name: "Read Replica 2", category: "Database", monthlyCost: 800 },
+      { name: "App servers (8x c6g.xlarge)", category: "Compute", monthlyCost: 1100 },
+      { name: "Background workers (4x m6g.large)", category: "Compute", monthlyCost: 450 },
+      { name: "NAT Gateway", category: "Networking", monthlyCost: 350 },
+      { name: "Data transfer out", category: "Networking", monthlyCost: 600 },
+      { name: "CloudFront CDN", category: "Networking", monthlyCost: 200 },
+      { name: "S3 storage (2TB)", category: "Storage", monthlyCost: 46 },
+      { name: "EBS volumes", category: "Storage", monthlyCost: 180 },
+      { name: "ElastiCache Redis", category: "Cache", monthlyCost: 300 },
+      { name: "Elasticsearch", category: "Search", monthlyCost: 500 },
+      { name: "CloudWatch logs", category: "Observability", monthlyCost: 250 },
+      { name: "Datadog APM", category: "Observability", monthlyCost: 400 },
+    ]),
+    null,
+    2
+  )
+);
+```
+
+## Reserved instances and savings plans
+
+On-demand pricing is the default and most expensive option. If you know you will run a workload for 1-3 years, reserved instances or savings plans cut costs 30-60%. The tradeoff is commitment — you pay whether you use the capacity or not.
+
+```javascript
+// Reserved instance ROI calculator
+function reservedInstanceROI(workload) {
+  const {
+    instanceType,
+    onDemandHourly,
+    reservedMonthly1Year,
+    reservedMonthly3Year,
+    currentUtilizationPercent,
+    expectedGrowthPercent,
+    instanceCount,
+  } = workload;
+
+  const onDemandMonthly = onDemandHourly * 730 * instanceCount; // 730 hours/month avg
+  const onDemandYearly = onDemandMonthly * 12;
+
+  const reserved1YearYearly = reservedMonthly1Year * 12 * instanceCount;
+  const reserved3YearYearly = reservedMonthly3Year * 12 * instanceCount;
+
+  // Risk: if you over-commit, you waste money
+  // If utilization is below 70%, reserved instances may not pay off
+  const utilizationRisk =
+    currentUtilizationPercent < 70
+      ? "WARNING: Current utilization is low. Rightsize before committing."
+      : currentUtilizationPercent < 50
+        ? "DANGER: Under 50% utilization. Reserved instances will waste money."
+        : "Utilization supports commitment.";
+
+  // Growth consideration: will you need more or fewer instances?
+  const instancesInOneYear = Math.ceil(instanceCount * (1 + expectedGrowthPercent / 100));
+  const instancesInThreeYears = Math.ceil(
+    instanceCount * Math.pow(1 + expectedGrowthPercent / 100, 3)
+  );
+
+  return {
+    instanceType,
+    currentInstances: instanceCount,
+    onDemandYearly: `$${Math.round(onDemandYearly).toLocaleString()}`,
+    reserved1Year: {
+      yearlyCost: `$${Math.round(reserved1YearYearly).toLocaleString()}`,
+      savings: `$${Math.round(onDemandYearly - reserved1YearYearly).toLocaleString()}`,
+      savingsPercent: `${Math.round((1 - reserved1YearYearly / onDemandYearly) * 100)}%`,
+    },
+    reserved3Year: {
+      yearlyCost: `$${Math.round(reserved3YearYearly).toLocaleString()}`,
+      savings: `$${Math.round(onDemandYearly - reserved3YearYearly).toLocaleString()}`,
+      savingsPercent: `${Math.round((1 - reserved3YearYearly / onDemandYearly) * 100)}%`,
+    },
+    utilizationRisk,
+    growthForecast: {
+      instancesIn1Year: instancesInOneYear,
+      instancesIn3Years: instancesInThreeYears,
+      recommendation:
+        instancesInThreeYears > instanceCount * 2
+          ? "Fast growth — use 1-year terms and re-evaluate"
+          : "Stable growth — 3-year terms are safe",
+    },
+  };
+}
+
+console.log(
+  JSON.stringify(
+    reservedInstanceROI({
+      instanceType: "c6g.xlarge",
+      onDemandHourly: 0.136,
+      reservedMonthly1Year: 63,
+      reservedMonthly3Year: 42,
+      currentUtilizationPercent: 72,
+      expectedGrowthPercent: 25,
+      instanceCount: 8,
+    }),
+    null,
+    2
+  )
+);
+```
+
+## Rightsizing
+
+Rightsizing means matching instance sizes to actual usage. Most teams provision for peak and run at 20-30% utilization average. Dropping one instance size saves 40-50% on that resource.
+
+```javascript
+// Rightsizing analyzer
+function rightsizeAnalysis(instances) {
+  return instances.map((instance) => {
+    const cpuHeadroom = 100 - instance.avgCPUPercent;
+    const memHeadroom = 100 - instance.avgMemoryPercent;
+
+    let recommendation;
+    let savingsEstimate;
+
+    if (instance.avgCPUPercent < 20 && instance.avgMemoryPercent < 20) {
+      recommendation = "DOWNSIZE 2 TIERS";
+      savingsEstimate = 0.75;
+    } else if (instance.avgCPUPercent < 40 && instance.avgMemoryPercent < 40) {
+      recommendation = "DOWNSIZE 1 TIER";
+      savingsEstimate = 0.45;
+    } else if (instance.peakCPUPercent > 90 || instance.peakMemoryPercent > 90) {
+      recommendation = "UPSIZE or add autoscaling";
+      savingsEstimate = -0.5; // Costs more
+    } else {
+      recommendation = "RIGHT-SIZED";
+      savingsEstimate = 0;
+    }
+
+    return {
+      name: instance.name,
+      currentCost: `$${instance.monthlyCost}`,
+      avgCPU: `${instance.avgCPUPercent}%`,
+      peakCPU: `${instance.peakCPUPercent}%`,
+      avgMemory: `${instance.avgMemoryPercent}%`,
+      peakMemory: `${instance.peakMemoryPercent}%`,
+      recommendation,
+      estimatedNewCost: `$${Math.round(instance.monthlyCost * (1 - savingsEstimate))}`,
+      monthlySavings: `$${Math.round(instance.monthlyCost * savingsEstimate)}`,
+    };
+  });
+}
+
+const analysis = rightsizeAnalysis([
+  {
+    name: "api-server-1",
+    monthlyCost: 140,
+    avgCPUPercent: 15,
+    peakCPUPercent: 45,
+    avgMemoryPercent: 25,
+    peakMemoryPercent: 50,
+  },
+  {
+    name: "api-server-2",
+    monthlyCost: 140,
+    avgCPUPercent: 12,
+    peakCPUPercent: 40,
+    avgMemoryPercent: 20,
+    peakMemoryPercent: 45,
+  },
+  {
+    name: "worker-1",
+    monthlyCost: 110,
+    avgCPUPercent: 65,
+    peakCPUPercent: 88,
+    avgMemoryPercent: 50,
+    peakMemoryPercent: 70,
+  },
+  {
+    name: "staging-server",
+    monthlyCost: 140,
+    avgCPUPercent: 5,
+    peakCPUPercent: 15,
+    avgMemoryPercent: 8,
+    peakMemoryPercent: 20,
+  },
+  {
+    name: "ml-inference",
+    monthlyCost: 300,
+    avgCPUPercent: 35,
+    peakCPUPercent: 92,
+    avgMemoryPercent: 70,
+    peakMemoryPercent: 95,
+  },
+]);
+
+console.log(JSON.stringify(analysis, null, 2));
+
+const totalSavings = analysis.reduce(
+  (sum, a) => sum + parseInt(a.monthlySavings.replace("$", "")),
+  0
+);
+console.log(`Total monthly savings opportunity: $${totalSavings}`);
+```
+
+## Unit economics
+
+The most important FinOps metric is cost per unit of value — cost per user, cost per transaction, cost per API call. Absolute cloud spend going up is fine if it goes up slower than revenue. Cloud spend per customer going up is a problem.
+
+```javascript
+// Unit economics tracker
+function unitEconomics(months) {
+  return months.map((month) => {
+    const costPerUser = month.cloudSpend / month.activeUsers;
+    const costPerTransaction = month.cloudSpend / month.transactions;
+    const cloudAsPercentOfRevenue = (month.cloudSpend / month.revenue) * 100;
+
+    return {
+      month: month.name,
+      activeUsers: month.activeUsers.toLocaleString(),
+      cloudSpend: `$${month.cloudSpend.toLocaleString()}`,
+      revenue: `$${month.revenue.toLocaleString()}`,
+      costPerUser: `$${costPerUser.toFixed(3)}`,
+      costPerTransaction: `$${costPerTransaction.toFixed(4)}`,
+      cloudPercentOfRevenue: `${cloudAsPercentOfRevenue.toFixed(1)}%`,
+      trend:
+        cloudAsPercentOfRevenue > 30
+          ? "CRITICAL — cloud costs eating margins"
+          : cloudAsPercentOfRevenue > 15
+            ? "WARNING — watch closely"
+            : "HEALTHY",
+    };
+  });
+}
+
+console.log(
+  unitEconomics([
+    { name: "Jan", activeUsers: 50000, transactions: 200000, cloudSpend: 4200, revenue: 25000 },
+    { name: "Feb", activeUsers: 65000, transactions: 280000, cloudSpend: 5100, revenue: 32000 },
+    { name: "Mar", activeUsers: 80000, transactions: 350000, cloudSpend: 7800, revenue: 38000 },
+    { name: "Apr", activeUsers: 95000, transactions: 420000, cloudSpend: 11500, revenue: 44000 },
+  ])
+);
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a FinOps optimization planner.
+// Analyze current spend and produce a prioritized list of savings actions.
+
+function finopsOptimizationPlan(currentSpend) {
+const actions = [];
+
+// Check for rightsizing opportunities
+currentSpend.instances.forEach((inst) => {
+if (inst.avgUtilizationPercent < 30) {
+const savings = inst.monthlyCost \* 0.45;
+actions.push({
+action: "Rightsize " + inst.name,
+type: "rightsizing",
+effort: "low",
+monthlySavings: Math.round(savings),
+risk: "Verify peak utilization before downsizing",
+});
+}
+});
+
+// Check for reserved instance opportunities
+const stableWorkloads = currentSpend.instances.filter(
+(i) => i.ageMonths > 6 && i.avgUtilizationPercent > 50
+);
+if (stableWorkloads.length > 0) {
+const onDemandCost = stableWorkloads.reduce((s, i) => s + i.monthlyCost, 0);
+actions.push({
+action: "Convert " + stableWorkloads.length + " stable instances to 1-year reserved",
+type: "commitment",
+effort: "medium",
+monthlySavings: Math.round(onDemandCost \* 0.35),
+risk: "Locked commitment — ensure workload persists",
+});
+}
+
+// Check for unused resources
+currentSpend.instances
+.filter((i) => i.avgUtilizationPercent < 5)
+.forEach((inst) => {
+actions.push({
+action: "Terminate idle resource: " + inst.name,
+type: "waste-elimination",
+effort: "low",
+monthlySavings: inst.monthlyCost,
+risk: "Confirm resource is truly unused before termination",
+});
+});
+
+// Check data transfer costs
+if (currentSpend.dataTransferMonthly > currentSpend.totalMonthly _ 0.15) {
+actions.push({
+action: "Optimize data transfer — consider VPC endpoints and CDN caching",
+type: "architecture",
+effort: "high",
+monthlySavings: Math.round(currentSpend.dataTransferMonthly _ 0.4),
+risk: "Requires architecture changes — test thoroughly",
+});
+}
+
+// Sort by ROI (savings / effort)
+const effortMultiplier = { low: 1, medium: 2, high: 4 };
+actions.sort(
+(a, b) =>
+b.monthlySavings / effortMultiplier[b.effort] -
+a.monthlySavings / effortMultiplier[a.effort]
+);
+
+const totalSavings = actions.reduce((s, a) => s + a.monthlySavings, 0);
+
+return {
+currentMonthlySpend: "$" + currentSpend.totalMonthly.toLocaleString(),
+    totalPotentialSavings: "$" + totalSavings.toLocaleString() + "/month",
+savingsPercent: Math.round((totalSavings / currentSpend.totalMonthly) \* 100) + "%",
+prioritizedActions: actions.map((a, i) => ({ priority: i + 1, ...a })),
+};
+}
+
+console.log(JSON.stringify(finopsOptimizationPlan({
+totalMonthly: 12000,
+dataTransferMonthly: 2500,
+instances: [
+{ name: "prod-api-1", monthlyCost: 140, avgUtilizationPercent: 65, ageMonths: 14 },
+{ name: "prod-api-2", monthlyCost: 140, avgUtilizationPercent: 60, ageMonths: 14 },
+{ name: "staging-api", monthlyCost: 140, avgUtilizationPercent: 3, ageMonths: 10 },
+{ name: "old-worker", monthlyCost: 110, avgUtilizationPercent: 1, ageMonths: 18 },
+{ name: "prod-worker", monthlyCost: 110, avgUtilizationPercent: 55, ageMonths: 12 },
+{ name: "dev-box", monthlyCost: 200, avgUtilizationPercent: 15, ageMonths: 6 },
+],
+}), null, 2));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should you rightsize instances before purchasing reserved instances?"
+  options={[
+    "Reserved instances are not available for all instance sizes",
+    "Committing to an oversized instance locks you into paying for capacity you do not use",
+    "Rightsizing is required by cloud provider terms of service",
+    "Reserved instances cannot be applied to resized instances",
+  ]}
+  answer={1}
+  explanation="If an instance runs at 25% utilization and you buy a 1-year reservation, you are paying full price for 75% idle capacity for 12 months. Rightsize first, then commit to the smaller instance."
+/>
+
+<Quiz
+  question="What is the most important FinOps metric for a growing company?"
+  options={[
+    "Total monthly cloud spend",
+    "Number of running instances",
+    "Cloud cost per user (or per transaction) over time",
+    "Percentage of instances using reserved pricing",
+  ]}
+  answer={2}
+  explanation="Absolute cloud spend going up is expected during growth. Cost per unit of value going up means your architecture is scaling sub-linearly with your business. Track unit economics to catch inefficiency early."
+/>
+
+<FillBlank
+  question="Companies routinely discover they are spending ______-40% of their cloud budget on idle, oversized, or forgotten resources."
+  answer="30"
+/>
+
+## What you learned
+
+- Cloud bills decompose into compute, storage, networking, and managed services — the top 3 categories typically account for 80%+ of spend and are where optimization efforts should focus
+- Rightsizing (matching instance size to actual utilization) should precede reserved instance commitments — committing to oversized instances locks in waste for 1-3 years
+- Unit economics (cost per user, cost per transaction) is the metric that matters — absolute cloud spend increasing is fine if it grows slower than revenue
