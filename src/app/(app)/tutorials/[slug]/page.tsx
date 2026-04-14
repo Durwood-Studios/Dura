@@ -83,7 +83,7 @@ export default async function TutorialPage({ params }: PageProps): Promise<React
         <p className="mt-2 text-neutral-500">{tutorial.meta.description}</p>
       </div>
 
-      <article className="prose-dura">{tutorial.content}</article>
+      <article>{tutorial.content}</article>
     </div>
   );
 }

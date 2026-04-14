@@ -88,7 +88,7 @@ export default async function HowToGuidePage({ params }: PageProps): Promise<Rea
         <p className="mt-2 text-neutral-500">{guide.meta.description}</p>
       </div>
 
-      <article className="prose-dura">{guide.content}</article>
+      <article>{guide.content}</article>
     </div>
   );
 }
