@@ -1,0 +1,248 @@
+---
+title: "Microservices"
+description: "Understand when monoliths break, how to draw service boundaries, and how services communicate in distributed systems."
+phase: 8
+module: "8-3-architecture-patterns"
+order: 3
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - microservice
+  - monolith
+  - service-boundary
+  - api-gateway
+  - service-mesh
+  - distributed-system
+---
+
+## Why this matters
+
+"Microservices" is one of the most misunderstood words in software. Teams split monoliths into dozens of services, then spend years fighting network failures, data consistency bugs, and deployment complexity they didn't have before. The architecture is powerful — Netflix, Spotify, and Amazon run on it — but only when the problems it solves are problems you actually have. Understanding when to stay monolithic is just as important as understanding how to decompose.
+
+## When monoliths break
+
+A well-structured monolith serves most teams well for years. It breaks when any of these pressures become unbearable:
+
+1. **Team contention** — Multiple teams stepping on each other in the same codebase, with merge conflicts on every deploy.
+2. **Scaling mismatch** — One feature (e.g., image processing) needs 50x the compute of another (e.g., user profile reads), but you can only scale the whole app together.
+3. **Technology lock-in** — A subsystem needs a different language, runtime, or database, but the monolith forces everything into one stack.
+4. **Deploy risk** — A one-line change to the payment module requires redeploying the entire application.
+
+If none of these hurt, a monolith is almost certainly the better choice. Microservices trade code complexity for operational complexity — and operational complexity is harder to see in a code review.
+
+## Drawing service boundaries
+
+The hardest part of microservices isn't the code — it's deciding where to cut. A bad boundary creates services that can't function without calling each other on every request, which is a distributed monolith with extra latency.
+
+Good boundaries align with **business capabilities**, not technical layers.
+
+```javascript
+// BAD boundaries — split by technical layer.
+// Every user action crosses all three services.
+// "UserInterface Service" → "BusinessLogic Service" → "Database Service"
+
+// GOOD boundaries — split by business domain.
+// Each service owns its data and logic end-to-end.
+// "Order Service"    → owns orders table, order logic, order API
+// "Inventory Service" → owns stock table, reservation logic, stock API
+// "Shipping Service"  → owns shipments table, carrier logic, tracking API
+```
+
+A useful test: can this service be developed, deployed, and operated by a single team without constant coordination with other teams? If yes, the boundary is probably right.
+
+## Communication patterns
+
+Services must talk to each other. The two fundamental styles are synchronous (request/response) and asynchronous (events/messages).
+
+### Synchronous — HTTP or gRPC
+
+One service calls another and waits for a response. Simple to understand, but creates temporal coupling: if the downstream service is down, the caller fails.
+
+```javascript
+// Order Service calls Inventory Service synchronously.
+async function placeOrder(orderData) {
+  // This fails if Inventory Service is unreachable.
+  const stockCheck = await fetch("http://inventory-service/api/reserve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: orderData.items,
+      orderId: orderData.id,
+    }),
+  });
+
+  if (!stockCheck.ok) {
+    const error = await stockCheck.json();
+    throw new Error(`Reservation failed: ${error.reason}`);
+  }
+
+  const reservation = await stockCheck.json();
+
+  // Proceed with order creation using the reservation confirmation.
+  return createOrder({ ...orderData, reservationId: reservation.id });
+}
+```
+
+### Asynchronous — events via a message broker
+
+The producer emits an event and moves on. Consumers process it when they're ready. This removes temporal coupling but introduces eventual consistency — the system is not immediately up to date everywhere.
+
+```javascript
+// Order Service publishes an event after creating an order.
+async function placeOrder(orderData) {
+  const order = await createOrder(orderData);
+
+  // Publish and forget — Inventory Service will consume this later.
+  await messageBroker.publish("orders.created", {
+    orderId: order.id,
+    items: order.items,
+    createdAt: new Date().toISOString(),
+  });
+
+  return order;
+}
+
+// Inventory Service subscribes and processes the event.
+messageBroker.subscribe("orders.created", async (event) => {
+  try {
+    await reserveStock(event.orderId, event.items);
+    await messageBroker.publish("inventory.reserved", {
+      orderId: event.orderId,
+    });
+  } catch (error) {
+    await messageBroker.publish("inventory.reservationFailed", {
+      orderId: event.orderId,
+      reason: error.message,
+    });
+  }
+});
+```
+
+### Choosing between them
+
+Use synchronous calls when the caller genuinely cannot proceed without the response (e.g., checking if a username exists during registration). Use asynchronous events when the caller can proceed and the downstream work can happen later (e.g., sending a welcome email after registration).
+
+## The API Gateway
+
+Clients shouldn't call 15 different services directly. An API Gateway sits at the edge and routes requests to the right service, handles authentication, rate limiting, and response aggregation.
+
+```javascript
+// Simplified gateway routing — real gateways use Kong, Envoy, or cloud-native solutions.
+const serviceRoutes = {
+  "/api/orders": "http://order-service:3001",
+  "/api/inventory": "http://inventory-service:3002",
+  "/api/shipping": "http://shipping-service:3003",
+};
+
+async function gatewayHandler(request) {
+  const prefix = Object.keys(serviceRoutes).find((p) => request.url.startsWith(p));
+
+  if (!prefix) {
+    return new Response("Not Found", { status: 404 });
+  }
+
+  const targetUrl = request.url.replace(prefix, serviceRoutes[prefix]);
+  return fetch(targetUrl, {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+  });
+}
+```
+
+## What microservices cost
+
+Every network call can fail, time out, or return stale data. You need distributed tracing to debug issues. You need container orchestration to deploy. You need schema registries or contract tests to prevent breaking changes between services. These are not optional extras — they are the minimum operational requirements.
+
+Start with a monolith. Extract services only when the pain of coupling exceeds the pain of distribution.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Simulate a microservices communication flow.
+// Build three "services" as plain objects with async methods.
+// Wire them together using an event bus.
+
+function createEventBus() {
+const subs = {};
+return {
+subscribe(event, handler) {
+if (!subs[event]) subs[event] = [];
+subs[event].push(handler);
+},
+async publish(event, data) {
+for (const handler of (subs[event] || [])) {
+await handler(data);
+}
+},
+};
+}
+
+const bus = createEventBus();
+const log = [];
+
+// Order Service: creates an order and publishes "order.created"
+async function createOrder(item, quantity) {
+const order = { id: "ORD-1", item, quantity, status: "created" };
+log.push("Order created");
+await bus.publish("order.created", order);
+return order;
+}
+
+// Inventory Service: listens for "order.created", reserves stock,
+// publishes "stock.reserved"
+// YOUR CODE HERE — subscribe to "order.created"
+
+// Shipping Service: listens for "stock.reserved", schedules delivery
+// YOUR CODE HERE — subscribe to "stock.reserved"
+
+// --- Test ---
+await createOrder("Laptop", 1);
+console.log(log[0] === "Order created"); // true
+console.log(log[1] === "Stock reserved"); // true
+console.log(log[2] === "Shipping scheduled"); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the biggest risk of drawing microservice boundaries along technical layers (UI, business logic, database) instead of business domains?"
+  options={[
+    "Each service becomes too large to deploy",
+    "Every user action must cross all services, creating a distributed monolith",
+    "It makes testing easier but deployment harder",
+    "Technical boundaries prevent using different programming languages",
+  ]}
+  answer={1}
+  explanation="Technical layer boundaries mean every feature touches every service, defeating the purpose. Business domain boundaries let each service handle a complete capability independently."
+/>
+
+<Quiz
+  question="When should you prefer asynchronous (event-based) communication between services over synchronous HTTP calls?"
+  options={[
+    "Always — synchronous calls are an anti-pattern in microservices",
+    "When the calling service cannot proceed without an immediate response",
+    "When the downstream work can happen later and the caller can proceed without waiting",
+    "Only when using a message broker like Kafka or RabbitMQ",
+  ]}
+  answer={2}
+  explanation="Async communication is preferred when the caller doesn't need an immediate response. This decouples services temporally — if the consumer is slow or briefly down, the work still completes eventually."
+/>
+
+<FillBlank
+  question="An ______ sits at the edge of a microservices system to route requests, handle authentication, and aggregate responses."
+  answer="API Gateway"
+/>
+
+## What you learned
+
+- Monoliths break under team contention, scaling mismatch, technology lock-in, or deploy risk — if none of those apply, stay monolithic
+- Good service boundaries align with business domains, not technical layers, so each service can be developed and deployed independently
+- Synchronous calls create temporal coupling while asynchronous events enable eventual consistency — choose based on whether the caller needs an immediate response

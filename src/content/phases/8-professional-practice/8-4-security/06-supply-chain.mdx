@@ -1,0 +1,341 @@
+---
+title: "Supply Chain Security"
+description: "Audit dependencies, lock versions, verify integrity, and build reproducibly to defend against supply chain attacks."
+phase: 8
+module: "8-4-security"
+order: 6
+estimatedMinutes: 11
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-4"]
+  swebok: ["Software Quality"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - supply-chain-attack
+  - lockfile
+  - dependency-audit
+  - reproducible-build
+  - sbom
+  - semver
+  - integrity-hash
+  - typosquatting
+---
+
+## Why this matters
+
+Your application is not just your code. A typical Node.js project pulls in hundreds of transitive dependencies — each one is code you did not write, running with your application's full permissions. The SolarWinds breach, the event-stream attack, the ua-parser-js hijack, and the colors.js sabotage all exploited the software supply chain. One compromised dependency can steal credentials, exfiltrate data, or deploy ransomware to every machine that installs it.
+
+## The attack surface
+
+Every dependency is a trust decision. When you run `npm install some-package`, you are trusting that the package author, every maintainer, their npm account security, the npm registry infrastructure, and every transitive dependency have not been compromised.
+
+```javascript
+// A seemingly innocent package.json
+{
+  "dependencies": {
+    "express": "^4.18.0"   // 30+ transitive dependencies
+    // Each of those has its own dependencies
+    // Total: potentially 200+ packages you implicitly trust
+  }
+}
+
+// The event-stream attack (2018):
+// 1. Attacker gained maintainer access to a popular package
+// 2. Added a malicious dependency (flatmap-stream)
+// 3. The malicious code targeted a specific Bitcoin wallet app
+// 4. Millions of developers installed the compromised version
+```
+
+## Lockfiles — pinning exact versions
+
+Lockfiles record the exact version, resolved URL, and integrity hash of every installed package. They are your first line of defense against version substitution attacks.
+
+```javascript
+// package-lock.json entry (simplified)
+{
+  "node_modules/express": {
+    "version": "4.18.2",           // Exact version, not a range
+    "resolved": "https://registry.npmjs.org/express/-/express-4.18.2.tgz",
+    "integrity": "sha512-5/PsL6iG...",  // Hash of the actual tarball
+    // If the tarball content changes, this hash will not match
+    // npm will refuse to install it
+  }
+}
+
+// RULES:
+// 1. ALWAYS commit package-lock.json to version control
+// 2. Use "npm ci" in CI/CD (installs from lockfile exactly, fails if mismatch)
+// 3. Never run "npm install" in CI — it can modify the lockfile
+// 4. Review lockfile diffs in pull requests
+
+// In CI/CD pipeline:
+// npm ci          ← installs exact versions from lockfile
+// npm install     ← resolves versions, may change lockfile (NEVER in CI)
+```
+
+## Dependency auditing
+
+Regularly check your dependencies against known vulnerability databases.
+
+```javascript
+// Built-in npm audit
+// $ npm audit
+// Found 3 vulnerabilities (1 moderate, 2 high)
+//
+// $ npm audit --json | jq '.vulnerabilities | keys'
+// ["lodash", "minimist", "node-fetch"]
+
+// Automated auditing in CI
+// .github/workflows/security.yml
+const ciSecurityWorkflow = `
+name: Security Audit
+on:
+  schedule:
+    - cron: '0 9 * * 1'   # Every Monday at 9am
+  push:
+    branches: [main]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm audit --audit-level=high
+        # Fails the build if high or critical vulnerabilities exist
+`;
+
+// Interpreting npm audit results
+function triageVulnerability(vuln) {
+  // Not all vulnerabilities are exploitable in your context
+  const questions = [
+    "Is the vulnerable function actually called in our code path?",
+    "Is the vulnerable package a devDependency (not in production)?",
+    "Is there a patch available?",
+    "Can we update without breaking changes?",
+    "Is a workaround available if we cannot update?",
+  ];
+  return questions;
+}
+```
+
+## SBOMs — knowing what you ship
+
+A Software Bill of Materials (SBOM) is a complete inventory of every component in your software. Increasingly required by regulation (US Executive Order 14028) and enterprise customers.
+
+```javascript
+// Generate an SBOM with a tool like cyclonedx
+// $ npx @cyclonedx/cyclonedx-npm --output-file sbom.json
+
+// An SBOM entry looks like:
+const sbomEntry = {
+  type: "library",
+  name: "express",
+  version: "4.18.2",
+  purl: "pkg:npm/express@4.18.2",
+  licenses: [{ id: "MIT" }],
+  hashes: [
+    {
+      alg: "SHA-256",
+      content: "5a2f9526c4b4e0c3e...",
+    },
+  ],
+};
+
+// Why SBOMs matter:
+// When a new CVE drops for a library, you can instantly answer:
+// "Do we use this library? Which version? In which products?"
+// Without an SBOM, this is a scramble.
+```
+
+## Typosquatting and dependency confusion
+
+Attackers publish packages with names similar to popular ones, hoping developers mistype the name. Dependency confusion exploits how package managers resolve private vs. public packages.
+
+```javascript
+// Typosquatting examples:
+// "expresss" instead of "express"
+// "lodahs" instead of "lodash"
+// "cross-env" vs. "crossenv" (real attack from 2017)
+
+// Defense: verify package names before installing
+function verifyPackage(name) {
+  const checks = {
+    // Check npm for the package metadata
+    hasRecentPublish: "Was it published recently by an unknown author?",
+    hasDownloads: "Does it have significant weekly downloads?",
+    hasRepository: "Does it link to a real, active repository?",
+    hasMaintainers: "Are the maintainers established npm users?",
+    matchesIntent: "Is this the exact package name you intended?",
+  };
+  return checks;
+}
+
+// Dependency confusion defense:
+// Configure .npmrc to scope private packages
+// @mycompany:registry=https://npm.mycompany.com
+// This ensures @mycompany/* packages are never fetched from public npm
+```
+
+## Reproducible builds
+
+A build is reproducible if the same source code, build environment, and build instructions always produce bit-for-bit identical output.
+
+```javascript
+// Dockerfile for reproducible Node.js builds
+const dockerfile = `
+# Pin the exact base image by digest, not just tag
+FROM node:20.11.0-alpine@sha256:abc123...
+
+WORKDIR /app
+
+# Copy lockfile first for layer caching
+COPY package.json package-lock.json ./
+
+# Install from lockfile exactly
+RUN npm ci --ignore-scripts
+
+# Copy source and build
+COPY . .
+RUN npm run build
+
+# Run as non-root user
+USER node
+CMD ["node", "dist/server.js"]
+`;
+
+// Key practices:
+// 1. Pin base images by digest (tags can be overwritten)
+// 2. Use npm ci (not npm install)
+// 3. Pin tool versions in CI (Node, npm, OS packages)
+// 4. Disable postinstall scripts in CI (--ignore-scripts) and audit them
+// 5. Verify build output hash matches expected value
+```
+
+## Automated dependency updates
+
+Keeping dependencies current is itself a security practice. Stale dependencies accumulate vulnerabilities.
+
+```javascript
+// Dependabot configuration (.github/dependabot.yml)
+const dependabotConfig = `
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "security-team"
+    labels:
+      - "dependencies"
+    # Group minor and patch updates to reduce PR noise
+    groups:
+      production-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+`;
+
+// Review process for dependency updates:
+// 1. Does the changelog mention security fixes?
+// 2. Does our test suite pass with the update?
+// 3. Is the version jump reasonable (patch/minor vs. major)?
+// 4. Did the maintainer change? (flag for extra review)
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a dependency auditor that checks for common supply chain risks.
+
+function auditDependency(pkg) {
+const risks = [];
+
+// Check 1: Is the version pinned or using a range?
+if (pkg.version.startsWith("^") || pkg.version.startsWith("~")) {
+risks.push({
+severity: "medium",
+issue: "Version range allows automatic updates",
+fix: "Pin to exact version: " + pkg.version.replace(/[^~]/, ""),
+});
+}
+
+// Check 2: Was it published very recently? (possible typosquatting)
+// Check 3: Does it have very few downloads? (suspicious)
+// Check 4: Does the name look like a typosquat of a popular package?
+// Check 5: Does it have an integrity hash?
+
+// Implement checks 2-5
+return risks;
+}
+
+const popularPackages = ["express", "react", "lodash", "axios", "next"];
+
+function isTyposquat(name, knownPackages) {
+// Check if name is within edit distance 1-2 of a known package
+// Simple check: is it a substring match or character swap?
+}
+
+// Test
+const suspicious = {
+name: "expresss",
+version: "^1.0.0",
+publishedDaysAgo: 2,
+weeklyDownloads: 15,
+hasIntegrity: false,
+};
+
+const results = auditDependency(suspicious);
+console.log("Risks found:", results.length);
+results.forEach(r => console.log("-", r.severity, r.issue));
+
+console.log("Typosquat check:", isTyposquat("expresss", popularPackages));
+console.log("Not typosquat:", isTyposquat("totally-unique-pkg", popularPackages));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should CI/CD pipelines use 'npm ci' instead of 'npm install'?"
+  options={[
+    "npm ci is faster because it skips type checking",
+    "npm ci installs exact versions from the lockfile and fails if there is a mismatch",
+    "npm ci automatically patches security vulnerabilities",
+    "npm ci works without a package.json file",
+  ]}
+  answer={1}
+  explanation="npm ci reads package-lock.json and installs exact versions. If the lockfile does not match package.json, it fails instead of silently resolving new versions. This prevents supply chain attacks that substitute malicious versions."
+/>
+
+<Quiz
+  question="What is dependency confusion?"
+  options={[
+    "When developers confuse two similarly-named packages",
+    "When a package manager resolves a public package instead of a private one with the same name",
+    "When circular dependencies cause build failures",
+    "When a package depends on conflicting versions of the same library",
+  ]}
+  answer={1}
+  explanation="Dependency confusion exploits package managers that check public registries before private ones. An attacker publishes a higher version of an internal package on the public registry, and the build system installs the malicious public version."
+/>
+
+<FillBlank
+  question="A Software ______ of Materials (SBOM) is a complete inventory of every component shipped in your software."
+  answer="Bill"
+/>
+
+## What you learned
+
+- Every dependency is a trust decision; lockfiles, integrity hashes, and `npm ci` ensure you install exactly what you audited
+- Typosquatting and dependency confusion exploit human error and package resolution logic; scoped registries and name verification defend against them
+- Reproducible builds, automated auditing, and SBOMs create a verifiable chain of custody from source code to deployed artifact

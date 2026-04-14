@@ -1,0 +1,360 @@
+---
+title: "Authorization Patterns"
+description: "Implement RBAC, ABAC, and policy engines to enforce least privilege across your application."
+phase: 8
+module: "8-4-security"
+order: 3
+estimatedMinutes: 11
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-4"]
+  swebok: ["Software Quality"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - rbac
+  - abac
+  - least-privilege
+  - policy-engine
+  - permission
+  - role
+  - claim
+  - principal
+---
+
+## Why this matters
+
+Authentication tells you who someone is. Authorization decides what they can do. Most security breaches exploit authorization failures — a regular user accessing admin endpoints, a customer viewing another customer's data, an employee escalating their own privileges. Getting authorization right means thinking in policies, not ad-hoc if-statements scattered across your codebase.
+
+## Role-Based Access Control (RBAC)
+
+RBAC assigns permissions to roles, then assigns roles to users. It is the most common pattern and works well when your permission model maps cleanly to organizational roles.
+
+```javascript
+// Define roles and their permissions
+const ROLES = {
+  viewer: {
+    permissions: ["read:articles", "read:comments"],
+  },
+  editor: {
+    permissions: ["read:articles", "read:comments", "write:articles", "write:comments"],
+  },
+  admin: {
+    permissions: [
+      "read:articles",
+      "read:comments",
+      "write:articles",
+      "write:comments",
+      "delete:articles",
+      "delete:comments",
+      "manage:users",
+    ],
+  },
+};
+
+// Check if a user has a specific permission
+function hasPermission(user, permission) {
+  const role = ROLES[user.role];
+  if (!role) return false;
+  return role.permissions.includes(permission);
+}
+
+// Middleware that enforces a required permission
+function requirePermission(permission) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    if (!hasPermission(req.user, permission)) {
+      return res.status(403).json({ error: "Insufficient permissions" });
+    }
+    next();
+  };
+}
+
+// Usage in routes
+app.get("/articles", requirePermission("read:articles"), getArticles);
+app.post("/articles", requirePermission("write:articles"), createArticle);
+app.delete("/articles/:id", requirePermission("delete:articles"), deleteArticle);
+```
+
+## RBAC limitations
+
+RBAC breaks down when decisions depend on context. "Editors can edit articles" is simple. "Editors can edit articles they created, but not articles in the Legal department, unless they are also a Legal reviewer" requires conditions that roles alone cannot express.
+
+```javascript
+// This kind of logic quickly becomes unmanageable with pure RBAC
+app.put("/articles/:id", requirePermission("write:articles"), async (req, res) => {
+  const article = await db.getArticle(req.params.id);
+
+  // Ad-hoc ownership check bolted onto RBAC
+  if (req.user.role === "editor" && article.authorId !== req.user.id) {
+    return res.status(403).json({ error: "Can only edit your own articles" });
+  }
+
+  // Ad-hoc department check
+  if (article.department === "legal" && !req.user.departments.includes("legal")) {
+    return res.status(403).json({ error: "Cannot edit Legal articles" });
+  }
+
+  // The actual update — buried under authorization spaghetti
+  await db.updateArticle(req.params.id, req.body);
+  res.json({ message: "Updated" });
+});
+```
+
+## Attribute-Based Access Control (ABAC)
+
+ABAC evaluates policies based on attributes of the subject (user), resource (article), action (edit), and environment (time, IP). It handles complex, contextual rules without combinatorial explosion.
+
+```javascript
+// Policy engine using attribute-based rules
+class PolicyEngine {
+  constructor() {
+    this.policies = [];
+  }
+
+  addPolicy(policy) {
+    this.policies.push(policy);
+  }
+
+  evaluate(context) {
+    // Default deny — if no policy explicitly allows, access is denied
+    for (const policy of this.policies) {
+      const result = policy(context);
+      if (result === "deny") return false; // Explicit deny always wins
+      if (result === "allow") return true;
+    }
+    return false; // No policy matched — implicit deny
+  }
+}
+
+const engine = new PolicyEngine();
+
+// Admins can do anything
+engine.addPolicy(({ subject }) => {
+  if (subject.role === "admin") return "allow";
+  return "skip";
+});
+
+// Editors can edit their own articles
+engine.addPolicy(({ subject, resource, action }) => {
+  if (
+    action === "edit" &&
+    subject.role === "editor" &&
+    resource.type === "article" &&
+    resource.authorId === subject.id
+  ) {
+    return "allow";
+  }
+  return "skip";
+});
+
+// Nobody edits articles outside business hours (environment attribute)
+engine.addPolicy(({ action, environment }) => {
+  if (action === "edit") {
+    const hour = environment.currentHour;
+    if (hour < 6 || hour > 22) return "deny";
+  }
+  return "skip";
+});
+
+// Usage
+const allowed = engine.evaluate({
+  subject: { id: "u1", role: "editor" },
+  resource: { type: "article", authorId: "u1", department: "tech" },
+  action: "edit",
+  environment: { currentHour: 14 },
+});
+console.log(allowed); // true
+```
+
+## The principle of least privilege
+
+Every user, service, and process should have the minimum permissions required to perform its function. Nothing more. This limits the blast radius when something is compromised.
+
+```javascript
+// BAD — one API key with full access
+const supabase = createClient(url, SERVICE_ROLE_KEY); // god mode
+
+// GOOD — scoped client with Row Level Security
+const supabase = createClient(url, ANON_KEY); // RLS enforces per-user access
+
+// BAD — broad database permissions
+// GRANT ALL ON ALL TABLES TO app_user;
+
+// GOOD — scoped permissions per role
+// GRANT SELECT ON articles TO app_reader;
+// GRANT SELECT, INSERT, UPDATE ON articles TO app_writer;
+// GRANT SELECT ON users TO app_writer; -- read-only access to users table
+```
+
+## Resource-level authorization
+
+Authorization often needs to check ownership at the data layer.
+
+```javascript
+// Row Level Security in Supabase (PostgreSQL)
+// This policy runs on every query — the app cannot bypass it
+
+// Users can only read their own profile
+// CREATE POLICY "Users read own profile"
+// ON profiles FOR SELECT
+// USING (auth.uid() = user_id);
+
+// Implementing the same in application code as defense in depth
+async function getProfile(req, res) {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("user_id", req.user.id)
+    .single();
+
+  if (error || !data) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+
+  // Double check — even if RLS failed, application code catches it
+  if (data.user_id !== req.user.id) {
+    console.error("RLS bypass detected", { expected: req.user.id, got: data.user_id });
+    return res.status(403).json({ error: "Access denied" });
+  }
+
+  res.json(data);
+}
+```
+
+## Centralize authorization logic
+
+Scattered permission checks are the source of most access control bugs. Centralize into a single decision point.
+
+```javascript
+// Authorization module — single source of truth
+const authz = {
+  canEditArticle(user, article) {
+    if (user.role === "admin") return true;
+    if (user.role === "editor" && article.authorId === user.id) return true;
+    return false;
+  },
+
+  canDeleteArticle(user, article) {
+    if (user.role === "admin") return true;
+    return false;
+  },
+
+  canViewArticle(user, article) {
+    if (article.status === "published") return true;
+    if (article.authorId === user.id) return true;
+    if (user.role === "admin") return true;
+    return false;
+  },
+};
+
+// Every route calls the same module — no inline permission checks
+app.put("/articles/:id", authenticate, async (req, res) => {
+  const article = await db.getArticle(req.params.id);
+  if (!authz.canEditArticle(req.user, article)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  await db.updateArticle(req.params.id, req.body);
+  res.json({ message: "Updated" });
+});
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a policy engine that supports RBAC + ABAC together.
+// Requirements:
+// 1. Define roles with base permissions
+// 2. Add attribute-based policies that can override role permissions
+// 3. Implement "deny overrides allow" (explicit deny always wins)
+
+const roles = {
+viewer: ["read"],
+editor: ["read", "write"],
+admin: ["read", "write", "delete", "manage"],
+};
+
+function createAuthz(roleDefinitions) {
+const policies = [];
+
+return {
+addPolicy(policyFn) {
+policies.push(policyFn);
+},
+
+    check(subject, action, resource) {
+      // Step 1: Check if role grants the base permission
+      // Step 2: Run all ABAC policies — collect allow/deny/skip
+      // Step 3: If any policy returns "deny", return false
+      // Step 4: If role grants permission OR a policy returns "allow", return true
+      // Step 5: Default deny
+    },
+
+};
+}
+
+const authz = createAuthz(roles);
+
+// Policy: editors cannot delete even if someone adds delete to their role
+authz.addPolicy((subject, action) => {
+if (subject.role === "editor" && action === "delete") return "deny";
+return "skip";
+});
+
+// Policy: resource owners can always edit their own resources
+authz.addPolicy((subject, action, resource) => {
+if (action === "write" && resource.ownerId === subject.id) return "allow";
+return "skip";
+});
+
+// Tests
+const editor = { id: "u1", role: "editor" };
+const viewer = { id: "u2", role: "viewer" };
+const ownedDoc = { ownerId: "u2", type: "doc" };
+
+console.log(authz.check(editor, "read", {}) === true); // role grants read
+console.log(authz.check(editor, "delete", {}) === false); // policy denies
+console.log(authz.check(viewer, "write", ownedDoc) === true); // owner policy
+console.log(authz.check(viewer, "write", { ownerId: "u9" }) === false); // not owner`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the key advantage of ABAC over RBAC?"
+  options={[
+    "ABAC is faster to evaluate at runtime",
+    "ABAC can make decisions based on context like resource ownership, time, and environment",
+    "ABAC requires fewer lines of code",
+    "ABAC eliminates the need for authentication",
+  ]}
+  answer={1}
+  explanation="ABAC evaluates attributes of the subject, resource, action, and environment, enabling fine-grained contextual policies that RBAC's static role-to-permission mapping cannot express."
+/>
+
+<Quiz
+  question="In a 'deny overrides allow' policy engine, what happens when one policy returns 'allow' and another returns 'deny' for the same request?"
+  options={[
+    "The first policy evaluated wins",
+    "The allow takes precedence",
+    "The deny takes precedence",
+    "The request is deferred to an admin",
+  ]}
+  answer={2}
+  explanation="Deny-overrides is a safe default: an explicit deny from any policy blocks access regardless of how many policies allow it. This prevents privilege escalation through policy miscombination."
+/>
+
+<FillBlank
+  question="The principle of ______ states that every user and process should have only the minimum permissions required to perform its function."
+  answer="least privilege"
+/>
+
+## What you learned
+
+- RBAC maps permissions to roles and works well for straightforward organizational hierarchies, but struggles with contextual access decisions
+- ABAC evaluates attributes of the subject, resource, action, and environment, enabling fine-grained policies like "editors can edit their own articles during business hours"
+- Centralizing authorization into a single policy engine prevents scattered permission checks and makes the security model auditable

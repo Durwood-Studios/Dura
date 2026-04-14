@@ -1,0 +1,261 @@
+---
+title: "CD Strategies"
+description: "Learn deployment strategies including blue-green, canary, rolling deployments, and feature flags to ship code safely to production."
+phase: 8
+module: "8-2-cicd-devops"
+order: 3
+estimatedMinutes: 8
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-3"]
+  swebok: ["Software Engineering Process"]
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - unit-test
+  - deployment
+  - rollback
+  - canary-release
+  - feature-flag
+---
+
+## Why this matters
+
+Getting code to pass CI is half the battle. The other half is getting it to production without breaking things for real users. A bad deployment strategy means every release is a gamble — either it works or your users see errors while you scramble to roll back. Blue-green, canary, and rolling deployments are battle-tested patterns that let teams ship confidently, multiple times per day.
+
+## Blue-green deployment
+
+Blue-green keeps two identical production environments. One (blue) serves live traffic. The other (green) sits idle. You deploy to green, verify it works, then switch the router to point at green. If anything goes wrong, switch back to blue in seconds.
+
+```javascript
+// Blue-green deployment model
+function blueGreenDeploy(newVersion, environments) {
+  const active = environments.find((env) => env.servingTraffic);
+  const idle = environments.find((env) => !env.servingTraffic);
+
+  // Deploy to the idle environment
+  idle.version = newVersion;
+  idle.status = "deployed";
+
+  // Run smoke tests against idle
+  const healthy = runSmokeTests(idle.url);
+
+  if (healthy) {
+    // Swap traffic — instant cutover
+    active.servingTraffic = false;
+    idle.servingTraffic = true;
+    return { success: true, rollbackAvailable: true };
+  }
+
+  // Failed smoke tests — idle stays idle, nothing changed for users
+  idle.status = "failed";
+  return { success: false, rollbackAvailable: false };
+}
+
+function runSmokeTests(url) {
+  // Hit critical endpoints and verify responses
+  const checks = [
+    { path: "/health", expect: 200 },
+    { path: "/api/status", expect: 200 },
+    { path: "/", expect: 200 },
+  ];
+  return checks.every((check) => fetch(`${url}${check.path}`).status === check.expect);
+}
+```
+
+The strength of blue-green is instant rollback. If the new version has a bug, you flip the router back in seconds. The weakness is cost — you maintain two full production environments.
+
+## Canary deployment
+
+Canary releases send a small percentage of traffic to the new version while the old version handles the rest. If the canary looks healthy (low error rates, good response times), you gradually increase its traffic share until it handles 100%.
+
+```yaml
+# Canary rollout stages
+canary:
+  stages:
+    - percentage: 5
+      duration: 10m
+      validation:
+        - error-rate < 0.1%
+        - p99-latency < 500ms
+
+    - percentage: 25
+      duration: 30m
+      validation:
+        - error-rate < 0.1%
+        - p99-latency < 500ms
+
+    - percentage: 50
+      duration: 1h
+      validation:
+        - error-rate < 0.1%
+        - p99-latency < 500ms
+
+    - percentage: 100
+      # Full rollout — old version decommissioned
+```
+
+The canary metaphor comes from coal mining — miners brought canaries underground because the birds would react to toxic gas before humans. Your canary deployment detects toxic code before it reaches all users.
+
+## Rolling deployment
+
+Rolling deployments update instances one at a time (or in batches). If you have 10 servers, the deployer takes one offline, updates it, verifies it, and puts it back. Then the next. This continues until all instances run the new version.
+
+```javascript
+// Rolling deployment simulation
+async function rollingDeploy(instances, newVersion, batchSize) {
+  const batches = [];
+  for (let i = 0; i < instances.length; i += batchSize) {
+    batches.push(instances.slice(i, i + batchSize));
+  }
+
+  for (const batch of batches) {
+    // Remove batch from load balancer
+    for (const instance of batch) {
+      instance.receivingTraffic = false;
+    }
+
+    // Update the batch
+    for (const instance of batch) {
+      instance.version = newVersion;
+      const healthy = await healthCheck(instance);
+      if (!healthy) {
+        return { success: false, failedInstance: instance.id };
+      }
+      instance.receivingTraffic = true;
+    }
+  }
+
+  return { success: true, version: newVersion };
+}
+
+async function healthCheck(instance) {
+  // Verify the instance responds correctly after update
+  return instance.version !== null && instance.status === "running";
+}
+```
+
+Rolling deployments use fewer resources than blue-green (no duplicate environment) but rollback is slower because you need to re-roll the already-updated instances.
+
+## Feature flags
+
+Feature flags decouple deployment from release. You deploy code that includes a new feature, but the feature is hidden behind a flag. You enable it for specific users, teams, or percentages — completely independent of when the code was deployed.
+
+```javascript
+// Feature flag evaluation
+function isFeatureEnabled(flagName, user, flags) {
+  const flag = flags[flagName];
+  if (!flag) return false;
+
+  // Kill switch — disable for everyone instantly
+  if (!flag.enabled) return false;
+
+  // User allowlist — enable for specific users (internal testing)
+  if (flag.allowlist && flag.allowlist.includes(user.id)) return true;
+
+  // Percentage rollout — enable for a percentage of users
+  if (flag.percentage !== undefined) {
+    // Deterministic: same user always gets same result
+    const hash = simpleHash(user.id + flagName);
+    return hash % 100 < flag.percentage;
+  }
+
+  return flag.enabled;
+}
+
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) & 0x7fffffff;
+  }
+  return hash;
+}
+
+// Usage
+const flags = {
+  newCheckout: { enabled: true, percentage: 10 },
+  darkMode: { enabled: true, allowlist: ["user-42", "user-99"] },
+  betaApi: { enabled: false },
+};
+```
+
+Feature flags are the safest deployment strategy because the code is already deployed and tested. Turning a flag on is a configuration change, not a deployment. Turning it off is an instant rollback.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a canary deployment decision engine.
+// Given metrics from the canary and the stable version,
+// decide whether to promote, hold, or rollback the canary.
+//
+// Rules:
+// - If canary error rate > 1%, rollback
+// - If canary p99 latency > 2x stable p99 latency, rollback
+// - If canary has been healthy for all check intervals, promote
+// - Otherwise, hold (keep observing)
+
+function canaryDecision(canaryMetrics, stableMetrics, checkIntervals) {
+// canaryMetrics: { errorRate: number, p99Latency: number }
+// stableMetrics: { errorRate: number, p99Latency: number }
+// checkIntervals: number (how many healthy checks have passed)
+// Return: "promote" | "rollback" | "hold"
+}
+
+// Tests
+console.log(canaryDecision(
+{ errorRate: 0.05, p99Latency: 200 },
+{ errorRate: 0.03, p99Latency: 180 },
+5
+)); // "promote"
+
+console.log(canaryDecision(
+{ errorRate: 2.5, p99Latency: 200 },
+{ errorRate: 0.03, p99Latency: 180 },
+1
+)); // "rollback"
+
+console.log(canaryDecision(
+{ errorRate: 0.05, p99Latency: 400 },
+{ errorRate: 0.03, p99Latency: 180 },
+3
+)); // "rollback" (400 > 2 \* 180)`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the main advantage of blue-green deployment over rolling deployment?"
+  options={[
+    "It uses fewer server resources",
+    "It provides instant rollback by switching traffic between two identical environments",
+    "It tests with real user traffic before full rollout",
+    "It eliminates the need for smoke tests",
+  ]}
+  answer={1}
+  explanation="Blue-green maintains two full environments. If the new version fails, you switch the router back to the old environment instantly. Rolling deployments require re-updating instances to roll back, which takes time."
+/>
+
+<Quiz
+  question="How do feature flags decouple deployment from release?"
+  options={[
+    "They prevent code from being deployed until it is approved",
+    "They automatically roll back bad deployments",
+    "They allow deployed code to be enabled or disabled without redeploying",
+    "They replace the need for staging environments",
+  ]}
+  answer={2}
+  explanation="Feature flags let you deploy code with a new feature hidden behind a flag. You can enable it for specific users or percentages at any time — no new deployment required. Disabling the flag is an instant rollback."
+/>
+
+<FillBlank
+  question="In a canary deployment, a small percentage of traffic is sent to the new version while the ______ version handles the rest."
+  answer="old"
+/>
+
+## What you learned
+
+- Blue-green deployments maintain two environments for instant rollback, while rolling deployments update instances incrementally to save resources
+- Canary releases gradually shift traffic to the new version, using real-world metrics to decide whether to promote or roll back
+- Feature flags separate deployment from release, letting teams ship code safely and enable features independently of deploys

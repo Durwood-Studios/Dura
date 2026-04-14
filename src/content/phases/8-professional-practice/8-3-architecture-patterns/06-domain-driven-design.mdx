@@ -1,0 +1,326 @@
+---
+title: "Domain-Driven Design"
+description: "Use bounded contexts, aggregates, and ubiquitous language to model complex business domains in code that stakeholders can actually read."
+phase: 8
+module: "8-3-architecture-patterns"
+order: 6
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - domain-driven-design
+  - bounded-context
+  - aggregate
+  - ubiquitous-language
+  - value-object
+  - entity
+---
+
+## Why this matters
+
+Most software projects fail not because of technology, but because the code doesn't match how the business actually works. A developer calls it a "User," the sales team calls it a "Lead," accounting calls it an "Account." The same word means different things to different people, and the code becomes a patchwork of misunderstandings that compounds with every feature.
+
+Domain-Driven Design (DDD) is a set of practices for aligning code structure with business reality. It's not about specific technology — it's about building a shared mental model between developers and domain experts, then encoding that model directly into the code. When the CEO says "cancel an order," there should be a function called `cancelOrder` that does exactly what she means.
+
+## Ubiquitous Language
+
+The foundation of DDD is a shared vocabulary — the **ubiquitous language** — that everyone on the team uses: in code, in meetings, in documentation, in commit messages. If the domain expert says "fulfillment," the code says `fulfillment`, not `processShipment` or `handleStep3`.
+
+```javascript
+// BAD: developer-speak that means nothing to the business.
+function processEntity(data, flag) {
+  if (flag === 2) {
+    data.status = 4;
+    updateRecord(data);
+  }
+}
+
+// GOOD: ubiquitous language — a domain expert can read this.
+function cancelOrder(order) {
+  if (!order.canBeCancelled()) {
+    throw new OrderCancellationError(order.id, order.status);
+  }
+  order.markAsCancelled();
+  return order;
+}
+```
+
+Building the ubiquitous language isn't a one-time activity. It evolves through conversations. When you discover a term collision ("reservation" means different things in booking vs. inventory), you've found a context boundary.
+
+## Bounded Contexts
+
+A **bounded context** is a boundary within which a particular model and its ubiquitous language apply. The same real-world concept can have different representations in different contexts — and that's not a bug.
+
+```javascript
+// In the "Sales" bounded context, a Customer has a cart and purchase history.
+// Sales/Customer.js
+class Customer {
+  constructor(id, name, email) {
+    this.id = id;
+    this.name = name;
+    this.email = email;
+    this.cart = [];
+    this.purchaseHistory = [];
+  }
+
+  addToCart(product, quantity) {
+    this.cart.push({ productId: product.id, quantity, price: product.price });
+  }
+
+  get cartTotal() {
+    return this.cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  }
+}
+
+// In the "Shipping" bounded context, a Customer is just a delivery address.
+// Shipping/Recipient.js — different name because different concept.
+class Recipient {
+  constructor(orderId, name, address, phone) {
+    this.orderId = orderId;
+    this.name = name;
+    this.address = address;
+    this.phone = phone;
+  }
+
+  isDeliverable() {
+    return Boolean(this.address.street && this.address.city && this.address.zip);
+  }
+}
+```
+
+Don't force a single `Customer` class to serve both contexts. That creates a "god object" that grows endlessly and becomes impossible to change. Let each context own its own model.
+
+### Context mapping
+
+Bounded contexts don't exist in isolation — they communicate. A **context map** documents how contexts relate:
+
+```javascript
+// When a sale is completed in the Sales context, the Shipping context
+// needs to know. An anti-corruption layer translates between models.
+
+// Sales context publishes a domain event.
+function completeSale(customer, orderId) {
+  const order = customer.purchaseHistory.find((o) => o.id === orderId);
+
+  return {
+    type: "SaleCompleted",
+    data: {
+      orderId,
+      customerId: customer.id,
+      customerName: customer.name,
+      shippingAddress: customer.defaultAddress,
+      items: order.items,
+    },
+  };
+}
+
+// Shipping context consumes and translates via an anti-corruption layer.
+function handleSaleCompleted(event) {
+  // Translate Sales language into Shipping language.
+  const recipient = new Recipient(
+    event.data.orderId,
+    event.data.customerName,
+    event.data.shippingAddress,
+    null // Shipping will look up phone from its own records.
+  );
+
+  return createShipment(recipient, event.data.items);
+}
+```
+
+The anti-corruption layer prevents one context's model from leaking into another. Each context stays clean and internally consistent.
+
+## Aggregates
+
+An **aggregate** is a cluster of domain objects that are treated as a single unit for data changes. One entity in the aggregate is the **aggregate root** — all external access goes through it. This enforces invariants: business rules that must always be true.
+
+```javascript
+// Order is the aggregate root. OrderItems cannot exist outside an Order.
+// The Order enforces all invariants.
+class Order {
+  constructor(id, customerId) {
+    this.id = id;
+    this.customerId = customerId;
+    this.items = [];
+    this.status = "draft";
+  }
+
+  addItem(productId, name, price, quantity) {
+    if (this.status !== "draft") {
+      throw new Error("Cannot modify a submitted order");
+    }
+    if (quantity <= 0) {
+      throw new Error("Quantity must be positive");
+    }
+
+    const existing = this.items.find((i) => i.productId === productId);
+    if (existing) {
+      existing.quantity += quantity;
+    } else {
+      this.items.push({ productId, name, price, quantity });
+    }
+  }
+
+  removeItem(productId) {
+    if (this.status !== "draft") {
+      throw new Error("Cannot modify a submitted order");
+    }
+    this.items = this.items.filter((i) => i.productId !== productId);
+  }
+
+  submit() {
+    if (this.items.length === 0) {
+      throw new Error("Cannot submit an empty order");
+    }
+    this.status = "submitted";
+  }
+
+  get total() {
+    return this.items.reduce((sum, i) => sum + i.price * i.quantity, 0);
+  }
+}
+
+// External code ALWAYS goes through the aggregate root.
+const order = new Order("ORD-1", "CUST-5");
+order.addItem("PROD-1", "Keyboard", 89.99, 1);
+order.addItem("PROD-2", "Mouse", 49.99, 2);
+order.submit();
+// order.items[0].quantity = -5; // This "works" but violates the pattern —
+// all mutations should go through Order methods that enforce rules.
+```
+
+## Value Objects
+
+A **value object** is defined by its attributes, not by an identity. Two value objects with the same attributes are equal. They're immutable — you create a new one instead of modifying an existing one.
+
+```javascript
+// Money is a classic value object — $10 USD is $10 USD regardless of
+// which specific instance you're looking at.
+class Money {
+  constructor(amount, currency) {
+    if (amount < 0) throw new Error("Amount cannot be negative");
+    this.amount = amount;
+    this.currency = currency;
+    Object.freeze(this);
+  }
+
+  add(other) {
+    if (this.currency !== other.currency) {
+      throw new Error(`Cannot add ${this.currency} and ${other.currency}`);
+    }
+    return new Money(this.amount + other.amount, this.currency);
+  }
+
+  equals(other) {
+    return this.amount === other.amount && this.currency === other.currency;
+  }
+}
+
+const price = new Money(29.99, "USD");
+const tax = new Money(2.4, "USD");
+const total = price.add(tax); // new Money(32.39, "USD")
+console.log(price.amount); // 29.99 — original unchanged
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Model a Library system using DDD concepts.
+// Bounded context: "Lending"
+// Aggregate root: LoanRecord
+// Value object: DateRange
+// Ubiquitous language: borrow, return, overdue, patron
+
+class DateRange {
+constructor(start, end) {
+this.start = start;
+this.end = end;
+Object.freeze(this);
+}
+
+includes(date) {
+return date >= this.start && date <= this.end;
+}
+
+get durationDays() {
+return Math.ceil((this.end - this.start) / (1000 _ 60 _ 60 \* 24));
+}
+}
+
+class LoanRecord {
+constructor(id, patronId, bookId, borrowDate) {
+this.id = id;
+this.patronId = patronId;
+this.bookId = bookId;
+this.loanPeriod = new DateRange(
+borrowDate,
+new Date(borrowDate.getTime() + 14 _ 24 _ 60 _ 60 _ 1000) // 14 days
+);
+this.returnedDate = null;
+}
+
+returnBook(date) {
+// Set returnedDate. Throw if already returned.
+}
+
+isOverdue(currentDate) {
+// True if not returned and currentDate is past loanPeriod.end
+}
+
+get isReturned() {
+return this.returnedDate !== null;
+}
+}
+
+// --- Test ---
+const loan = new LoanRecord("L1", "P1", "B1", new Date("2025-01-01"));
+console.log(loan.loanPeriod.durationDays === 14); // true
+console.log(loan.isOverdue(new Date("2025-01-10")) === false); // true
+console.log(loan.isOverdue(new Date("2025-01-20")) === true); // true
+
+loan.returnBook(new Date("2025-01-12"));
+console.log(loan.isReturned === true); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should two bounded contexts have their own separate model for the same real-world concept (e.g., 'Customer')?"
+  options={[
+    "To maximize code reuse across the codebase",
+    "Because each context needs different attributes and behaviors, and forcing a shared model creates a fragile god object",
+    "Because DDD requires every class to be unique",
+    "To make the codebase larger and more enterprise-grade",
+  ]}
+  answer={1}
+  explanation="A Customer in Sales has a cart and purchase history. A Customer in Shipping is just a delivery address. Forcing both into one class creates a bloated object that's hard to change and breaks multiple contexts when modified."
+/>
+
+<Quiz
+  question="What role does the aggregate root play in Domain-Driven Design?"
+  options={[
+    "It's the database table that stores all domain objects",
+    "It's the single entry point for modifying a cluster of related objects, enforcing all business rules",
+    "It's the root component of the user interface",
+    "It's the first entity created in the application lifecycle",
+  ]}
+  answer={1}
+  explanation="The aggregate root is the only object external code should modify directly. It enforces invariants (business rules) across the entire cluster of related objects, ensuring the aggregate is always in a valid state."
+/>
+
+<FillBlank
+  question="A ______ language is the shared vocabulary that developers and domain experts use in code, conversations, and documentation."
+  answer="ubiquitous"
+/>
+
+## What you learned
+
+- Bounded contexts define clear boundaries where a specific model and language apply, preventing "god objects" that try to serve every part of the business
+- Aggregates group related entities under a single root that enforces business invariants — all external access goes through the root
+- Ubiquitous language aligns code with business reality so that domain experts can read the code and developers can speak the business language

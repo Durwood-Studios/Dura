@@ -1,0 +1,281 @@
+---
+title: "Event-Driven Architecture"
+description: "Learn event sourcing, CQRS, and eventual consistency — patterns that let systems scale by recording what happened instead of overwriting state."
+phase: 8
+module: "8-3-architecture-patterns"
+order: 4
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - event-sourcing
+  - cqrs
+  - eventual-consistency
+  - event-store
+  - projection
+  - command
+---
+
+## Why this matters
+
+Traditional systems store the current state of things: "Account balance is $450." If something goes wrong, you're left asking, "How did it get to $450?" and digging through logs. Event-driven systems flip this model: they store the sequence of things that happened — "deposited $500, withdrew $50" — and derive the current state from the event history. This gives you a complete audit trail, the ability to replay history, and natural scalability because events flow one direction.
+
+Banks, stock exchanges, healthcare systems, and e-commerce platforms use event-driven patterns because they need to know not just where the data is, but how it got there.
+
+## Event Sourcing
+
+Instead of storing the latest state in a row and overwriting it on every change, event sourcing stores every state change as an immutable event. The current state is computed by replaying events from the beginning.
+
+```javascript
+// Traditional approach: UPDATE accounts SET balance = 450 WHERE id = 'A';
+// Event sourcing approach: append events, never update.
+
+const eventStore = [];
+
+function appendEvent(stream, type, data) {
+  const event = {
+    stream,
+    type,
+    data,
+    timestamp: Date.now(),
+    version: eventStore.filter((e) => e.stream === stream).length + 1,
+  };
+  eventStore.push(event);
+  return event;
+}
+
+// Record what happened — these events are immutable facts.
+appendEvent("account-A", "AccountOpened", { owner: "Alice" });
+appendEvent("account-A", "MoneyDeposited", { amount: 500 });
+appendEvent("account-A", "MoneyWithdrawn", { amount: 50 });
+appendEvent("account-A", "MoneyDeposited", { amount: 200 });
+```
+
+To get the current balance, replay the events:
+
+```javascript
+function getBalance(accountStream) {
+  const events = eventStore.filter((e) => e.stream === accountStream);
+
+  return events.reduce((balance, event) => {
+    switch (event.type) {
+      case "AccountOpened":
+        return 0;
+      case "MoneyDeposited":
+        return balance + event.data.amount;
+      case "MoneyWithdrawn":
+        return balance - event.data.amount;
+      default:
+        return balance;
+    }
+  }, 0);
+}
+
+console.log(getBalance("account-A")); // 650
+```
+
+The event log answers every question: What was the balance at 3pm? Replay events up to 3pm. Who withdrew money last Tuesday? Filter events by type and date. Why is this balance negative? Walk the event history step by step.
+
+## CQRS: Command Query Responsibility Segregation
+
+Event sourcing creates a tension: replaying hundreds of thousands of events to answer "what's the current balance?" is slow. CQRS resolves this by splitting the system into two sides.
+
+- **Command side** — handles writes by validating business rules and appending events.
+- **Query side** — maintains pre-computed read models (projections) optimized for specific queries.
+
+```javascript
+// --- Command side: validates and writes events ---
+function handleDeposit(accountId, amount) {
+  if (amount <= 0) {
+    throw new Error("Deposit amount must be positive");
+  }
+
+  // Business rule: check current state before writing.
+  const balance = getBalance(accountId);
+  if (balance < 0) {
+    throw new Error("Account is frozen — cannot accept deposits");
+  }
+
+  return appendEvent(accountId, "MoneyDeposited", { amount });
+}
+
+// --- Query side: a projection that listens to events and maintains
+// a fast-read data structure ---
+const balanceProjection = new Map();
+
+function projectEvent(event) {
+  const current = balanceProjection.get(event.stream) || 0;
+
+  switch (event.type) {
+    case "AccountOpened":
+      balanceProjection.set(event.stream, 0);
+      break;
+    case "MoneyDeposited":
+      balanceProjection.set(event.stream, current + event.data.amount);
+      break;
+    case "MoneyWithdrawn":
+      balanceProjection.set(event.stream, current - event.data.amount);
+      break;
+  }
+}
+
+// Process all existing events to build the projection.
+eventStore.forEach(projectEvent);
+
+// Now queries are instant — no replay needed.
+console.log(balanceProjection.get("account-A")); // 650
+```
+
+You can have multiple projections for different query needs: one for account balances, another for transaction history, a third for monthly spending summaries. Each projection is a different "view" of the same event stream.
+
+## Eventual consistency
+
+When the command side writes an event and the query side updates asynchronously, there's a window where the read model is stale. A deposit might be confirmed but not yet visible in the balance query. This is **eventual consistency** — the system guarantees that all projections will eventually catch up, but not instantly.
+
+```javascript
+// Simulating the consistency gap.
+async function processCommand(accountId, amount) {
+  // Command side: immediate.
+  const event = handleDeposit(accountId, amount);
+
+  // Query side: processes asynchronously (simulated with setTimeout).
+  setTimeout(() => {
+    projectEvent(event);
+    console.log("Projection updated:", balanceProjection.get(accountId));
+  }, 100);
+
+  // At this exact moment, the projection is STALE.
+  // The event is recorded, but the read model hasn't caught up yet.
+  return { status: "accepted", eventVersion: event.version };
+}
+```
+
+Eventual consistency requires design decisions:
+
+- **Show pending state in the UI** — "Your deposit is being processed" instead of showing an outdated balance.
+- **Use optimistic updates** — immediately show the expected new balance on the client, reconcile when the projection catches up.
+- **Design idempotent consumers** — if a projection processes the same event twice, the result should be identical. Use event version numbers to detect duplicates.
+
+```javascript
+// Idempotent projection — tracks the last processed version.
+const projectionState = { lastVersion: 0, balance: 0 };
+
+function idempotentProject(event) {
+  if (event.version <= projectionState.lastVersion) {
+    return; // Already processed — skip.
+  }
+
+  switch (event.type) {
+    case "MoneyDeposited":
+      projectionState.balance += event.data.amount;
+      break;
+    case "MoneyWithdrawn":
+      projectionState.balance -= event.data.amount;
+      break;
+  }
+
+  projectionState.lastVersion = event.version;
+}
+```
+
+## When to use event-driven architecture
+
+Event sourcing and CQRS add significant complexity. Use them when:
+
+- **Audit trail is mandatory** — finance, healthcare, legal compliance.
+- **Temporal queries matter** — "What was the state at timestamp X?"
+- **Read and write patterns differ dramatically** — 100:1 read-to-write ratio where reads need different data shapes.
+- **Multiple consumers need the same data** — analytics, notifications, and search all derive from the same events.
+
+Skip them for simple CRUD apps, internal tools, or systems where "the current state" is all anyone ever needs.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a tiny event-sourced shopping cart.
+// Events: "ItemAdded", "ItemRemoved", "CartCleared"
+// Projection: compute the current cart contents from the event log.
+
+const events = [];
+
+function addItem(cartId, item, price) {
+events.push({
+cartId,
+type: "ItemAdded",
+data: { item, price },
+version: events.filter((e) => e.cartId === cartId).length + 1,
+});
+}
+
+function removeItem(cartId, item) {
+// Append an "ItemRemoved" event
+}
+
+function clearCart(cartId) {
+// Append a "CartCleared" event
+}
+
+function getCartContents(cartId) {
+// Replay events for this cartId and return an array of { item, price }
+// ItemAdded → push to array
+// ItemRemoved → remove first matching item
+// CartCleared → reset to empty array
+}
+
+// --- Test ---
+addItem("cart-1", "Book", 15);
+addItem("cart-1", "Pen", 3);
+addItem("cart-1", "Book", 15);
+removeItem("cart-1", "Book");
+
+const cart = getCartContents("cart-1");
+console.log(cart.length === 2); // true (one Book + one Pen)
+console.log(cart[0].item === "Pen"); // true
+console.log(cart[1].item === "Book"); // true
+
+clearCart("cart-1");
+console.log(getCartContents("cart-1").length === 0); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the primary advantage of event sourcing over traditional state-based storage?"
+  options={[
+    "Events are faster to write to disk than rows in a database",
+    "You get a complete history of every change, enabling audit trails and temporal queries",
+    "Event sourcing eliminates the need for a database entirely",
+    "It guarantees immediate consistency across all parts of the system",
+  ]}
+  answer={1}
+  explanation="Event sourcing stores every state change as an immutable event. This gives you a full audit trail, the ability to replay history, and temporal queries — none of which traditional UPDATE/DELETE operations support."
+/>
+
+<Quiz
+  question="In CQRS, why does the query side use projections instead of replaying events on every read?"
+  options={[
+    "Projections use less disk space than event logs",
+    "Replaying thousands of events on every query is too slow — projections maintain pre-computed read models",
+    "Projections are required by eventual consistency guarantees",
+    "The command side does not share its event store with the query side",
+  ]}
+  answer={1}
+  explanation="Replaying a full event stream on every read is O(n) over all events. Projections process events once and maintain a fast-read data structure, making queries O(1) or O(log n)."
+/>
+
+<FillBlank
+  question="______ consistency means the system guarantees all read models will eventually reflect the latest writes, but not instantaneously."
+  answer="Eventual"
+/>
+
+## What you learned
+
+- Event sourcing stores every state change as an immutable event, giving you a complete audit trail and the ability to reconstruct state at any point in time
+- CQRS separates the write path (commands that append events) from the read path (projections that maintain pre-computed views), optimizing each independently
+- Eventual consistency is the tradeoff — read models may be briefly stale, so design with idempotent consumers, optimistic UI updates, and version tracking

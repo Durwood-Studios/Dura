@@ -1,0 +1,230 @@
+---
+title: "Clean Architecture"
+description: "Organize code into domain, application, and infrastructure layers so business logic never depends on frameworks or databases."
+phase: 8
+module: "8-3-architecture-patterns"
+order: 1
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - clean-architecture
+  - dependency-rule
+  - domain-layer
+  - application-layer
+  - infrastructure-layer
+  - port
+  - adapter
+---
+
+## Why this matters
+
+Every project starts simple. A few files, a few functions, everything fits in your head. Then the feature list grows, a second database appears, you swap an email provider, and suddenly every change breaks something unrelated. Clean Architecture exists to prevent that decay. It gives you a dependency rule — inner layers never import from outer layers — that keeps your business logic stable even when frameworks, databases, and third-party services change around it.
+
+Companies adopt Clean Architecture (or its cousins Hexagonal and Onion) because it makes large codebases survivable. If your payment processing logic depends directly on Stripe's SDK, switching to a different provider means rewriting business rules. If that logic depends on an abstract `PaymentGateway` interface, you swap one adapter file and the rest of the system never notices.
+
+## The layers
+
+Clean Architecture arranges code in concentric rings. The innermost ring is the most stable; the outermost ring changes the most.
+
+### Domain layer (innermost)
+
+Pure business rules and entities. No imports from any framework, database, or HTTP library. This layer answers the question: "What does this system do regardless of technology?"
+
+```javascript
+// domain/entities/Order.js — pure business logic, zero dependencies
+class Order {
+  constructor(id, items, status = "pending") {
+    this.id = id;
+    this.items = items;
+    this.status = status;
+  }
+
+  get total() {
+    return this.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  }
+
+  canBeCancelled() {
+    return this.status === "pending" || this.status === "confirmed";
+  }
+
+  cancel() {
+    if (!this.canBeCancelled()) {
+      throw new Error(`Cannot cancel order in status: ${this.status}`);
+    }
+    this.status = "cancelled";
+  }
+}
+```
+
+Notice: no `fetch`, no `require("pg")`, no framework. This class works in Node, in the browser, in a test runner — anywhere JavaScript runs.
+
+### Application layer (use cases)
+
+Orchestrates domain objects to accomplish user goals. It knows _what_ the system should do, but not _how_ infrastructure works. It talks to the outside world through **ports** — abstract interfaces that the infrastructure layer implements.
+
+```javascript
+// application/useCases/cancelOrder.js
+// Depends on domain (Order) and abstract ports, never on concrete infrastructure.
+function createCancelOrderUseCase({ orderRepository, notificationService }) {
+  return async function cancelOrder(orderId, userId) {
+    const order = await orderRepository.findById(orderId);
+
+    if (!order) {
+      throw new Error(`Order ${orderId} not found`);
+    }
+
+    order.cancel();
+
+    await orderRepository.save(order);
+    await notificationService.send(userId, `Order ${orderId} cancelled.`);
+
+    return order;
+  };
+}
+```
+
+`orderRepository` and `notificationService` are ports — plain objects with known methods. The use case doesn't know whether the repository talks to PostgreSQL, MongoDB, or an in-memory array.
+
+### Infrastructure layer (outermost)
+
+Concrete implementations that plug into the ports: database clients, HTTP controllers, email SDKs, message queues.
+
+```javascript
+// infrastructure/repositories/PostgresOrderRepository.js
+// This is the ONLY file that imports the database driver.
+const pool = require("./dbPool");
+
+const PostgresOrderRepository = {
+  async findById(id) {
+    const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [id]);
+    if (!rows[0]) return null;
+    const row = rows[0];
+    return new Order(row.id, JSON.parse(row.items), row.status);
+  },
+
+  async save(order) {
+    await pool.query("UPDATE orders SET items = $1, status = $2 WHERE id = $3", [
+      JSON.stringify(order.items),
+      order.status,
+      order.id,
+    ]);
+  },
+};
+```
+
+## The Dependency Rule
+
+Dependencies point **inward**. Infrastructure imports application. Application imports domain. Domain imports nothing external. This single rule is what makes the architecture "clean."
+
+```javascript
+// Wiring it all together at the composition root — the ONLY place
+// that knows about all layers simultaneously.
+const cancelOrder = createCancelOrderUseCase({
+  orderRepository: PostgresOrderRepository,
+  notificationService: EmailNotificationService,
+});
+
+// In a test, swap the infrastructure for fakes:
+const cancelOrderTest = createCancelOrderUseCase({
+  orderRepository: InMemoryOrderRepository,
+  notificationService: FakeNotificationService,
+});
+```
+
+When you test, you replace the outermost ring with fakes. The domain and application layers run identically — because they never knew the real infrastructure existed.
+
+## When Clean Architecture is overkill
+
+Not every project needs concentric layers. A weekend hackathon, a CLI tool, or a CRUD app with five endpoints will drown in abstraction if you force full Clean Architecture on it. The dependency rule still applies — keep business logic free of framework imports — but you don't need formal layers until a project has at least two reasons to change independently (e.g., swapping a database, adding a second UI).
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a tiny Clean Architecture stack.
+// Domain: a BankAccount entity with deposit() and withdraw().
+// Application: a transferFunds use case that moves money between accounts.
+// "Infrastructure": an in-memory repository (a plain Map).
+
+// --- Domain ---
+class BankAccount {
+constructor(id, balance = 0) {
+this.id = id;
+this.balance = balance;
+}
+
+deposit(amount) {
+// Add amount to balance. Throw if amount <= 0.
+}
+
+withdraw(amount) {
+// Subtract amount. Throw if amount <= 0 or insufficient funds.
+}
+}
+
+// --- Infrastructure (in-memory) ---
+const accounts = new Map();
+const accountRepository = {
+findById(id) { return accounts.get(id) || null; },
+save(account) { accounts.set(account.id, account); },
+};
+
+// --- Application ---
+function transferFunds(repo, fromId, toId, amount) {
+// 1. Load both accounts from repo
+// 2. Withdraw from source, deposit to target
+// 3. Save both
+// 4. Return { from: source.balance, to: target.balance }
+}
+
+// --- Test ---
+accountRepository.save(new BankAccount("A", 100));
+accountRepository.save(new BankAccount("B", 50));
+
+const result = transferFunds(accountRepository, "A", "B", 30);
+console.log(result.from === 70); // true
+console.log(result.to === 80); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In Clean Architecture, which layer is allowed to import from the domain layer?"
+  options={[
+    "Only the infrastructure layer",
+    "Only the application layer",
+    "Both the application and infrastructure layers",
+    "No other layer — the domain is isolated",
+  ]}
+  answer={2}
+  explanation="Dependencies point inward. Both application and infrastructure can depend on domain. The key rule is that domain never depends on anything outside itself."
+/>
+
+<Quiz
+  question="What is a 'port' in the context of Clean Architecture?"
+  options={[
+    "A network port the application listens on",
+    "An abstract interface that the application layer defines and infrastructure implements",
+    "A specific database connection configuration",
+    "A testing utility for mocking HTTP requests",
+  ]}
+  answer={1}
+  explanation="Ports are abstract contracts (interfaces) defined in the application layer. The infrastructure layer provides concrete adapters that fulfill those contracts."
+/>
+
+<FillBlank
+  question="The ______ Rule states that dependencies in Clean Architecture must always point toward the inner layers."
+  answer="Dependency"
+/>
+
+## What you learned
+
+- Clean Architecture organizes code into domain (business rules), application (use cases), and infrastructure (frameworks/databases) layers with dependencies pointing inward
+- The Dependency Rule means inner layers never import from outer layers, making business logic testable and framework-independent
+- Ports and adapters let you swap infrastructure (databases, APIs, email providers) without changing a single line of business logic

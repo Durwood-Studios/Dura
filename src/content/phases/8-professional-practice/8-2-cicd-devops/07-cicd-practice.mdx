@@ -1,0 +1,348 @@
+---
+title: "CI/CD Practice"
+description: "Build a complete CI/CD pipeline with GitHub Actions that lints, tests, builds, scans for security, and deploys with a canary strategy."
+phase: 8
+module: "8-2-cicd-devops"
+order: 7
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-3"]
+  swebok: ["Software Engineering Process"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - unit-test
+  - pipeline
+  - workflow
+  - deploy
+  - rollback
+---
+
+## Why this matters
+
+Individual CI/CD concepts make sense in isolation, but the real challenge is composing them into a pipeline that is fast, safe, and maintainable. This lesson puts everything together — from the first push to production deployment — so you can see how each piece connects and why the order matters.
+
+## The full pipeline architecture
+
+A production-grade pipeline has five stages, ordered from fastest and cheapest to slowest and most expensive:
+
+```yaml
+# .github/workflows/pipeline.yml
+name: Production Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+  # If a new push arrives while a pipeline is running, cancel the old one
+```
+
+The `concurrency` block prevents wasted compute. If a developer pushes a fix while their previous commit is still building, there is no reason to finish the old build.
+
+## Stage 1: Quality gates
+
+Quality gates run in parallel because they are independent. Linting does not need test results, and type checking does not need lint results.
+
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: "npm" }
+      - run: npm ci
+      - run: npm run lint
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: "npm" }
+      - run: npm ci
+      - run: npm run typecheck
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: "npm" }
+      - run: npm ci
+      - run: npm audit --audit-level=high
+```
+
+Three jobs, all starting simultaneously. The total time is the duration of the slowest job — not the sum of all three.
+
+## Stage 2: Test
+
+Tests depend on quality gates. There is no point running a 3-minute test suite if the code has a type error.
+
+```yaml
+test:
+  needs: [lint, typecheck, security]
+  runs-on: ubuntu-latest
+  strategy:
+    matrix:
+      node-version: [18, 20]
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: "npm"
+    - run: npm ci
+    - run: npm test -- --coverage
+
+    - name: Upload coverage
+      if: matrix.node-version == 20
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: coverage/
+```
+
+Coverage is only uploaded from one matrix combination to avoid duplicates. The `if` conditional keeps the workflow clean.
+
+## Stage 3: Build
+
+The build job produces the deployable artifact. It depends on tests passing.
+
+```yaml
+build:
+  needs: test
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with: { node-version: 20, cache: "npm" }
+    - run: npm ci
+    - run: npm run build
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: production-build
+        path: .next/
+        retention-days: 7
+```
+
+The `retention-days` setting prevents old artifacts from consuming storage indefinitely. Seven days is enough to debug any deployment issue.
+
+## Stage 4: Deploy with canary
+
+Deployment only happens on the main branch — never on pull requests. The canary strategy sends 10% of traffic to the new version, monitors for 10 minutes, then promotes or rolls back.
+
+```yaml
+deploy:
+  needs: build
+  if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  runs-on: ubuntu-latest
+  environment: production # Requires manual approval if configured
+  steps:
+    - name: Download build artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: production-build
+        path: .next/
+
+    - name: Deploy canary (10% traffic)
+      run: echo "Deploying canary to 10% of traffic"
+
+    - name: Monitor canary health
+      run: |
+        echo "Checking error rate and latency for 10 minutes..."
+        # In a real pipeline, this calls your monitoring API
+        # and fails the step if metrics exceed thresholds
+
+    - name: Promote to 100%
+      run: echo "Canary healthy — promoting to full traffic"
+```
+
+The `environment: production` setting can require manual approval before deployment starts. The `if` condition ensures pull requests never trigger a deploy.
+
+## Implementing the pipeline logic in code
+
+The workflow YAML defines the structure. The actual build, test, and deploy scripts live in your codebase. Here is how the pipeline logic connects to your code:
+
+```javascript
+// scripts/check-canary-health.js
+// Called by the "Monitor canary health" step
+
+async function checkCanaryHealth(monitoringUrl, durationMinutes) {
+  const checkInterval = 30_000; // Check every 30 seconds
+  const totalChecks = (durationMinutes * 60_000) / checkInterval;
+  let consecutiveFailures = 0;
+  const maxFailures = 3;
+
+  for (let i = 0; i < totalChecks; i++) {
+    const metrics = await fetchMetrics(monitoringUrl);
+
+    const isHealthy = metrics.errorRate < 0.01 && metrics.p99Latency < 500 && metrics.cpuUsage < 80;
+
+    if (!isHealthy) {
+      consecutiveFailures++;
+      console.log(`Health check failed (${consecutiveFailures}/${maxFailures})`);
+      if (consecutiveFailures >= maxFailures) {
+        return { action: "rollback", reason: formatReason(metrics) };
+      }
+    } else {
+      consecutiveFailures = 0;
+    }
+
+    await sleep(checkInterval);
+  }
+
+  return { action: "promote", reason: "All health checks passed" };
+}
+
+async function fetchMetrics(url) {
+  try {
+    const response = await fetch(url);
+    return await response.json();
+  } catch (error) {
+    return { errorRate: 1, p99Latency: 9999, cpuUsage: 100 };
+  }
+}
+
+function formatReason(metrics) {
+  const issues = [];
+  if (metrics.errorRate >= 0.01)
+    issues.push(`Error rate: ${(metrics.errorRate * 100).toFixed(2)}%`);
+  if (metrics.p99Latency >= 500) issues.push(`p99 latency: ${metrics.p99Latency}ms`);
+  if (metrics.cpuUsage >= 80) issues.push(`CPU: ${metrics.cpuUsage}%`);
+  return issues.join(", ");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+```
+
+## Notifications
+
+A pipeline that fails silently is worse than no pipeline at all. Notifications ensure the team knows immediately when something breaks.
+
+```yaml
+notify:
+  needs: [deploy]
+  if: always() # Run even if deploy failed
+  runs-on: ubuntu-latest
+  steps:
+    - name: Notify on failure
+      if: needs.deploy.result == 'failure'
+      run: |
+        echo "ALERT: Deployment failed — canary rolled back"
+        # In production: send Slack message, PagerDuty alert, etc.
+
+    - name: Notify on success
+      if: needs.deploy.result == 'success'
+      run: |
+        echo "Deployment successful — running at 100%"
+```
+
+The `if: always()` ensures the notify job runs regardless of whether the deploy succeeded or failed. Without this, a failed deploy would skip notifications entirely.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a pipeline orchestrator.
+// Given a set of jobs with dependencies, determine the execution order.
+// Jobs with no unmet dependencies run in parallel (same "wave").
+
+function planExecution(jobs) {
+// jobs: { [name]: { needs: string[] } }
+// Return: array of arrays (waves). Each wave is jobs that can run in parallel.
+const waves = [];
+const completed = new Set();
+const remaining = new Map(Object.entries(jobs));
+
+while (remaining.size > 0) {
+const wave = [];
+
+    for (const [name, config] of remaining) {
+      const deps = config.needs || [];
+      const depsReady = deps.every((dep) => completed.has(dep));
+      if (depsReady) wave.push(name);
+    }
+
+    if (wave.length === 0) {
+      throw new Error("Circular dependency detected");
+    }
+
+    // Your code here:
+    // 1. Add wave to waves
+    // 2. Mark wave jobs as completed
+    // 3. Remove wave jobs from remaining
+
+}
+
+return waves;
+}
+
+// Test
+const pipeline = {
+lint: { needs: [] },
+typecheck: { needs: [] },
+security: { needs: [] },
+test: { needs: ["lint", "typecheck", "security"] },
+build: { needs: ["test"] },
+deploy: { needs: ["build"] },
+notify: { needs: ["deploy"] },
+};
+
+const plan = planExecution(pipeline);
+console.log("Execution plan:");
+plan.forEach((wave, i) => console.log("Wave " + (i + 1) + ":", wave.join(", ")));
+// Wave 1: lint, typecheck, security
+// Wave 2: test
+// Wave 3: build
+// Wave 4: deploy
+// Wave 5: notify`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why do lint, typecheck, and security jobs run in parallel rather than sequentially?"
+  options={[
+    "Because they modify different files and cannot conflict",
+    "Because they are independent — none needs the output of another — so parallel execution reduces total pipeline time",
+    "Because GitHub Actions requires at least three parallel jobs",
+    "Because sequential jobs would exceed the workflow timeout limit",
+  ]}
+  answer={1}
+  explanation="Independent jobs can run simultaneously. If lint takes 20s, typecheck 30s, and security 40s, parallel execution takes 40s total. Sequential would take 90s. The pipeline total time equals the slowest parallel job."
+/>
+
+<Quiz
+  question="What does the 'concurrency' block with 'cancel-in-progress: true' prevent?"
+  options={[
+    "Multiple developers from pushing to the same branch",
+    "Duplicate artifacts from being uploaded",
+    "Wasted compute from running outdated pipeline runs when a new push arrives",
+    "Deployment to production during business hours",
+  ]}
+  answer={2}
+  explanation="When a developer pushes a fix while their previous commit is still building, the old run is no longer useful. cancel-in-progress stops the old run, saving compute time and preventing confusion about which run matters."
+/>
+
+<FillBlank
+  question="In a GitHub Actions workflow, the 'if: ______()' condition on a job ensures it runs regardless of whether its dependencies succeeded or failed."
+  answer="always"
+/>
+
+## What you learned
+
+- A production pipeline layers five stages (quality gates, tests, build, deploy, notify) ordered from fastest to slowest, with parallel execution wherever possible
+- Canary deployments in CI use health check scripts that monitor error rates and latency before promoting new code to full traffic
+- Pipeline orchestration uses dependency graphs to determine which jobs can run in parallel (same wave) and which must wait for predecessors

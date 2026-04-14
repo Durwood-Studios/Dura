@@ -1,0 +1,307 @@
+---
+title: "Integration Testing"
+description: "Testing API routes, database queries, and service boundaries where modules meet."
+phase: 8
+module: "8-1-testing"
+order: 3
+estimatedMinutes: 12
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-3"]
+  swebok: ["Software Testing"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - unit-test
+---
+
+## Why this matters
+
+Unit tests verify functions in isolation. But your application is not a collection of isolated functions — it is modules connected to databases, APIs, and each other. Integration tests verify that those connections work. They catch the bugs that slip through unit tests: mismatched request shapes, broken query logic, serialization errors at service boundaries. If unit tests prove the bricks are solid, integration tests prove the wall stands.
+
+## What integration tests cover
+
+Integration tests sit in the middle of the testing pyramid. They test the seams between systems.
+
+```javascript
+// Unit test: does the function compute correctly? (isolated)
+// Integration test: does the API route call the service
+//   and return the right HTTP response? (connected)
+
+// Example: an API route handler
+async function handleGetUser(req) {
+  const userId = req.params.id;
+
+  if (!userId) {
+    return { status: 400, body: { error: "Missing user ID" } };
+  }
+
+  try {
+    const user = await userService.findById(userId);
+    if (!user) {
+      return { status: 404, body: { error: "User not found" } };
+    }
+    return { status: 200, body: user };
+  } catch (error) {
+    return { status: 500, body: { error: "Internal server error" } };
+  }
+}
+```
+
+An integration test for this handler would verify the full request-to-response cycle — not just the business logic, but the HTTP status codes, error shapes, and data transformation.
+
+## Testing API routes
+
+```javascript
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+
+// Simulate an in-memory database for integration testing
+function createTestDB() {
+  const users = [
+    { id: "1", name: "Ada Lovelace", email: "ada@example.com" },
+    { id: "2", name: "Grace Hopper", email: "grace@example.com" },
+  ];
+
+  return {
+    findById(id) {
+      return Promise.resolve(users.find((u) => u.id === id) || null);
+    },
+    findAll() {
+      return Promise.resolve(users);
+    },
+  };
+}
+
+// The handler under test uses a real service (backed by test DB)
+function createHandler(db) {
+  return async function handleGetUser(id) {
+    if (!id) {
+      return { status: 400, body: { error: "Missing user ID" } };
+    }
+
+    try {
+      const user = await db.findById(id);
+      if (!user) {
+        return { status: 404, body: { error: "User not found" } };
+      }
+      return { status: 200, body: user };
+    } catch (error) {
+      return { status: 500, body: { error: "Internal server error" } };
+    }
+  };
+}
+
+describe("GET /users/:id", () => {
+  let handler;
+  let db;
+
+  beforeAll(() => {
+    db = createTestDB();
+    handler = createHandler(db);
+  });
+
+  it("returns a user when found", async () => {
+    const response = await handler("1");
+
+    expect(response.status).toBe(200);
+    expect(response.body.name).toBe("Ada Lovelace");
+    expect(response.body.email).toBe("ada@example.com");
+  });
+
+  it("returns 404 for unknown user", async () => {
+    const response = await handler("999");
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe("User not found");
+  });
+
+  it("returns 400 when ID is missing", async () => {
+    const response = await handler(null);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("Missing user ID");
+  });
+});
+```
+
+Notice the difference from unit tests: we are testing the handler with a real (in-memory) data source, verifying the full response shape including HTTP status codes. The database is simplified but structurally authentic.
+
+## Testing service boundaries
+
+When two services communicate, the contract between them is the most fragile part. Integration tests lock down that contract.
+
+```javascript
+// A service that transforms data between two systems
+function transformOrderForPayment(order) {
+  return {
+    amount: Math.round(order.total * 100), // cents for Stripe
+    currency: order.currency.toLowerCase(),
+    metadata: {
+      orderId: order.id,
+      customerEmail: order.customer.email,
+    },
+  };
+}
+
+// Integration test: verify the output shape matches
+// what the payment API actually expects
+describe("transformOrderForPayment", () => {
+  it("produces a valid payment payload", () => {
+    const order = {
+      id: "ORD-123",
+      total: 49.99,
+      currency: "USD",
+      customer: { email: "buyer@example.com" },
+    };
+
+    const payload = transformOrderForPayment(order);
+
+    // These assertions match the payment API's contract
+    expect(payload.amount).toBe(4999);
+    expect(typeof payload.amount).toBe("number");
+    expect(payload.currency).toBe("usd");
+    expect(payload.metadata.orderId).toBe("ORD-123");
+    expect(payload.metadata.customerEmail).toBe("buyer@example.com");
+  });
+
+  it("rounds fractional cents correctly", () => {
+    const order = {
+      id: "ORD-456",
+      total: 19.995,
+      currency: "EUR",
+      customer: { email: "test@example.com" },
+    };
+
+    const payload = transformOrderForPayment(order);
+
+    // Math.round(19.995 * 100) = 2000, not 1999
+    expect(payload.amount).toBe(2000);
+  });
+});
+```
+
+## Test database patterns
+
+Real integration tests against a database follow a setup-teardown pattern.
+
+```javascript
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+
+// Pattern: each test gets a clean state
+describe("UserRepository", () => {
+  let db;
+
+  beforeEach(async () => {
+    db = createTestDB();
+    // Seed with known data
+    await db.insert("users", { id: "1", name: "Test User" });
+  });
+
+  afterEach(async () => {
+    // Clean up — prevent test pollution
+    await db.clear("users");
+  });
+
+  it("finds an existing user", async () => {
+    const user = await db.findById("users", "1");
+    expect(user.name).toBe("Test User");
+  });
+
+  it("returns null for missing user", async () => {
+    const user = await db.findById("users", "nonexistent");
+    expect(user).toBeNull();
+  });
+});
+```
+
+The key principle: every test must be **independent**. No test should rely on data created by a previous test. `beforeEach` and `afterEach` enforce that isolation.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write an integration test for a `createUser` function. The function takes a name and email, validates them, and stores the user. Test the happy path (valid input returns the user), and the error path (missing email throws an error)."
+  initialCode={`// Simple in-memory store
+const store = [];
+
+function createUser(name, email) {
+if (!name) throw new Error("Name is required");
+if (!email) throw new Error("Email is required");
+
+const user = { id: store.length + 1, name, email };
+store.push(user);
+return user;
+}
+
+// Write your integration tests as assertions
+// Test 1: valid input creates and returns a user
+// Test 2: missing email throws an error`}
+  solution={`const store = [];
+
+function createUser(name, email) {
+if (!name) throw new Error("Name is required");
+if (!email) throw new Error("Email is required");
+
+const user = { id: store.length + 1, name, email };
+store.push(user);
+return user;
+}
+
+// Test 1: valid input
+const user = createUser("Ada", "ada@example.com");
+console.log(user.name === "Ada");
+console.log(user.email === "ada@example.com");
+console.log(typeof user.id === "number");
+console.log(store.length === 1);
+
+// Test 2: missing email
+try {
+createUser("Grace", null);
+console.log(false); // should not reach here
+} catch (e) {
+console.log(e.message === "Email is required");
+}`}
+testCases={["createUser stores valid users and rejects invalid input"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What is the main difference between a unit test and an integration test?",
+      options: [
+        "Integration tests are written in a different language",
+        "Integration tests verify how multiple modules work together across boundaries",
+        "Integration tests do not use assertions",
+        "Integration tests only run in production",
+      ],
+      correct: 1,
+      explanation:
+        "Integration tests verify the connections between modules — API routes, database queries, service contracts — while unit tests verify individual functions in isolation.",
+    },
+    {
+      type: "true-false",
+      question:
+        "True or false: integration tests should share state between test cases for efficiency.",
+      options: ["True", "False"],
+      correct: 1,
+      explanation:
+        "Each test must be independent. Shared state causes flaky tests that pass or fail depending on execution order. Use beforeEach/afterEach for clean isolation.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Integration tests verify the ___ between modules, such as API routes, database ___, and service contracts."
+  answers={["boundaries", "queries"]}
+  hints={["seams or connections", "data operations"]}
+/>
+
+## What you learned
+
+- Integration tests verify **boundaries between modules** — API handlers, database queries, and service-to-service contracts.
+- Use **in-memory databases or test doubles** that mirror real data sources without the cost of external infrastructure.
+- Every test must be **independent** — use `beforeEach` and `afterEach` to prevent state pollution between test cases.

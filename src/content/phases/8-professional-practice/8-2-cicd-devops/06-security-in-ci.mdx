@@ -1,0 +1,300 @@
+---
+title: "Security in CI"
+description: "Learn how to integrate dependency scanning, static analysis, secrets detection, and software bill of materials into your CI pipeline."
+phase: 8
+module: "8-2-cicd-devops"
+order: 6
+estimatedMinutes: 8
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-3"]
+  swebok: ["Software Engineering Process"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - unit-test
+  - vulnerability
+  - static-analysis
+  - supply-chain
+  - sbom
+---
+
+## Why this matters
+
+Security vulnerabilities discovered in production cost 100 times more to fix than those caught during development. The 2021 Log4Shell vulnerability affected virtually every Java application on the planet — and the teams that recovered fastest were the ones that already knew which of their services used Log4j because they had software bills of materials. Building security checks into your CI pipeline catches vulnerabilities automatically, on every commit, before they reach production.
+
+## Dependency scanning
+
+Your application code is typically 10-20% of what ships. The other 80-90% is third-party dependencies. Each one is an attack surface. Dependency scanning tools check your lockfile against known vulnerability databases.
+
+```yaml
+# GitHub Actions: dependency scanning with npm audit
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # Weekly Monday 6 AM — catch new CVEs
+
+jobs:
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+        # Fails the build if any HIGH or CRITICAL vulnerability exists
+
+      - name: Check for outdated packages
+        run: npm outdated || true
+        # Informational — does not fail the build
+```
+
+The `schedule` trigger is critical. New vulnerabilities are published daily. A dependency that was safe last week might have a critical CVE today. Weekly scans catch these even when no code changes.
+
+## Static Application Security Testing (SAST)
+
+SAST tools analyze your source code without running it, looking for patterns that indicate security problems: SQL injection, cross-site scripting, insecure cryptography, hardcoded secrets.
+
+```javascript
+// Examples of what SAST tools catch
+
+// BAD: SQL injection — user input concatenated into query
+function findUserBad(username) {
+  const query = `SELECT * FROM users WHERE name = '${username}'`;
+  // SAST flags this: possible SQL injection
+  return db.execute(query);
+}
+
+// GOOD: Parameterized query — user input is escaped by the driver
+function findUserGood(username) {
+  const query = "SELECT * FROM users WHERE name = $1";
+  return db.execute(query, [username]);
+}
+
+// BAD: Hardcoded secret in source code
+const API_KEY = "sk-live-abc123def456";
+// SAST flags this: possible hardcoded credential
+
+// GOOD: Secret loaded from environment
+const API_KEY_SAFE = process.env.API_KEY;
+
+// BAD: Insecure random for security-sensitive operation
+function generateTokenBad() {
+  return Math.random().toString(36).slice(2);
+  // SAST flags this: Math.random() is not cryptographically secure
+}
+
+// GOOD: Cryptographically secure random
+function generateTokenGood() {
+  const { randomBytes } = require("crypto");
+  return randomBytes(32).toString("hex");
+}
+```
+
+SAST runs fast because it does not execute code. It can scan an entire codebase in seconds, making it ideal for the CI pipeline where speed matters.
+
+## Secrets detection
+
+Secrets accidentally committed to Git are compromised forever — even if you delete the commit, it exists in the repository history. Pre-commit hooks and CI checks prevent secrets from entering the codebase in the first place.
+
+```yaml
+# GitHub Actions: secrets scanning
+jobs:
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history to scan all commits
+
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          extra_args: --only-verified
+          # Only flag secrets that are confirmed valid (reduces false positives)
+```
+
+```javascript
+// Patterns that secrets scanners look for
+const secretPatterns = [
+  { name: "AWS Access Key", pattern: /AKIA[0-9A-Z]{16}/ },
+  { name: "GitHub Token", pattern: /ghp_[A-Za-z0-9]{36}/ },
+  { name: "Generic API Key", pattern: /api[_-]?key\s*[:=]\s*['"][A-Za-z0-9]{20,}['"]/ },
+  { name: "Private Key", pattern: /-----BEGIN (RSA |EC )?PRIVATE KEY-----/ },
+  { name: "Database URL", pattern: /postgres:\/\/[^:]+:[^@]+@/ },
+];
+
+function scanForSecrets(content, filename) {
+  const findings = [];
+  for (const { name, pattern } of secretPatterns) {
+    if (pattern.test(content)) {
+      findings.push({
+        type: name,
+        file: filename,
+        severity: "critical",
+        action: "Rotate this credential immediately — it is compromised",
+      });
+    }
+  }
+  return findings;
+}
+```
+
+If a secret is accidentally committed: rotate it immediately, then remove it from history. The rotation is more important than the cleanup because bots scrape public repositories for credentials within minutes.
+
+## Software Bill of Materials (SBOM)
+
+An SBOM is a machine-readable inventory of every component in your software — every dependency, its version, its license, and its origin. When a new vulnerability is announced, the SBOM tells you in seconds whether you are affected.
+
+```javascript
+// What an SBOM contains
+const sbomEntry = {
+  name: "express",
+  version: "4.18.2",
+  license: "MIT",
+  supplier: "npm registry",
+  dependencies: ["body-parser@1.20.2", "cookie@0.6.0"],
+  checksums: {
+    sha256: "abc123...",
+  },
+};
+
+// Why SBOMs matter during incidents
+function checkVulnerability(sbom, cveAffects) {
+  // cveAffects: { package: "lodash", versions: "<4.17.21" }
+  const affected = sbom.filter((entry) => {
+    if (entry.name !== cveAffects.package) return false;
+    return isVersionInRange(entry.version, cveAffects.versions);
+  });
+
+  return {
+    isVulnerable: affected.length > 0,
+    affectedServices: affected.map((e) => e.service),
+    action: affected.length > 0 ? "Upgrade immediately" : "Not affected",
+  };
+}
+
+function isVersionInRange(version, range) {
+  // Simplified — real implementation uses semver comparison
+  return version < range.replace("<", "");
+}
+```
+
+## Putting it all together
+
+A secure CI pipeline layers these checks so that the fastest, cheapest checks run first:
+
+```yaml
+# Complete security-focused CI pipeline
+jobs:
+  secrets: # 10 seconds — catch leaked credentials
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Run secrets scanner"
+
+  sast: # 30 seconds — catch code-level vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Run SAST scanner"
+
+  dependencies: # 1 minute — catch vulnerable packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm audit --audit-level=high
+
+  sbom: # 1 minute — generate inventory
+    needs: dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Generate and upload SBOM"
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a simple secrets scanner.
+// Given file contents, detect potential hardcoded secrets.
+// Return an array of findings with the pattern name and line number.
+
+const patterns = [
+{ name: "AWS Key", regex: /AKIA[0-9A-Z]{16}/ },
+{ name: "GitHub Token", regex: /ghp\_[A-Za-z0-9]{36}/ },
+{ name: "Generic Secret", regex: /secret\s*[:=]\s*['"][A-Za-z0-9]{16,}['"]/ },
+];
+
+function scanFile(contents) {
+const lines = contents.split("\\n");
+const findings = [];
+
+// Your code here: check each line against each pattern
+// Push { pattern: name, line: lineNumber } for matches
+
+return findings;
+}
+
+// Test
+const fileContents = [
+'const config = { region: "us-east-1" };',
+'const key = "AKIAIOSFODNN7EXAMPLE1";',
+'const safe = process.env.SECRET;',
+'const token = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";',
+'const secret = "not-long-enough";',
+].join("\\n");
+
+const results = scanFile(fileContents);
+console.log(JSON.stringify(results, null, 2));
+// Should find AWS Key on line 2, GitHub Token on line 4`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should dependency scanning run on a weekly schedule in addition to on every push?"
+  options={[
+    "To reduce CI costs by running fewer scans during the week",
+    "Because new vulnerabilities are published daily and affect existing dependencies even without code changes",
+    "Weekly scans are more thorough than per-push scans",
+    "To comply with open source license requirements",
+  ]}
+  answer={1}
+  explanation="New CVEs are published daily. A dependency that was safe when you committed it may have a critical vulnerability discovered later. Scheduled scans catch these even when your code hasn't changed."
+/>
+
+<Quiz
+  question="What should you do FIRST when a secret is accidentally committed to a repository?"
+  options={[
+    "Delete the commit from the repository history",
+    "Add the file to .gitignore to prevent future commits",
+    "Rotate the credential immediately so the exposed value is no longer valid",
+    "Open an issue to track the remediation",
+  ]}
+  answer={2}
+  explanation="Rotation is the most urgent action. Bots scrape public repositories for credentials within minutes. A rotated credential is useless to an attacker even if the commit remains in history."
+/>
+
+<FillBlank
+  question="An SBOM is a machine-readable ______ of every component in your software, including dependencies, versions, and licenses."
+  answer="inventory"
+/>
+
+## What you learned
+
+- Dependency scanning checks third-party packages against vulnerability databases, and scheduled scans catch new CVEs even when your code has not changed
+- SAST analyzes source code for security patterns like SQL injection, hardcoded secrets, and insecure cryptography without executing the code
+- Software Bills of Materials provide instant answers during vulnerability incidents by listing every component, version, and license in your application

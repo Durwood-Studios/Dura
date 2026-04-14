@@ -1,0 +1,336 @@
+---
+title: "API Design"
+description: "Compare REST maturity levels, GraphQL, gRPC, and tRPC — and learn how to choose the right API style for your system."
+phase: 8
+module: "8-3-architecture-patterns"
+order: 5
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - rest
+  - graphql
+  - grpc
+  - trpc
+  - api-contract
+  - idempotency
+---
+
+## Why this matters
+
+Every system boundary is an API. Frontend to backend. Service to service. Your app to a third-party provider. The way you design that boundary determines how easy it is to evolve, debug, and scale your system. A poorly designed API creates coupling that bleeds across teams — a well-designed one lets each side change independently.
+
+There is no single "best" API style. REST, GraphQL, gRPC, and tRPC each solve different problems. Choosing the wrong one costs you months of workarounds.
+
+## REST and the Richardson Maturity Model
+
+REST isn't a protocol — it's an architectural style with levels of maturity.
+
+**Level 0 — The Swamp of POX:** One URL, one HTTP method (usually POST), the action is in the request body. This is effectively RPC over HTTP.
+
+**Level 1 — Resources:** Different URLs for different things (`/users`, `/orders`), but still using POST for everything.
+
+**Level 2 — HTTP Verbs:** Resources plus proper verbs — GET reads, POST creates, PUT/PATCH updates, DELETE removes. Status codes carry meaning. This is where most "REST APIs" live.
+
+**Level 3 — Hypermedia (HATEOAS):** Responses include links to related actions. The client discovers what it can do next from the response itself, rather than hardcoding URL patterns.
+
+```javascript
+// Level 2 REST — the practical baseline most teams target.
+// GET /api/orders/42
+const orderResponse = {
+  id: 42,
+  status: "shipped",
+  total: 89.99,
+  items: [{ productId: 7, name: "Keyboard", quantity: 1, price: 89.99 }],
+};
+
+// Level 3 REST — includes navigable links.
+const orderWithLinks = {
+  id: 42,
+  status: "shipped",
+  total: 89.99,
+  items: [{ productId: 7, name: "Keyboard", quantity: 1, price: 89.99 }],
+  _links: {
+    self: { href: "/api/orders/42" },
+    cancel: { href: "/api/orders/42/cancel", method: "POST" },
+    track: { href: "/api/shipments/42", method: "GET" },
+    customer: { href: "/api/customers/15", method: "GET" },
+  },
+};
+```
+
+### REST design principles
+
+```javascript
+// Good REST endpoint design.
+// Nouns for resources, verbs from HTTP methods.
+// GET    /api/users          → list users
+// POST   /api/users          → create a user
+// GET    /api/users/5        → get user 5
+// PATCH  /api/users/5        → update user 5
+// DELETE /api/users/5        → delete user 5
+// GET    /api/users/5/orders → list orders for user 5
+
+// Idempotency: GET, PUT, DELETE should produce the same result
+// if called multiple times. POST is not idempotent.
+
+// Pagination for collections:
+// GET /api/users?page=2&limit=20
+const paginatedResponse = {
+  data: [
+    /* 20 users */
+  ],
+  pagination: {
+    page: 2,
+    limit: 20,
+    total: 347,
+    totalPages: 18,
+  },
+};
+```
+
+## GraphQL: ask for exactly what you need
+
+GraphQL lets the client specify exactly which fields it wants, solving the over-fetching (getting fields you don't need) and under-fetching (needing multiple requests) problems of REST.
+
+```javascript
+// REST: two round trips to get an order with customer details.
+// GET /api/orders/42        → { customerId: 15, ... }
+// GET /api/customers/15     → { name: "Alice", email: "..." }
+
+// GraphQL: one request, client specifies the shape.
+const query = `
+  query {
+    order(id: 42) {
+      id
+      status
+      total
+      customer {
+        name
+        email
+      }
+      items {
+        name
+        quantity
+      }
+    }
+  }
+`;
+
+// The server resolves each field through resolver functions.
+const resolvers = {
+  Query: {
+    order: async (_, { id }) => {
+      return await orderRepository.findById(id);
+    },
+  },
+  Order: {
+    customer: async (order) => {
+      return await customerRepository.findById(order.customerId);
+    },
+    items: async (order) => {
+      return await orderItemRepository.findByOrderId(order.id);
+    },
+  },
+};
+```
+
+**Use GraphQL when:** You have many clients (web, mobile, third-party) with different data needs from the same backend. Mobile might want 5 fields; the dashboard wants 50.
+
+**Skip GraphQL when:** You have one client and one backend, or your data model is simple. GraphQL's query parsing, schema management, and N+1 query prevention add overhead that a few REST endpoints wouldn't need.
+
+## gRPC: binary protocol for service-to-service
+
+gRPC uses Protocol Buffers (protobuf) for strongly-typed, binary-encoded messages. It's 2-10x faster than JSON over HTTP for high-throughput service-to-service communication.
+
+```javascript
+// gRPC defines services and messages in .proto files.
+// This is the schema — not JavaScript, but you interact with
+// generated code from it.
+
+// order_service.proto (conceptual)
+// service OrderService {
+//   rpc GetOrder (GetOrderRequest) returns (Order);
+//   rpc CreateOrder (CreateOrderRequest) returns (Order);
+//   rpc StreamOrderUpdates (GetOrderRequest) returns (stream OrderUpdate);
+// }
+
+// In Node.js, the generated client looks like:
+async function getOrderViaGrpc(client, orderId) {
+  try {
+    const order = await client.getOrder({ id: orderId });
+    console.log(`Order ${order.id}: ${order.status}, $${order.total}`);
+    return order;
+  } catch (error) {
+    console.error(`gRPC error code ${error.code}: ${error.message}`);
+    throw error;
+  }
+}
+
+// gRPC supports streaming — the server pushes updates as they happen.
+function streamOrderUpdates(client, orderId) {
+  const stream = client.streamOrderUpdates({ id: orderId });
+
+  stream.on("data", (update) => {
+    console.log(`Order ${orderId} status: ${update.status}`);
+  });
+
+  stream.on("error", (error) => {
+    console.error("Stream error:", error.message);
+  });
+}
+```
+
+**Use gRPC when:** Service-to-service communication needs high throughput, strong typing, or streaming. Internal microservices are the sweet spot.
+
+**Skip gRPC when:** The client is a browser (gRPC needs HTTP/2 and doesn't work natively in browsers without a proxy), or the team doesn't want to manage protobuf schemas.
+
+## tRPC: end-to-end type safety
+
+tRPC eliminates the API layer between a TypeScript frontend and backend. You define procedures on the server; the client calls them with full type inference — no code generation, no schema files.
+
+```javascript
+// tRPC server — define procedures with input validation.
+// (Shown as conceptual JavaScript; tRPC is TypeScript-first.)
+const appRouter = {
+  getOrder: {
+    input: (id) => {
+      if (typeof id !== "number") throw new Error("ID must be a number");
+      return id;
+    },
+    async resolve({ input: id }) {
+      const order = await db.orders.findById(id);
+      if (!order) throw new Error("Not found");
+      return order;
+    },
+  },
+
+  createOrder: {
+    input: (data) => {
+      if (!data.items?.length) throw new Error("Items required");
+      return data;
+    },
+    async resolve({ input }) {
+      return await db.orders.create(input);
+    },
+  },
+};
+
+// tRPC client — call server procedures like local functions.
+// Types flow from server to client automatically.
+// const order = await trpc.getOrder.query(42);
+// const newOrder = await trpc.createOrder.mutate({ items: [...] });
+```
+
+**Use tRPC when:** Both frontend and backend are TypeScript in the same monorepo. The type safety payoff is enormous.
+
+**Skip tRPC when:** Your backend is not TypeScript, or you need a public API that non-TypeScript clients will consume.
+
+## Choosing the right style
+
+| Factor           | REST                       | GraphQL                    | gRPC              | tRPC             |
+| ---------------- | -------------------------- | -------------------------- | ----------------- | ---------------- |
+| Client diversity | Many clients, standardized | Many clients, varied needs | Internal services | Single TS client |
+| Performance      | Good                       | Moderate                   | Excellent         | Good             |
+| Type safety      | Manual (OpenAPI)           | Schema-based               | Protobuf          | Automatic        |
+| Browser support  | Native                     | Native                     | Needs proxy       | Native           |
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Design a REST API router that maps HTTP methods to handlers.
+// Implement a mini router that dispatches based on method + path.
+
+function createRouter() {
+const routes = [];
+
+return {
+get(path, handler) { routes.push({ method: "GET", path, handler }); },
+post(path, handler) { routes.push({ method: "POST", path, handler }); },
+patch(path, handler) { routes.push({ method: "PATCH", path, handler }); },
+delete(path, handler) { routes.push({ method: "DELETE", path, handler }); },
+
+    handle(method, path, body) {
+      // Find the matching route and call its handler.
+      // If a route has a parameter like "/users/:id",
+      // extract the id and pass it as params.id.
+      // Return { status: 404, body: "Not Found" } if no match.
+    },
+
+};
+}
+
+const router = createRouter();
+const users = [{ id: 1, name: "Alice" }, { id: 2, name: "Bob" }];
+
+router.get("/users", () => ({ status: 200, body: users }));
+router.get("/users/:id", (params) => {
+const user = users.find((u) => u.id === Number(params.id));
+return user
+? { status: 200, body: user }
+: { status: 404, body: "Not Found" };
+});
+router.post("/users", (params, body) => {
+const newUser = { id: users.length + 1, ...body };
+users.push(newUser);
+return { status: 201, body: newUser };
+});
+
+// --- Test ---
+const r1 = router.handle("GET", "/users");
+console.log(r1.status === 200); // true
+console.log(r1.body.length === 2); // true
+
+const r2 = router.handle("GET", "/users/1");
+console.log(r2.body.name === "Alice"); // true
+
+const r3 = router.handle("POST", "/users", { name: "Charlie" });
+console.log(r3.status === 201); // true
+console.log(r3.body.name === "Charlie"); // true
+
+const r4 = router.handle("GET", "/users/99");
+console.log(r4.status === 404); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What problem does GraphQL solve that REST Level 2 does not?"
+  options={[
+    "GraphQL is faster because it uses binary encoding",
+    "GraphQL lets clients request exactly the fields they need, avoiding over-fetching and under-fetching",
+    "GraphQL provides automatic type safety between frontend and backend",
+    "GraphQL eliminates the need for a database",
+  ]}
+  answer={1}
+  explanation="REST endpoints return fixed response shapes. GraphQL lets each client specify which fields it needs in the query, so a mobile app can request 5 fields while a dashboard requests 50 — from the same endpoint."
+/>
+
+<Quiz
+  question="When is tRPC the best choice for an API layer?"
+  options={[
+    "When building a public API for third-party consumers",
+    "When both frontend and backend are TypeScript in the same monorepo",
+    "When you need maximum throughput between microservices",
+    "When you need to support both REST and GraphQL clients",
+  ]}
+  answer={1}
+  explanation="tRPC's strength is automatic end-to-end type safety between TypeScript client and server. This only works when both sides share the same type system, typically in a monorepo."
+/>
+
+<FillBlank
+  question="A ______ HTTP method should produce the same result whether called once or multiple times."
+  answer="idempotent"
+/>
+
+## What you learned
+
+- REST's Richardson Maturity Model progresses from basic RPC (Level 0) through resources and HTTP verbs (Level 2) to hypermedia-driven discovery (Level 3)
+- GraphQL solves over/under-fetching for diverse clients, gRPC optimizes service-to-service throughput, and tRPC provides automatic type safety in TypeScript monorepos
+- API style choice depends on client diversity, performance requirements, type safety needs, and team constraints — no single style is universally best

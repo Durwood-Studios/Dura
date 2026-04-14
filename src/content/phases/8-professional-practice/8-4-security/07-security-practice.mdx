@@ -1,0 +1,461 @@
+---
+title: "Security Audit Practice"
+description: "Audit a sample web application for real vulnerabilities, classify them by severity, and implement fixes using everything from this module."
+phase: 8
+module: "8-4-security"
+order: 7
+estimatedMinutes: 14
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-4"]
+  swebok: ["Software Quality"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - security-audit
+  - threat-model
+  - attack-surface
+  - vulnerability-classification
+  - penetration-testing
+  - remediation
+  - severity-rating
+  - security-checklist
+---
+
+## Why this matters
+
+Reading about vulnerabilities is not the same as finding them. In a real security audit, you examine running code with an adversarial mindset: "How would I break this?" This lesson puts every concept from the module into practice. You will analyze a deliberately vulnerable application, classify each flaw, prioritize by severity, and write the fixes. This is the skill that separates developers who build secure systems from those who merely read about them.
+
+## The audit process
+
+A security audit follows a structured methodology. You do not randomly poke at endpoints — you systematically examine every trust boundary.
+
+```javascript
+// Step 1: Map the attack surface
+function mapAttackSurface(app) {
+  return {
+    endpoints: [
+      // Every route that accepts input
+      { method: "POST", path: "/api/auth/login", input: "body" },
+      { method: "GET", path: "/api/users/:id", input: "params" },
+      { method: "POST", path: "/api/comments", input: "body" },
+      { method: "GET", path: "/api/preview", input: "query.url" },
+    ],
+    dataFlows: [
+      // Where data moves between trust boundaries
+      "user input → API → database",
+      "user input → API → external service",
+      "database → API → browser (rendered as HTML)",
+      "cookie → session store → authorization decision",
+    ],
+    trustBoundaries: [
+      "browser ↔ API server",
+      "API server ↔ database",
+      "API server ↔ external APIs",
+      "authenticated ↔ unauthenticated",
+      "user role ↔ admin role",
+    ],
+  };
+}
+```
+
+## The vulnerable application
+
+Here is a sample Express application with multiple security flaws. Read it carefully before looking at the analysis.
+
+```javascript
+const express = require("express");
+const app = express();
+app.use(express.json());
+
+// Database simulation
+const users = [
+  { id: 1, username: "admin", password: "admin123", role: "admin" },
+  { id: 2, username: "alice", password: "alice456", role: "user" },
+];
+const comments = [];
+let sessionStore = {};
+
+// LOGIN
+app.post("/api/login", (req, res) => {
+  const { username, password } = req.body;
+  const user = users.find((u) => u.username === username && u.password === password);
+  if (!user) {
+    return res.status(401).json({ error: "Invalid credentials for " + username });
+  }
+  const sessionId = Math.random().toString(36).slice(2);
+  sessionStore[sessionId] = { userId: user.id, role: user.role };
+  res.cookie("session", sessionId);
+  res.json({ message: "Welcome " + user.username, role: user.role });
+});
+
+// GET USER PROFILE
+app.get("/api/users/:id", (req, res) => {
+  const user = users.find((u) => u.id === parseInt(req.params.id));
+  if (!user) return res.status(404).json({ error: "Not found" });
+  res.json(user); // Returns full user object
+});
+
+// POST COMMENT
+app.post("/api/comments", (req, res) => {
+  const { body, articleId } = req.body;
+  comments.push({ body, articleId, createdAt: new Date() });
+  res.json({ message: "Comment added" });
+});
+
+// RENDER COMMENTS
+app.get("/api/comments/:articleId", (req, res) => {
+  const articleComments = comments.filter((c) => c.articleId === req.params.articleId);
+  const html = articleComments.map((c) => `<div class="comment">${c.body}</div>`).join("");
+  res.send(html);
+});
+
+// URL PREVIEW
+app.get("/api/preview", async (req, res) => {
+  const response = await fetch(req.query.url);
+  const data = await response.text();
+  res.send(data);
+});
+
+// ADMIN — DELETE USER
+app.delete("/api/users/:id", (req, res) => {
+  const index = users.findIndex((u) => u.id === parseInt(req.params.id));
+  if (index === -1) return res.status(404).json({ error: "Not found" });
+  users.splice(index, 1);
+  res.json({ message: "User deleted" });
+});
+
+app.listen(3000);
+```
+
+## Vulnerability classification
+
+Now let us systematically identify every vulnerability.
+
+```javascript
+const auditFindings = [
+  {
+    id: "VULN-001",
+    location: "POST /api/login",
+    category: "A02 — Cryptographic Failures",
+    severity: "CRITICAL",
+    description: "Passwords stored and compared in plaintext",
+    impact: "Database breach exposes all user passwords immediately",
+    fix: "Hash passwords with bcrypt (cost 12+), compare with bcrypt.compare()",
+  },
+  {
+    id: "VULN-002",
+    location: "POST /api/login",
+    category: "A07 — Authentication Failures",
+    severity: "HIGH",
+    description: "Session ID generated with Math.random() (predictable)",
+    impact: "Attacker can predict session IDs and hijack sessions",
+    fix: "Use crypto.randomBytes(32).toString('hex')",
+  },
+  {
+    id: "VULN-003",
+    location: "POST /api/login",
+    category: "A07 — Authentication Failures",
+    severity: "HIGH",
+    description: "Session cookie missing httpOnly, secure, sameSite flags",
+    impact: "XSS can steal session cookies; CSRF is possible",
+    fix: "Set httpOnly: true, secure: true, sameSite: 'strict'",
+  },
+  {
+    id: "VULN-004",
+    location: "POST /api/login",
+    category: "A09 — Logging Failures",
+    severity: "MEDIUM",
+    description: "Error message reveals whether username exists",
+    impact: "Enables user enumeration attacks",
+    fix: "Return generic 'Invalid credentials' without username",
+  },
+  {
+    id: "VULN-005",
+    location: "GET /api/users/:id",
+    category: "A01 — Broken Access Control",
+    severity: "CRITICAL",
+    description: "No authentication required; returns password in response",
+    impact: "Anyone can read any user's password",
+    fix: "Require authentication, check authorization, exclude password from response",
+  },
+  {
+    id: "VULN-006",
+    location: "POST /api/comments",
+    category: "A03 — Injection / A08 — Integrity",
+    severity: "HIGH",
+    description: "No input validation or sanitization on comment body",
+    impact: "Stored XSS when comments are rendered as HTML",
+    fix: "Validate with Zod schema, sanitize HTML, use textContent for rendering",
+  },
+  {
+    id: "VULN-007",
+    location: "GET /api/comments/:articleId",
+    category: "A03 — Injection (XSS)",
+    severity: "CRITICAL",
+    description: "Comment body rendered directly as HTML without escaping",
+    impact: "Stored XSS executes in every visitor's browser",
+    fix: "Escape HTML entities or use a sanitization library",
+  },
+  {
+    id: "VULN-008",
+    location: "GET /api/preview",
+    category: "A10 — SSRF",
+    severity: "CRITICAL",
+    description: "Fetches any user-supplied URL without validation",
+    impact: "Attacker accesses internal services, cloud metadata, etc.",
+    fix: "Allowlist domains, block internal IPs, validate protocol",
+  },
+  {
+    id: "VULN-009",
+    location: "DELETE /api/users/:id",
+    category: "A01 — Broken Access Control",
+    severity: "CRITICAL",
+    description: "No authentication or authorization check on delete",
+    impact: "Anyone can delete any user account",
+    fix: "Require authentication + admin role check",
+  },
+  {
+    id: "VULN-010",
+    location: "Global",
+    category: "A05 — Security Misconfiguration",
+    severity: "MEDIUM",
+    description: "No rate limiting on any endpoint",
+    impact: "Brute force attacks on login, resource exhaustion via preview",
+    fix: "Add express-rate-limit with per-endpoint configuration",
+  },
+];
+```
+
+## Writing the fixes
+
+Prioritize by severity. Fix CRITICAL findings first.
+
+```javascript
+const crypto = require("crypto");
+const bcrypt = require("bcrypt");
+const { z } = require("zod");
+const rateLimit = require("express-rate-limit");
+const DOMPurify = require("dompurify");
+
+// FIX: Secure session creation
+function createSession(userId, role) {
+  const sessionId = crypto.randomBytes(32).toString("hex");
+  sessionStore[sessionId] = {
+    userId,
+    role,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 3600000,
+  };
+  return sessionId;
+}
+
+// FIX: Authentication middleware
+function authenticate(req, res, next) {
+  const sessionId = req.cookies.session;
+  if (!sessionId) return res.status(401).json({ error: "Not authenticated" });
+
+  const session = sessionStore[sessionId];
+  if (!session || session.expiresAt < Date.now()) {
+    delete sessionStore[sessionId];
+    return res.status(401).json({ error: "Session expired" });
+  }
+
+  req.user = session;
+  next();
+}
+
+// FIX: Authorization middleware
+function authorize(requiredRole) {
+  return (req, res, next) => {
+    if (req.user.role !== requiredRole) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    next();
+  };
+}
+
+// FIX: Secure login with hashed passwords and safe cookies
+const LoginSchema = z.object({
+  username: z.string().min(1).max(50),
+  password: z.string().min(1).max(128),
+});
+
+const loginLimiter = rateLimit({ windowMs: 900000, max: 5 });
+
+app.post("/api/login", loginLimiter, async (req, res) => {
+  const parsed = LoginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid input" });
+  }
+
+  const user = users.find((u) => u.username === parsed.data.username);
+  if (!user || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  const sessionId = createSession(user.id, user.role);
+  res.cookie("session", sessionId, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "strict",
+    maxAge: 3600000,
+  });
+  res.json({ message: "Authenticated" });
+});
+
+// FIX: Protected user endpoint, password excluded
+app.get("/api/users/:id", authenticate, (req, res) => {
+  const user = users.find((u) => u.id === parseInt(req.params.id));
+  if (!user) return res.status(404).json({ error: "Not found" });
+
+  if (req.user.role !== "admin" && req.user.userId !== user.id) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  const { passwordHash, ...safeUser } = user;
+  res.json(safeUser);
+});
+
+// FIX: Admin-only delete with authentication
+app.delete("/api/users/:id", authenticate, authorize("admin"), (req, res) => {
+  const index = users.findIndex((u) => u.id === parseInt(req.params.id));
+  if (index === -1) return res.status(404).json({ error: "Not found" });
+  users.splice(index, 1);
+  res.json({ message: "User deleted" });
+});
+```
+
+## The security audit checklist
+
+Use this checklist as a final pass on any application.
+
+```javascript
+const securityChecklist = {
+  authentication: [
+    "Passwords hashed with bcrypt/scrypt/Argon2 (cost factor 12+)",
+    "Session IDs generated with crypto.randomBytes",
+    "Cookies set with httpOnly, secure, sameSite",
+    "Sessions expire and are invalidated on logout",
+    "Rate limiting on login endpoints",
+  ],
+  authorization: [
+    "Every endpoint checks authentication",
+    "Every endpoint checks authorization (role or ownership)",
+    "Default deny — new endpoints require explicit permission grants",
+    "No sensitive data in responses beyond what the user is authorized to see",
+  ],
+  inputValidation: [
+    "All input validated with schema (Zod) at the API boundary",
+    "SQL queries use parameterized statements",
+    "HTML output is escaped or sanitized",
+    "URLs are validated against allowlists before server-side fetch",
+    "File uploads are validated (type, size, content)",
+  ],
+  headers: [
+    "Content-Security-Policy configured",
+    "X-Content-Type-Options: nosniff",
+    "X-Frame-Options: DENY",
+    "Strict-Transport-Security set",
+    "Referrer-Policy configured",
+  ],
+  dependencies: [
+    "Lockfile committed and used in CI (npm ci)",
+    "npm audit runs in CI pipeline",
+    "No known critical vulnerabilities in production dependencies",
+    "SBOM generated for releases",
+  ],
+  logging: [
+    "Authentication events logged (success and failure)",
+    "Authorization failures logged",
+    "Logs do not contain passwords, tokens, or PII",
+    "Alerts configured for anomalous patterns",
+  ],
+};
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Security audit exercise: analyze this API endpoint and list
+// every vulnerability you can find. Then write the fixed version.
+
+function vulnerableEndpoint(req, res) {
+// Search for users by name and return results as HTML
+const searchTerm = req.query.q;
+
+const query = "SELECT id, name, email, password, ssn " +
+"FROM users WHERE name LIKE '%" + searchTerm + "%'";
+
+const results = db.execute(query);
+
+let html = "<h2>Results for: " + searchTerm + "</h2><ul>";
+for (const user of results) {
+html += "<li>" + user.name + " - " + user.email +
+" (SSN: " + user.ssn + ")</li>";
+}
+html += "</ul>";
+
+res.send(html);
+}
+
+// List every vulnerability (aim for at least 6):
+const findings = [
+// { issue: "...", category: "...", fix: "..." },
+];
+
+// Write the secure version:
+function secureEndpoint(req, res) {
+// Your fixed implementation
+}
+
+// Print your findings
+console.log("Vulnerabilities found:");
+console.log("1. SQL injection via string concatenation");
+console.log("2. Reflected XSS — searchTerm rendered as HTML");
+console.log("3. Stored XSS — user.name rendered without escaping");
+console.log("4. Sensitive data exposure — password and SSN in query");
+console.log("5. No authentication — anyone can search");
+console.log("6. No input validation — no length/format check");
+console.log("7. No rate limiting — enables data scraping");
+console.log("8. No authorization — all users see SSNs");`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="When prioritizing security findings, which should be fixed first?"
+  options={[
+    "Vulnerabilities that are easiest to fix",
+    "Vulnerabilities with the highest severity and most likely exploitation",
+    "Vulnerabilities found by automated tools",
+    "Vulnerabilities in third-party dependencies",
+  ]}
+  answer={1}
+  explanation="Prioritize by risk: severity (how bad is the impact) multiplied by likelihood (how easy is it to exploit). A critical SQL injection on a public endpoint is fixed before a low-severity information disclosure on an internal tool."
+/>
+
+<Quiz
+  question="Why does the vulnerable app's error message 'Invalid credentials for admin' constitute a security flaw?"
+  options={[
+    "It reveals the server technology stack",
+    "It confirms which usernames exist, enabling enumeration attacks",
+    "It exposes the password hashing algorithm",
+    "It allows SQL injection through the username",
+  ]}
+  answer={1}
+  explanation="Different error messages for 'user not found' vs. 'wrong password' let attackers build a list of valid usernames. Always return a generic message: 'Invalid credentials' regardless of which part failed."
+/>
+
+<FillBlank
+  question="A security audit systematically examines every ______ boundary where data flows between trusted and untrusted contexts."
+  answer="trust"
+/>
+
+## What you learned
+
+- A security audit follows a structured methodology: map the attack surface, identify trust boundaries, classify findings by OWASP category and severity, then fix in priority order
+- Real applications often contain multiple interacting vulnerabilities — a single endpoint can have SQL injection, XSS, broken access control, and sensitive data exposure simultaneously
+- Security is a practice, not a checklist item — every code change should be reviewed with an adversarial mindset, asking "how could this be abused?"
