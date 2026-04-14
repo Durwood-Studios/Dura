@@ -1,10 +1,14 @@
 import type { DictionaryTerm } from "@/types/dictionary";
+import { WEB_BACKEND_TERMS } from "./batch-web-backend";
+import { SYSTEMS_AI_TERMS } from "./batch-systems-ai";
+import { ADVANCED_PROFESSIONAL_TERMS } from "./batch-advanced-professional";
+import { CTO_GAPS_TERMS } from "./batch-cto-gaps";
 
 /**
- * Seed dictionary. Real content lives here as the curriculum is written.
+ * Verified dictionary. Core terms inline, expansion batches imported.
  * Each term gets its own indexed URL: /dictionary/{slug}.
  */
-export const DICTIONARY: DictionaryTerm[] = [
+const CORE_TERMS: DictionaryTerm[] = [
   {
     slug: "algorithm",
     term: "Algorithm",
@@ -3642,6 +3646,14 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["clean-architecture"],
   },
+];
+
+export const DICTIONARY: DictionaryTerm[] = [
+  ...CORE_TERMS,
+  ...WEB_BACKEND_TERMS,
+  ...SYSTEMS_AI_TERMS,
+  ...ADVANCED_PROFESSIONAL_TERMS,
+  ...CTO_GAPS_TERMS,
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
