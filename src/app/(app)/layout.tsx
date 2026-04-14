@@ -10,12 +10,20 @@ import { TipButton } from "@/components/support/TipButton";
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
     <div className="flex min-h-screen bg-[#FAFAFA] text-neutral-900">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[100] focus:rounded-lg focus:bg-emerald-600 focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white focus:shadow-lg"
+      >
+        Skip to content
+      </a>
       <FocusModeProvider />
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
         <Breadcrumbs />
-        <main className="flex-1 pb-20 lg:pb-0">{children}</main>
+        <main id="main-content" className="flex-1 pb-20 lg:pb-0">
+          {children}
+        </main>
       </div>
       <MobileBottomTabs />
       <MobileDrawer />
