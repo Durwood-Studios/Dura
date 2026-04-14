@@ -1,0 +1,320 @@
+---
+title: "Parsing"
+description: "Converting a flat token stream into a tree that captures the structure and meaning of your code."
+phase: 7
+module: "7-1-compilers-interpreters"
+order: 3
+estimatedMinutes: 14
+difficulty: "advanced"
+standards:
+  cs2023: ["PL-5"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - compiler
+---
+
+## Why this matters
+
+Tokens alone are flat — a list with no hierarchy. The expression `2 + 3 * 4` tokenizes to five tokens in a row, but the `*` must bind tighter than `+`. A **parser** is the stage that discovers structure: it reads the flat token list and builds a tree where `3 * 4` is grouped together as a child of the `+`. Without a parser, a language cannot distinguish `(2 + 3) * 4` from `2 + (3 * 4)`.
+
+Every "unexpected token" error you have ever seen came from a parser. Understanding parsing means understanding why your code is valid or invalid — and how to read those error messages precisely.
+
+## Grammars: the rules of the language
+
+A **context-free grammar** (CFG) defines which sequences of tokens are valid. It is a set of rules (called productions) that describe how larger structures are built from smaller ones:
+
+```javascript
+// A grammar for simple arithmetic, written as comments:
+//
+// Expression  → Term (('+' | '-') Term)*
+// Term        → Factor (('*' | '/') Factor)*
+// Factor      → NUMBER | '(' Expression ')'
+//
+// This grammar encodes operator precedence:
+// * and / bind tighter because they are parsed at the Term level,
+// which is "deeper" in the rule hierarchy than Expression.
+```
+
+The parser's job is to match the token stream against these rules and build a tree.
+
+## Recursive descent parsing
+
+The most intuitive parsing technique: write one function per grammar rule. Each function consumes tokens and calls other rule functions as needed.
+
+```javascript
+class Parser {
+  constructor(tokens) {
+    this.tokens = tokens;
+    this.pos = 0;
+  }
+
+  peek() {
+    return this.tokens[this.pos];
+  }
+
+  consume(expectedType) {
+    const token = this.tokens[this.pos];
+    if (token.type !== expectedType) {
+      throw new Error(`Expected ${expectedType} but got ${token.type} ("${token.value}")`);
+    }
+    this.pos++;
+    return token;
+  }
+
+  // Expression → Term (('+' | '-') Term)*
+  parseExpression() {
+    let left = this.parseTerm();
+
+    while (this.peek().type === "Plus" || this.peek().type === "Minus") {
+      const op = this.consume(this.peek().type);
+      const right = this.parseTerm();
+      left = { type: "BinaryExpr", op: op.value, left, right };
+    }
+
+    return left;
+  }
+
+  // Term → Factor (('*' | '/') Factor)*
+  parseTerm() {
+    let left = this.parseFactor();
+
+    while (this.peek().type === "Star" || this.peek().type === "Slash") {
+      const op = this.consume(this.peek().type);
+      const right = this.parseFactor();
+      left = { type: "BinaryExpr", op: op.value, left, right };
+    }
+
+    return left;
+  }
+
+  // Factor → NUMBER | '(' Expression ')'
+  parseFactor() {
+    const token = this.peek();
+
+    if (token.type === "Number") {
+      this.consume("Number");
+      return { type: "NumberLiteral", value: parseFloat(token.value) };
+    }
+
+    if (token.type === "LParen") {
+      this.consume("LParen");
+      const expr = this.parseExpression();
+      this.consume("RParen");
+      return expr;
+    }
+
+    throw new Error(`Unexpected token: ${token.type} ("${token.value}")`);
+  }
+}
+```
+
+Notice the recursion: `parseExpression` calls `parseTerm`, which calls `parseFactor`, which can call `parseExpression` again (for parenthesized groups). This mutual recursion is why the technique is called "recursive descent."
+
+## Operator precedence
+
+The grammar structure directly encodes precedence. Lower-precedence operators are parsed at higher (earlier) levels:
+
+```javascript
+// Parsing "2 + 3 * 4":
+//
+// parseExpression()
+//   parseTerm() → returns NumberLiteral(2)
+//   sees '+', consumes it
+//   parseTerm()
+//     parseFactor() → returns NumberLiteral(3)
+//     sees '*', consumes it
+//     parseFactor() → returns NumberLiteral(4)
+//     returns BinaryExpr(3 * 4)
+//   returns BinaryExpr(2 + BinaryExpr(3 * 4))
+//
+// Result tree:
+//        +
+//       / \
+//      2   *
+//         / \
+//        3   4
+```
+
+The `*` ends up deeper in the tree, which means it gets evaluated first. This is exactly how mathematical precedence works — encoded in the grammar, not in special-case logic.
+
+## Pratt parsing: a more elegant approach
+
+For languages with many precedence levels, writing one function per level gets tedious. **Pratt parsing** (also called "top-down operator precedence") uses a single function with a precedence table:
+
+```javascript
+const PRECEDENCE = {
+  "+": 1,
+  "-": 1,
+  "*": 2,
+  "/": 2,
+};
+
+function parsePratt(tokens, pos, minPrec) {
+  let left = parseAtom(tokens, pos);
+  pos = left.nextPos;
+
+  while (pos < tokens.length) {
+    const op = tokens[pos];
+    const prec = PRECEDENCE[op.value];
+
+    if (prec === undefined || prec < minPrec) break;
+
+    pos++; // consume operator
+    const right = parsePratt(tokens, pos, prec + 1);
+    pos = right.nextPos;
+
+    left = {
+      node: { type: "BinaryExpr", op: op.value, left: left.node, right: right.node },
+      nextPos: pos,
+    };
+  }
+
+  return left;
+}
+```
+
+Many production parsers use Pratt parsing. It handles unary operators, ternary operators, and postfix expressions with minimal code changes.
+
+## Parse errors and error recovery
+
+A parser that stops at the first error is not very helpful. Good parsers try to **recover** and report multiple errors:
+
+```javascript
+// Panic-mode recovery: when an error is found,
+// skip tokens until a synchronization point (like ';')
+
+function synchronize(parser) {
+  while (parser.peek().type !== "EOF") {
+    if (parser.peek().type === "Semicolon") {
+      parser.consume("Semicolon");
+      return; // found a safe restart point
+    }
+    parser.pos++;
+  }
+}
+
+// This is why compilers sometimes report errors on the wrong line:
+// the parser is recovering from an earlier error and gets confused
+// about where the next valid statement begins.
+```
+
+TypeScript's parser is remarkably good at recovery — it can type-check your entire file and report dozens of errors at once because it knows how to skip past malformed sections.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Using the Parser class above, parse the expression '2 + 3 * 4' and log the resulting AST. First create the tokens array manually, then feed it to the parser."
+  initialCode={`// Tokens for "2 + 3 * 4"
+const tokens = [
+  { type: "Number", value: "2" },
+  { type: "Plus",   value: "+" },
+  { type: "Number", value: "3" },
+  { type: "Star",   value: "*" },
+  { type: "Number", value: "4" },
+  { type: "EOF",    value: "" },
+];
+
+// Paste the Parser class here, then:
+// const parser = new Parser(tokens);
+// const ast = parser.parseExpression();
+// console.log(JSON.stringify(ast, null, 2));`}
+  solution={`const tokens = [
+{ type: "Number", value: "2" },
+{ type: "Plus", value: "+" },
+{ type: "Number", value: "3" },
+{ type: "Star", value: "*" },
+{ type: "Number", value: "4" },
+{ type: "EOF", value: "" },
+];
+
+class Parser {
+constructor(tokens) { this.tokens = tokens; this.pos = 0; }
+peek() { return this.tokens[this.pos]; }
+consume(t) {
+const tok = this.tokens[this.pos];
+if (tok.type !== t) throw new Error("Expected " + t);
+this.pos++;
+return tok;
+}
+parseExpression() {
+let left = this.parseTerm();
+while (this.peek().type === "Plus" || this.peek().type === "Minus") {
+const op = this.consume(this.peek().type);
+const right = this.parseTerm();
+left = { type: "BinaryExpr", op: op.value, left, right };
+}
+return left;
+}
+parseTerm() {
+let left = this.parseFactor();
+while (this.peek().type === "Star" || this.peek().type === "Slash") {
+const op = this.consume(this.peek().type);
+const right = this.parseFactor();
+left = { type: "BinaryExpr", op: op.value, left, right };
+}
+return left;
+}
+parseFactor() {
+const tok = this.peek();
+if (tok.type === "Number") {
+this.consume("Number");
+return { type: "NumberLiteral", value: parseFloat(tok.value) };
+}
+throw new Error("Unexpected: " + tok.type);
+}
+}
+
+const parser = new Parser(tokens);
+const ast = parser.parseExpression();
+console.log(JSON.stringify(ast, null, 2));`}
+testCases={["Parser produces a tree with * nested deeper than +"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "In a recursive descent parser, how is operator precedence encoded?",
+      options: [
+        "Through if/else statements that check operator priority",
+        "Through the nesting of grammar rules — lower precedence operators are parsed at higher levels",
+        "Through a sorting step that reorders tokens by priority",
+        "Through special precedence tokens inserted by the lexer",
+      ],
+      correct: 1,
+      explanation:
+        "Lower-precedence operators (like +) are handled in outer rules (parseExpression), while higher-precedence operators (like *) are in inner rules (parseTerm). The nesting creates the correct tree structure.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What does 'panic-mode' error recovery do in a parser?",
+      options: [
+        "Crashes the program immediately",
+        "Fixes the syntax error automatically",
+        "Skips tokens until a synchronization point so parsing can continue",
+        "Reverts to the last valid state and retries",
+      ],
+      correct: 2,
+      explanation:
+        "Panic-mode recovery skips tokens until it finds a known synchronization point (like a semicolon or closing brace), then resumes parsing. This allows reporting multiple errors in one pass.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="A ___ defines which sequences of tokens form valid programs. In recursive descent parsing, each grammar ___ becomes a function in the parser."
+  answers={["grammar", "rule"]}
+  hints={["Abbreviated CFG.", "Also called a production."]}
+/>
+
+## What you learned
+
+- A **parser** converts a flat token sequence into a tree structure (AST) by matching tokens against grammar rules.
+- **Recursive descent** is the most intuitive technique: one function per grammar rule, with mutual recursion handling nested structures.
+- Operator precedence is encoded in the grammar's rule hierarchy — deeper rules bind tighter — and error recovery allows parsers to report multiple errors in a single pass.

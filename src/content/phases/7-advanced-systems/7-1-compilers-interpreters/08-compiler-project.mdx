@@ -1,0 +1,551 @@
+---
+title: "Compiler Project"
+description: "Build a complete calculator language from scratch: define a grammar, lex, parse, and evaluate expressions by walking an AST."
+phase: 7
+module: "7-1-compilers-interpreters"
+order: 8
+estimatedMinutes: 18
+difficulty: "advanced"
+standards:
+  cs2023: ["PL-5"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - compiler
+---
+
+## Why this matters
+
+You have learned each compiler stage individually. Now you put them together. Building a working language — even a tiny one — is the single best way to internalize how compilers work. After this lesson, "unexpected token" errors, AST-based tools, and JIT compilation will never feel mysterious again.
+
+You will build a calculator language that supports numbers, arithmetic with correct operator precedence, parentheses, and variables. The entire implementation fits in one JavaScript file.
+
+## Step 1: Define the grammar
+
+Every language starts with a grammar. Ours handles addition, subtraction, multiplication, division, parentheses, unary negation, and variable assignment:
+
+```javascript
+// Grammar for CalcLang:
+//
+// Program     → Statement*
+// Statement   → Assignment | Expression
+// Assignment  → IDENTIFIER '=' Expression
+// Expression  → Term (('+' | '-') Term)*
+// Term        → Unary (('*' | '/') Unary)*
+// Unary       → '-' Unary | Factor
+// Factor      → NUMBER | IDENTIFIER | '(' Expression ')'
+```
+
+This grammar encodes precedence: unary `-` binds tighter than `*`/`/`, which bind tighter than `+`/`-`. Parentheses override everything by recursing back to `Expression`.
+
+## Step 2: The lexer
+
+Tokenize the input into numbers, identifiers, operators, and parentheses:
+
+```javascript
+function tokenize(source) {
+  const tokens = [];
+  let pos = 0;
+
+  while (pos < source.length) {
+    // Skip whitespace
+    if (/\s/.test(source[pos])) {
+      pos++;
+      continue;
+    }
+
+    // Numbers (including decimals)
+    if (/\d/.test(source[pos])) {
+      let num = "";
+      while (pos < source.length && /[\d.]/.test(source[pos])) {
+        num += source[pos++];
+      }
+      tokens.push({ type: "Number", value: num });
+      continue;
+    }
+
+    // Identifiers (variable names)
+    if (/[a-zA-Z_]/.test(source[pos])) {
+      let name = "";
+      while (pos < source.length && /\w/.test(source[pos])) {
+        name += source[pos++];
+      }
+      tokens.push({ type: "Identifier", value: name });
+      continue;
+    }
+
+    // Single-character tokens
+    const charTokens = {
+      "+": "Plus",
+      "-": "Minus",
+      "*": "Star",
+      "/": "Slash",
+      "(": "LParen",
+      ")": "RParen",
+      "=": "Equals",
+    };
+
+    if (charTokens[source[pos]]) {
+      tokens.push({ type: charTokens[source[pos]], value: source[pos] });
+      pos++;
+      continue;
+    }
+
+    throw new Error(`Unexpected character: '${source[pos]}' at position ${pos}`);
+  }
+
+  tokens.push({ type: "EOF", value: "" });
+  return tokens;
+}
+```
+
+## Step 3: The parser
+
+Build an AST using recursive descent, following the grammar exactly:
+
+```javascript
+class Parser {
+  constructor(tokens) {
+    this.tokens = tokens;
+    this.pos = 0;
+  }
+
+  peek() {
+    return this.tokens[this.pos];
+  }
+
+  consume(type) {
+    const token = this.peek();
+    if (token.type !== type) {
+      throw new Error(`Expected ${type}, got ${token.type} ("${token.value}")`);
+    }
+    this.pos++;
+    return token;
+  }
+
+  // Program → Statement*
+  parseProgram() {
+    const statements = [];
+    while (this.peek().type !== "EOF") {
+      statements.push(this.parseStatement());
+    }
+    return { type: "Program", body: statements };
+  }
+
+  // Statement → Assignment | Expression
+  parseStatement() {
+    // Look ahead: if we see IDENTIFIER followed by '=', it is an assignment
+    if (this.peek().type === "Identifier" && this.tokens[this.pos + 1]?.type === "Equals") {
+      return this.parseAssignment();
+    }
+    return this.parseExpression();
+  }
+
+  // Assignment → IDENTIFIER '=' Expression
+  parseAssignment() {
+    const name = this.consume("Identifier").value;
+    this.consume("Equals");
+    const value = this.parseExpression();
+    return { type: "Assignment", name, value };
+  }
+
+  // Expression → Term (('+' | '-') Term)*
+  parseExpression() {
+    let left = this.parseTerm();
+    while (this.peek().type === "Plus" || this.peek().type === "Minus") {
+      const op = this.consume(this.peek().type).value;
+      const right = this.parseTerm();
+      left = { type: "BinaryExpr", op, left, right };
+    }
+    return left;
+  }
+
+  // Term → Unary (('*' | '/') Unary)*
+  parseTerm() {
+    let left = this.parseUnary();
+    while (this.peek().type === "Star" || this.peek().type === "Slash") {
+      const op = this.consume(this.peek().type).value;
+      const right = this.parseUnary();
+      left = { type: "BinaryExpr", op, left, right };
+    }
+    return left;
+  }
+
+  // Unary → '-' Unary | Factor
+  parseUnary() {
+    if (this.peek().type === "Minus") {
+      this.consume("Minus");
+      const operand = this.parseUnary();
+      return { type: "UnaryExpr", op: "-", operand };
+    }
+    return this.parseFactor();
+  }
+
+  // Factor → NUMBER | IDENTIFIER | '(' Expression ')'
+  parseFactor() {
+    const token = this.peek();
+
+    if (token.type === "Number") {
+      this.consume("Number");
+      return { type: "NumberLiteral", value: parseFloat(token.value) };
+    }
+
+    if (token.type === "Identifier") {
+      this.consume("Identifier");
+      return { type: "Identifier", name: token.value };
+    }
+
+    if (token.type === "LParen") {
+      this.consume("LParen");
+      const expr = this.parseExpression();
+      this.consume("RParen");
+      return expr;
+    }
+
+    throw new Error(`Unexpected token: ${token.type} ("${token.value}")`);
+  }
+}
+```
+
+## Step 4: The evaluator
+
+Walk the AST and compute results. This is a tree-walking interpreter — the simplest form of execution:
+
+```javascript
+class Evaluator {
+  constructor() {
+    this.variables = new Map();
+  }
+
+  evaluate(node) {
+    switch (node.type) {
+      case "Program": {
+        let result = 0;
+        for (const stmt of node.body) {
+          result = this.evaluate(stmt);
+        }
+        return result;
+      }
+
+      case "Assignment": {
+        const value = this.evaluate(node.value);
+        this.variables.set(node.name, value);
+        return value;
+      }
+
+      case "NumberLiteral":
+        return node.value;
+
+      case "Identifier": {
+        if (!this.variables.has(node.name)) {
+          throw new Error(`Undefined variable: '${node.name}'`);
+        }
+        return this.variables.get(node.name);
+      }
+
+      case "BinaryExpr": {
+        const left = this.evaluate(node.left);
+        const right = this.evaluate(node.right);
+        switch (node.op) {
+          case "+":
+            return left + right;
+          case "-":
+            return left - right;
+          case "*":
+            return left * right;
+          case "/":
+            if (right === 0) throw new Error("Division by zero");
+            return left / right;
+        }
+        break;
+      }
+
+      case "UnaryExpr": {
+        const operand = this.evaluate(node.operand);
+        if (node.op === "-") return -operand;
+        break;
+      }
+
+      default:
+        throw new Error(`Unknown node type: ${node.type}`);
+    }
+  }
+}
+```
+
+## Step 5: Wire it all together
+
+The full pipeline in one function:
+
+```javascript
+function run(source) {
+  // Stage 1: Lex
+  const tokens = tokenize(source);
+
+  // Stage 2: Parse
+  const parser = new Parser(tokens);
+  const ast = parser.parseProgram();
+
+  // Stage 3: Evaluate
+  const evaluator = new Evaluator();
+  return evaluator.evaluate(ast);
+}
+
+// Test it
+console.log(run("2 + 3 * 4")); // 14
+console.log(run("(2 + 3) * 4")); // 20
+console.log(run("-5 + 3")); // -2
+console.log(run("10 / (2 + 3)")); // 2
+```
+
+## Step 6: Variables
+
+The evaluator already supports variables. Test them:
+
+```javascript
+function runMultiLine(lines) {
+  const evaluator = new Evaluator();
+  let result = 0;
+
+  for (const line of lines) {
+    const tokens = tokenize(line);
+    const parser = new Parser(tokens);
+    const ast = parser.parseProgram();
+
+    for (const stmt of ast.body) {
+      result = evaluator.evaluate(stmt);
+    }
+  }
+
+  return result;
+}
+
+const result = runMultiLine(["x = 10", "y = 20", "x + y * 2"]);
+
+console.log(result); // 50
+```
+
+You now have a working programming language. It is small, but it follows the exact same pipeline as every production compiler and interpreter: source text to tokens to tree to result.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Using the complete CalcLang implementation above, add support for the modulo operator (%). You need to: 1) Add '%' to the lexer's charTokens as 'Percent', 2) Handle 'Percent' in parseTerm alongside Star and Slash, 3) Handle '%' in the evaluator's BinaryExpr case. Test with '10 % 3' (should return 1)."
+  initialCode={`// Full CalcLang implementation — modify three places to add modulo
+
+function tokenize(source) {
+const tokens = [];
+let pos = 0;
+while (pos < source.length) {
+if (/\\s/.test(source[pos])) { pos++; continue; }
+if (/\\d/.test(source[pos])) {
+let n = "";
+while (pos < source.length && /[\\d.]/.test(source[pos])) n += source[pos++];
+tokens.push({ type: "Number", value: n });
+continue;
+}
+if (/[a-zA-Z_]/.test(source[pos])) {
+let name = "";
+while (pos < source.length && /\\w/.test(source[pos])) name += source[pos++];
+tokens.push({ type: "Identifier", value: name });
+continue;
+}
+const ct = {
+"+": "Plus", "-": "Minus", "\*": "Star", "/": "Slash",
+"(": "LParen", ")": "RParen", "=": "Equals",
+// Add "%" here
+};
+if (ct[source[pos]]) {
+tokens.push({ type: ct[source[pos]], value: source[pos] });
+pos++;
+continue;
+}
+throw new Error("Unexpected: " + source[pos]);
+}
+tokens.push({ type: "EOF", value: "" });
+return tokens;
+}
+
+class Parser {
+constructor(tokens) { this.tokens = tokens; this.pos = 0; }
+peek() { return this.tokens[this.pos]; }
+consume(t) {
+const tok = this.peek();
+if (tok.type !== t) throw new Error("Expected " + t + " got " + tok.type);
+this.pos++;
+return tok;
+}
+parseExpression() {
+let left = this.parseTerm();
+while (this.peek().type === "Plus" || this.peek().type === "Minus") {
+const op = this.consume(this.peek().type).value;
+left = { type: "BinaryExpr", op, left, right: this.parseTerm() };
+}
+return left;
+}
+parseTerm() {
+let left = this.parseFactor();
+// Add Percent handling here alongside Star and Slash
+while (this.peek().type === "Star" || this.peek().type === "Slash") {
+const op = this.consume(this.peek().type).value;
+left = { type: "BinaryExpr", op, left, right: this.parseFactor() };
+}
+return left;
+}
+parseFactor() {
+const t = this.peek();
+if (t.type === "Number") { this.consume("Number"); return { type: "NumberLiteral", value: parseFloat(t.value) }; }
+if (t.type === "LParen") { this.consume("LParen"); const e = this.parseExpression(); this.consume("RParen"); return e; }
+throw new Error("Unexpected: " + t.type);
+}
+}
+
+function evaluate(node) {
+if (node.type === "NumberLiteral") return node.value;
+if (node.type === "BinaryExpr") {
+const l = evaluate(node.left), r = evaluate(node.right);
+if (node.op === "+") return l + r;
+if (node.op === "-") return l - r;
+if (node.op === "_") return l _ r;
+if (node.op === "/") return l / r;
+// Add "%" here
+}
+}
+
+const tokens = tokenize("10 % 3");
+const parser = new Parser(tokens);
+const ast = parser.parseExpression();
+console.log(evaluate(ast)); // Should print 1`}
+  solution={`function tokenize(source) {
+const tokens = [];
+let pos = 0;
+while (pos < source.length) {
+if (/\\s/.test(source[pos])) { pos++; continue; }
+if (/\\d/.test(source[pos])) {
+let n = "";
+while (pos < source.length && /[\\d.]/.test(source[pos])) n += source[pos++];
+tokens.push({ type: "Number", value: n });
+continue;
+}
+if (/[a-zA-Z_]/.test(source[pos])) {
+let name = "";
+while (pos < source.length && /\\w/.test(source[pos])) name += source[pos++];
+tokens.push({ type: "Identifier", value: name });
+continue;
+}
+const ct = {
+"+": "Plus", "-": "Minus", "\*": "Star", "/": "Slash",
+"(": "LParen", ")": "RParen", "=": "Equals",
+"%": "Percent",
+};
+if (ct[source[pos]]) {
+tokens.push({ type: ct[source[pos]], value: source[pos] });
+pos++;
+continue;
+}
+throw new Error("Unexpected: " + source[pos]);
+}
+tokens.push({ type: "EOF", value: "" });
+return tokens;
+}
+
+class Parser {
+constructor(tokens) { this.tokens = tokens; this.pos = 0; }
+peek() { return this.tokens[this.pos]; }
+consume(t) {
+const tok = this.peek();
+if (tok.type !== t) throw new Error("Expected " + t + " got " + tok.type);
+this.pos++;
+return tok;
+}
+parseExpression() {
+let left = this.parseTerm();
+while (this.peek().type === "Plus" || this.peek().type === "Minus") {
+const op = this.consume(this.peek().type).value;
+left = { type: "BinaryExpr", op, left, right: this.parseTerm() };
+}
+return left;
+}
+parseTerm() {
+let left = this.parseFactor();
+while (this.peek().type === "Star" || this.peek().type === "Slash" || this.peek().type === "Percent") {
+const op = this.consume(this.peek().type).value;
+left = { type: "BinaryExpr", op, left, right: this.parseFactor() };
+}
+return left;
+}
+parseFactor() {
+const t = this.peek();
+if (t.type === "Number") { this.consume("Number"); return { type: "NumberLiteral", value: parseFloat(t.value) }; }
+if (t.type === "LParen") { this.consume("LParen"); const e = this.parseExpression(); this.consume("RParen"); return e; }
+throw new Error("Unexpected: " + t.type);
+}
+}
+
+function evaluate(node) {
+if (node.type === "NumberLiteral") return node.value;
+if (node.type === "BinaryExpr") {
+const l = evaluate(node.left), r = evaluate(node.right);
+if (node.op === "+") return l + r;
+if (node.op === "-") return l - r;
+if (node.op === "_") return l _ r;
+if (node.op === "/") return l / r;
+if (node.op === "%") return l % r;
+}
+}
+
+const tokens = tokenize("10 % 3");
+const parser = new Parser(tokens);
+const ast = parser.parseExpression();
+console.log(evaluate(ast));`}
+testCases={["10 % 3 evaluates to 1"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "In CalcLang, why does parseTerm handle '*' and '/' while parseExpression handles '+' and '-'?",
+      options: [
+        "Alphabetical ordering of operators",
+        "It makes the code shorter",
+        "parseTerm is called from within parseExpression, so its operators bind tighter (higher precedence)",
+        "There is no specific reason; they could be swapped",
+      ],
+      correct: 2,
+      explanation:
+        "Functions called deeper in the recursive descent bind tighter. parseTerm is called by parseExpression, so * and / are grouped before + and - in the resulting tree.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What kind of interpreter is CalcLang's evaluator?",
+      options: [
+        "A bytecode interpreter",
+        "A JIT compiler",
+        "A tree-walking interpreter",
+        "A register-based virtual machine",
+      ],
+      correct: 2,
+      explanation:
+        "The evaluator recursively walks the AST nodes and computes results directly. This is a tree-walking interpreter — the simplest execution strategy, with no bytecode compilation step.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The CalcLang pipeline is: source text → ___ → AST → ___. The evaluator uses a ___ pattern to compute results by recursively visiting each node."
+  answers={["tokens", "result", "tree-walking"]}
+  hints={["Output of the lexer.", "The final computed value.", "Walk the tree."]}
+/>
+
+## What you learned
+
+- A complete language implementation — even a simple one — follows the pipeline: **lex** (characters to tokens), **parse** (tokens to AST), **evaluate** (AST to result).
+- Operator precedence emerges naturally from the grammar's rule hierarchy: deeper rules bind tighter, and parentheses override precedence by recursing to the top-level expression rule.
+- Extending a language (adding operators, variables, new syntax) means updating each stage: new token types in the lexer, new grammar rules in the parser, new cases in the evaluator.

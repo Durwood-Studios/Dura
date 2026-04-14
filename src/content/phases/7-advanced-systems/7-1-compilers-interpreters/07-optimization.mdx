@@ -1,0 +1,371 @@
+---
+title: "Optimization"
+description: "How compilers make your code faster without changing what it does. Constant folding, dead code elimination, inlining, and why the compiler is usually smarter than you."
+phase: 7
+module: "7-1-compilers-interpreters"
+order: 7
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["PL-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - compiler
+---
+
+## Why this matters
+
+Donald Knuth famously wrote: "Premature optimization is the root of all evil." But compiler optimization is the opposite of premature — it is systematic, proven, and automatic. Modern compilers apply dozens of transformations that make your code run faster, use less memory, or produce smaller binaries, all without changing the program's behavior.
+
+Understanding these optimizations helps you write code that compilers can optimize effectively, explains why "clever" hand-optimized code sometimes runs slower than the straightforward version, and demystifies the performance characteristics of production JavaScript.
+
+## Constant folding
+
+If the compiler can compute a value at compile time, it does — so the runtime never has to:
+
+```javascript
+// Before optimization
+const x = 2 + 3;
+const y = 60 * 60 * 24;
+const z = "hello" + " " + "world";
+
+// After constant folding
+const x = 5;
+const y = 86400;
+const z = "hello world";
+
+// The runtime never sees the arithmetic or concatenation.
+// This is why using named constants costs nothing:
+const SECONDS_PER_DAY = 60 * 60 * 24; // folded to 86400
+```
+
+Here is how a compiler implements constant folding on an AST:
+
+```javascript
+function foldConstants(node) {
+  if (node.type !== "BinaryExpr") return node;
+
+  const left = foldConstants(node.left);
+  const right = foldConstants(node.right);
+
+  // Both sides are literals — we can compute now
+  if (left.type === "NumberLiteral" && right.type === "NumberLiteral") {
+    let value;
+    switch (node.op) {
+      case "+":
+        value = left.value + right.value;
+        break;
+      case "-":
+        value = left.value - right.value;
+        break;
+      case "*":
+        value = left.value * right.value;
+        break;
+      case "/":
+        value = left.value / right.value;
+        break;
+    }
+    return { type: "NumberLiteral", value };
+  }
+
+  return { ...node, left, right };
+}
+
+// Input AST for "2 + 3"
+const before = {
+  type: "BinaryExpr",
+  op: "+",
+  left: { type: "NumberLiteral", value: 2 },
+  right: { type: "NumberLiteral", value: 3 },
+};
+
+const after = foldConstants(before);
+console.log(after); // { type: "NumberLiteral", value: 5 }
+```
+
+## Dead code elimination
+
+Code that can never execute or whose result is never used can be removed entirely:
+
+```javascript
+// Before optimization
+function example(x) {
+  if (false) {
+    console.log("This never runs"); // dead: condition is always false
+  }
+
+  const unused = x * x; // dead: result is never read
+
+  return x + 1;
+}
+
+// After dead code elimination
+function example(x) {
+  return x + 1;
+}
+```
+
+Implementing dead code detection on an AST:
+
+```javascript
+function eliminateDeadCode(statements) {
+  const used = new Set();
+
+  // Pass 1: find which variables are actually read
+  for (const stmt of statements) {
+    walkReads(stmt, (name) => used.add(name));
+  }
+
+  // Pass 2: remove declarations of variables never read
+  return statements.filter((stmt) => {
+    if (stmt.type === "VarDeclaration") {
+      if (!used.has(stmt.name)) {
+        console.log(`Removing unused variable: ${stmt.name}`);
+        return false;
+      }
+    }
+
+    // Remove if(false) blocks
+    if (
+      stmt.type === "IfStatement" &&
+      stmt.condition.type === "BooleanLiteral" &&
+      stmt.condition.value === false
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+}
+```
+
+Tree-shaking in bundlers like Webpack and Rollup is dead code elimination at the module level — removing exported functions that no other module imports.
+
+## Function inlining
+
+Replace a function call with the function's body, eliminating the overhead of the call itself:
+
+```javascript
+// Before inlining
+function square(n) {
+  return n * n;
+}
+const result = square(5);
+
+// After inlining
+const result = 5 * 5;
+
+// After constant folding (which now applies)
+const result = 25;
+
+// Inlining enables other optimizations. This is why
+// small helper functions are often FREE in optimized builds —
+// the compiler inlines them and they vanish.
+```
+
+V8's TurboFan compiler aggressively inlines small functions in hot loops. This is why writing clean, small functions in JavaScript does not hurt performance — the optimizer removes the function call boundary.
+
+## Loop optimizations
+
+Loops are where programs spend most of their time, so compilers focus heavily on optimizing them:
+
+```javascript
+// LOOP-INVARIANT CODE MOTION
+// Move computations that don't change across iterations outside the loop
+
+// Before
+for (let i = 0; i < arr.length; i++) {
+  const factor = Math.sqrt(config.baseValue); // same every iteration
+  result[i] = arr[i] * factor;
+}
+
+// After (compiler moves the invariant computation out)
+const factor = Math.sqrt(config.baseValue);
+for (let i = 0; i < arr.length; i++) {
+  result[i] = arr[i] * factor;
+}
+
+// LOOP UNROLLING
+// Reduce loop overhead by processing multiple iterations per cycle
+
+// Before
+for (let i = 0; i < 4; i++) {
+  sum += arr[i];
+}
+
+// After unrolling
+sum += arr[0];
+sum += arr[1];
+sum += arr[2];
+sum += arr[3];
+```
+
+## Why premature optimization by humans is bad
+
+Compilers apply optimizations mechanically and correctly. Human "optimizations" often backfire:
+
+```javascript
+// Human "optimization": cache array length
+// (advice from 2010 that is now wrong)
+for (let i = 0, len = arr.length; i < len; i++) {
+  // V8 already knows arr.length is constant here.
+  // Adding the variable just makes the code harder to read.
+}
+
+// Human "optimization": bit shift instead of multiply
+const half = x >> 1; // instead of x / 2
+// The compiler does this automatically for integer division by powers of 2.
+// The bit shift version is harder to read and no faster.
+
+// Human "optimization": unroll a loop manually
+sum += arr[0];
+sum += arr[1];
+sum += arr[2];
+sum += arr[3];
+// The compiler unrolls when it helps and does NOT unroll when
+// the loop is too large for the instruction cache.
+// It makes better decisions than you.
+```
+
+Write clear code. Let the compiler optimize. Profile before you hand-optimize.
+
+## Profile-guided optimization (PGO)
+
+The most sophisticated optimization strategy: run the program once to collect profiling data, then recompile using that data to make better decisions:
+
+```javascript
+const pgoSteps = {
+  step1: "Compile with instrumentation (counters at every branch)",
+  step2: "Run the program with representative input data",
+  step3: "Collect profile: which branches taken, which functions hot",
+  step4: "Recompile using the profile to guide optimization",
+};
+
+// PGO answers questions the compiler cannot answer statically:
+// - Which branch of an if/else is taken more often?
+// - Which functions should be inlined?
+// - Which loops are worth unrolling?
+// V8's JIT is essentially doing PGO at runtime.
+```
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a foldConstants function that simplifies a BinaryExpr AST node when both children are NumberLiterals. Test it on the AST for '(2 + 3) * (10 - 6)'."
+  initialCode={`function foldConstants(node) {
+  if (node.type !== "BinaryExpr") return node;
+
+const left = foldConstants(node.left);
+const right = foldConstants(node.right);
+
+// If both are number literals, compute the result
+// your code here
+
+return { ...node, left, right };
+}
+
+const ast = {
+type: "BinaryExpr", op: "\*",
+left: {
+type: "BinaryExpr", op: "+",
+left: { type: "NumberLiteral", value: 2 },
+right: { type: "NumberLiteral", value: 3 },
+},
+right: {
+type: "BinaryExpr", op: "-",
+left: { type: "NumberLiteral", value: 10 },
+right: { type: "NumberLiteral", value: 6 },
+},
+};
+
+const optimized = foldConstants(ast);
+console.log(JSON.stringify(optimized));
+// Should be: { type: "NumberLiteral", value: 20 }`}
+  solution={`function foldConstants(node) {
+if (node.type !== "BinaryExpr") return node;
+
+const left = foldConstants(node.left);
+const right = foldConstants(node.right);
+
+if (left.type === "NumberLiteral" && right.type === "NumberLiteral") {
+let value;
+switch (node.op) {
+case "+": value = left.value + right.value; break;
+case "-": value = left.value - right.value; break;
+case "_": value = left.value _ right.value; break;
+case "/": value = left.value / right.value; break;
+}
+return { type: "NumberLiteral", value };
+}
+
+return { ...node, left, right };
+}
+
+const ast = {
+type: "BinaryExpr", op: "\*",
+left: {
+type: "BinaryExpr", op: "+",
+left: { type: "NumberLiteral", value: 2 },
+right: { type: "NumberLiteral", value: 3 },
+},
+right: {
+type: "BinaryExpr", op: "-",
+left: { type: "NumberLiteral", value: 10 },
+right: { type: "NumberLiteral", value: 6 },
+},
+};
+
+const optimized = foldConstants(ast);
+console.log(JSON.stringify(optimized));`}
+testCases={["foldConstants reduces the entire tree to NumberLiteral with value 20"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What is constant folding?",
+      options: [
+        "Replacing variables with constants throughout the program",
+        "Computing expressions with known values at compile time instead of runtime",
+        "Folding multiple constant declarations into one",
+        "Converting constants to smaller data types",
+      ],
+      correct: 1,
+      explanation:
+        "Constant folding evaluates expressions where all operands are known at compile time. The expression '2 + 3' becomes '5' in the compiled output, saving runtime computation.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Why can hand-optimized JavaScript sometimes be slower than the straightforward version?",
+      options: [
+        "JavaScript does not support optimization",
+        "Hand optimizations may confuse the JIT compiler, preventing it from applying more effective automatic optimizations",
+        "Straightforward code uses less memory",
+        "The V8 engine penalizes code that looks optimized",
+      ],
+      correct: 1,
+      explanation:
+        "V8's TurboFan makes optimization decisions based on code patterns. Unusual patterns (manual unrolling, bit hacks) can prevent the JIT from recognizing optimization opportunities it would otherwise take.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Removing code that can never execute is called ___ code elimination. Replacing a function call with the function's body is called ___."
+  answers={["dead", "inlining"]}
+  hints={["It is not alive.", "The function's code goes inline."]}
+/>
+
+## What you learned
+
+- **Constant folding** computes known expressions at compile time; **dead code elimination** removes unreachable or unused code; **inlining** replaces function calls with the function body.
+- Compiler optimizations are systematic and correct — human "optimizations" often backfire by confusing the JIT compiler or reducing readability for no real gain.
+- **Profile-guided optimization** uses runtime data to make better compile-time decisions, and V8's JIT compilation is essentially PGO happening continuously at runtime.

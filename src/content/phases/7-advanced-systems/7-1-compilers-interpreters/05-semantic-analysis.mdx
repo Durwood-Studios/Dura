@@ -1,0 +1,333 @@
+---
+title: "Semantic Analysis"
+description: "The compiler phase that catches errors no parser can see: undeclared variables, type mismatches, and scope violations."
+phase: 7
+module: "7-1-compilers-interpreters"
+order: 5
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["PL-5"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - compiler
+---
+
+## Why this matters
+
+Parsing confirms that your code is **syntactically** valid — the tokens form a legal tree. But a program can parse perfectly and still be meaningless. The expression `"hello" * true` is syntactically fine (a binary expression with a string, an operator, and a boolean) but semantically nonsensical. The variable reference `x + 1` is valid syntax, but if `x` was never declared, the program is broken.
+
+**Semantic analysis** is the compiler phase that catches these deeper errors. It walks the AST and checks meaning: Are variables declared before use? Do types match? Is a `break` statement inside a loop? This is the phase that powers TypeScript's red squiggly underlines.
+
+## Scope resolution
+
+The first job of semantic analysis is figuring out what each name refers to. A **scope** is a region of code where a set of names are valid. Scopes nest:
+
+```javascript
+// Scope resolution: which "x" does each reference mean?
+
+function buildScopes(ast) {
+  const scopes = [];
+
+  function enterScope() {
+    scopes.push(new Map());
+  }
+
+  function exitScope() {
+    scopes.pop();
+  }
+
+  function declare(name) {
+    const current = scopes[scopes.length - 1];
+    if (current.has(name)) {
+      throw new Error(`Variable '${name}' already declared in this scope`);
+    }
+    current.set(name, true);
+  }
+
+  function resolve(name) {
+    // Walk scopes from innermost to outermost
+    for (let i = scopes.length - 1; i >= 0; i--) {
+      if (scopes[i].has(name)) return true;
+    }
+    throw new Error(`Undeclared variable: '${name}'`);
+  }
+
+  return { enterScope, exitScope, declare, resolve };
+}
+```
+
+When you see TypeScript report "Cannot find name 'x'," this is exactly the algorithm that detected the problem — walking the scope chain from inner to outer and finding nothing.
+
+## Symbol tables
+
+A **symbol table** is the data structure that stores everything known about each declared name: its type, its scope level, whether it has been initialized, and where it was declared.
+
+```javascript
+class SymbolTable {
+  constructor(parent) {
+    this.symbols = new Map();
+    this.parent = parent; // enclosing scope's table
+  }
+
+  define(name, info) {
+    if (this.symbols.has(name)) {
+      throw new Error(`'${name}' is already defined in this scope`);
+    }
+    this.symbols.set(name, {
+      type: info.type,
+      initialized: info.initialized || false,
+      line: info.line,
+    });
+  }
+
+  lookup(name) {
+    if (this.symbols.has(name)) {
+      return this.symbols.get(name);
+    }
+    if (this.parent) {
+      return this.parent.lookup(name);
+    }
+    return null; // not found in any scope
+  }
+}
+
+// Usage during analysis:
+const global = new SymbolTable(null);
+global.define("console", { type: "object", initialized: true, line: 0 });
+
+const fnScope = new SymbolTable(global);
+fnScope.define("x", { type: "number", initialized: false, line: 3 });
+
+console.log(fnScope.lookup("x")); // { type: "number", ... }
+console.log(fnScope.lookup("console")); // found in parent scope
+console.log(fnScope.lookup("y")); // null — undeclared
+```
+
+## Type checking
+
+With symbols resolved, the analyzer can verify that operations make sense for the types involved:
+
+```javascript
+function checkTypes(node, symbols) {
+  if (node.type === "BinaryExpr") {
+    const leftType = inferType(node.left, symbols);
+    const rightType = inferType(node.right, symbols);
+
+    if (node.op === "+" || node.op === "-" || node.op === "*") {
+      if (leftType !== "number" || rightType !== "number") {
+        throw new Error(
+          `Operator '${node.op}' requires numbers, ` + `got ${leftType} and ${rightType}`
+        );
+      }
+      return "number";
+    }
+
+    if (node.op === "==" || node.op === "!=") {
+      // Allow comparing any types, but warn if they differ
+      if (leftType !== rightType) {
+        console.warn(`Comparing ${leftType} with ${rightType} — ` + `this will always be false`);
+      }
+      return "boolean";
+    }
+  }
+}
+
+function inferType(node, symbols) {
+  if (node.type === "NumberLiteral") return "number";
+  if (node.type === "StringLiteral") return "string";
+  if (node.type === "BooleanLiteral") return "boolean";
+  if (node.type === "Identifier") {
+    const sym = symbols.lookup(node.name);
+    if (!sym) throw new Error(`Undeclared: ${node.name}`);
+    return sym.type;
+  }
+  if (node.type === "BinaryExpr") {
+    return checkTypes(node, symbols);
+  }
+  return "unknown";
+}
+```
+
+This is a simplified version of what TypeScript does. TypeScript's type checker is far more sophisticated — it handles generics, union types, conditional types, and type narrowing — but the core idea is the same: walk the AST, look up types in the symbol table, verify that operations are valid for those types.
+
+## Errors that only semantic analysis catches
+
+Parsing cannot detect any of these. They all require understanding what names mean and what types are involved:
+
+```javascript
+const semanticErrors = [
+  // Using a variable before declaring it
+  "console.log(x); let x = 5;",
+
+  // Calling a non-function
+  "let x = 42; x();",
+
+  // Wrong number of arguments
+  "function add(a, b) {} add(1);",
+
+  // Type mismatch
+  "let name = 'Alice'; let result = name * 2;",
+
+  // Break outside a loop
+  "break;",
+
+  // Return outside a function
+  "return 5;",
+
+  // Duplicate declaration
+  "let x = 1; let x = 2;",
+];
+
+// A parser would accept all of these as syntactically valid.
+// Semantic analysis rejects every one.
+```
+
+## Building a semantic analyzer
+
+A semantic analyzer is another AST walker, but one that carries context (the symbol table) as it traverses:
+
+```javascript
+function analyze(node, symbols) {
+  switch (node.type) {
+    case "Program":
+      for (const stmt of node.body) {
+        analyze(stmt, symbols);
+      }
+      break;
+
+    case "VarDeclaration": {
+      const initType = inferType(node.initializer, symbols);
+      symbols.define(node.name, {
+        type: initType,
+        initialized: true,
+        line: node.line,
+      });
+      break;
+    }
+
+    case "Identifier": {
+      const sym = symbols.lookup(node.name);
+      if (!sym) {
+        throw new Error(`'${node.name}' is not defined`);
+      }
+      if (!sym.initialized) {
+        throw new Error(`'${node.name}' is used before being initialized`);
+      }
+      break;
+    }
+
+    case "BinaryExpr":
+      analyze(node.left, symbols);
+      analyze(node.right, symbols);
+      checkTypes(node, symbols);
+      break;
+  }
+}
+```
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Create a SymbolTable class with define(name, type) and lookup(name) methods. Define 'x' as a number and 'name' as a string. Then verify that lookup('x') returns 'number' and lookup('z') returns null."
+  initialCode={`class SymbolTable {
+  constructor(parent) {
+    this.symbols = new Map();
+    this.parent = parent || null;
+  }
+
+define(name, type) {
+// your code here
+}
+
+lookup(name) {
+// your code here
+}
+}
+
+const table = new SymbolTable(null);
+table.define("x", "number");
+table.define("name", "string");
+
+console.log(table.lookup("x")); // should print "number"
+console.log(table.lookup("name")); // should print "string"
+console.log(table.lookup("z")); // should print null`}
+  solution={`class SymbolTable {
+constructor(parent) {
+this.symbols = new Map();
+this.parent = parent || null;
+}
+
+define(name, type) {
+this.symbols.set(name, type);
+}
+
+lookup(name) {
+if (this.symbols.has(name)) {
+return this.symbols.get(name);
+}
+if (this.parent) {
+return this.parent.lookup(name);
+}
+return null;
+}
+}
+
+const table = new SymbolTable(null);
+table.define("x", "number");
+table.define("name", "string");
+
+console.log(table.lookup("x"));
+console.log(table.lookup("name"));
+console.log(table.lookup("z"));`}
+testCases={["lookup returns the correct type for defined symbols and null for undefined ones"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Which of these errors can a parser detect?",
+      options: [
+        "Using a variable that was never declared",
+        "Passing the wrong number of arguments to a function",
+        "A missing closing parenthesis",
+        "Multiplying a string by a boolean",
+      ],
+      correct: 2,
+      explanation:
+        "A missing parenthesis is a syntax error — the token sequence does not match any grammar rule. The other three are semantic errors that require understanding names and types.",
+    },
+    {
+      type: "multiple-choice",
+      question: "How does scope resolution find the value of a variable name?",
+      options: [
+        "It searches all scopes in random order",
+        "It only checks the global scope",
+        "It walks from the innermost scope outward until it finds a match",
+        "It checks the nearest function scope and stops",
+      ],
+      correct: 2,
+      explanation:
+        "Scope resolution starts in the current (innermost) scope and walks outward through parent scopes. The first match wins, which is why inner variables shadow outer ones.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="A ___ stores information about every declared name (its type, scope, and initialization status). The process of determining which declaration a name refers to is called scope ___."
+  answers={["symbol table", "resolution"]}
+  hints={["Two words: ___ table.", "Finding the right match."]}
+/>
+
+## What you learned
+
+- **Semantic analysis** catches errors that parsing cannot: undeclared variables, type mismatches, duplicate declarations, and misplaced control flow.
+- **Scope resolution** walks the scope chain from inner to outer to find what each name refers to, and **symbol tables** store the metadata about each declaration.
+- This phase is what powers TypeScript's type checking, IDE autocomplete, and the red underlines that warn you before you run your code.

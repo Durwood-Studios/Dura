@@ -1,0 +1,388 @@
+---
+title: "Code Generation"
+description: "The back end of the compiler: turning an AST into something a machine can execute — bytecode, machine code, or another language."
+phase: 7
+module: "7-1-compilers-interpreters"
+order: 6
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["PL-5"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - compiler
+---
+
+## Why this matters
+
+Everything up to now — lexing, parsing, semantic analysis — has been about understanding the source code. Code generation is where the compiler finally produces output: the instructions a machine will execute. This is the stage that turns your high-level `let x = 2 + 3` into the low-level operations that a CPU or virtual machine actually runs.
+
+Understanding code generation explains why compiled code is fast, why different languages can share a runtime (JVM, CLR), and how V8 makes JavaScript competitive with C for tight loops.
+
+## Stack machines vs register machines
+
+There are two fundamental models for executing instructions:
+
+```javascript
+// STACK MACHINE: operands live on a stack
+// To compute 2 + 3:
+const stackInstructions = [
+  "PUSH 2", // stack: [2]
+  "PUSH 3", // stack: [2, 3]
+  "ADD", // pops 2 and 3, pushes 5 → stack: [5]
+];
+
+// REGISTER MACHINE: operands live in named slots
+// To compute 2 + 3:
+const registerInstructions = [
+  "LOAD r0, 2", // r0 = 2
+  "LOAD r1, 3", // r1 = 3
+  "ADD r2, r0, r1", // r2 = r0 + r1 = 5
+];
+```
+
+Stack machines are simpler to generate code for — you do not need to manage register allocation. The JVM, Python's CPython, and V8's Ignition interpreter all use stack-based bytecode. Real CPUs (x86, ARM) are register machines. Compilers that target native code must solve the harder problem of assigning variables to a limited set of registers.
+
+## Bytecode
+
+**Bytecode** is an intermediate instruction set — simpler than source code, more portable than machine code. It runs on a virtual machine (VM) rather than directly on hardware:
+
+```javascript
+// A simple bytecode format for our calculator language
+const OpCode = {
+  CONST: 0x01, // push a constant value
+  ADD: 0x02, // pop two values, push their sum
+  SUB: 0x03, // pop two values, push the difference
+  MUL: 0x04, // pop two values, push the product
+  DIV: 0x05, // pop two values, push the quotient
+  PRINT: 0x06, // pop and display the top value
+  HALT: 0xff, // stop execution
+};
+
+// "2 + 3" compiles to:
+const program = [OpCode.CONST, 2, OpCode.CONST, 3, OpCode.ADD, OpCode.PRINT, OpCode.HALT];
+```
+
+Java compiles to JVM bytecode. C# compiles to CIL bytecode. Python compiles to `.pyc` bytecode. The bytecode is the same regardless of which OS or CPU you run on — the VM handles the translation to native instructions.
+
+## Generating bytecode from an AST
+
+A code generator walks the AST and emits instructions for each node:
+
+```javascript
+function generate(node, output) {
+  switch (node.type) {
+    case "NumberLiteral":
+      output.push(OpCode.CONST);
+      output.push(node.value);
+      break;
+
+    case "BinaryExpr":
+      // Post-order: generate children first, then the operator
+      generate(node.left, output);
+      generate(node.right, output);
+
+      switch (node.op) {
+        case "+":
+          output.push(OpCode.ADD);
+          break;
+        case "-":
+          output.push(OpCode.SUB);
+          break;
+        case "*":
+          output.push(OpCode.MUL);
+          break;
+        case "/":
+          output.push(OpCode.DIV);
+          break;
+      }
+      break;
+
+    case "PrintStatement":
+      generate(node.expression, output);
+      output.push(OpCode.PRINT);
+      break;
+  }
+}
+
+// Compile the AST for "2 + 3 * 4"
+const ast = {
+  type: "BinaryExpr",
+  op: "+",
+  left: { type: "NumberLiteral", value: 2 },
+  right: {
+    type: "BinaryExpr",
+    op: "*",
+    left: { type: "NumberLiteral", value: 3 },
+    right: { type: "NumberLiteral", value: 4 },
+  },
+};
+
+const bytecode = [];
+generate(ast, bytecode);
+console.log(bytecode);
+// [CONST, 2, CONST, 3, CONST, 4, MUL, ADD]
+```
+
+Notice the post-order traversal: children are generated before their parent. This ensures operands are on the stack before the operator instruction executes.
+
+## Running bytecode: a simple VM
+
+A virtual machine executes bytecode using a stack and an instruction pointer:
+
+```javascript
+function execute(bytecode) {
+  const stack = [];
+  let ip = 0; // instruction pointer
+
+  while (ip < bytecode.length) {
+    const op = bytecode[ip++];
+
+    switch (op) {
+      case OpCode.CONST:
+        stack.push(bytecode[ip++]);
+        break;
+
+      case OpCode.ADD: {
+        const b = stack.pop();
+        const a = stack.pop();
+        stack.push(a + b);
+        break;
+      }
+
+      case OpCode.SUB: {
+        const b = stack.pop();
+        const a = stack.pop();
+        stack.push(a - b);
+        break;
+      }
+
+      case OpCode.MUL: {
+        const b = stack.pop();
+        const a = stack.pop();
+        stack.push(a * b);
+        break;
+      }
+
+      case OpCode.DIV: {
+        const b = stack.pop();
+        const a = stack.pop();
+        if (b === 0) throw new Error("Division by zero");
+        stack.push(a / b);
+        break;
+      }
+
+      case OpCode.PRINT:
+        console.log(stack.pop());
+        break;
+
+      case OpCode.HALT:
+        return;
+    }
+  }
+}
+
+// Run it
+execute([0x01, 2, 0x01, 3, 0x01, 4, 0x04, 0x02, 0x06, 0xff]);
+// Prints: 14 (which is 2 + 3 * 4)
+```
+
+This is a real (minimal) virtual machine. CPython, the JVM, and V8's Ignition all work on the same principle — just with hundreds of opcodes instead of six.
+
+## Intermediate representations
+
+Production compilers do not go straight from AST to final output. They translate to one or more **intermediate representations** (IRs) first:
+
+```javascript
+// The compilation pipeline with IRs:
+//
+// Source → AST → High-level IR → Low-level IR → Machine code
+//
+// Why? Each IR is a better fit for different optimizations.
+
+const irExample = {
+  highLevel: [
+    // Three-address code: closer to the source
+    "t0 = 3 * 4",
+    "t1 = 2 + t0",
+  ],
+  lowLevel: [
+    // Closer to machine instructions
+    "LOAD r0, 3",
+    "LOAD r1, 4",
+    "MUL  r2, r0, r1",
+    "LOAD r3, 2",
+    "ADD  r4, r3, r2",
+  ],
+};
+```
+
+LLVM's IR is the most famous intermediate representation. Rust, Swift, and Clang (C/C++) all compile to LLVM IR, and LLVM handles the final optimization and machine code generation. This is why one person can write an LLVM backend for a new CPU architecture, and every language targeting LLVM benefits immediately.
+
+## How V8 compiles JavaScript
+
+V8 uses a multi-tier pipeline that combines interpretation and compilation:
+
+```javascript
+const v8Pipeline = {
+  step1: "Parse JavaScript into an AST",
+  step2: "Generate Ignition bytecode (stack-based, interpreted)",
+  step3: "Run bytecode, collect profiling data",
+  step4: "TurboFan compiles hot functions to optimized machine code",
+  step5: "Replace interpreted functions with compiled versions",
+  step6: "If assumptions are violated, deoptimize back to bytecode",
+};
+
+// Deoptimization example: V8 optimizes a function assuming
+// a parameter is always a number. If it suddenly receives a
+// string, V8 discards the optimized code and falls back to
+// the interpreter. This is why consistent types in hot loops
+// make JavaScript faster.
+```
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Complete the generate function to handle 'SUB' (subtraction) nodes. Then compile and execute the AST for '10 - 3 * 2' and verify the result is 4."
+  initialCode={`const OpCode = { CONST: 1, ADD: 2, SUB: 3, MUL: 4, PRINT: 6, HALT: 0xFF };
+
+function generate(node, out) {
+switch (node.type) {
+case "NumberLiteral":
+out.push(OpCode.CONST, node.value);
+break;
+case "BinaryExpr":
+generate(node.left, out);
+generate(node.right, out);
+if (node.op === "+") out.push(OpCode.ADD);
+if (node.op === "\*") out.push(OpCode.MUL);
+// Add SUB handling here
+break;
+}
+}
+
+function execute(code) {
+const stack = [];
+let ip = 0;
+while (ip < code.length) {
+const op = code[ip++];
+if (op === OpCode.CONST) stack.push(code[ip++]);
+else if (op === OpCode.ADD) { const b = stack.pop(); stack.push(stack.pop() + b); }
+else if (op === OpCode.SUB) { const b = stack.pop(); stack.push(stack.pop() - b); }
+else if (op === OpCode.MUL) { const b = stack.pop(); stack.push(stack.pop() \* b); }
+else if (op === OpCode.PRINT) console.log(stack.pop());
+else if (op === OpCode.HALT) return;
+}
+}
+
+const ast = {
+type: "BinaryExpr", op: "-",
+left: { type: "NumberLiteral", value: 10 },
+right: {
+type: "BinaryExpr", op: "\*",
+left: { type: "NumberLiteral", value: 3 },
+right: { type: "NumberLiteral", value: 2 },
+},
+};
+
+const bytecode = [];
+generate(ast, bytecode);
+bytecode.push(OpCode.PRINT, OpCode.HALT);
+execute(bytecode);`}
+  solution={`const OpCode = { CONST: 1, ADD: 2, SUB: 3, MUL: 4, PRINT: 6, HALT: 0xFF };
+
+function generate(node, out) {
+switch (node.type) {
+case "NumberLiteral":
+out.push(OpCode.CONST, node.value);
+break;
+case "BinaryExpr":
+generate(node.left, out);
+generate(node.right, out);
+if (node.op === "+") out.push(OpCode.ADD);
+if (node.op === "-") out.push(OpCode.SUB);
+if (node.op === "\*") out.push(OpCode.MUL);
+break;
+}
+}
+
+function execute(code) {
+const stack = [];
+let ip = 0;
+while (ip < code.length) {
+const op = code[ip++];
+if (op === OpCode.CONST) stack.push(code[ip++]);
+else if (op === OpCode.ADD) { const b = stack.pop(); stack.push(stack.pop() + b); }
+else if (op === OpCode.SUB) { const b = stack.pop(); stack.push(stack.pop() - b); }
+else if (op === OpCode.MUL) { const b = stack.pop(); stack.push(stack.pop() \* b); }
+else if (op === OpCode.PRINT) console.log(stack.pop());
+else if (op === OpCode.HALT) return;
+}
+}
+
+const ast = {
+type: "BinaryExpr", op: "-",
+left: { type: "NumberLiteral", value: 10 },
+right: {
+type: "BinaryExpr", op: "\*",
+left: { type: "NumberLiteral", value: 3 },
+right: { type: "NumberLiteral", value: 2 },
+},
+};
+
+const bytecode = [];
+generate(ast, bytecode);
+bytecode.push(OpCode.PRINT, OpCode.HALT);
+execute(bytecode); // prints 4`}
+testCases={["Program prints 4 (10 - 3 * 2)"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Why do code generators traverse the AST in post-order (children before parent)?",
+      options: [
+        "It produces smaller bytecode",
+        "Operands must be on the stack before the operator instruction executes",
+        "Post-order is faster than pre-order",
+        "The parser requires post-order output",
+      ],
+      correct: 1,
+      explanation:
+        "In a stack machine, the operator pops its operands from the stack. Those operands must be pushed first, which means the child nodes must be generated before the parent operator node.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "What is the main advantage of compiling to an intermediate representation (IR) like LLVM IR?",
+      options: [
+        "IR is human-readable",
+        "IR eliminates the need for a parser",
+        "Multiple languages can share the same optimization and code generation backend",
+        "IR runs faster than native machine code",
+      ],
+      correct: 2,
+      explanation:
+        "LLVM IR lets any language frontend (Rust, C, Swift) benefit from the same optimizations and target any CPU architecture that LLVM supports, without each language reimplementing those backends.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="A ___ machine executes instructions by pushing and popping from a stack. V8's first-tier interpreter is called ___, and its optimizing compiler is called ___."
+  answers={["stack", "Ignition", "TurboFan"]}
+  hints={["Push and pop.", "Starts the engine.", "Spins fast."]}
+/>
+
+## What you learned
+
+- **Code generation** walks the AST in post-order and emits instructions — either bytecode for a virtual machine or native machine code for a CPU.
+- **Stack machines** (used by JVM, CPython, V8 Ignition) are simpler to target than register machines; **intermediate representations** like LLVM IR let multiple languages share a single optimizing backend.
+- V8 compiles JavaScript through a multi-tier pipeline: parse, generate bytecode, interpret, profile, then JIT-compile hot paths to native code via TurboFan.
