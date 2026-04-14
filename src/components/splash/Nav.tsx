@@ -10,7 +10,7 @@ interface NavLink {
 }
 
 const LINKS: ReadonlyArray<NavLink> = [
-  { href: "/dashboard", label: "Learn" },
+  { href: "/paths", label: "Paths" },
   { href: "/dictionary", label: "Dictionary" },
   { href: "/about", label: "About" },
 ];
@@ -64,7 +64,7 @@ export function Nav(): React.ReactElement {
 
         <div className="flex items-center gap-2">
           <Link
-            href="/dashboard"
+            href="/paths"
             className="hidden h-9 items-center justify-center rounded-lg bg-[#10B981] px-4 text-sm font-medium text-white transition-all hover:bg-[#059669] sm:inline-flex"
           >
             Start
@@ -101,7 +101,7 @@ export function Nav(): React.ReactElement {
             </Link>
           ))}
           <Link
-            href="/dashboard"
+            href="/paths"
             onClick={() => setIsOpen(false)}
             className="mt-2 flex h-12 items-center justify-center rounded-lg bg-[#10B981] px-4 text-base font-medium text-white transition-all hover:bg-[#059669]"
           >

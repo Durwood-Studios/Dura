@@ -2,7 +2,6 @@
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import dynamic from "next/dynamic";
-import { CodeBlock } from "@/components/lesson/CodeBlock";
 import { SandboxExerciseSkeleton } from "@/components/lesson/SandboxExerciseSkeleton";
 
 interface SandboxExerciseProps {
@@ -46,11 +45,9 @@ const SandboxExerciseInner = dynamic(() => import("@/components/lesson/SandboxEx
 /** Fallback when the interactive sandbox can't load. */
 function SandboxFallback({
   initialCode,
-  language,
   onRetry,
 }: {
   initialCode: string;
-  language: string;
   onRetry: () => void;
 }): React.ReactElement {
   return (
@@ -58,7 +55,9 @@ function SandboxFallback({
       <p className="mb-3 text-sm font-medium text-amber-800">
         Interactive sandbox unavailable. Code shown in read-only mode.
       </p>
-      <CodeBlock language={language}>{initialCode}</CodeBlock>
+      <pre className="overflow-x-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-4 text-sm leading-relaxed">
+        <code>{initialCode}</code>
+      </pre>
       <button
         type="button"
         onClick={onRetry}
@@ -78,11 +77,7 @@ export function SandboxExercise({
   testCases = [],
 }: SandboxExerciseProps): React.ReactElement {
   const fallback = (
-    <SandboxFallback
-      initialCode={initialCode}
-      language={language}
-      onRetry={() => window.location.reload()}
-    />
+    <SandboxFallback initialCode={initialCode} onRetry={() => window.location.reload()} />
   );
 
   return (

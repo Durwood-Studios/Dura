@@ -18,7 +18,7 @@ export function CTA(): React.ReactElement {
         </h2>
         <p className="mt-4 text-lg text-[#525252]">The first lesson is free. So is the last.</p>
         <Link
-          href="/dashboard"
+          href="/paths"
           className="mt-10 inline-flex h-12 min-w-[200px] items-center justify-center rounded-lg bg-[#10B981] px-8 text-base font-medium text-white shadow-sm transition-all duration-200 hover:bg-[#059669] hover:shadow-md"
         >
           Begin Phase 0

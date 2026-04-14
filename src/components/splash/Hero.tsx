@@ -45,7 +45,7 @@ export function Hero(): React.ReactElement {
           className="mt-10 flex w-full flex-col items-stretch justify-center gap-3 sm:w-auto sm:flex-row sm:items-center sm:gap-4"
         >
           <Link
-            href="/dashboard"
+            href="/paths"
             className="inline-flex h-12 items-center justify-center rounded-lg bg-[#10B981] px-6 text-base font-medium text-white shadow-sm transition-all duration-200 hover:bg-[#059669] hover:shadow-md sm:min-w-[180px]"
           >
             Start Learning

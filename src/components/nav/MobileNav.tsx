@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 
 const TABS = [
   { href: "/dashboard", label: "Home", icon: LayoutDashboard },
-  { href: "/paths/0", label: "Learn", icon: BookOpen },
+  { href: "/paths", label: "Learn", icon: BookOpen },
   { href: "/review", label: "Review", icon: Repeat },
   { href: "/dictionary", label: "Dict", icon: BookMarked },
   { href: "/stats", label: "Stats", icon: BarChart3 },
@@ -47,7 +47,7 @@ export function MobileBottomTabs(): React.ReactElement {
 
 const DRAWER_LINKS = [
   { href: "/dashboard", label: "Dashboard" },
-  { href: "/paths/0", label: "Learn" },
+  { href: "/paths", label: "Learn" },
   { href: "/review", label: "Review" },
   { href: "/dictionary", label: "Dictionary" },
   { href: "/sandbox", label: "Sandbox" },

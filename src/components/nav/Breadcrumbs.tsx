@@ -4,7 +4,18 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronRight } from "lucide-react";
 
-function toLabel(segment: string): string {
+/** Generate a human-readable label for a URL segment. */
+function toLabel(segment: string, index: number, segments: string[]): string {
+  // Inside /paths routes, improve labels
+  if (segments[0] === "paths") {
+    // /paths/[phaseId] — show "Phase N"
+    if (index === 1 && /^\d+$/.test(segment)) return `Phase ${segment}`;
+    // /paths/[phaseId]/[moduleId] — show "Module N-M"
+    if (index === 2 && /^\d+-\d+/.test(segment)) return `Module ${segment}`;
+    // /paths/[phaseId]/[moduleId]/[lessonId] — show "Lesson NN"
+    if (index === 3 && /^\d+$/.test(segment)) return `Lesson ${segment}`;
+  }
+
   return segment.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
@@ -14,7 +25,7 @@ export function Breadcrumbs(): React.ReactElement | null {
   if (segments.length === 0) return null;
 
   const crumbs = segments.map((seg, i) => ({
-    label: toLabel(seg),
+    label: toLabel(seg, i, segments),
     href: "/" + segments.slice(0, i + 1).join("/"),
   }));
 
@@ -22,7 +33,7 @@ export function Breadcrumbs(): React.ReactElement | null {
     <nav aria-label="Breadcrumb" className="px-6 py-3 text-sm text-neutral-500">
       <ol className="flex flex-wrap items-center gap-1">
         <li>
-          <Link href="/" className="hover:text-neutral-900">
+          <Link href="/dashboard" className="hover:text-neutral-900">
             Home
           </Link>
         </li>
