@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   BookOpen,
   Brain,
@@ -10,10 +10,6 @@ import {
   Printer,
   type LucideIcon,
 } from "lucide-react";
-import { downloadCSV, downloadJSON, downloadText } from "@/lib/exports/download";
-import { dictionaryCSV, dictionaryAnki, dictionaryJSON } from "@/lib/exports/dictionary-export";
-import { quizBankCSV, quizBankJSON } from "@/lib/exports/quiz-export";
-import { standardsCSV } from "@/lib/exports/standards-export";
 import type { StandardRef } from "@/lib/curriculum";
 import type { LessonMeta } from "@/types/curriculum";
 
@@ -81,10 +77,29 @@ export function ExportHubClient({
   authoredLessons,
 }: ExportHubClientProps): React.ReactElement {
   const [status, setStatus] = useState<string | null>(null);
+  const generating = useRef(false);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flash = (msg: string) => {
+    if (flashTimer.current) clearTimeout(flashTimer.current);
     setStatus(msg);
-    setTimeout(() => setStatus(null), 2000);
+    flashTimer.current = setTimeout(() => setStatus(null), 2000);
+  };
+
+  /** Wraps an export action: prevents concurrent clicks, shows status, catches errors. */
+  const guard = (label: string, fn: () => Promise<void> | void) => async () => {
+    if (generating.current) return;
+    generating.current = true;
+    setStatus(`Generating ${label}…`);
+    try {
+      await fn();
+      flash(`Downloaded ${label}`);
+    } catch (error) {
+      console.error(`[export] ${label} failed:`, error);
+      flash(`Export failed — try again`);
+    } finally {
+      generating.current = false;
+    }
   };
 
   return (
@@ -98,24 +113,27 @@ export function ExportHubClient({
           formats={[
             {
               label: "CSV",
-              onClick: () => {
+              onClick: guard("dura-dictionary.csv", async () => {
+                const { dictionaryCSV } = await import("@/lib/exports/dictionary-export");
+                const { downloadCSV } = await import("@/lib/exports/download");
                 downloadCSV("dura-dictionary.csv", dictionaryCSV());
-                flash("Downloaded dura-dictionary.csv");
-              },
+              }),
             },
             {
               label: "Anki TXT",
-              onClick: () => {
+              onClick: guard("dura-dictionary-anki.txt", async () => {
+                const { dictionaryAnki } = await import("@/lib/exports/dictionary-export");
+                const { downloadText } = await import("@/lib/exports/download");
                 downloadText("dura-dictionary-anki.txt", dictionaryAnki(), "text/plain");
-                flash("Downloaded dura-dictionary-anki.txt");
-              },
+              }),
             },
             {
               label: "JSON",
-              onClick: () => {
+              onClick: guard("dura-dictionary.json", async () => {
+                const { dictionaryJSON } = await import("@/lib/exports/dictionary-export");
+                const { downloadJSON } = await import("@/lib/exports/download");
                 downloadJSON("dura-dictionary.json", dictionaryJSON());
-                flash("Downloaded dura-dictionary.json");
-              },
+              }),
             },
           ]}
         />
@@ -128,17 +146,19 @@ export function ExportHubClient({
           formats={[
             {
               label: "JSON",
-              onClick: () => {
+              onClick: guard("dura-quiz-bank.json", async () => {
+                const { quizBankJSON } = await import("@/lib/exports/quiz-export");
+                const { downloadJSON } = await import("@/lib/exports/download");
                 downloadJSON("dura-quiz-bank.json", quizBankJSON());
-                flash("Downloaded dura-quiz-bank.json");
-              },
+              }),
             },
             {
               label: "CSV",
-              onClick: () => {
+              onClick: guard("dura-quiz-bank.csv", async () => {
+                const { quizBankCSV } = await import("@/lib/exports/quiz-export");
+                const { downloadCSV } = await import("@/lib/exports/download");
                 downloadCSV("dura-quiz-bank.csv", quizBankCSV());
-                flash("Downloaded dura-quiz-bank.csv");
-              },
+              }),
             },
           ]}
         />
@@ -151,10 +171,11 @@ export function ExportHubClient({
           formats={[
             {
               label: "CSV",
-              onClick: () => {
+              onClick: guard("dura-standards.csv", async () => {
+                const { standardsCSV } = await import("@/lib/exports/standards-export");
+                const { downloadCSV } = await import("@/lib/exports/download");
                 downloadCSV("dura-standards.csv", standardsCSV(standards, lessons));
-                flash("Downloaded dura-standards.csv");
-              },
+              }),
             },
           ]}
         />
@@ -167,14 +188,14 @@ export function ExportHubClient({
           formats={[
             {
               label: "JSON",
-              onClick: () => {
+              onClick: guard("dura-lessons.json", async () => {
+                const { downloadJSON } = await import("@/lib/exports/download");
                 downloadJSON("dura-lessons.json", {
                   exportedAt: new Date().toISOString(),
                   count: lessons.length,
                   lessons,
                 });
-                flash("Downloaded dura-lessons.json");
-              },
+              }),
             },
           ]}
         />
@@ -186,9 +207,7 @@ export function ExportHubClient({
           formats={[
             {
               label: "Open print view",
-              onClick: () => {
-                window.open("/teach/print/curriculum", "_blank");
-              },
+              onClick: () => window.open("/teach/print/curriculum", "_blank"),
             },
           ]}
         />
@@ -200,9 +219,7 @@ export function ExportHubClient({
           formats={[
             {
               label: "Browse modules",
-              onClick: () => {
-                window.open("/teach/print/modules", "_blank");
-              },
+              onClick: () => window.open("/teach/print/modules", "_blank"),
             },
           ]}
         />
