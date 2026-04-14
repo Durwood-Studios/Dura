@@ -8,6 +8,7 @@ import { PHASE_5_QUESTIONS } from "@/content/questions/phase-5";
 import { PHASE_6_QUESTIONS } from "@/content/questions/phase-6";
 import { PHASE_7_QUESTIONS } from "@/content/questions/phase-7";
 import { PHASE_8_QUESTIONS } from "@/content/questions/phase-8";
+import { PHASE_9_QUESTIONS } from "@/content/questions/phase-9";
 
 /**
  * Every authored question across every phase. Isomorphic — safe to
@@ -24,6 +25,7 @@ export const ALL_QUESTIONS: AssessmentQuestion[] = [
   ...PHASE_6_QUESTIONS,
   ...PHASE_7_QUESTIONS,
   ...PHASE_8_QUESTIONS,
+  ...PHASE_9_QUESTIONS,
 ];
 
 export function getAllQuestions(): AssessmentQuestion[] {
