@@ -70,6 +70,13 @@ export function CompletionGate({
   const [dueAfter, setDueAfter] = useState<number>(0);
   const [streakDays, setStreakDays] = useState<number>(0);
   const [streakExtended, setStreakExtended] = useState<boolean>(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const xp = useTween(XP_AWARDS.lesson, XP_TWEEN_MS, celebrating);
 
   const checks = useMemo(
@@ -99,20 +106,29 @@ export function CompletionGate({
 
   const onComplete = async () => {
     if (!current || completed) return;
-    const before = await getTotalXP();
-    setPreviousLevel(levelFromXP(before));
-    await complete(XP_AWARDS.lesson);
-    await awardXPWithToast("lesson", XP_AWARDS.lesson, current.lessonId);
-    const after = before + XP_AWARDS.lesson;
-    setNewLevel(levelFromXP(after));
-    setCelebrating(true);
+    try {
+      const before = await getTotalXP();
+      if (!mountedRef.current) return;
+      setPreviousLevel(levelFromXP(before));
+      await complete(XP_AWARDS.lesson);
+      await awardXPWithToast("lesson", XP_AWARDS.lesson, current.lessonId);
+      if (!mountedRef.current) return;
+      const after = before + XP_AWARDS.lesson;
+      setNewLevel(levelFromXP(after));
+      setCelebrating(true);
+    } catch (error) {
+      console.error("[gate] completion failed", error);
+      return;
+    }
     // Extend the streak and record whether it grew.
     try {
       const { getCurrentStreak } = await import("@/lib/streak-manager");
       const prev = await getCurrentStreak();
       const updated = await extendStreak();
-      setStreakDays(updated.current);
-      setStreakExtended(updated.current > prev.current);
+      if (mountedRef.current) {
+        setStreakDays(updated.current);
+        setStreakExtended(updated.current > prev.current);
+      }
     } catch (error) {
       console.error("[gate] streak extend failed", error);
     }
