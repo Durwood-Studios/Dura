@@ -10,7 +10,7 @@ import { CommandPalette } from "@/components/nav/CommandPalette";
 
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
-    <div className="flex min-h-screen bg-[#FAFAFA] text-neutral-900">
+    <div className="flex min-h-screen bg-[var(--color-bg-primary)] text-[var(--color-text-primary)]">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[100] focus:rounded-lg focus:bg-emerald-600 focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white focus:shadow-lg"

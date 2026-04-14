@@ -37,8 +37,8 @@ const NAV_ITEMS = [
 export function Sidebar(): React.ReactElement {
   const pathname = usePathname();
   return (
-    <aside className="hidden h-screen w-60 shrink-0 flex-col border-r border-[#E5E5E5] bg-white px-3 py-4 lg:flex">
-      <Link href="/" className="mb-6 px-3 text-xl font-semibold text-neutral-900">
+    <aside className="hidden h-screen w-60 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-4 lg:flex">
+      <Link href="/" className="mb-6 px-3 text-xl font-semibold text-[var(--color-text-primary)]">
         DURA
       </Link>
       <nav className="flex flex-col gap-1">
@@ -51,8 +51,8 @@ export function Sidebar(): React.ReactElement {
               className={cn(
                 "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition",
                 active
-                  ? "bg-[#F0FDF4] text-emerald-700"
-                  : "text-neutral-600 hover:bg-[#F5F5F4] hover:text-neutral-900"
+                  ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-text-primary)]"
               )}
             >
               <Icon className="h-4 w-4" aria-hidden />
