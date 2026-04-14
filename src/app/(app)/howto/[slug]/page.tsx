@@ -2,7 +2,9 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import { compileMDX } from "next-mdx-remote/rsc";
+import { evaluate } from "@mdx-js/mdx";
+import * as runtime from "react/jsx-runtime";
+import matter from "gray-matter";
 import { mdxComponents } from "@/components/lesson/MDXComponents";
 
 interface HowToMeta {
@@ -42,16 +44,19 @@ async function getGuide(
       const filePath = join(dir, file);
       if (!existsSync(filePath)) continue;
 
-      const source = readFileSync(filePath, "utf-8");
-      const { content, frontmatter } = await compileMDX<HowToMeta>({
-        source,
-        options: { parseFrontmatter: true },
-        components: mdxComponents,
+      const raw = readFileSync(filePath, "utf-8");
+      const { data, content: mdxBody } = matter(raw);
+      const frontmatter = data as HowToMeta;
+
+      if (frontmatter.slug !== slug) continue;
+
+      const { default: MDXContent } = await evaluate(mdxBody, {
+        ...runtime,
+        development: false,
       });
 
-      if (frontmatter.slug === slug) {
-        return { meta: frontmatter, content };
-      }
+      const rendered = <MDXContent components={mdxComponents} />;
+      return { meta: frontmatter, content: rendered };
     }
   } catch (error) {
     console.error(`[howto] Failed to load guide "${slug}":`, error);

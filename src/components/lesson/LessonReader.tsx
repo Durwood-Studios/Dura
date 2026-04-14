@@ -1,4 +1,5 @@
-import { MDXRemote } from "next-mdx-remote/rsc";
+import { evaluate } from "@mdx-js/mdx";
+import * as runtime from "react/jsx-runtime";
 import { mdxComponents } from "@/components/lesson/MDXComponents";
 import { ScrollTracker } from "@/components/lesson/ScrollTracker";
 import { CompletionGate } from "@/components/lesson/CompletionGate";
@@ -12,8 +13,20 @@ interface LessonReaderProps {
   shareUrl: string;
 }
 
-export function LessonReader({ lesson, next, shareUrl }: LessonReaderProps): React.ReactElement {
+export async function LessonReader({
+  lesson,
+  next,
+  shareUrl,
+}: LessonReaderProps): Promise<React.ReactElement> {
   const { meta, body } = lesson;
+
+  // Compile and evaluate MDX using @mdx-js/mdx directly.
+  // next-mdx-remote/rsc strips JSX expression props (arrays/objects)
+  // from client components. evaluate() preserves them.
+  const { default: MDXContent } = await evaluate(body, {
+    ...runtime,
+    development: false,
+  });
 
   return (
     <article className="mx-auto max-w-[700px] px-6 py-12">
@@ -46,7 +59,7 @@ export function LessonReader({ lesson, next, shareUrl }: LessonReaderProps): Rea
       </header>
 
       <div className="lesson-prose">
-        <MDXRemote source={body} components={mdxComponents} />
+        <MDXContent components={mdxComponents} />
       </div>
 
       <CompletionGate

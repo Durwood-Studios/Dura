@@ -16,8 +16,8 @@ import type { MDXComponents as MDXComponentsType } from "mdx/types";
 /**
  * Map of components made available to every MDX file.
  *
- * Interactive lesson components (Quiz, FillBlank, ParsonsPanel,
- * SandboxExercise, VocabTooltip) are added in their own commits.
+ * These are used with @mdx-js/mdx evaluate() which correctly passes
+ * JSX expression props (arrays/objects) to client components.
  */
 export const mdxComponents: MDXComponentsType = {
   Quiz: Quiz as unknown as MDXComponentsType[string],
