@@ -31,7 +31,7 @@ const VERIFICATION_QUESTION_COUNT = 30;
 interface PhaseTestProps {
   phaseId: string;
   phaseTitle: string;
-  questionPool: AssessmentQuestion[];
+  questionPool?: AssessmentQuestion[];
 }
 
 type Status = "loading" | "intro" | "in-progress" | "results" | "verified" | "cooldown";
@@ -39,9 +39,20 @@ type Status = "loading" | "intro" | "in-progress" | "results" | "verified" | "co
 export function PhaseTest({
   phaseId,
   phaseTitle,
-  questionPool,
+  questionPool: externalPool,
 }: PhaseTestProps): React.ReactElement {
   const [status, setStatus] = useState<Status>("loading");
+  const [loadedPool, setLoadedPool] = useState<AssessmentQuestion[]>(externalPool ?? []);
+
+  // Lazy-load question bank when no external pool provided
+  useEffect(() => {
+    if (externalPool && externalPool.length > 0) return;
+    void import("@/content/questions").then(({ getQuestionsByPhase }) => {
+      setLoadedPool(getQuestionsByPhase(phaseId));
+    });
+  }, [phaseId, externalPool]);
+
+  const questionPool = externalPool ?? loadedPool;
   const [questions, setQuestions] = useState<AssessmentQuestion[]>([]);
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Map<string, number[]>>(new Map());

@@ -20,7 +20,9 @@ import type { AssessmentQuestion, AssessmentResult, QuestionResult } from "@/typ
 interface MasteryGateProps {
   moduleId: string;
   moduleTitle: string;
-  questionPool: AssessmentQuestion[];
+  /** If provided, uses these questions. Otherwise lazy-loads from phaseId. */
+  questionPool?: AssessmentQuestion[];
+  phaseId?: string;
   questionCount?: number;
 }
 
@@ -29,11 +31,24 @@ type GateStatus = "loading" | "locked" | "in-progress" | "results" | "passed" | 
 export function MasteryGate({
   moduleId,
   moduleTitle,
-  questionPool,
+  questionPool: externalPool,
+  phaseId,
   questionCount = 12,
 }: MasteryGateProps): React.ReactElement {
   const [status, setStatus] = useState<GateStatus>("loading");
   const [questions, setQuestions] = useState<AssessmentQuestion[]>([]);
+  const [loadedPool, setLoadedPool] = useState<AssessmentQuestion[]>(externalPool ?? []);
+
+  // Lazy-load question bank when no external pool provided
+  useEffect(() => {
+    if (externalPool && externalPool.length > 0) return;
+    if (!phaseId) return;
+    void import("@/content/questions").then(({ getQuestionsByPhase }) => {
+      setLoadedPool(getQuestionsByPhase(phaseId));
+    });
+  }, [phaseId, externalPool]);
+
+  const questionPool = externalPool ?? loadedPool;
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Map<string, number[]>>(new Map());
   const [submitted, setSubmitted] = useState(false);

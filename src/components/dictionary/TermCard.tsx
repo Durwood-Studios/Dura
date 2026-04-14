@@ -7,8 +7,21 @@ import { createCard } from "@/lib/fsrs";
 import { getCardByTermSlug, putCard } from "@/lib/db/flashcards";
 import { generateId, cn } from "@/lib/utils";
 import { track } from "@/lib/analytics";
-import { getPhase } from "@/content/phases";
 import type { DictionaryDifficulty, DictionaryTerm } from "@/types/dictionary";
+
+/** Phase colors — avoids importing the full PHASES array into the client bundle. */
+const PHASE_COLORS: Record<string, string> = {
+  "0": "#6ee7b7",
+  "1": "#93c5fd",
+  "2": "#c4b5fd",
+  "3": "#fda4af",
+  "4": "#fdba74",
+  "5": "#f0abfc",
+  "6": "#67e8f9",
+  "7": "#fcd34d",
+  "8": "#a3e635",
+  "9": "#f472b6",
+};
 
 interface TermCardProps {
   term: DictionaryTerm;
@@ -41,7 +54,8 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
     void track("flashcard_rated", { source: "dictionary", slug: term.slug });
   };
 
-  const phase = term.phaseIds[0] ? getPhase(term.phaseIds[0]) : undefined;
+  const firstPhase = term.phaseIds[0];
+  const phaseColor = firstPhase ? PHASE_COLORS[firstPhase] : undefined;
 
   return (
     <article className="flex flex-col gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 shadow-sm transition hover:shadow-md">
@@ -52,12 +66,12 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
         >
           {term.term}
         </Link>
-        {phase && (
+        {firstPhase && (
           <span
             className="rounded-full px-2 py-0.5 text-[10px] font-medium"
-            style={{ backgroundColor: `${phase.color}33`, color: "#171717" }}
+            style={{ backgroundColor: `${phaseColor ?? "#10b981"}33`, color: "#171717" }}
           >
-            Phase {phase.id}
+            Phase {firstPhase}
           </span>
         )}
       </header>

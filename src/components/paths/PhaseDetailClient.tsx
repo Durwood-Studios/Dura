@@ -4,8 +4,12 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, CheckCircle2, Lock, Clock, Award } from "lucide-react";
 import { summarizePhase, type PhaseSummary } from "@/lib/progress-aggregate";
-import { PhaseTest } from "@/components/verify/PhaseTest";
-import { getQuestionsByPhase } from "@/content/questions";
+import dynamic from "next/dynamic";
+
+const PhaseTest = dynamic(
+  () => import("@/components/verify/PhaseTest").then((m) => ({ default: m.PhaseTest })),
+  { ssr: false }
+);
 import { Skeleton } from "@/components/ui/Skeleton";
 import { cn } from "@/lib/utils";
 import type { Phase } from "@/types/curriculum";
@@ -38,8 +42,6 @@ export function PhaseDetailClient({ phase }: PhaseDetailClientProps): React.Reac
       </div>
     );
   }
-
-  const questionPool = getQuestionsByPhase(phase.id);
 
   return (
     <>
@@ -78,17 +80,15 @@ export function PhaseDetailClient({ phase }: PhaseDetailClientProps): React.Reac
         ))}
       </ul>
 
-      {questionPool.length > 0 && (
-        <div className="mt-10">
-          <h2 className="mb-2 text-xl font-semibold text-[var(--color-text-primary)]">
-            Phase Verification
-          </h2>
-          <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-            Complete all module assessments, then verify your mastery of the entire phase.
-          </p>
-          <PhaseTest phaseId={phase.id} phaseTitle={phase.title} questionPool={questionPool} />
-        </div>
-      )}
+      <div className="mt-10">
+        <h2 className="mb-2 text-xl font-semibold text-[var(--color-text-primary)]">
+          Phase Verification
+        </h2>
+        <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
+          Complete all module assessments, then verify your mastery of the entire phase.
+        </p>
+        <PhaseTest phaseId={phase.id} phaseTitle={phase.title} />
+      </div>
     </>
   );
 }

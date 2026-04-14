@@ -3,8 +3,12 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, ChevronLeft, Check } from "lucide-react";
-import { MasteryGate } from "@/components/verify/MasteryGate";
-import { getQuestionsByPhase } from "@/content/questions";
+import dynamic from "next/dynamic";
+
+const MasteryGate = dynamic(
+  () => import("@/components/verify/MasteryGate").then((m) => ({ default: m.MasteryGate })),
+  { ssr: false }
+);
 import { getProgressByModule } from "@/lib/db/progress";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { formatMinutes, cn } from "@/lib/utils";
@@ -39,7 +43,6 @@ export function ModuleDetailClient({
     };
   }, [moduleId]);
 
-  const questionPool = getQuestionsByPhase(phaseId);
   const completedCount = progress
     ? Array.from(progress.values()).filter((p) => p.completedAt !== null).length
     : 0;
@@ -112,16 +115,14 @@ export function ModuleDetailClient({
         </ul>
       )}
 
-      {questionPool.length > 0 && (
-        <div className="mt-8">
-          <MasteryGate moduleId={moduleId} moduleTitle={moduleTitle} questionPool={questionPool} />
-          {!allComplete && (
-            <p className="mt-2 text-center text-[10px] text-[var(--color-text-muted)]">
-              Tip: complete every lesson before attempting the module assessment.
-            </p>
-          )}
-        </div>
-      )}
+      <div className="mt-8">
+        <MasteryGate moduleId={moduleId} moduleTitle={moduleTitle} phaseId={phaseId} />
+        {!allComplete && (
+          <p className="mt-2 text-center text-[10px] text-[var(--color-text-muted)]">
+            Tip: complete every lesson before attempting the module assessment.
+          </p>
+        )}
+      </div>
     </>
   );
 }
