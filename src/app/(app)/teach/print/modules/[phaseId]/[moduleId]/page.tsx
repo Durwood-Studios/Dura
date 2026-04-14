@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { MDXRemote } from "next-mdx-remote/rsc";
+import { evaluate } from "@mdx-js/mdx";
+import * as runtime from "react/jsx-runtime";
 import { getPhase, getModule } from "@/content/phases";
 import { listLessons, loadLesson } from "@/lib/content";
 import { mdxComponents } from "@/components/lesson/MDXComponents";
@@ -63,7 +64,7 @@ export default async function ModuleWorkbookPage({
             </p>
           </header>
           <div className="lesson-print text-[14px] leading-[1.75] text-neutral-800">
-            <MDXRemote source={lesson.body} components={mdxComponents} />
+            <LessonMDX body={lesson.body} />
           </div>
         </article>
       ))}
@@ -73,4 +74,18 @@ export default async function ModuleWorkbookPage({
       </footer>
     </main>
   );
+}
+
+/** Server component that evaluates MDX with @mdx-js/mdx (preserves JSX expression props). */
+async function LessonMDX({ body }: { body: string }): Promise<React.ReactElement> {
+  try {
+    const { default: MDXContent } = await evaluate(body, {
+      ...runtime,
+      development: false,
+    });
+    return <MDXContent components={mdxComponents} />;
+  } catch (error) {
+    console.error("[print] MDX evaluation failed:", error);
+    return <p className="text-sm text-red-500">Failed to render lesson content.</p>;
+  }
 }

@@ -6,9 +6,13 @@ import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 
 interface FillBlankProps {
-  prompt: string;
-  answers: string[];
+  /** Multi-blank format */
+  prompt?: string;
+  answers?: string[];
   hints?: string[];
+  /** Single-blank format (used in many Phase 3-9 lessons) */
+  question?: string;
+  answer?: string;
 }
 
 interface BlankState {
@@ -23,9 +27,22 @@ const REVEAL_AFTER_ATTEMPTS = 2;
  * Fill-in-the-blank with per-blank attempt tracking, tab navigation,
  * shake-on-wrong animation, and answer reveal after two failed attempts.
  */
-export function FillBlank({ prompt, answers, hints = [] }: FillBlankProps): React.ReactElement {
-  const safePrompt = prompt ?? "";
-  const safeAnswers = answers ?? [];
+export function FillBlank(props: FillBlankProps): React.ReactElement {
+  // Normalize: support both multi-blank and single-blank formats
+  const safePrompt = (() => {
+    if (props.prompt) return props.prompt;
+    if (props.question) {
+      // Single-blank format uses "question" with a ______ placeholder
+      return props.question.includes("___") ? props.question : props.question + " ___";
+    }
+    return "";
+  })();
+  const safeAnswers = (() => {
+    if (props.answers && props.answers.length > 0) return props.answers;
+    if (props.answer) return [props.answer];
+    return [];
+  })();
+  const hints = props.hints ?? [];
   const segments = useMemo(() => safePrompt.split("___"), [safePrompt]);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const [values, setValues] = useState<string[]>(() => safeAnswers.map(() => ""));

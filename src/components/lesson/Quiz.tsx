@@ -24,7 +24,16 @@ export interface QuizQuestion {
 }
 
 interface QuizProps {
-  questions: QuizQuestion[];
+  /** Array-format: pass an array of questions. */
+  questions?: QuizQuestion[];
+  /** Single-question format props (used in many Phase 3-9 lessons). */
+  question?: string;
+  options?: string[];
+  answer?: number;
+  correct?: number;
+  explanation?: string;
+  type?: QuizQuestionType;
+  terms?: string[];
   passingScore?: number;
 }
 
@@ -45,8 +54,26 @@ function correctAsArray(correct: number | number[]): number[] {
   return Array.isArray(correct) ? correct : [correct];
 }
 
-export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactElement {
-  const safeQuestions = questions ?? [];
+export function Quiz(props: QuizProps): React.ReactElement {
+  const { passingScore = 0.8 } = props;
+
+  // Normalize: support both array format and single-question format
+  const safeQuestions: QuizQuestion[] = (() => {
+    if (props.questions && props.questions.length > 0) return props.questions;
+    if (props.question && props.options) {
+      return [
+        {
+          question: props.question,
+          options: props.options,
+          correct: props.answer ?? props.correct ?? 0,
+          explanation: props.explanation,
+          type: props.type,
+          terms: props.terms,
+        },
+      ];
+    }
+    return [];
+  })();
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState<number[]>([]);
   const [submitted, setSubmitted] = useState(false);
