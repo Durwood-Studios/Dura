@@ -6,6 +6,11 @@ import { ParsonsPanel } from "@/components/lesson/ParsonsPanel";
 import { VocabTooltip } from "@/components/lesson/VocabTooltip";
 import { SandboxExercise } from "@/components/lesson/SandboxExercise";
 import { VocabHighlighter } from "@/components/lesson/VocabHighlighter";
+import { SplitPane } from "@/components/tutorial/SplitPane";
+import { Checkpoint } from "@/components/tutorial/Checkpoint";
+import { ProgressBar } from "@/components/tutorial/ProgressBar";
+import { StepCounter } from "@/components/tutorial/StepCounter";
+import { TutorialLayout } from "@/components/tutorial/TutorialLayout";
 import type { MDXComponents as MDXComponentsType } from "mdx/types";
 
 /**
@@ -21,6 +26,11 @@ export const mdxComponents: MDXComponentsType = {
   VocabTooltip: VocabTooltip as unknown as MDXComponentsType[string],
   SandboxExercise: SandboxExercise as unknown as MDXComponentsType[string],
   VocabHighlighter: VocabHighlighter as unknown as MDXComponentsType[string],
+  SplitPane: SplitPane as unknown as MDXComponentsType[string],
+  Checkpoint: Checkpoint as unknown as MDXComponentsType[string],
+  ProgressBar: ProgressBar as unknown as MDXComponentsType[string],
+  StepCounter: StepCounter as unknown as MDXComponentsType[string],
+  TutorialLayout: TutorialLayout as unknown as MDXComponentsType[string],
   h1: ({ children, ...props }) => (
     <h1 className="mt-8 mb-4 text-4xl font-semibold text-[var(--color-text-primary)]" {...props}>
       {children}

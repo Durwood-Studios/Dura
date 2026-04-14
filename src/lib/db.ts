@@ -7,9 +7,10 @@ import type { AnalyticsEvent } from "@/types/analytics";
 import type { SandboxSave } from "@/types/sandbox";
 import type { AssessmentResult, Certificate } from "@/types/assessment";
 import type { XPEvent } from "@/types/xp";
+import type { TutorialProgress } from "@/types/tutorial";
 
 export const DB_NAME = "dura";
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 
 export interface DuraDBSchema extends DBSchema {
   progress: {
@@ -73,6 +74,11 @@ export interface DuraDBSchema extends DBSchema {
     key: string;
     value: XPEvent;
     indexes: { "by-source": string; "by-awarded": number };
+  };
+  "tutorial-progress": {
+    key: string;
+    value: TutorialProgress;
+    indexes: { "by-type": string; "by-slug": string; "by-active": number };
   };
 }
 
@@ -148,6 +154,13 @@ export function getDB(): Promise<DuraDB> {
           const store = db.createObjectStore("xp-events", { keyPath: "id" });
           store.createIndex("by-source", "source");
           store.createIndex("by-awarded", "awardedAt");
+        }
+        // v5: tutorial progress
+        if (!db.objectStoreNames.contains("tutorial-progress")) {
+          const store = db.createObjectStore("tutorial-progress", { keyPath: "id" });
+          store.createIndex("by-type", "type");
+          store.createIndex("by-slug", "slug");
+          store.createIndex("by-active", "lastActiveAt");
         }
       },
       blocked() {
