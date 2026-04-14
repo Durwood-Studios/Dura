@@ -19,6 +19,8 @@ import { cn } from "@/lib/utils";
 interface CompletionGateProps {
   estimatedMinutes: number;
   lessonTitle: string;
+  /** Whether this lesson contains a Quiz component. */
+  hasQuiz?: boolean;
   nextHref?: string;
   nextTitle?: string;
 }
@@ -49,6 +51,7 @@ function useTween(target: number, durationMs: number, run: boolean): number {
 export function CompletionGate({
   estimatedMinutes,
   lessonTitle,
+  hasQuiz = true,
   nextHref,
   nextTitle,
 }: CompletionGateProps): React.ReactElement {
@@ -62,7 +65,8 @@ export function CompletionGate({
   const requiredMs = estimatedMinutes * 60_000 * TIME_REQUIRED_RATIO;
   const scrollOk = scrollPercent >= SCROLL_REQUIRED;
   const timeOk = timeSpentMs >= requiredMs;
-  const ready = scrollOk && timeOk && quizPassed;
+  const quizOk = hasQuiz ? quizPassed : true;
+  const ready = scrollOk && timeOk && quizOk;
 
   const [celebrating, setCelebrating] = useState(false);
   const [previousLevel, setPreviousLevel] = useState<number | null>(null);
@@ -86,9 +90,9 @@ export function CompletionGate({
         label: `Spend at least ${Math.ceil(estimatedMinutes * TIME_REQUIRED_RATIO)} minutes`,
         done: timeOk,
       },
-      { label: "Pass the quiz", done: quizPassed },
+      ...(hasQuiz ? [{ label: "Pass the quiz", done: quizPassed }] : []),
     ],
-    [scrollOk, timeOk, quizPassed, estimatedMinutes]
+    [scrollOk, timeOk, quizPassed, estimatedMinutes, hasQuiz]
   );
 
   // If the lesson was already completed in a previous session, skip celebration animation.

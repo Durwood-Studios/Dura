@@ -28,6 +28,8 @@ export async function LessonReader({
     development: false,
   });
 
+  const hasQuiz = /<Quiz\b/.test(body);
+
   return (
     <article className="mx-auto max-w-[700px] px-6 py-12">
       <ScrollTracker lessonId={meta.id} phaseId={meta.phaseId} moduleId={meta.moduleId} />
@@ -65,6 +67,7 @@ export async function LessonReader({
       <CompletionGate
         estimatedMinutes={meta.estimatedMinutes}
         lessonTitle={meta.title}
+        hasQuiz={hasQuiz}
         nextHref={next?.href}
         nextTitle={next?.title}
       />
