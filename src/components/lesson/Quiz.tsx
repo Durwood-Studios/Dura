@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, X, Plus } from "lucide-react";
 import { useProgressStore } from "@/stores/progress";
 import { track } from "@/lib/analytics";
 import { createCard } from "@/lib/fsrs";
 import { putCard } from "@/lib/db/flashcards";
-import { getTerm } from "@/lib/dictionary";
+import type { DictionaryTerm } from "@/types/dictionary";
 import { generateId, cn } from "@/lib/utils";
 import { XP_AWARDS } from "@/lib/xp";
 import { awardXPWithToast } from "@/lib/xp-manager";
@@ -53,9 +53,43 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
   const [history, setHistory] = useState<AnswerRecord[]>([]);
   const [done, setDone] = useState(false);
   const [addedTerms, setAddedTerms] = useState<Set<string>>(new Set());
+  const [termCache, setTermCache] = useState<Map<string, DictionaryTerm>>(new Map());
   const passQuiz = useProgressStore((s) => s.passQuiz);
   const setQuizScore = useProgressStore((s) => s.setQuizScore);
   const currentLesson = useProgressStore((s) => s.current);
+
+  // Fetch missed term data lazily when quiz is done
+  useEffect(() => {
+    if (!done || safeQuestions.length === 0) return;
+    const slugs = new Set<string>();
+    for (const record of history) {
+      if (record.correct) continue;
+      const q = safeQuestions[record.questionIndex];
+      for (const s of q.terms ?? []) slugs.add(s);
+    }
+    const toFetch = Array.from(slugs).filter((s) => !termCache.has(s));
+    if (toFetch.length === 0) return;
+    void Promise.all(
+      toFetch.map(async (s) => {
+        try {
+          const res = await fetch(`/api/v1/terms/${encodeURIComponent(s)}`);
+          if (!res.ok) return null;
+          const json = await res.json();
+          return json.data as DictionaryTerm;
+        } catch {
+          return null;
+        }
+      })
+    ).then((results) => {
+      setTermCache((prev) => {
+        const next = new Map(prev);
+        results.forEach((t, i) => {
+          if (t) next.set(toFetch[i], t);
+        });
+        return next;
+      });
+    });
+  }, [done, history, safeQuestions, termCache]);
 
   if (safeQuestions.length === 0) {
     return (
@@ -126,7 +160,7 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
   })();
 
   const addTermToDeck = async (slug: string) => {
-    const term = getTerm(slug);
+    const term = termCache.get(slug);
     if (!term) return;
     const card = createCard({
       id: generateId("card"),
@@ -163,7 +197,7 @@ export function Quiz({ questions, passingScore = 0.8 }: QuizProps): React.ReactE
             </p>
             <ul className="flex flex-wrap gap-2">
               {missedTerms.map((slug) => {
-                const term = getTerm(slug);
+                const term = termCache.get(slug);
                 if (!term) return null;
                 const added = addedTerms.has(slug);
                 return (
