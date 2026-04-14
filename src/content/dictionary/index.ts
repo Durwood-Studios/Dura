@@ -3335,6 +3335,313 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["message-queue"],
   },
+  // ── Phase 8: Professional Practice ───────────────────────────────────────
+  {
+    slug: "unit-test-deep",
+    term: "Unit Test",
+    aliases: ["unit testing"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Code that checks if a single function works correctly by giving it inputs and checking the outputs.",
+      intermediate:
+        "A test that exercises one function or module in isolation using the Arrange/Act/Assert pattern. Fast, deterministic, independent. Frameworks: Vitest, Jest. Mocks isolate the unit from dependencies.",
+      advanced:
+        "Tests at the smallest granularity — one function per test case. Test doubles (mocks, stubs, spies) replace dependencies. Property: if a unit test fails, the bug is in the unit under test, not a dependency. Coverage metrics (line, branch, path) guide completeness but don't guarantee correctness.",
+    },
+    seeAlso: ["tdd"],
+  },
+  {
+    slug: "tdd",
+    term: "TDD",
+    aliases: ["Test-Driven Development"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Write the test first, then write the code to make it pass, then clean up. Red → green → refactor.",
+      intermediate:
+        "A development methodology: (1) write a failing test (red), (2) write minimal code to pass (green), (3) refactor while keeping tests green. Forces you to think about the interface before the implementation.",
+      advanced:
+        "TDD's value is design pressure — it forces small, testable, loosely-coupled units. Best when requirements are clear. Less useful during exploratory prototyping where the interface is still forming. London school (mock everything) vs Chicago school (test behavior, not implementation).",
+    },
+    seeAlso: ["unit-test-deep"],
+  },
+  {
+    slug: "ci-cd",
+    term: "CI/CD",
+    aliases: ["Continuous Integration / Continuous Deployment"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Automatically testing your code when you push (CI) and automatically deploying it when tests pass (CD).",
+      intermediate:
+        "CI: build + lint + test on every push; block merge on failure. CD: automatically deploy verified code to staging or production. Together they form the automated delivery pipeline. GitHub Actions, GitLab CI, CircleCI are common platforms.",
+      advanced:
+        "CI reduces integration risk by surfacing conflicts early. CD reduces deployment risk through small, frequent releases. Metrics: build time, mean time to recovery (MTTR), change failure rate (CFR). Trunk-based development with CI/CD enables continuous delivery.",
+    },
+    seeAlso: ["blue-green", "canary"],
+  },
+  {
+    slug: "blue-green",
+    term: "Blue-Green Deployment",
+    aliases: [],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Running two identical environments (blue and green) and switching traffic between them for zero-downtime deployments.",
+      intermediate:
+        "Blue is the current live environment. Green is the new version. Deploy to green, run smoke tests, switch the load balancer. Rollback = switch back to blue. Zero downtime, instant rollback.",
+      advanced:
+        "Requires infrastructure for two full environments and database migration compatibility. Session stickiness and in-flight requests must be handled during the switch. Works best with stateless services; stateful services need shared or migrated state.",
+    },
+    seeAlso: ["canary", "ci-cd"],
+  },
+  {
+    slug: "canary",
+    term: "Canary Deployment",
+    aliases: ["canary release"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Rolling out a change to a small percentage of users first to catch problems before everyone sees it.",
+      intermediate:
+        "Route 1-5% of traffic to the new version; monitor error rates and latency. If metrics are healthy, gradually increase to 100%. If not, route all traffic back to the old version. Lower risk than big-bang deploys.",
+      advanced:
+        "Requires traffic splitting (weighted routing or header-based), comparable monitoring between canary and baseline, and automated rollback triggers. Feature flags are a code-level equivalent. Canary + progressive delivery = the state of the art for safe continuous deployment.",
+    },
+    seeAlso: ["blue-green", "ci-cd"],
+  },
+  {
+    slug: "clean-architecture",
+    term: "Clean Architecture",
+    aliases: ["hexagonal architecture", "ports and adapters"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Organizing code so the business logic is in the center and doesn't depend on databases, frameworks, or UIs.",
+      intermediate:
+        "Concentric layers: domain (entities, business rules) → application (use cases) → infrastructure (DB, HTTP, UI). The dependency rule: inner layers never depend on outer layers. This makes the core testable and framework-independent.",
+      advanced:
+        "Derived from Alistair Cockburn's Hexagonal Architecture (2005) and Robert Martin's Clean Architecture (2012). Ports (interfaces) define boundaries; adapters implement them. Composition root wires everything at startup. Tradeoff: more abstraction for more flexibility — overkill for simple CRUD apps.",
+    },
+    seeAlso: ["microservice"],
+  },
+  {
+    slug: "microservice",
+    term: "Microservice",
+    aliases: ["microservices"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Breaking a big application into small, independent services that each do one thing and talk to each other over the network.",
+      intermediate:
+        "Small, independently deployable services organized around business capabilities. Each owns its data, has its own deploy pipeline, and communicates via APIs or events. Benefits: independent scaling and deployment. Costs: operational complexity, distributed system problems.",
+      advanced:
+        "Conway's Law applies: team structure mirrors service structure. Service boundaries should align with bounded contexts (DDD). Communication: sync (REST/gRPC) for queries, async (events/queues) for commands. Distributed tracing (OpenTelemetry) is essential for debugging. Start as a monolith; split when the organizational or scaling need is clear.",
+    },
+    seeAlso: ["clean-architecture", "event-sourcing"],
+  },
+  {
+    slug: "event-sourcing",
+    term: "Event Sourcing",
+    aliases: [],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Instead of saving only the current state, save every change as an event — like a bank statement that records every transaction.",
+      intermediate:
+        "The event log is the source of truth. Current state is derived by replaying events. Benefits: full audit trail, temporal queries, event-driven architecture. Often paired with CQRS (separate read/write models).",
+      advanced:
+        "Events are immutable, append-only. Projections build read-optimized views by processing the event stream. Snapshots speed up replay for long-lived aggregates. Event versioning (upcasting) handles schema evolution. Tradeoffs: eventual consistency, complex debugging, storage growth.",
+    },
+    seeAlso: ["cqrs", "microservice"],
+  },
+  {
+    slug: "cqrs",
+    term: "CQRS",
+    aliases: ["Command Query Responsibility Segregation"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Separating the code that changes data (commands) from the code that reads data (queries) so each can be optimized independently.",
+      intermediate:
+        "Write model accepts commands and produces events. Read model is optimized for queries (denormalized, cached). The two models can use different databases. Often combined with event sourcing.",
+      advanced:
+        "Enables independent scaling of reads and writes. The read model is eventually consistent — updated asynchronously from the event stream. Materialized views serve as the query side. Not appropriate for simple CRUD — the consistency complexity is only justified when read and write patterns diverge significantly.",
+    },
+    seeAlso: ["event-sourcing"],
+  },
+  {
+    slug: "graphql",
+    term: "GraphQL",
+    aliases: [],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A query language for APIs that lets the client ask for exactly the data it needs — no more, no less.",
+      intermediate:
+        "Client-specified queries eliminate over-fetching and under-fetching. A single endpoint serves a typed schema. Resolvers fetch data per field. Introspection enables tooling. Tradeoffs: caching is harder than REST, query complexity must be limited.",
+      advanced:
+        "Batching (DataLoader) solves the N+1 problem. Persisted queries reduce attack surface. Schema stitching/federation composes multiple services. Subscriptions use WebSockets for real-time. Compared to REST: more flexibility, more server complexity, harder HTTP caching.",
+    },
+    seeAlso: ["grpc"],
+  },
+  {
+    slug: "grpc",
+    term: "gRPC",
+    aliases: [],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A fast way for services to call each other using binary data instead of text — like a phone call between computers.",
+      intermediate:
+        "Google's RPC framework using HTTP/2 and Protocol Buffers (binary serialization). Strongly typed, code-generated clients and servers. Supports unary, server-streaming, client-streaming, and bidirectional streaming. Ideal for service-to-service communication.",
+      advanced:
+        "Protobuf schemas (.proto) generate type-safe stubs in any language. HTTP/2 multiplexing eliminates head-of-line blocking. gRPC-web enables browser clients via a proxy. Reflection enables dynamic discovery. Interceptors provide middleware (auth, logging, tracing). Not suitable for browser-direct calls without a gateway.",
+    },
+    seeAlso: ["graphql"],
+  },
+  {
+    slug: "owasp",
+    term: "OWASP Top 10",
+    aliases: ["OWASP"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A list of the 10 most common and dangerous web security vulnerabilities that every developer should know.",
+      intermediate:
+        "Published by the Open Web Application Security Project. Includes: injection, broken auth, sensitive data exposure, XXE, broken access control, misconfig, XSS, insecure deserialization, vulnerable components, insufficient logging. Updated periodically.",
+      advanced:
+        "The OWASP Top 10 is a awareness document, not a standard. Use it as a checklist during threat modeling and code review. OWASP also publishes the ASVS (Application Security Verification Standard) for more rigorous assessment, and the Testing Guide for methodology.",
+    },
+    seeAlso: ["xss", "sqli"],
+  },
+  {
+    slug: "oauth",
+    term: "OAuth 2.0",
+    aliases: ["OAuth"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A system that lets you log into one app using your Google or GitHub account without sharing your password.",
+      intermediate:
+        "An authorization framework (not authentication — that's OIDC). Grants limited access to resources via access tokens. Flows: Authorization Code (web apps), Authorization Code + PKCE (SPAs/mobile), Client Credentials (service-to-service).",
+      advanced:
+        "OAuth 2.0 (RFC 6749) delegates authorization without sharing credentials. Access tokens are bearer tokens (usually JWTs). Refresh tokens extend sessions without re-authentication. PKCE prevents authorization code interception in public clients. Token introspection (RFC 7662) validates tokens at the resource server.",
+    },
+    seeAlso: ["owasp"],
+  },
+  {
+    slug: "rbac",
+    term: "RBAC",
+    aliases: ["Role-Based Access Control"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Users have roles (like 'admin' or 'editor'), and each role has specific permissions (like 'can delete posts').",
+      intermediate:
+        "Permissions are assigned to roles, not directly to users. Users are assigned to roles. Simple, auditable, and the default choice for most applications. Contrast with ABAC (attribute-based), which evaluates policies against user/resource/environment attributes.",
+      advanced:
+        "RBAC (NIST model) supports role hierarchies (senior inherits junior permissions) and separation of duties constraints. For complex policies, ABAC or policy engines (Open Policy Agent, Cedar) evaluate rules at runtime. RBAC is sufficient for 90% of applications.",
+    },
+    seeAlso: ["oauth"],
+  },
+  {
+    slug: "xss",
+    term: "XSS",
+    aliases: ["Cross-Site Scripting"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An attack where a hacker injects malicious code into a webpage that runs in other users' browsers.",
+      intermediate:
+        "Stored XSS: malicious script saved in the database and served to victims. Reflected XSS: script in a URL parameter reflected in the page. DOM XSS: client-side JavaScript inserts unsanitized data into the DOM. Mitigate: escape output, use textContent not innerHTML, CSP headers.",
+      advanced:
+        "Content-Security-Policy headers are the strongest defense — they restrict which scripts can execute. Framework auto-escaping (React's JSX, Vue's templates) prevents most XSS by default. The remaining risk is dangerouslySetInnerHTML and href='javascript:' patterns.",
+    },
+    seeAlso: ["sqli", "owasp"],
+  },
+  {
+    slug: "sqli",
+    term: "SQL Injection",
+    aliases: ["SQLi"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An attack where someone types SQL commands into a form field to trick the database into doing something it shouldn't.",
+      intermediate:
+        "Occurs when user input is concatenated into SQL strings. `WHERE name = '${input}'` becomes `WHERE name = '' OR 1=1 --'` — returning all rows. Mitigate: always use parameterized queries / prepared statements. Never concatenate user input into SQL.",
+      advanced:
+        "Blind SQLi extracts data via true/false questions or timing attacks without visible output. Second-order SQLi stores malicious input that triggers later. Defense: parameterized queries (mandatory), input validation (defense in depth), least privilege DB accounts, WAF rules.",
+    },
+    seeAlso: ["xss", "owasp"],
+  },
+  {
+    slug: "csrf",
+    term: "CSRF",
+    aliases: ["Cross-Site Request Forgery"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "An attack where a malicious website tricks your browser into making requests to a site you're logged into.",
+      intermediate:
+        "Exploits the browser's automatic cookie inclusion. A hidden form on evil.com submits to bank.com using your session cookie. Mitigations: CSRF tokens (unique per session/request), SameSite cookie attribute (Lax or Strict), checking Origin/Referer headers.",
+      advanced:
+        "SameSite=Lax (default in modern browsers) prevents cross-site POST requests, mitigating most CSRF. For APIs using token-based auth (Bearer tokens in headers), CSRF is not a concern — the token is not automatically included like cookies. CSRF is primarily a cookie-based session vulnerability.",
+    },
+    seeAlso: ["xss", "owasp"],
+  },
+  {
+    slug: "adr",
+    term: "ADR",
+    aliases: ["Architecture Decision Record"],
+    category: "professional",
+    phaseIds: ["8"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A short document that explains a technical decision: what was decided, why, and what the consequences are.",
+      intermediate:
+        "Format: title, status (proposed/accepted/deprecated), context (the situation), decision (what we chose), consequences (tradeoffs and implications). Stored in the repo (doc/adr/) so decisions are searchable and versioned alongside the code they affect.",
+      advanced:
+        "ADRs solve the 'why was this done?' problem that code comments and commit messages don't fully address. They capture the reasoning when it's fresh — invaluable when revisiting decisions months later. Lightweight ADR tools: adr-tools CLI, or just Markdown files with a numbering convention (0001-use-postgres.md).",
+    },
+    seeAlso: ["clean-architecture"],
+  },
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
