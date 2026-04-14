@@ -2995,6 +2995,346 @@ export const DICTIONARY: DictionaryTerm[] = [
     },
     seeAlso: ["llm", "fine-tuning"],
   },
+  // ── Phase 7: Advanced Systems ────────────────────────────────────────────
+  {
+    slug: "compiler",
+    term: "Compiler",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A program that translates source code into machine code or bytecode before it runs.",
+      intermediate:
+        "Transforms source code through a pipeline: lexing → parsing → semantic analysis → optimization → code generation. Ahead-of-time (AOT) compilers (GCC, rustc) produce executables; JIT compilers (V8, JVM) compile at runtime.",
+      advanced:
+        "Multi-pass compilation separates front-end (source-specific: lexer, parser, AST) from back-end (target-specific: IR, register allocation, instruction selection). LLVM provides a shared back-end IR used by Rust, Swift, and Clang.",
+    },
+    seeAlso: ["lexer", "parser", "ast"],
+  },
+  {
+    slug: "lexer",
+    term: "Lexer",
+    aliases: ["scanner", "tokenizer"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "The first stage of a compiler — it breaks source code text into small labeled chunks called tokens.",
+      intermediate:
+        "Reads a character stream and produces a token stream. Each token has a type (keyword, identifier, literal, operator) and a value. Typically implemented with regular expressions or hand-written state machines.",
+      advanced:
+        "Maximal munch: the lexer always matches the longest possible token. Context-sensitive lexing (e.g., JSX angle brackets vs comparison operators) requires lexer modes or parser feedback. Performance: O(n) in input length.",
+    },
+    seeAlso: ["compiler", "parser"],
+  },
+  {
+    slug: "parser",
+    term: "Parser",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Takes tokens from the lexer and builds a tree structure (AST) that represents the program's grammar.",
+      intermediate:
+        "Implements a context-free grammar. Recursive descent parsers map each grammar rule to a function. Pratt parsing handles operator precedence elegantly. Parser generators (ANTLR, PEG.js) automate construction from grammar specs.",
+      advanced:
+        "LL (top-down, left-to-right) vs LR (bottom-up) parsing. Recursive descent is LL(k). Error recovery: synchronization points (semicolons, braces) allow parsing to continue after syntax errors. Parser combinators compose small parsers into larger ones.",
+    },
+    seeAlso: ["lexer", "ast"],
+  },
+  {
+    slug: "ast",
+    term: "AST",
+    aliases: ["Abstract Syntax Tree"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A tree that represents the structure of source code. Linters, formatters, and compilers all use ASTs.",
+      intermediate:
+        "A tree of nodes where each node represents a language construct (literal, binary expression, function declaration). Unlike a parse tree, it omits syntactic details (parentheses, semicolons) and captures only semantic structure.",
+      advanced:
+        "ASTs enable separation of syntax from semantics. The visitor pattern traverses the tree without modifying it. ESTree is the standard AST format for JavaScript (used by ESLint, Babel, Prettier). CSTs (Concrete Syntax Trees) preserve all syntactic information for formatters.",
+    },
+    seeAlso: ["compiler", "parser"],
+  },
+  {
+    slug: "bytecode",
+    term: "Bytecode",
+    aliases: ["intermediate code"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A simplified instruction set that a virtual machine runs — halfway between source code and machine code.",
+      intermediate:
+        "Platform-independent instructions for a virtual machine. JVM bytecode, Python bytecode (.pyc), and V8's Ignition bytecode all serve this role. Faster to interpret than source code; can be JIT-compiled to native code for hot paths.",
+      advanced:
+        "Stack-based (JVM, CPython) vs register-based (Lua, V8 Ignition) VMs. Bytecode verification ensures type safety without re-parsing. AOT compilation from bytecode (GraalVM native-image, Android ART) enables startup-time optimization.",
+    },
+    seeAlso: ["compiler"],
+  },
+  {
+    slug: "cap-theorem",
+    term: "CAP Theorem",
+    aliases: ["Brewer's theorem"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A distributed system can guarantee at most two of three things: consistency, availability, and partition tolerance.",
+      intermediate:
+        "In a network partition, you must choose: CP systems (MongoDB, HBase) refuse requests to stay consistent; AP systems (Cassandra, DynamoDB) serve requests but may return stale data. CA is impossible in the presence of partitions (and partitions always happen).",
+      advanced:
+        "The PACELC extension: in Partition → choose A or C; Else → choose Latency or Consistency. This captures the everyday tradeoff better than CAP alone. Jepsen testing empirically verifies consistency claims under failure.",
+    },
+    seeAlso: ["consensus", "raft"],
+  },
+  {
+    slug: "consensus",
+    term: "Consensus",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Getting multiple computers to agree on the same value — even when some of them fail or messages get lost.",
+      intermediate:
+        "The consensus problem: N nodes must agree on a single value despite crashes and network delays. Raft and Paxos are the dominant algorithms. Used by etcd, ZooKeeper, CockroachDB, and every replicated database.",
+      advanced:
+        "Safety (never disagree) and liveness (eventually decide) under crash-fault models. Byzantine fault tolerance (BFT) handles malicious nodes but at higher cost. FLP impossibility: no deterministic consensus protocol can guarantee termination in an asynchronous system with even one crash failure.",
+    },
+    seeAlso: ["raft", "cap-theorem"],
+  },
+  {
+    slug: "raft",
+    term: "Raft",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A way for a group of servers to elect a leader and agree on a shared log of events — even if some servers crash.",
+      intermediate:
+        "A consensus algorithm: leader election (randomized timeouts), log replication (leader sends entries, followers acknowledge), and safety (committed entries are never lost). Designed to be understandable — the paper's explicit goal over Paxos.",
+      advanced:
+        "Term numbers provide monotonic logical time. The Leader Completeness Property guarantees a leader has all committed entries. Membership changes use joint consensus. Implementations: etcd (Kubernetes), CockroachDB, TiKV. Performance: one round-trip for replication in the common case.",
+    },
+    seeAlso: ["consensus", "cap-theorem"],
+  },
+  {
+    slug: "crdt",
+    term: "CRDT",
+    aliases: ["Conflict-free Replicated Data Type"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A data structure that can be copied to many servers and merged back together without conflicts.",
+      intermediate:
+        "Data types where concurrent updates always converge to the same state regardless of merge order. G-Counter (grow-only), LWW-Register (last-writer-wins), OR-Set (observed-remove set). Used in collaborative editing, offline-first apps, and eventually consistent stores.",
+      advanced:
+        "State-based CRDTs merge via a join semilattice; operation-based CRDTs require exactly-once causal delivery. The tradeoff: CRDTs guarantee convergence but limit the operations you can express. Automerge and Yjs are production CRDT frameworks for rich text and JSON documents.",
+    },
+    seeAlso: ["consensus", "cap-theorem"],
+  },
+  {
+    slug: "consistent-hashing",
+    term: "Consistent Hashing",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A way to spread data across servers so that adding or removing a server moves as little data as possible.",
+      intermediate:
+        "Maps both keys and nodes onto a hash ring. Each key is assigned to the next node clockwise. Adding a node only moves keys between the new node and its neighbor. Virtual nodes (multiple positions per physical node) improve balance.",
+      advanced:
+        "Expected data movement on a node change: K/n keys (vs K keys for naive modulo). Jump consistent hash is an alternative with perfect balance and O(1) computation. Rendezvous hashing (highest random weight) is simpler and provides the same guarantees.",
+    },
+    seeAlso: ["cap-theorem"],
+  },
+  {
+    slug: "message-queue",
+    term: "Message Queue",
+    aliases: ["message broker"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A system that stores messages between services so they can communicate without being online at the same time.",
+      intermediate:
+        "Decouples producers from consumers. Delivery semantics: at-most-once (may lose), at-least-once (may duplicate), exactly-once (idempotent consumers). Kafka, RabbitMQ, SQS are dominant. Patterns: pub/sub, work queues, dead letter queues.",
+      advanced:
+        "Kafka's log-based architecture: ordered, partitioned, replicated append-only log. Consumer groups enable parallel processing with partition assignment. Exactly-once via idempotent producers + transactional consumers. Backpressure: consumer lag monitoring triggers scaling or alerting.",
+    },
+    seeAlso: ["consensus"],
+  },
+  {
+    slug: "saga",
+    term: "Saga",
+    aliases: ["saga pattern"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A way to handle a multi-step operation across services where each step can be undone if a later step fails.",
+      intermediate:
+        "A sequence of local transactions with compensating actions for rollback. Choreography: each service triggers the next via events. Orchestration: a central coordinator manages the sequence. Replaces distributed transactions (2PC) in microservices.",
+      advanced:
+        "Sagas trade atomicity for availability — intermediate states are visible. Semantic locking (soft state fields like 'pending') mitigates this. Compensation must be idempotent. The orchestrator is itself a state machine that must handle crashes and retries.",
+    },
+    seeAlso: ["consensus", "message-queue"],
+  },
+  {
+    slug: "ownership",
+    term: "Ownership (Rust)",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Rust's rule that every value has exactly one owner — when the owner goes away, the value is automatically cleaned up.",
+      intermediate:
+        "Three rules: (1) each value has one owner, (2) ownership can be moved (invalidating the original), (3) when the owner goes out of scope, the value is dropped. This eliminates use-after-free and double-free without garbage collection.",
+      advanced:
+        "Ownership models the concept of affine types (used at most once). Move semantics transfer ownership; Copy trait opts into bitwise copy for stack-allocated types. Drop trait customizes cleanup. The borrow checker statically verifies ownership rules at compile time with zero runtime cost.",
+    },
+    seeAlso: ["borrowing", "lifetime"],
+  },
+  {
+    slug: "borrowing",
+    term: "Borrowing (Rust)",
+    aliases: ["references"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Lending a value to a function without giving up ownership — like letting someone read your book without giving it away.",
+      intermediate:
+        "Creating a reference (&T for immutable, &mut T for mutable) without moving ownership. The rule: you can have many &T OR one &mut T, never both simultaneously. This prevents data races at compile time.",
+      advanced:
+        "Non-lexical lifetimes (NLL) allow borrows to end before the scope closes, based on usage analysis. Reborrowing allows passing &mut to functions that take &mut without moving the borrow. Interior mutability (Cell, RefCell, Mutex) provides runtime-checked mutation through shared references.",
+    },
+    seeAlso: ["ownership", "lifetime"],
+  },
+  {
+    slug: "lifetime",
+    term: "Lifetime (Rust)",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A label that tells the Rust compiler how long a reference is valid — preventing it from outliving the data it points to.",
+      intermediate:
+        "Lifetime annotations ('a) explicitly mark how long references are valid relative to each other. The compiler infers most lifetimes via elision rules. 'static means the data lives for the entire program (string literals, owned data in threads).",
+      advanced:
+        "Lifetimes are a form of region-based memory management verified at compile time. Variance: &'a T is covariant in 'a (longer lifetimes can substitute for shorter ones). Higher-ranked trait bounds (for<'a>) express lifetimes that must work for any lifetime.",
+    },
+    seeAlso: ["ownership", "borrowing"],
+  },
+  {
+    slug: "trait",
+    term: "Trait (Rust)",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A set of methods that a type can implement — like a contract that says 'I can do these things.'",
+      intermediate:
+        "Rust's version of interfaces. Define with `trait Display { fn fmt(&self, f: &mut Formatter) -> Result; }`. Implement with `impl Display for MyType { ... }`. Generic bounds: `fn print<T: Display>(val: T)` requires T to implement Display.",
+      advanced:
+        "Traits enable static dispatch (monomorphization — zero-cost) via generics and dynamic dispatch (vtable — runtime cost) via `dyn Trait`. Blanket implementations (`impl<T: Display> ToString for T`) provide derived behavior. Orphan rules prevent conflicting implementations across crates.",
+    },
+    seeAlso: ["ownership"],
+  },
+  {
+    slug: "profiling",
+    term: "Profiling",
+    aliases: ["performance profiling"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner: "Measuring where your program spends its time so you know what to optimize.",
+      intermediate:
+        "Sampling-based profilers (periodically record the call stack) provide low-overhead statistical data. Instrumentation-based profilers (inject measurement code) give exact counts but slow execution. Flame graphs visualize the results: width = time, stack depth = call chain.",
+      advanced:
+        "CPU profilers: Linux perf, Node.js --prof, Chrome DevTools Performance tab. Memory profilers: heap snapshots, allocation timelines. Continuous profiling in production (Pyroscope, Parca) catches performance regressions that only appear under real load.",
+    },
+    seeAlso: ["flame-graph"],
+  },
+  {
+    slug: "flame-graph",
+    term: "Flame Graph",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A chart where each bar is a function and its width shows how much time was spent there. Wider = slower.",
+      intermediate:
+        "Visualizes profiling data as stacked bars: x-axis is time (or sample count), y-axis is call depth. The widest bars at the top are the biggest optimization targets. Invented by Brendan Gregg. Available in Chrome DevTools, Node.js, and most profiling tools.",
+      advanced:
+        "Differential flame graphs compare two profiles (before/after) by color-coding changes. Icicle graphs (inverted flame graphs) show callers instead of callees. Cold flame graphs highlight functions called infrequently but expensively per-call.",
+    },
+    seeAlso: ["profiling"],
+  },
+  {
+    slug: "cache-invalidation",
+    term: "Cache Invalidation",
+    aliases: [],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "Deciding when cached data is stale and should be refreshed — famously one of the hardest problems in computer science.",
+      intermediate:
+        "Strategies: TTL (expire after N seconds), event-driven (invalidate on write), versioning (cache key includes version). Write-through (update cache on write), write-behind (write to cache, async persist). Stale-while-revalidate serves cached data while fetching fresh.",
+      advanced:
+        "Thundering herd: when a popular cached item expires, hundreds of requests hit the origin simultaneously. Mitigate with request coalescing (single-flight) or probabilistic early expiration. Distributed cache invalidation across multiple servers requires pub/sub or gossip protocols.",
+    },
+    seeAlso: ["profiling"],
+  },
+  {
+    slug: "back-pressure",
+    term: "Back-Pressure",
+    aliases: ["backpressure"],
+    category: "systems",
+    phaseIds: ["7"],
+    lessonIds: [],
+    definitions: {
+      beginner:
+        "A way for a slow part of a system to tell the fast part to slow down, preventing overwhelm.",
+      intermediate:
+        "When a consumer processes slower than a producer produces, without back-pressure the queue between them grows until memory runs out. Back-pressure signals the producer to slow down (reject requests, apply rate limiting, or drop lowest-priority work).",
+      advanced:
+        "Reactive Streams specification defines back-pressure semantics (request-based pull model). TCP flow control is back-pressure at the transport layer (receiver window). In Node.js, stream.pipe() implements back-pressure via the drain event. Bounded queues with blocking push are the simplest form.",
+    },
+    seeAlso: ["message-queue"],
+  },
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
