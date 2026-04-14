@@ -53,6 +53,8 @@ const DRAWER_LINKS = [
   { href: "/sandbox", label: "Sandbox" },
   { href: "/goals", label: "Goals" },
   { href: "/stats", label: "Stats" },
+  { href: "/howto", label: "How-To" },
+  { href: "/tutorials", label: "Tutorials" },
   { href: "/verify", label: "Verify" },
   { href: "/teach", label: "Teach" },
   { href: "/settings", label: "Settings" },
