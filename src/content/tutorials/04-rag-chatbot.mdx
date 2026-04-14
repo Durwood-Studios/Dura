@@ -1,0 +1,610 @@
+---
+title: "Build a RAG Chatbot"
+description: "Create an AI-powered chatbot that answers questions about your own documents using Retrieval-Augmented Generation."
+slug: "rag-chatbot"
+difficulty: "advanced"
+estimatedMinutes: 60
+steps: 10
+tags: ["ai", "rag", "embeddings", "chatbot", "llm"]
+---
+
+## Overview
+
+In this tutorial, you'll build a chatbot that can answer questions about a set of documents you provide. This is **Retrieval-Augmented Generation (RAG)** — the most practical AI pattern for real applications.
+
+**What you'll learn:**
+
+- How RAG works (chunking → embedding → retrieval → generation)
+- Text chunking strategies
+- Vector similarity search
+- Prompt engineering for grounded responses
+- Building a chat UI with streaming responses
+
+## Step 1: Understand the RAG Pipeline
+
+RAG has two phases:
+
+**Indexing (one-time):**
+
+```text
+Documents → Chunk into passages → Generate embeddings → Store in vector DB
+```
+
+**Query (per question):**
+
+```text
+User question → Embed question → Find similar chunks → Send chunks + question to LLM → Answer
+```
+
+**Why RAG instead of fine-tuning?**
+
+- No training required — add new documents instantly
+- Answers are grounded in your data — less hallucination
+- You can show sources — users can verify answers
+- Works with any LLM — swap providers without retraining
+
+<Checkpoint
+  id="rag-concept"
+  label="RAG Concepts"
+  status="active"
+  challenge="What are the two phases of a RAG pipeline?"
+  answer="indexing and query"
+>
+  Understanding the architecture makes implementation decisions clear.
+</Checkpoint>
+
+## Step 2: Project Setup
+
+```bash
+mkdir rag-chatbot
+cd rag-chatbot
+npm init -y
+npm install openai
+```
+
+Create the project structure:
+
+```text
+rag-chatbot/
+├── documents/          # Your source documents
+│   ├── guide.md
+│   └── faq.md
+├── src/
+│   ├── chunk.js        # Text chunking
+│   ├── embed.js        # Embedding generation
+│   ├── index.js        # Vector store
+│   ├── retrieve.js     # Similarity search
+│   └── chat.js         # Chat interface
+├── .env                # API keys
+└── package.json
+```
+
+Add to `.env`:
+
+```bash
+OPENAI_API_KEY=sk-your-key-here
+```
+
+<Checkpoint id="setup" label="Project Setup" status="active">
+  The project structure mirrors the RAG pipeline stages.
+</Checkpoint>
+
+## Step 3: Document Chunking
+
+Large documents need to be split into smaller chunks for effective retrieval:
+
+```javascript
+// src/chunk.js
+
+/**
+ * Split text into overlapping chunks.
+ * Overlap ensures context isn't lost at chunk boundaries.
+ */
+export function chunkText(text, options = {}) {
+  const { chunkSize = 500, overlap = 50 } = options;
+  const chunks = [];
+  let start = 0;
+
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length);
+    let chunk = text.slice(start, end);
+
+    // Try to break at a sentence boundary
+    if (end < text.length) {
+      const lastPeriod = chunk.lastIndexOf(".");
+      const lastNewline = chunk.lastIndexOf("\n");
+      const breakPoint = Math.max(lastPeriod, lastNewline);
+      if (breakPoint > chunkSize * 0.5) {
+        chunk = chunk.slice(0, breakPoint + 1);
+      }
+    }
+
+    chunks.push({
+      text: chunk.trim(),
+      start,
+      end: start + chunk.length,
+    });
+
+    start += chunk.length - overlap;
+  }
+
+  return chunks.filter((c) => c.text.length > 20);
+}
+
+/**
+ * Process a markdown document into metadata-rich chunks.
+ */
+export function chunkDocument(filename, content) {
+  const chunks = chunkText(content);
+  return chunks.map((chunk, i) => ({
+    id: `${filename}#${i}`,
+    source: filename,
+    text: chunk.text,
+    index: i,
+  }));
+}
+```
+
+**Key decisions:**
+
+- **Chunk size (500 chars):** Small enough for precise retrieval, large enough for context
+- **Overlap (50 chars):** Prevents losing meaning at boundaries
+- **Sentence boundaries:** Avoids cutting mid-thought
+
+<Checkpoint
+  id="chunking"
+  label="Document Chunking"
+  status="active"
+  challenge="Why do chunks overlap?"
+  answer="to prevent losing context at boundaries"
+>
+  Good chunking is the foundation of good retrieval.
+</Checkpoint>
+
+## Step 4: Generate Embeddings
+
+Embeddings convert text into numerical vectors that capture meaning:
+
+```javascript
+// src/embed.js
+import OpenAI from "openai";
+
+const openai = new OpenAI();
+
+/**
+ * Generate embeddings for an array of text strings.
+ */
+export async function generateEmbeddings(texts) {
+  const response = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: texts,
+  });
+
+  return response.data.map((item) => item.embedding);
+}
+
+/**
+ * Generate a single embedding for a query string.
+ */
+export async function embedQuery(query) {
+  const response = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: query,
+  });
+
+  return response.data[0].embedding;
+}
+```
+
+**Why `text-embedding-3-small`?**
+
+- Fast and cheap
+- 1536 dimensions — good balance of quality and efficiency
+- Supports up to 8191 tokens per input
+
+<Checkpoint
+  id="embeddings"
+  label="Embeddings"
+  status="active"
+  challenge="What do embeddings convert text into?"
+  answer="numerical vectors"
+>
+  Embeddings are how machines understand semantic similarity.
+</Checkpoint>
+
+## Step 5: Build the Vector Store
+
+For simplicity, we'll use an in-memory vector store with cosine similarity:
+
+```javascript
+// src/index.js
+
+/**
+ * Cosine similarity between two vectors.
+ */
+function cosineSimilarity(a, b) {
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+export class VectorStore {
+  constructor() {
+    this.entries = []; // { chunk, embedding }
+  }
+
+  /** Add chunks with their embeddings. */
+  addEntries(chunks, embeddings) {
+    for (let i = 0; i < chunks.length; i++) {
+      this.entries.push({
+        chunk: chunks[i],
+        embedding: embeddings[i],
+      });
+    }
+  }
+
+  /** Find the top-k most similar chunks to a query embedding. */
+  search(queryEmbedding, topK = 3) {
+    const scored = this.entries.map((entry) => ({
+      chunk: entry.chunk,
+      score: cosineSimilarity(queryEmbedding, entry.embedding),
+    }));
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, topK);
+  }
+
+  /** Get stats about the store. */
+  stats() {
+    return {
+      totalChunks: this.entries.length,
+      sources: [...new Set(this.entries.map((e) => e.chunk.source))],
+    };
+  }
+}
+```
+
+**In production, you'd use:**
+
+- **Pinecone** or **Weaviate** for managed vector databases
+- **pgvector** for PostgreSQL-based vector search
+- **ChromaDB** for local development
+
+<Checkpoint
+  id="vector-store"
+  label="Vector Store"
+  status="active"
+  challenge="What similarity metric compares the angle between two vectors?"
+  answer="cosine similarity"
+>
+  The vector store is where retrieval happens.
+</Checkpoint>
+
+## Step 6: The Retrieval Step
+
+```javascript
+// src/retrieve.js
+import { embedQuery } from "./embed.js";
+
+/**
+ * Retrieve relevant chunks for a user question.
+ */
+export async function retrieve(store, question, topK = 3) {
+  const queryEmbedding = await embedQuery(question);
+  const results = store.search(queryEmbedding, topK);
+
+  // Filter out low-similarity results
+  const threshold = 0.3;
+  return results.filter((r) => r.score >= threshold);
+}
+
+/**
+ * Format retrieved chunks into a context string for the LLM.
+ */
+export function formatContext(results) {
+  return results
+    .map((r, i) => `[Source ${i + 1}: ${r.chunk.source}]\n${r.chunk.text}`)
+    .join("\n\n---\n\n");
+}
+```
+
+<Checkpoint id="retrieval" label="Retrieval" status="active">
+  Retrieval connects the user's question to your documents.
+</Checkpoint>
+
+## Step 7: Generate Answers with Context
+
+```javascript
+// src/chat.js
+import OpenAI from "openai";
+import { retrieve, formatContext } from "./retrieve.js";
+
+const openai = new OpenAI();
+
+const SYSTEM_PROMPT = `You are a helpful assistant that answers questions based on the provided context.
+
+Rules:
+1. Only answer based on the provided context. If the context doesn't contain the answer, say "I don't have enough information to answer that."
+2. Cite your sources using [Source N] references.
+3. Be concise and direct.
+4. If the question is ambiguous, ask for clarification.`;
+
+export async function chat(store, question) {
+  // Step 1: Retrieve relevant context
+  const results = await retrieve(store, question);
+
+  if (results.length === 0) {
+    return {
+      answer: "I couldn't find any relevant information in the documents to answer your question.",
+      sources: [],
+    };
+  }
+
+  const context = formatContext(results);
+
+  // Step 2: Generate answer with context
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `Context:\n${context}\n\nQuestion: ${question}`,
+      },
+    ],
+    temperature: 0.3, // Low temperature for factual answers
+    max_tokens: 500,
+  });
+
+  return {
+    answer: response.choices[0].message.content,
+    sources: results.map((r) => ({
+      file: r.chunk.source,
+      score: r.score.toFixed(3),
+      preview: r.chunk.text.slice(0, 100) + "...",
+    })),
+  };
+}
+```
+
+**Key prompt engineering decisions:**
+
+- System prompt enforces grounding ("only answer based on context")
+- Low temperature (0.3) reduces creative hallucination
+- Source citations let users verify answers
+- Explicit fallback when context is insufficient
+
+<Checkpoint
+  id="generation"
+  label="Answer Generation"
+  status="active"
+  challenge="Why use a low temperature for RAG answers?"
+  answer="to reduce hallucination"
+>
+  The prompt engineering is what makes RAG trustworthy.
+</Checkpoint>
+
+## Step 8: Put It All Together
+
+```javascript
+// main.js
+import { readFileSync, readdirSync } from "fs";
+import { join } from "path";
+import { createInterface } from "readline";
+import { chunkDocument } from "./src/chunk.js";
+import { generateEmbeddings } from "./src/embed.js";
+import { VectorStore } from "./src/index.js";
+import { chat } from "./src/chat.js";
+
+async function main() {
+  console.log("Loading documents...");
+
+  // Read all documents
+  const docsDir = "./documents";
+  const files = readdirSync(docsDir).filter((f) => f.endsWith(".md"));
+  const allChunks = [];
+
+  for (const file of files) {
+    const content = readFileSync(join(docsDir, file), "utf-8");
+    const chunks = chunkDocument(file, content);
+    allChunks.push(...chunks);
+    console.log(`  ${file}: ${chunks.length} chunks`);
+  }
+
+  // Generate embeddings
+  console.log(`\nGenerating embeddings for ${allChunks.length} chunks...`);
+  const texts = allChunks.map((c) => c.text);
+  const embeddings = await generateEmbeddings(texts);
+
+  // Build vector store
+  const store = new VectorStore();
+  store.addEntries(allChunks, embeddings);
+  console.log("Vector store ready!\n");
+
+  // Interactive chat loop
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  function ask() {
+    rl.question("You: ", async (question) => {
+      if (question.toLowerCase() === "quit") {
+        rl.close();
+        return;
+      }
+
+      const result = await chat(store, question);
+      console.log(`\nAssistant: ${result.answer}`);
+
+      if (result.sources.length > 0) {
+        console.log("\nSources:");
+        result.sources.forEach((s) => {
+          console.log(`  - ${s.file} (relevance: ${s.score})`);
+        });
+      }
+      console.log("");
+      ask();
+    });
+  }
+
+  ask();
+}
+
+main().catch(console.error);
+```
+
+<Checkpoint id="integration" label="Full Integration" status="active">
+  The complete pipeline: load → chunk → embed → store → retrieve → answer.
+</Checkpoint>
+
+## Step 9: Add a Web Interface
+
+Create a simple web chat interface:
+
+```typescript
+// src/app/api/chat/route.ts (Next.js)
+import { NextResponse } from "next/server";
+
+export async function POST(request: Request): Promise<NextResponse> {
+  const { question, history } = await request.json();
+
+  // In a real app, use the vector store from Step 8
+  // For demo, return a formatted response
+  const response = {
+    answer: `Based on the documents, here's what I found about "${question}"...`,
+    sources: [{ file: "guide.md", score: "0.892" }],
+  };
+
+  return NextResponse.json(response);
+}
+```
+
+```tsx
+// Chat component
+"use client";
+import { useState } from "react";
+
+interface Message {
+  role: "user" | "assistant";
+  content: string;
+  sources?: { file: string; score: string }[];
+}
+
+function ChatInterface() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+
+  async function sendMessage(e: React.FormEvent) {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
+
+    const question = input;
+    setInput("");
+    setMessages((prev) => [...prev, { role: "user", content: question }]);
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      const data = await response.json();
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: data.answer, sources: data.sources },
+      ]);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "Sorry, something went wrong." },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  return (
+    <div className="flex h-screen flex-col bg-[var(--color-bg-primary)]">
+      <div className="flex-1 space-y-4 overflow-y-auto p-6">
+        {messages.map((msg, i) => (
+          <div
+            key={i}
+            className={`max-w-2xl rounded-xl p-4 ${
+              msg.role === "user"
+                ? "ml-auto bg-emerald-600 text-white"
+                : "bg-[var(--color-bg-surface)] text-[var(--color-text-primary)]"
+            }`}
+          >
+            {msg.content}
+          </div>
+        ))}
+      </div>
+      <form onSubmit={sendMessage} className="border-t border-[var(--color-border)] p-4">
+        <div className="flex gap-2">
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask about your documents..."
+            className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-4 py-2 outline-none focus:border-emerald-500"
+          />
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-white hover:bg-emerald-500 disabled:opacity-50"
+          >
+            Send
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+```
+
+<Checkpoint id="web-ui" label="Web Interface" status="active">
+  A chat UI makes your RAG system accessible to non-technical users.
+</Checkpoint>
+
+## Step 10: Production Considerations
+
+Before deploying your RAG chatbot:
+
+**Performance:**
+
+- Batch embedding requests (up to 2048 inputs per API call)
+- Cache embeddings — don't re-embed unchanged documents
+- Use a proper vector database for large document sets
+
+**Quality:**
+
+- Experiment with chunk sizes (300-1000 chars)
+- Try different embedding models (small vs. large)
+- Add metadata filtering (date, category, source)
+- Implement re-ranking for better retrieval precision
+
+**Safety:**
+
+- Rate limit API calls
+- Sanitize user input
+- Monitor for prompt injection attempts
+- Log queries and answers for quality review
+
+<Checkpoint id="rag-complete" label="Tutorial Complete" status="active">
+  You've built a RAG chatbot. This pattern powers knowledge bases, customer support bots, and
+  document Q&A systems everywhere.
+</Checkpoint>
+
+---
+
+**What you built:** A complete RAG pipeline — document chunking, vector embeddings, similarity search, grounded answer generation, and a chat interface. This is the same architecture behind enterprise AI assistants.

@@ -13,6 +13,8 @@ import {
   ShieldCheck,
   Settings,
   GraduationCap,
+  Lightbulb,
+  Wrench,
 } from "lucide-react";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
 import { cn } from "@/lib/utils";
@@ -25,6 +27,8 @@ const NAV_ITEMS = [
   { href: "/sandbox", label: "Sandbox", icon: Code2 },
   { href: "/goals", label: "Goals", icon: Target },
   { href: "/stats", label: "Stats", icon: BarChart3 },
+  { href: "/howto", label: "How-To", icon: Lightbulb },
+  { href: "/tutorials", label: "Tutorials", icon: Wrench },
   { href: "/verify", label: "Verify", icon: ShieldCheck },
   { href: "/teach", label: "Teach", icon: GraduationCap },
   { href: "/settings", label: "Settings", icon: Settings },
