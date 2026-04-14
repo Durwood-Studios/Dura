@@ -1,4 +1,11 @@
+import type { Metadata } from "next";
 import Link from "next/link";
+
+export const metadata: Metadata = {
+  title: "Project Tutorials",
+  description:
+    "Build real projects from scratch with guided, step-by-step instructions and interactive checkpoints.",
+};
 
 const TUTORIALS = [
   {

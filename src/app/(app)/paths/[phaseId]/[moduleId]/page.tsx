@@ -1,9 +1,17 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getPhase, getModule } from "@/content/phases";
 import { listLessons } from "@/lib/content";
 import { ModuleDetailClient } from "@/components/paths/ModuleDetailClient";
 
 type Params = Promise<{ phaseId: string; moduleId: string }>;
+
+export async function generateMetadata({ params }: { params: Params }): Promise<Metadata> {
+  const { phaseId, moduleId } = await params;
+  const mod = getModule(phaseId, moduleId);
+  if (!mod) return { title: "Module Not Found" };
+  return { title: mod.title };
+}
 
 export default async function ModulePage({
   params,

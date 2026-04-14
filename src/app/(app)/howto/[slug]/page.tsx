@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -18,40 +19,52 @@ interface PageProps {
   params: Promise<{ slug: string }>;
 }
 
+const HOWTO_FILES = [
+  "01-dev-environment.mdx",
+  "02-error-messages.mdx",
+  "03-git-basics.mdx",
+  "04-debugging.mdx",
+  "05-deploying.mdx",
+  "06-api-basics.mdx",
+  "07-interview-prep.mdx",
+  "08-reading-docs.mdx",
+  "09-open-source.mdx",
+  "10-portfolio.mdx",
+];
+
 async function getGuide(
   slug: string
 ): Promise<{ meta: HowToMeta; content: React.ReactElement } | null> {
   const dir = join(process.cwd(), "src/content/howto");
-  const files = [
-    "01-dev-environment.mdx",
-    "02-error-messages.mdx",
-    "03-git-basics.mdx",
-    "04-debugging.mdx",
-    "05-deploying.mdx",
-    "06-api-basics.mdx",
-    "07-interview-prep.mdx",
-    "08-reading-docs.mdx",
-    "09-open-source.mdx",
-    "10-portfolio.mdx",
-  ];
 
-  for (const file of files) {
-    const path = join(dir, file);
-    if (!existsSync(path)) continue;
+  try {
+    for (const file of HOWTO_FILES) {
+      const filePath = join(dir, file);
+      if (!existsSync(filePath)) continue;
 
-    const source = readFileSync(path, "utf-8");
-    const { content, frontmatter } = await compileMDX<HowToMeta>({
-      source,
-      options: { parseFrontmatter: true },
-      components: mdxComponents,
-    });
+      const source = readFileSync(filePath, "utf-8");
+      const { content, frontmatter } = await compileMDX<HowToMeta>({
+        source,
+        options: { parseFrontmatter: true },
+        components: mdxComponents,
+      });
 
-    if (frontmatter.slug === slug) {
-      return { meta: frontmatter, content };
+      if (frontmatter.slug === slug) {
+        return { meta: frontmatter, content };
+      }
     }
+  } catch (error) {
+    console.error(`[howto] Failed to load guide "${slug}":`, error);
   }
 
   return null;
+}
+
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const { slug } = await params;
+  const guide = await getGuide(slug);
+  if (!guide) return { title: "Guide Not Found" };
+  return { title: guide.meta.title, description: guide.meta.description };
 }
 
 export default async function HowToGuidePage({ params }: PageProps): Promise<React.ReactElement> {

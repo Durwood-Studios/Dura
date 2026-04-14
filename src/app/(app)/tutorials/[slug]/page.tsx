@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -18,35 +19,47 @@ interface PageProps {
   params: Promise<{ slug: string }>;
 }
 
+const TUTORIAL_FILES = [
+  "01-cli-tool.mdx",
+  "02-rest-api.mdx",
+  "03-react-dashboard.mdx",
+  "04-rag-chatbot.mdx",
+  "05-portfolio-site.mdx",
+];
+
 async function getTutorial(
   slug: string
 ): Promise<{ meta: TutorialMeta; content: React.ReactElement } | null> {
   const dir = join(process.cwd(), "src/content/tutorials");
-  const files = [
-    "01-cli-tool.mdx",
-    "02-rest-api.mdx",
-    "03-react-dashboard.mdx",
-    "04-rag-chatbot.mdx",
-    "05-portfolio-site.mdx",
-  ];
 
-  for (const file of files) {
-    const path = join(dir, file);
-    if (!existsSync(path)) continue;
+  try {
+    for (const file of TUTORIAL_FILES) {
+      const filePath = join(dir, file);
+      if (!existsSync(filePath)) continue;
 
-    const source = readFileSync(path, "utf-8");
-    const { content, frontmatter } = await compileMDX<TutorialMeta>({
-      source,
-      options: { parseFrontmatter: true },
-      components: mdxComponents,
-    });
+      const source = readFileSync(filePath, "utf-8");
+      const { content, frontmatter } = await compileMDX<TutorialMeta>({
+        source,
+        options: { parseFrontmatter: true },
+        components: mdxComponents,
+      });
 
-    if (frontmatter.slug === slug) {
-      return { meta: frontmatter, content };
+      if (frontmatter.slug === slug) {
+        return { meta: frontmatter, content };
+      }
     }
+  } catch (error) {
+    console.error(`[tutorials] Failed to load tutorial "${slug}":`, error);
   }
 
   return null;
+}
+
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const { slug } = await params;
+  const tutorial = await getTutorial(slug);
+  if (!tutorial) return { title: "Tutorial Not Found" };
+  return { title: tutorial.meta.title, description: tutorial.meta.description };
 }
 
 export default async function TutorialPage({ params }: PageProps): Promise<React.ReactElement> {
