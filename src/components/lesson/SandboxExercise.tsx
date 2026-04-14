@@ -1,6 +1,8 @@
 "use client";
 
+import { Component, type ErrorInfo, type ReactNode } from "react";
 import dynamic from "next/dynamic";
+import { CodeBlock } from "@/components/lesson/CodeBlock";
 import { SandboxExerciseSkeleton } from "@/components/lesson/SandboxExerciseSkeleton";
 
 interface SandboxExerciseProps {
@@ -11,10 +13,62 @@ interface SandboxExerciseProps {
   testCases?: string[];
 }
 
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+/** Catches dynamic import failures and Sandpack runtime errors. */
+class SandboxErrorBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  ErrorBoundaryState
+> {
+  state: ErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error("[SandboxExercise] Render failed:", error, info);
+  }
+
+  render(): ReactNode {
+    if (this.state.hasError) return this.props.fallback;
+    return this.props.children;
+  }
+}
+
 const SandboxExerciseInner = dynamic(() => import("@/components/lesson/SandboxExerciseInner"), {
   ssr: false,
   loading: () => <SandboxExerciseSkeleton />,
 });
+
+/** Fallback when the interactive sandbox can't load. */
+function SandboxFallback({
+  initialCode,
+  language,
+  onRetry,
+}: {
+  initialCode: string;
+  language: string;
+  onRetry: () => void;
+}): React.ReactElement {
+  return (
+    <section className="my-8 rounded-2xl border border-amber-200 bg-amber-50 p-5">
+      <p className="mb-3 text-sm font-medium text-amber-800">
+        Interactive sandbox unavailable. Code shown in read-only mode.
+      </p>
+      <CodeBlock language={language}>{initialCode}</CodeBlock>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-3 rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-700 transition hover:bg-amber-50"
+      >
+        Retry
+      </button>
+    </section>
+  );
+}
 
 export function SandboxExercise({
   language = "javascript",
@@ -23,13 +77,23 @@ export function SandboxExercise({
   solution,
   testCases = [],
 }: SandboxExerciseProps): React.ReactElement {
-  return (
-    <SandboxExerciseInner
-      language={language}
-      instructions={instructions}
+  const fallback = (
+    <SandboxFallback
       initialCode={initialCode}
-      solution={solution}
-      testCases={testCases}
+      language={language}
+      onRetry={() => window.location.reload()}
     />
+  );
+
+  return (
+    <SandboxErrorBoundary fallback={fallback}>
+      <SandboxExerciseInner
+        language={language}
+        instructions={instructions}
+        initialCode={initialCode}
+        solution={solution}
+        testCases={testCases}
+      />
+    </SandboxErrorBoundary>
   );
 }
