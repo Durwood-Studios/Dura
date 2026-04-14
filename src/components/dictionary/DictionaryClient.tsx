@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { SearchBar } from "@/components/dictionary/SearchBar";
 import { DifficultyToggle } from "@/components/dictionary/DifficultyToggle";
 import { TermCard } from "@/components/dictionary/TermCard";
