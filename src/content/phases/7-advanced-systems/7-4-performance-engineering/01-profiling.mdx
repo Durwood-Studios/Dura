@@ -1,0 +1,258 @@
+---
+title: "CPU Profiling"
+description: "Learn how to find performance bottlenecks using CPU profilers, flame graphs, and Chrome DevTools."
+phase: 7
+module: "7-4-performance-engineering"
+order: 1
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Engineering Process"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - profiler
+  - flame-graph
+  - sampling
+  - instrumentation
+  - call-stack
+  - hot-path
+---
+
+## Why this matters
+
+When someone says "the app is slow," you need a systematic way to find out _where_ it is slow. Guessing wastes hours. Profiling gives you a map of exactly where your program spends its time, so you fix the one function that matters instead of rewriting code that was never the problem. Every production team profiles before optimizing — anything else is superstition.
+
+## Sampling vs instrumentation
+
+There are two fundamental approaches to CPU profiling.
+
+**Sampling profilers** interrupt the program at regular intervals (usually every 1-5 ms) and record the current call stack. After thousands of samples, the functions that appear most often are the ones consuming the most CPU time. Sampling is low-overhead, typically adding less than 5% to execution time, which makes it safe for production.
+
+**Instrumentation profilers** inject timing code at the entry and exit of every function. This captures exact call counts and durations but adds significant overhead — sometimes 10-100x slower. Use instrumentation only in development when you need precise call counts.
+
+```javascript
+// Simulating what a sampling profiler sees
+// Every millisecond, it captures the current call stack
+
+function parseJSON(data) {
+  // Appears in 60% of samples — this is the hot path
+  return JSON.parse(data);
+}
+
+function validateSchema(obj) {
+  // Appears in 25% of samples
+  for (const key of Object.keys(obj)) {
+    if (typeof obj[key] === "undefined") {
+      throw new Error(`Missing field: ${key}`);
+    }
+  }
+  return obj;
+}
+
+function processRequest(raw) {
+  const parsed = parseJSON(raw); // Most time spent here
+  const valid = validateSchema(parsed); // Second most time
+  return valid;
+}
+```
+
+## Reading flame graphs
+
+A flame graph is the most powerful visualization in performance engineering. Each rectangle represents a function on the call stack. The **width** of a rectangle shows how much total time that function (and everything it called) consumed. The **vertical axis** shows call depth — the function at the bottom called the one above it.
+
+```javascript
+// This call structure produces a flame graph like:
+//
+// |------------ processAll (100%) --------------|
+// |--- fetchData (40%) ---|--- transform (60%) -|
+// |-- parse (30%) --|     |-- sort (45%) --|
+//
+// Width = time. "sort" dominates — optimize there first.
+
+function parse(raw) {
+  // 30% of total time
+  return raw.split("\n").map((line) => line.split(","));
+}
+
+function fetchData() {
+  const raw = generateLargeCSV(10000);
+  return parse(raw);
+}
+
+function transform(data) {
+  // sort() consumes 45% of total time — the widest bar
+  return data.sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+function processAll() {
+  const data = fetchData();
+  return transform(data);
+}
+
+function generateLargeCSV(rows) {
+  const lines = [];
+  for (let i = 0; i < rows; i++) {
+    lines.push(`${Math.random()},${Math.random()},${i}`);
+  }
+  return lines.join("\n");
+}
+```
+
+Key rules for reading flame graphs: look for the **widest bars** — those are your optimization targets. Tall, narrow stacks are deep but fast. Short, wide bars are shallow but expensive. A "plateau" (a wide bar with no children) means that function itself is doing heavy work, not delegating.
+
+## Chrome DevTools Performance tab
+
+Open DevTools, go to the **Performance** tab, click Record, interact with your page, then stop. The timeline shows frames, scripting time, rendering, and painting. The **Bottom-Up** view sorts functions by self-time. The **Call Tree** view shows the execution hierarchy. The **Flame Chart** is the flame graph described above.
+
+```javascript
+// Profiling a slow DOM operation in the browser
+function renderList(items) {
+  const container = document.getElementById("list");
+
+  // BAD: causes layout thrashing — profiler shows
+  // heavy "Recalculate Style" and "Layout" bars
+  items.forEach((item) => {
+    const div = document.createElement("div");
+    div.textContent = item.name;
+    div.style.height = container.offsetHeight + "px"; // forces layout
+    container.appendChild(div);
+  });
+}
+
+// BETTER: batch reads and writes separately
+function renderListOptimized(items) {
+  const container = document.getElementById("list");
+  const height = container.offsetHeight; // one read
+
+  const fragment = document.createDocumentFragment();
+  items.forEach((item) => {
+    const div = document.createElement("div");
+    div.textContent = item.name;
+    div.style.height = height + "px"; // uses cached value
+    fragment.appendChild(div);
+  });
+  container.appendChild(fragment); // one write
+}
+```
+
+## Node.js profiling
+
+Node.js has a built-in V8 profiler. Run `node --prof app.js` to generate a tick file, then `node --prof-process isolate-*.log` to produce a human-readable report. The report groups time by JavaScript, C++, GC, and shared libraries.
+
+```javascript
+// Simulating what --prof reveals: where time goes
+
+function cpuIntensiveWork(iterations) {
+  const start = performance.now();
+  let result = 0;
+
+  for (let i = 0; i < iterations; i++) {
+    // Appears as "self time" in the profiler
+    result += Math.sqrt(i) * Math.sin(i);
+  }
+
+  const elapsed = performance.now() - start;
+  console.log(`${iterations} iterations: ${elapsed.toFixed(2)}ms`);
+  return result;
+}
+
+// Profile shows: 95% time in cpuIntensiveWork
+// The fix: reduce iterations, cache results, or use a worker thread
+cpuIntensiveWork(1_000_000);
+```
+
+## Where to start when "it is slow"
+
+Follow this checklist every time: (1) Reproduce the slowness with a consistent scenario. (2) Open a profiler and record. (3) Look at the flame graph for the widest bars. (4) Check if the bottleneck is CPU, I/O, or memory. (5) Optimize the single worst offender. (6) Measure again to confirm improvement. Never optimize two things at once — you will not know which change helped.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a simple profiler that measures function execution time.
+// Implement the 'profile' wrapper that records how long a function takes
+// and stores results in a shared log.
+
+const profileLog = [];
+
+function profile(name, fn) {
+// Return a new function that:
+// 1. Records performance.now() before calling fn
+// 2. Calls fn with all passed arguments
+// 3. Records performance.now() after
+// 4. Pushes { name, duration } to profileLog
+// 5. Returns the original result
+}
+
+// Test functions
+function slowSort(arr) {
+// Bubble sort — intentionally slow
+const copy = [...arr];
+for (let i = 0; i < copy.length; i++) {
+for (let j = 0; j < copy.length - i - 1; j++) {
+if (copy[j] > copy[j + 1]) {
+[copy[j], copy[j + 1]] = [copy[j + 1], copy[j]];
+}
+}
+}
+return copy;
+}
+
+function fastSort(arr) {
+return [...arr].sort((a, b) => a - b);
+}
+
+const data = Array.from({ length: 2000 }, () => Math.random());
+
+const profiledSlow = profile('bubbleSort', slowSort);
+const profiledFast = profile('nativeSort', fastSort);
+
+profiledSlow(data);
+profiledFast(data);
+
+// Print results
+profileLog.forEach(entry => {
+console.log(entry.name + ': ' + entry.duration.toFixed(2) + 'ms');
+});
+console.log('bubbleSort should be slower than nativeSort');`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does the width of a bar in a flame graph represent?"
+  options={[
+    "Memory allocated by that function",
+    "The number of times the function was called",
+    "The total time spent in that function and its children",
+    "The depth of the call stack",
+  ]}
+  answer={2}
+  explanation="In a flame graph, the width of each bar represents total time (self time plus time in all called functions). Wider bars are bigger optimization targets."
+/>
+
+<Quiz
+  question="Why is a sampling profiler preferred over instrumentation in production?"
+  options={[
+    "It gives exact call counts for every function",
+    "It has very low overhead, typically under 5%",
+    "It instruments every function entry and exit",
+    "It only works in development environments",
+  ]}
+  answer={1}
+  explanation="Sampling profilers periodically capture the call stack rather than wrapping every function, keeping overhead low enough for production use."
+/>
+
+<FillBlank
+  question="In a flame graph, the vertical axis represents call ______, showing which function called which."
+  answer="depth"
+/>
+
+## What you learned
+
+- Sampling profilers capture periodic call stack snapshots with low overhead, while instrumentation profilers wrap every function for exact timing at high cost
+- Flame graphs encode time as width and call relationships as depth, making the widest bars your optimization targets
+- The profiling workflow is always: reproduce, record, find the widest bar, fix one thing, measure again

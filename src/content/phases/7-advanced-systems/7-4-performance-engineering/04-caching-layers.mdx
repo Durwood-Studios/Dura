@@ -1,0 +1,349 @@
+---
+title: "Caching Layers"
+description: "Understand CPU caches, application caches, CDN edge caching, and why cache invalidation is the hardest problem."
+phase: 7
+module: "7-4-performance-engineering"
+order: 4
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Engineering Process"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - cache
+  - cache-invalidation
+  - data-locality
+  - cdn
+  - cache-control
+  - ttl
+---
+
+## Why this matters
+
+Caching is the single most effective performance optimization in computing. Every layer of the stack — from the CPU to the CDN — uses caches to avoid repeating expensive work. A cache hit that takes 1 nanosecond versus a database query that takes 10 milliseconds is a 10-million-fold difference. But caching introduces the hardest problem in computer science: knowing when the cached data is stale. Understanding where caches live and how they fail is essential for building fast, correct systems.
+
+## CPU caches: L1, L2, L3
+
+Your CPU does not read from main memory directly. It reads from a hierarchy of small, fast caches. L1 cache (per core, ~64KB) has ~1ns access time. L2 cache (per core, ~256KB) takes ~4ns. L3 cache (shared, ~8-32MB) takes ~10ns. Main memory takes ~100ns. This means accessing data already in L1 is 100x faster than going to RAM.
+
+Data locality — keeping related data close together in memory — determines whether your program hits these fast caches or constantly waits for slow memory fetches.
+
+```javascript
+// Demonstrating why data locality matters
+// Accessing array elements sequentially (cache-friendly)
+// versus randomly (cache-hostile)
+
+function sequentialAccess(arr) {
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    sum += arr[i]; // sequential: next element is already in cache line
+  }
+  return sum;
+}
+
+function randomAccess(arr, indices) {
+  let sum = 0;
+  for (let i = 0; i < indices.length; i++) {
+    sum += arr[indices[i]]; // random: each access may miss the cache
+  }
+  return sum;
+}
+
+const size = 100000;
+const arr = Array.from({ length: size }, (_, i) => i);
+
+// Create shuffled indices for random access
+const indices = Array.from({ length: size }, (_, i) => i);
+for (let i = indices.length - 1; i > 0; i--) {
+  const j = Math.floor(Math.random() * (i + 1));
+  [indices[i], indices[j]] = [indices[j], indices[i]];
+}
+
+// Time both approaches
+const t1 = performance.now();
+for (let r = 0; r < 100; r++) sequentialAccess(arr);
+const seqTime = performance.now() - t1;
+
+const t2 = performance.now();
+for (let r = 0; r < 100; r++) randomAccess(arr, indices);
+const randTime = performance.now() - t2;
+
+console.log(`Sequential: ${seqTime.toFixed(2)}ms`);
+console.log(`Random:     ${randTime.toFixed(2)}ms`);
+console.log(`Random access is typically slower due to cache misses`);
+```
+
+## Application cache: in-memory Map and Redis
+
+Application-level caching stores computed results to avoid repeating expensive work. The simplest form is an in-memory Map. For distributed systems, Redis provides a shared cache accessible by multiple server instances.
+
+```javascript
+// In-memory cache with TTL (time to live)
+
+class TTLCache {
+  constructor(defaultTTL = 60000) {
+    this.cache = new Map();
+    this.defaultTTL = defaultTTL;
+  }
+
+  set(key, value, ttl = this.defaultTTL) {
+    const expiry = Date.now() + ttl;
+    this.cache.set(key, { value, expiry });
+  }
+
+  get(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return undefined;
+
+    if (Date.now() > entry.expiry) {
+      this.cache.delete(key); // expired — evict
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  // Stale-while-revalidate pattern:
+  // return stale data immediately, refresh in background
+  async getOrRefresh(key, fetchFn, ttl = this.defaultTTL) {
+    const entry = this.cache.get(key);
+    const now = Date.now();
+
+    if (entry && now <= entry.expiry) {
+      return entry.value; // fresh cache hit
+    }
+
+    if (entry) {
+      // Stale — return old value but refresh in background
+      this.refreshInBackground(key, fetchFn, ttl);
+      return entry.value;
+    }
+
+    // Cold miss — must wait for fetch
+    const value = await fetchFn();
+    this.set(key, value, ttl);
+    return value;
+  }
+
+  async refreshInBackground(key, fetchFn, ttl) {
+    try {
+      const value = await fetchFn();
+      this.set(key, value, ttl);
+    } catch (err) {
+      console.error(`Background refresh failed for ${key}:`, err);
+    }
+  }
+}
+
+// Usage
+const cache = new TTLCache(5000); // 5 second TTL
+
+cache.set("user:42", { name: "Alice", role: "admin" });
+console.log(cache.get("user:42")); // { name: 'Alice', role: 'admin' }
+// After 5 seconds, cache.get('user:42') returns undefined
+```
+
+## CDN cache and Cache-Control headers
+
+A Content Delivery Network caches your assets at edge servers around the world. When a user in Tokyo requests your JavaScript bundle, the CDN serves it from a Tokyo edge server instead of your origin in Virginia. The `Cache-Control` HTTP header controls this behavior.
+
+```javascript
+// Cache-Control header examples and what they mean
+
+const cacheExamples = {
+  // Cache for 1 year — use for immutable assets with hashed filenames
+  immutableAsset: "public, max-age=31536000, immutable",
+
+  // Cache for 5 minutes, allow stale for 1 hour while revalidating
+  apiResponse: "public, max-age=300, stale-while-revalidate=3600",
+
+  // Never cache — use for personalized or sensitive data
+  privateData: "private, no-store",
+
+  // Always revalidate with origin before using cached version
+  htmlPage: "public, no-cache",
+  // no-cache does NOT mean "don't cache" — it means
+  // "cache it, but check with the origin every time"
+};
+
+// Simulating a CDN edge cache
+class EdgeCache {
+  constructor() {
+    this.store = new Map();
+    this.hits = 0;
+    this.misses = 0;
+  }
+
+  handleRequest(url, originFetch) {
+    const cached = this.store.get(url);
+    const now = Date.now();
+
+    if (cached && now < cached.expiry) {
+      this.hits++;
+      console.log(`CDN HIT: ${url} (${this.hits} hits, ${this.misses} misses)`);
+      return cached.response;
+    }
+
+    this.misses++;
+    const response = originFetch(url);
+    const maxAge = response.maxAge || 300; // default 5 min
+
+    this.store.set(url, {
+      response,
+      expiry: now + maxAge * 1000,
+    });
+
+    console.log(`CDN MISS: ${url} (${this.hits} hits, ${this.misses} misses)`);
+    return response;
+  }
+
+  hitRate() {
+    const total = this.hits + this.misses;
+    return total === 0 ? 0 : ((this.hits / total) * 100).toFixed(1);
+  }
+}
+
+const cdn = new EdgeCache();
+const origin = (url) => ({ body: `Content for ${url}`, maxAge: 10 });
+
+// Simulate traffic
+cdn.handleRequest("/style.css", origin); // MISS
+cdn.handleRequest("/style.css", origin); // HIT
+cdn.handleRequest("/style.css", origin); // HIT
+cdn.handleRequest("/app.js", origin); // MISS
+cdn.handleRequest("/app.js", origin); // HIT
+
+console.log(`Hit rate: ${cdn.hitRate()}%`);
+```
+
+## The hardest problem: cache invalidation
+
+Phil Karlton famously said there are two hard problems in computer science: cache invalidation and naming things. When the underlying data changes, every cached copy must be updated or discarded. Miss one cache layer and users see stale data. Invalidate too aggressively and you lose the performance benefit.
+
+Common strategies: **TTL-based** (expire after N seconds — simple but users see stale data until expiry), **event-driven** (publish an invalidation event when data changes — precise but complex), and **versioned keys** (include a version or hash in the cache key — the old key is simply never requested again).
+
+```javascript
+// Versioned cache keys: the most reliable invalidation strategy
+
+function versionedCacheKey(resource, version) {
+  return `${resource}:v${version}`;
+}
+
+const cache = new Map();
+let dataVersion = 1;
+
+function getData(id) {
+  const key = versionedCacheKey(`user:${id}`, dataVersion);
+  if (cache.has(key)) {
+    console.log("Cache hit:", key);
+    return cache.get(key);
+  }
+  // Simulate database fetch
+  const data = { id, name: "Alice", updatedAt: Date.now() };
+  cache.set(key, data);
+  console.log("Cache miss, fetched:", key);
+  return data;
+}
+
+getData(42); // miss
+getData(42); // hit
+
+// Data changes — bump the version
+dataVersion = 2;
+getData(42); // miss (new key, old entry orphaned)
+getData(42); // hit
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a cache with TTL expiration and hit/miss tracking.
+// Implement the get and set methods.
+
+class TrackedCache {
+constructor() {
+this.store = new Map();
+this.hits = 0;
+this.misses = 0;
+}
+
+set(key, value, ttlMs) {
+// Store the value with an expiry timestamp
+// expiry = Date.now() + ttlMs
+}
+
+get(key) {
+// If key does not exist: increment misses, return undefined
+// If key exists but expired: delete it, increment misses, return undefined
+// If key exists and fresh: increment hits, return value
+}
+
+stats() {
+const total = this.hits + this.misses;
+return {
+hits: this.hits,
+misses: this.misses,
+hitRate: total === 0 ? 0 : (this.hits / total \* 100),
+};
+}
+}
+
+// Tests
+const c = new TrackedCache();
+c.set('a', 'hello', 10000); // 10 second TTL
+c.set('b', 'world', 1); // 1ms TTL — will expire almost immediately
+
+console.log(c.get('a') === 'hello'); // true (hit)
+console.log(c.get('a') === 'hello'); // true (hit)
+console.log(c.get('missing') === undefined); // true (miss)
+
+// Wait a tiny bit for 'b' to expire
+const start = Date.now();
+while (Date.now() - start < 5) {} // busy wait 5ms
+console.log(c.get('b') === undefined); // true (expired = miss)
+
+const stats = c.stats();
+console.log('Hits:', stats.hits); // 2
+console.log('Misses:', stats.misses); // 2
+console.log('Hit rate:', stats.hitRate + '%'); // 50%`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does the Cache-Control directive 'no-cache' actually mean?"
+  options={[
+    "Do not store the response in any cache",
+    "Cache the response but revalidate with the origin server before using it",
+    "Only cache for private (non-shared) caches",
+    "Cache indefinitely without checking for updates",
+  ]}
+  answer={1}
+  explanation="Despite its misleading name, 'no-cache' means the cached copy must be revalidated with the origin server before each use. 'no-store' is the directive that prevents caching entirely."
+/>
+
+<Quiz
+  question="Why is sequential array access faster than random access, even for the same number of elements?"
+  options={[
+    "JavaScript arrays are linked lists internally",
+    "Sequential access benefits from CPU cache lines that prefetch adjacent memory",
+    "Random access triggers garbage collection",
+    "The JIT compiler cannot optimize random access",
+  ]}
+  answer={1}
+  explanation="CPU cache lines load blocks of contiguous memory (typically 64 bytes). Sequential access finds the next element already loaded in the cache line. Random access jumps to unpredictable locations, causing cache misses."
+/>
+
+<FillBlank
+  question="The strategy of including a version number or hash in cache keys so old entries are never requested again is called ______ keys."
+  answer="versioned"
+/>
+
+## What you learned
+
+- CPU caches (L1/L2/L3) make sequential, locality-friendly access patterns up to 100x faster than random access due to cache line prefetching
+- Application caches (in-memory or Redis) and CDN edge caches avoid expensive recomputation and reduce latency, controlled by TTL and Cache-Control headers
+- Cache invalidation is the hardest caching problem, and versioned keys are the most reliable strategy because stale entries are simply never requested

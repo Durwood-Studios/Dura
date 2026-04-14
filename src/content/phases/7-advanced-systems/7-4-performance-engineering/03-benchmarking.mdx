@@ -1,0 +1,278 @@
+---
+title: "Benchmarking"
+description: "Learn why microbenchmarks lie, how to measure performance correctly, and how to load test with statistical rigor."
+phase: 7
+module: "7-4-performance-engineering"
+order: 3
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Engineering Process"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - microbenchmark
+  - jit-warmup
+  - percentile
+  - load-testing
+  - statistical-significance
+  - throughput
+---
+
+## Why this matters
+
+"I benchmarked it and option A is faster" is one of the most dangerous sentences in software engineering. Poorly designed benchmarks produce misleading numbers that lead to worse code. JIT compilers optimize away dead code. Garbage collection pauses add noise. CPU branch predictors learn patterns from repeated runs. Understanding these traps is the difference between measuring performance and measuring illusions. Real benchmarking requires statistical discipline.
+
+## Microbenchmarks with console.time and performance.now
+
+The simplest benchmarks use the browser or Node.js timing APIs. `performance.now()` provides sub-millisecond precision. `console.time` is a convenience wrapper.
+
+```javascript
+// Basic microbenchmark: comparing two approaches
+
+function sumWithLoop(arr) {
+  let total = 0;
+  for (let i = 0; i < arr.length; i++) {
+    total += arr[i];
+  }
+  return total;
+}
+
+function sumWithReduce(arr) {
+  return arr.reduce((acc, val) => acc + val, 0);
+}
+
+const data = Array.from({ length: 100000 }, (_, i) => i);
+
+// Simple timing
+console.time("loop");
+for (let i = 0; i < 100; i++) sumWithLoop(data);
+console.timeEnd("loop");
+
+console.time("reduce");
+for (let i = 0; i < 100; i++) sumWithReduce(data);
+console.timeEnd("reduce");
+```
+
+This looks reasonable but has several problems. The JIT compiler might optimize differently based on run order. Garbage collection could pause during one test but not the other. A single run proves nothing.
+
+## Why microbenchmarks lie
+
+JavaScript engines use Just-In-Time (JIT) compilation. The first few runs of a function are interpreted. Then the engine compiles it to optimized machine code. If you benchmark cold code, you measure the interpreter. If you benchmark warm code, you measure the optimized path. Neither tells you what real users experience (a mix of both).
+
+```javascript
+// Demonstrating JIT warmup effects
+
+function fibonacci(n) {
+  if (n <= 1) return n;
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+// Run multiple rounds and watch times change
+const rounds = 10;
+const times = [];
+
+for (let round = 0; round < rounds; round++) {
+  const start = performance.now();
+  fibonacci(30);
+  const elapsed = performance.now() - start;
+  times.push(elapsed);
+}
+
+// First runs are often slower (interpreter / baseline JIT)
+// Later runs get faster (optimized JIT kicks in)
+times.forEach((t, i) => {
+  console.log(`Round ${i + 1}: ${t.toFixed(2)}ms`);
+});
+
+// This is why you must include warmup rounds
+// and discard the first N results
+const warmup = 3;
+const measured = times.slice(warmup);
+const avg = measured.reduce((a, b) => a + b, 0) / measured.length;
+console.log(`Average (after ${warmup} warmup rounds): ${avg.toFixed(2)}ms`);
+```
+
+Other traps: **dead code elimination** (the JIT removes computations whose results are never used), **branch prediction** (the CPU learns patterns in tight loops), and **GC pauses** (nondeterministic delays that can spike any individual measurement).
+
+## Statistical discipline: run many times, report percentiles
+
+A single number — "it took 42ms" — is meaningless. You need a distribution. Run the benchmark hundreds of times. Report the median (p50), the 95th percentile (p95), and the 99th percentile (p99). The median tells you the typical case. The p99 tells you what unlucky users experience.
+
+```javascript
+// Proper benchmarking with statistical reporting
+
+function benchmark(name, fn, iterations = 200) {
+  // Warmup phase — let the JIT optimize
+  for (let i = 0; i < 50; i++) fn();
+
+  // Measurement phase
+  const times = [];
+  for (let i = 0; i < iterations; i++) {
+    const start = performance.now();
+    fn();
+    const elapsed = performance.now() - start;
+    times.push(elapsed);
+  }
+
+  // Sort for percentile calculation
+  times.sort((a, b) => a - b);
+
+  const percentile = (p) => times[Math.floor((times.length * p) / 100)];
+
+  console.log(`--- ${name} (${iterations} runs) ---`);
+  console.log(`  Min:  ${times[0].toFixed(3)}ms`);
+  console.log(`  p50:  ${percentile(50).toFixed(3)}ms`);
+  console.log(`  p95:  ${percentile(95).toFixed(3)}ms`);
+  console.log(`  p99:  ${percentile(99).toFixed(3)}ms`);
+  console.log(`  Max:  ${times[times.length - 1].toFixed(3)}ms`);
+
+  return times;
+}
+
+// Compare array creation methods
+const size = 10000;
+
+benchmark("Array.from + map", () => {
+  return Array.from({ length: size }, (_, i) => i * 2);
+});
+
+benchmark("pre-allocated loop", () => {
+  const arr = new Array(size);
+  for (let i = 0; i < size; i++) arr[i] = i * 2;
+  return arr;
+});
+```
+
+## Load testing: measuring systems, not functions
+
+Microbenchmarks measure isolated functions. Load testing measures how a system behaves under realistic traffic. Tools like k6 and Artillery simulate thousands of concurrent users hitting your endpoints. They report request throughput (requests per second), latency percentiles, and error rates.
+
+```javascript
+// Simulating what a load test measures
+// (In practice you'd use k6 or Artillery against a real server)
+
+async function simulateLoadTest(handler, concurrency, totalRequests) {
+  const results = [];
+  let completed = 0;
+
+  async function worker() {
+    while (completed < totalRequests) {
+      const requestId = completed++;
+      const start = performance.now();
+      try {
+        await handler(requestId);
+        results.push({ status: "ok", duration: performance.now() - start });
+      } catch (err) {
+        results.push({ status: "error", duration: performance.now() - start });
+      }
+    }
+  }
+
+  // Launch concurrent workers
+  const workers = Array.from({ length: concurrency }, () => worker());
+  await Promise.all(workers);
+
+  // Report
+  const durations = results.map((r) => r.duration).sort((a, b) => a - b);
+  const errors = results.filter((r) => r.status === "error").length;
+  const p50 = durations[Math.floor(durations.length * 0.5)];
+  const p99 = durations[Math.floor(durations.length * 0.99)];
+
+  console.log(`Total requests: ${results.length}`);
+  console.log(`Errors: ${errors}`);
+  console.log(`p50 latency: ${p50.toFixed(2)}ms`);
+  console.log(`p99 latency: ${p99.toFixed(2)}ms`);
+}
+
+// Simulated handler with variable latency
+async function fakeHandler(id) {
+  const delay = Math.random() * 10 + (id % 20 === 0 ? 50 : 0);
+  await new Promise((r) => setTimeout(r, delay));
+}
+
+simulateLoadTest(fakeHandler, 10, 100);
+```
+
+The key insight: p99 latency under load is what determines user experience. An endpoint that averages 20ms but spikes to 2 seconds for 1% of users will generate complaints.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a benchmarking function that reports percentiles.
+// Given a function to benchmark and a number of iterations:
+// 1. Run 20 warmup iterations (discard results)
+// 2. Run the specified number of measured iterations
+// 3. Return an object with min, p50, p95, p99, and max in milliseconds
+
+function runBenchmark(fn, iterations) {
+// Warmup
+for (let i = 0; i < 20; i++) fn();
+
+// Collect timings
+const times = [];
+for (let i = 0; i < iterations; i++) {
+const start = performance.now();
+fn();
+times.push(performance.now() - start);
+}
+
+// Sort and compute percentiles
+times.sort((a, b) => a - b);
+
+// Return { min, p50, p95, p99, max }
+// p50 = value at index Math.floor(length _ 0.50)
+// p95 = value at index Math.floor(length _ 0.95)
+// p99 = value at index Math.floor(length \* 0.99)
+}
+
+// Test it
+const result = runBenchmark(() => {
+let sum = 0;
+for (let i = 0; i < 10000; i++) sum += i;
+return sum;
+}, 100);
+
+console.log('min:', result.min.toFixed(3), 'ms');
+console.log('p50:', result.p50.toFixed(3), 'ms');
+console.log('p95:', result.p95.toFixed(3), 'ms');
+console.log('p99:', result.p99.toFixed(3), 'ms');
+console.log('max:', result.max.toFixed(3), 'ms');
+console.log('p50 <= p95:', result.p50 <= result.p95);
+console.log('p95 <= p99:', result.p95 <= result.p99);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should you discard the first several runs when benchmarking JavaScript code?"
+  options={[
+    "The event loop needs time to start processing",
+    "The JIT compiler has not yet optimized the code, so early runs measure the interpreter",
+    "The garbage collector runs automatically on the first call",
+    "The CPU cache is always cold on the first run",
+  ]}
+  answer={1}
+  explanation="JavaScript engines use JIT compilation. Early runs execute interpreted or baseline-compiled code. After warmup, the engine produces optimized machine code, which is what you want to measure."
+/>
+
+<Quiz
+  question="Which percentile best represents the experience of your most unlucky users?"
+  options={["p50 (median)", "p75", "p95", "p99"]}
+  answer={3}
+  explanation="The p99 represents the slowest 1% of requests. These are the users most likely to notice poor performance and complain. Optimizing p99 improves the worst-case experience."
+/>
+
+<FillBlank
+  question="A benchmark that measures a single isolated function rather than a full system under load is called a ______."
+  answer="microbenchmark"
+/>
+
+## What you learned
+
+- Microbenchmarks are unreliable without warmup rounds, multiple iterations, and statistical analysis because JIT compilation, GC, and branch prediction distort single measurements
+- Always report percentiles (p50, p95, p99) rather than averages, because averages hide tail latency that affects real users
+- Load testing with concurrent simulated users reveals system-level bottlenecks that function-level benchmarks cannot detect

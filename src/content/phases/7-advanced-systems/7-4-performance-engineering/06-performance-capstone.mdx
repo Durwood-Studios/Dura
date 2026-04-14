@@ -1,0 +1,441 @@
+---
+title: "Performance Capstone"
+description: "Walk through the full diagnostic process for a slow application: profile, analyze, benchmark, fix, and measure again."
+phase: 7
+module: "7-4-performance-engineering"
+order: 6
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Engineering Process"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - optimization-loop
+  - regression
+  - flame-graph
+  - bottleneck
+  - baseline
+  - throughput
+---
+
+## Why this matters
+
+Knowing individual performance tools is not enough. Real performance engineering is a diagnostic process — a loop of measure, hypothesize, fix, and verify. Junior engineers jump straight to "rewrite it in a faster language." Senior engineers first ask "where exactly is the time going?" This lesson walks you through the complete optimization loop on a realistic slow application, combining every technique from this module into a single workflow.
+
+## Step 1: establish a baseline
+
+Before changing anything, you need a reproducible measurement. Run the slow scenario multiple times and record the baseline performance. Without a baseline, you cannot prove that any change helped — or that it did not make things worse.
+
+```javascript
+// Our "slow application": a data pipeline that processes records
+
+function generateRecords(count) {
+  const records = [];
+  for (let i = 0; i < count; i++) {
+    records.push({
+      id: `record-${i}`,
+      name: `User ${i}`,
+      email: `user${i}@example.com`,
+      score: Math.random() * 100,
+      tags: ["active", i % 3 === 0 ? "premium" : "free"],
+      metadata: { created: Date.now() - i * 1000, region: "us-east" },
+    });
+  }
+  return records;
+}
+
+function slowPipeline(records) {
+  // Step 1: Filter active premium users
+  const filtered = records.filter((r) => r.tags.includes("active") && r.tags.includes("premium"));
+
+  // Step 2: Sort by score descending
+  const sorted = filtered.sort((a, b) => b.score - a.score);
+
+  // Step 3: Transform to output format
+  const transformed = sorted.map((r) => ({
+    id: r.id,
+    display: `${r.name} (${r.score.toFixed(1)})`,
+    email: r.email.toUpperCase(),
+  }));
+
+  // Step 4: Deduplicate by id (intentionally bad: nested loop)
+  const unique = [];
+  for (const item of transformed) {
+    let isDuplicate = false;
+    for (const existing of unique) {
+      if (existing.id === item.id) {
+        isDuplicate = true;
+        break;
+      }
+    }
+    if (!isDuplicate) unique.push(item);
+  }
+
+  return unique;
+}
+
+// Establish baseline
+const records = generateRecords(10000);
+const times = [];
+for (let i = 0; i < 10; i++) {
+  const start = performance.now();
+  slowPipeline(records);
+  times.push(performance.now() - start);
+}
+
+times.sort((a, b) => a - b);
+console.log("=== BASELINE ===");
+console.log(`p50: ${times[Math.floor(times.length * 0.5)].toFixed(2)}ms`);
+console.log(`p99: ${times[Math.floor(times.length * 0.99)].toFixed(2)}ms`);
+```
+
+## Step 2: profile CPU — find the bottleneck
+
+With a baseline in hand, profile the code to find where time is actually spent. In a flame graph, the widest bar is your target. In our pipeline, we can simulate this by timing each step individually.
+
+```javascript
+// Profiling each stage of the pipeline
+
+function profilePipeline(records) {
+  const timings = {};
+
+  let start = performance.now();
+  const filtered = records.filter((r) => r.tags.includes("active") && r.tags.includes("premium"));
+  timings.filter = performance.now() - start;
+
+  start = performance.now();
+  const sorted = filtered.sort((a, b) => b.score - a.score);
+  timings.sort = performance.now() - start;
+
+  start = performance.now();
+  const transformed = sorted.map((r) => ({
+    id: r.id,
+    display: `${r.name} (${r.score.toFixed(1)})`,
+    email: r.email.toUpperCase(),
+  }));
+  timings.transform = performance.now() - start;
+
+  start = performance.now();
+  const unique = [];
+  for (const item of transformed) {
+    let isDuplicate = false;
+    for (const existing of unique) {
+      if (existing.id === item.id) {
+        isDuplicate = true;
+        break;
+      }
+    }
+    if (!isDuplicate) unique.push(item);
+  }
+  timings.deduplicate = performance.now() - start;
+
+  return { result: unique, timings };
+}
+
+const records = generateRecords(10000);
+
+function generateRecords(count) {
+  const records = [];
+  for (let i = 0; i < count; i++) {
+    records.push({
+      id: `record-${i}`,
+      name: `User ${i}`,
+      email: `user${i}@example.com`,
+      score: Math.random() * 100,
+      tags: ["active", i % 3 === 0 ? "premium" : "free"],
+      metadata: { created: Date.now() - i * 1000, region: "us-east" },
+    });
+  }
+  return records;
+}
+
+const { timings } = profilePipeline(records);
+
+console.log("=== STAGE PROFILING ===");
+const total = Object.values(timings).reduce((a, b) => a + b, 0);
+for (const [stage, time] of Object.entries(timings)) {
+  const pct = ((time / total) * 100).toFixed(1);
+  const bar = "█".repeat(Math.round((time / total) * 40));
+  console.log(`${stage.padEnd(15)} ${time.toFixed(2)}ms (${pct}%) ${bar}`);
+}
+
+// The deduplicate step will dominate — O(n²) nested loop
+```
+
+## Step 3: check memory
+
+If profiling shows time in GC (garbage collection), the problem might be memory, not CPU. Check for unnecessary allocations — creating objects that are immediately discarded, array copies on every iteration, string concatenation in loops.
+
+```javascript
+// Checking for unnecessary allocations
+
+function wastefulTransform(records) {
+  let result = [];
+  for (const r of records) {
+    // BAD: spread creates a new array on every iteration
+    result = [...result, { id: r.id, name: r.name }];
+  }
+  return result;
+}
+
+function efficientTransform(records) {
+  // GOOD: pre-allocate, push in place
+  const result = new Array(records.length);
+  for (let i = 0; i < records.length; i++) {
+    result[i] = { id: records[i].id, name: records[i].name };
+  }
+  return result;
+}
+
+const data = Array.from({ length: 5000 }, (_, i) => ({
+  id: i,
+  name: `User ${i}`,
+  extra: "ignored",
+}));
+
+const t1 = performance.now();
+wastefulTransform(data);
+const wasteful = performance.now() - t1;
+
+const t2 = performance.now();
+efficientTransform(data);
+const efficient = performance.now() - t2;
+
+console.log(`Wasteful (spread in loop): ${wasteful.toFixed(2)}ms`);
+console.log(`Efficient (pre-allocate):  ${efficient.toFixed(2)}ms`);
+console.log(`Speedup: ${(wasteful / efficient).toFixed(1)}x`);
+```
+
+## Step 4: benchmark the fix
+
+We identified the O(n squared) deduplication as the bottleneck. The fix is to use a Set for O(1) lookups instead of a nested loop. Before committing the fix, benchmark both versions to confirm the improvement.
+
+```javascript
+// The fix: replace O(n²) dedup with O(n) Set-based dedup
+
+function deduplicateSlow(items) {
+  const unique = [];
+  for (const item of items) {
+    let isDuplicate = false;
+    for (const existing of unique) {
+      if (existing.id === item.id) {
+        isDuplicate = true;
+        break;
+      }
+    }
+    if (!isDuplicate) unique.push(item);
+  }
+  return unique;
+}
+
+function deduplicateFast(items) {
+  const seen = new Set();
+  const unique = [];
+  for (const item of items) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      unique.push(item);
+    }
+  }
+  return unique;
+}
+
+// Generate test data
+const items = Array.from({ length: 5000 }, (_, i) => ({
+  id: `item-${i}`,
+  value: Math.random(),
+}));
+
+// Benchmark both
+function bench(name, fn, iterations) {
+  for (let i = 0; i < 10; i++) fn(); // warmup
+  const times = [];
+  for (let i = 0; i < iterations; i++) {
+    const start = performance.now();
+    fn();
+    times.push(performance.now() - start);
+  }
+  times.sort((a, b) => a - b);
+  return {
+    name,
+    p50: times[Math.floor(times.length * 0.5)],
+    p99: times[Math.floor(times.length * 0.99)],
+  };
+}
+
+const slow = bench("O(n²) loop", () => deduplicateSlow(items), 50);
+const fast = bench("O(n) Set", () => deduplicateFast(items), 50);
+
+console.log("=== BENCHMARK COMPARISON ===");
+console.log(`${slow.name}: p50=${slow.p50.toFixed(2)}ms  p99=${slow.p99.toFixed(2)}ms`);
+console.log(`${fast.name}:  p50=${fast.p50.toFixed(2)}ms  p99=${fast.p99.toFixed(2)}ms`);
+console.log(`Speedup: ${(slow.p50 / fast.p50).toFixed(1)}x at p50`);
+```
+
+## Step 5: apply the fix and measure again
+
+After confirming the fix is faster in isolation, integrate it into the full pipeline and measure the end-to-end improvement against the original baseline. If the improvement is significant, ship it. If not, your bottleneck analysis was wrong — go back to step 2.
+
+```javascript
+// Optimized pipeline with the Set-based dedup
+
+function generateRecords(count) {
+  const records = [];
+  for (let i = 0; i < count; i++) {
+    records.push({
+      id: `record-${i}`,
+      name: `User ${i}`,
+      email: `user${i}@example.com`,
+      score: Math.random() * 100,
+      tags: ["active", i % 3 === 0 ? "premium" : "free"],
+      metadata: { created: Date.now() - i * 1000, region: "us-east" },
+    });
+  }
+  return records;
+}
+
+function optimizedPipeline(records) {
+  const filtered = records.filter((r) => r.tags.includes("active") && r.tags.includes("premium"));
+
+  const sorted = filtered.sort((a, b) => b.score - a.score);
+
+  // Combined transform + dedup in a single pass
+  const seen = new Set();
+  const result = [];
+  for (const r of sorted) {
+    if (!seen.has(r.id)) {
+      seen.add(r.id);
+      result.push({
+        id: r.id,
+        display: `${r.name} (${r.score.toFixed(1)})`,
+        email: r.email.toUpperCase(),
+      });
+    }
+  }
+  return result;
+}
+
+const records = generateRecords(10000);
+
+// Measure optimized pipeline
+const times = [];
+for (let i = 0; i < 10; i++) optimizedPipeline(records); // warmup
+for (let i = 0; i < 50; i++) {
+  const start = performance.now();
+  optimizedPipeline(records);
+  times.push(performance.now() - start);
+}
+times.sort((a, b) => a - b);
+
+console.log("=== OPTIMIZED PIPELINE ===");
+console.log(`p50: ${times[Math.floor(times.length * 0.5)].toFixed(2)}ms`);
+console.log(`p99: ${times[Math.floor(times.length * 0.99)].toFixed(2)}ms`);
+console.log("Compare against baseline to confirm improvement");
+console.log("If faster: ship it. If not: re-profile.");
+```
+
+## The optimization loop
+
+This is the process every time. It never changes:
+
+1. **Reproduce** the slowness with a consistent scenario
+2. **Baseline** — measure before you change anything
+3. **Profile** — find where time or memory is actually spent
+4. **Hypothesize** — pick the single biggest bottleneck
+5. **Fix** — implement the smallest change that addresses it
+6. **Benchmark** — prove the fix is faster in isolation
+7. **Measure** — confirm end-to-end improvement against the baseline
+8. **Repeat** — if still slow, go back to step 3
+
+Never optimize two things at once. Never skip the measurement steps. Never assume your fix helped without proving it.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Apply the full optimization loop to this slow function.
+// 1. Measure the baseline
+// 2. Identify the bottleneck
+// 3. Fix it
+// 4. Prove the fix is faster
+
+function slowSearch(data, queries) {
+const results = [];
+for (const query of queries) {
+// O(n) linear scan for each query — O(n\*m) total
+const match = data.find(item => item.id === query);
+if (match) results.push(match);
+}
+return results;
+}
+
+// Your optimized version:
+function fastSearch(data, queries) {
+// Build a lookup structure first, then search in O(1) per query
+// Total: O(n + m) instead of O(n \* m)
+}
+
+// Test data
+const data = Array.from({ length: 10000 }, (_, i) => ({
+id: 'id-' + i,
+value: 'data-' + i,
+}));
+const queries = Array.from({ length: 1000 }, (_, i) =>
+'id-' + Math.floor(Math.random() \* 10000)
+);
+
+// Baseline
+const t1 = performance.now();
+const r1 = slowSearch(data, queries);
+const baseline = performance.now() - t1;
+
+// Optimized
+const t2 = performance.now();
+const r2 = fastSearch(data, queries);
+const optimized = performance.now() - t2;
+
+console.log('Baseline:', baseline.toFixed(2) + 'ms');
+console.log('Optimized:', optimized.toFixed(2) + 'ms');
+console.log('Speedup:', (baseline / optimized).toFixed(1) + 'x');
+console.log('Same results:', r1.length === r2.length);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is the first step when someone reports that an application is slow?"
+  options={[
+    "Rewrite the slowest-looking function",
+    "Add caching everywhere",
+    "Establish a reproducible baseline measurement",
+    "Switch to a faster programming language",
+  ]}
+  answer={2}
+  explanation="Without a baseline measurement, you cannot prove any change helped. The first step is always to reproduce the slowness and measure it consistently so you have a number to improve against."
+/>
+
+<Quiz
+  question="Why should you only fix one bottleneck at a time?"
+  options={[
+    "Modern CPUs can only optimize one function at a time",
+    "Fixing multiple things obscures which change actually helped, making the process unscientific",
+    "Version control can only track one change per commit",
+    "The JIT compiler resets when multiple functions change",
+  ]}
+  answer={1}
+  explanation="If you change three things and performance improves, you do not know which change was responsible. One or two might have made things worse while the third compensated. Isolating changes lets you build reliable knowledge."
+/>
+
+<FillBlank
+  question="The performance optimization loop is: reproduce, baseline, profile, hypothesize, fix, benchmark, ______, repeat."
+  answer="measure"
+/>
+
+## What you learned
+
+- The optimization loop (baseline, profile, fix one thing, measure again) is the only reliable process for improving performance — never skip the measurement steps
+- Profiling each stage of a pipeline reveals that one bottleneck often dominates, and fixing that single bottleneck can produce dramatic speedups
+- Replacing an O(n squared) algorithm with an O(n) approach using the right data structure is the most common high-impact optimization in real applications

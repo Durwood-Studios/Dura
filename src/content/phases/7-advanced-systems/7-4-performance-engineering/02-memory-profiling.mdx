@@ -1,0 +1,318 @@
+---
+title: "Memory Profiling"
+description: "Learn to find memory leaks using heap snapshots, allocation timelines, and modern JavaScript memory APIs."
+phase: 7
+module: "7-4-performance-engineering"
+order: 2
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Engineering Process"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - heap-snapshot
+  - memory-leak
+  - garbage-collection
+  - detached-dom
+  - weak-reference
+  - finalization-registry
+---
+
+## Why this matters
+
+A memory leak does not crash your app immediately. It slowly degrades performance over hours or days until the browser tab freezes or the Node.js process runs out of heap space. Users blame "the app is getting slower" without knowing why. Memory profiling lets you catch these leaks before they reach production, and diagnose them quickly when they do. Every long-running application — SPAs, servers, real-time dashboards — needs memory profiling as part of its engineering practice.
+
+## Heap snapshots in Chrome DevTools
+
+A heap snapshot captures every object in memory at a single point in time. In Chrome DevTools, go to the **Memory** tab, select "Heap snapshot," and click "Take snapshot." The snapshot shows object types, their sizes, and what retains them.
+
+The most powerful technique is **comparison**. Take a snapshot, perform an action that should be memory-neutral (open a modal, close it), then take a second snapshot. Switch to the "Comparison" view to see objects that were allocated but never freed.
+
+```javascript
+// Common leak: event listeners that are never removed
+
+class Tracker {
+  constructor() {
+    this.data = new Array(10000).fill("tracking-data");
+
+    // This listener holds a reference to 'this',
+    // preventing garbage collection even after
+    // the Tracker instance is "no longer needed"
+    this.handler = () => {
+      console.log(this.data.length);
+    };
+    window.addEventListener("scroll", this.handler);
+  }
+
+  // Without this method, the Tracker leaks forever
+  destroy() {
+    window.removeEventListener("scroll", this.handler);
+    this.data = null;
+  }
+}
+
+// Leak scenario: creating trackers without destroying them
+let tracker = new Tracker();
+// Later, reassigning without cleanup:
+// tracker = new Tracker(); // old one leaks!
+
+// Correct:
+// tracker.destroy();
+// tracker = new Tracker();
+```
+
+## Detached DOM nodes
+
+A detached DOM node is an element that has been removed from the document tree but is still referenced in JavaScript. The heap snapshot filter "Detached" reveals these. They are one of the most common leaks in single-page applications.
+
+```javascript
+// Detached DOM node leak
+
+function createNotification(message) {
+  const div = document.createElement("div");
+  div.textContent = message;
+  div.className = "notification";
+  document.body.appendChild(div);
+
+  // Store reference in a module-level array
+  notifications.push(div);
+
+  // Remove from DOM after 3 seconds
+  setTimeout(() => {
+    div.remove(); // removed from DOM...
+    // ...but still referenced in notifications[]
+    // The DOM node is now "detached" but not garbage collected
+  }, 3000);
+}
+
+const notifications = []; // grows forever
+
+// Fix: also remove from the array
+function createNotificationFixed(message) {
+  const div = document.createElement("div");
+  div.textContent = message;
+  div.className = "notification";
+  document.body.appendChild(div);
+
+  notifications.push(div);
+
+  setTimeout(() => {
+    div.remove();
+    const index = notifications.indexOf(div);
+    if (index > -1) notifications.splice(index, 1);
+  }, 3000);
+}
+```
+
+## Forgotten closures and growing arrays
+
+Closures capture their enclosing scope. If a closure is long-lived (stored in a cache, attached to an event), everything in its scope stays in memory. Growing arrays and maps that accumulate data without bounds are another classic pattern.
+
+```javascript
+// Closure-based leak: the cache grows without limit
+
+function createCache() {
+  const cache = new Map();
+
+  return {
+    get(key) {
+      return cache.get(key);
+    },
+    set(key, value) {
+      // No eviction policy — cache grows forever
+      cache.set(key, value);
+    },
+    size() {
+      return cache.size;
+    },
+  };
+}
+
+// Fix: add a maximum size with LRU eviction
+function createBoundedCache(maxSize) {
+  const cache = new Map();
+
+  return {
+    get(key) {
+      if (!cache.has(key)) return undefined;
+      // Move to end (most recently used)
+      const value = cache.get(key);
+      cache.delete(key);
+      cache.set(key, value);
+      return value;
+    },
+    set(key, value) {
+      if (cache.has(key)) cache.delete(key);
+      cache.set(key, value);
+      // Evict oldest entry if over limit
+      if (cache.size > maxSize) {
+        const oldest = cache.keys().next().value;
+        cache.delete(oldest);
+      }
+    },
+    size() {
+      return cache.size;
+    },
+  };
+}
+
+// Demonstration
+const leakyCache = createCache();
+const boundedCache = createBoundedCache(100);
+
+for (let i = 0; i < 1000; i++) {
+  leakyCache.set(`key-${i}`, { data: new Array(100).fill(i) });
+  boundedCache.set(`key-${i}`, { data: new Array(100).fill(i) });
+}
+
+console.log("Leaky cache size:", leakyCache.size()); // 1000
+console.log("Bounded cache size:", boundedCache.size()); // 100
+```
+
+## Allocation timelines
+
+The Chrome Memory tab also offers "Allocation instrumentation on timeline." This shows a bar chart over time — blue bars are allocations, gray bars are objects that were freed. Persistent blue bars that never turn gray are your leaks. You can click any bar to see what was allocated and what retains it.
+
+## WeakRef and FinalizationRegistry
+
+ES2021 introduced two tools for advanced memory management. `WeakRef` holds a reference to an object without preventing garbage collection. `FinalizationRegistry` lets you run cleanup code when an object is collected.
+
+```javascript
+// WeakRef: hold a reference that does not prevent GC
+
+class ImageCache {
+  constructor() {
+    this.cache = new Map(); // key → WeakRef
+    this.registry = new FinalizationRegistry((key) => {
+      // Called when the cached object is garbage collected
+      this.cache.delete(key);
+      console.log(`Cache entry "${key}" was garbage collected`);
+    });
+  }
+
+  set(key, imageData) {
+    const ref = new WeakRef(imageData);
+    this.cache.set(key, ref);
+    this.registry.register(imageData, key);
+  }
+
+  get(key) {
+    const ref = this.cache.get(key);
+    if (!ref) return undefined;
+
+    const value = ref.deref(); // returns undefined if GC'd
+    if (!value) {
+      this.cache.delete(key);
+      return undefined;
+    }
+    return value;
+  }
+
+  size() {
+    return this.cache.size;
+  }
+}
+
+// Usage
+const cache = new ImageCache();
+let bigImage = { pixels: new Array(10000).fill(0), id: "hero" };
+cache.set("hero", bigImage);
+
+console.log("Cached:", cache.get("hero") !== undefined); // true
+
+// If bigImage goes out of scope and nothing else references it,
+// the GC will eventually collect it and the registry fires
+// bigImage = null; // would allow GC
+```
+
+WeakRef is not a general-purpose caching solution. The garbage collector's timing is unpredictable. Use WeakRef when you want to opportunistically keep data that is expensive to recompute but acceptable to lose.
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Build a bounded cache that prevents memory leaks.
+// Implement an LRU (Least Recently Used) cache with a max size.
+// When the cache exceeds maxSize, evict the least recently accessed entry.
+
+class LRUCache {
+constructor(maxSize) {
+this.maxSize = maxSize;
+this.cache = new Map();
+}
+
+get(key) {
+// Return undefined if key is missing
+// If key exists, move it to "most recent" position
+// Hint: delete and re-set to move to end of Map iteration order
+}
+
+set(key, value) {
+// If key exists, update it (delete + set to refresh position)
+// Add the new entry
+// If size exceeds maxSize, delete the oldest entry
+// Hint: this.cache.keys().next().value gives the oldest key
+}
+
+get size() {
+return this.cache.size;
+}
+}
+
+// Tests
+const lru = new LRUCache(3);
+lru.set('a', 1);
+lru.set('b', 2);
+lru.set('c', 3);
+console.log(lru.size === 3); // true
+
+lru.set('d', 4); // evicts 'a'
+console.log(lru.get('a') === undefined); // true
+console.log(lru.get('b') === 2); // true — 'b' is now most recent
+
+lru.set('e', 5); // evicts 'c' (not 'b', because we just accessed 'b')
+console.log(lru.get('c') === undefined); // true
+console.log(lru.get('b') === 2); // true
+console.log(lru.size === 3); // true
+console.log('All tests passed!');`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What is a detached DOM node?"
+  options={[
+    "A node that has never been added to the document",
+    "A node removed from the document but still referenced in JavaScript",
+    "A node that has no child elements",
+    "A node that is hidden with CSS display: none",
+  ]}
+  answer={1}
+  explanation="A detached DOM node has been removed from the document tree (e.g., via element.remove()) but is still held in memory because JavaScript code retains a reference to it."
+/>
+
+<Quiz
+  question="What happens when you call deref() on a WeakRef whose target has been garbage collected?"
+  options={[
+    "It throws a ReferenceError",
+    "It returns null",
+    "It returns undefined",
+    "It recreates the object from a cached copy",
+  ]}
+  answer={2}
+  explanation="WeakRef.deref() returns undefined if the referenced object has already been garbage collected. This is the signal to evict the stale cache entry."
+/>
+
+<FillBlank
+  question="A cache that grows without limit is a ______ leak because it accumulates objects that are never freed."
+  answer="memory"
+/>
+
+## What you learned
+
+- Heap snapshots compared before and after an action reveal objects that were allocated but never freed, exposing memory leaks
+- The three most common leak patterns are detached DOM nodes, forgotten event listeners, and unbounded caches or closures
+- WeakRef and FinalizationRegistry allow holding references that do not prevent garbage collection, useful for opportunistic caches

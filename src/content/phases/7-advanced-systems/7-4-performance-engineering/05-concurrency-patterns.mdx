@@ -1,0 +1,382 @@
+---
+title: "Concurrency Patterns"
+description: "Learn thread pools, the event loop, async I/O, back-pressure, Web Workers, and SharedArrayBuffer."
+phase: 7
+module: "7-4-performance-engineering"
+order: 5
+estimatedMinutes: 10
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5"]
+  swebok: ["Software Engineering Process"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - concurrency
+  - event-loop
+  - thread-pool
+  - back-pressure
+  - web-worker
+  - shared-array-buffer
+---
+
+## Why this matters
+
+Modern applications must handle many things at once: network requests, user interactions, file reads, computations. A single-threaded program that blocks on each task in sequence wastes most of its time waiting. Concurrency patterns let you overlap work, utilize multiple CPU cores, and keep the UI responsive. Choosing the wrong concurrency model — or ignoring back-pressure — leads to frozen interfaces, crashed servers, and data corruption. Understanding these patterns is non-negotiable for any production system.
+
+## Thread pools
+
+A thread pool maintains a fixed number of worker threads that pull tasks from a shared queue. Instead of creating a new thread per request (expensive — thread creation involves OS kernel calls and memory allocation), the pool reuses existing threads. Node.js uses a thread pool internally (libuv, default 4 threads) for file system operations, DNS lookups, and other blocking work.
+
+```javascript
+// Simulating a thread pool with a task queue
+// (JavaScript is single-threaded, but the concept translates directly)
+
+class TaskPool {
+  constructor(concurrency) {
+    this.concurrency = concurrency;
+    this.running = 0;
+    this.queue = [];
+  }
+
+  async run(taskFn) {
+    return new Promise((resolve, reject) => {
+      const execute = async () => {
+        this.running++;
+        try {
+          const result = await taskFn();
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        } finally {
+          this.running--;
+          this.drain();
+        }
+      };
+
+      if (this.running < this.concurrency) {
+        execute();
+      } else {
+        this.queue.push(execute);
+      }
+    });
+  }
+
+  drain() {
+    while (this.queue.length > 0 && this.running < this.concurrency) {
+      const next = this.queue.shift();
+      next();
+    }
+  }
+}
+
+// Usage: limit to 3 concurrent "network requests"
+const pool = new TaskPool(3);
+
+async function fakeFetch(id) {
+  const delay = Math.random() * 100 + 50;
+  await new Promise((r) => setTimeout(r, delay));
+  return `Result ${id}`;
+}
+
+async function main() {
+  const tasks = Array.from({ length: 10 }, (_, i) =>
+    pool
+      .run(() => fakeFetch(i))
+      .then((result) => {
+        console.log(result);
+      })
+  );
+  await Promise.all(tasks);
+  console.log("All tasks complete");
+}
+
+main();
+```
+
+## The Node.js event loop
+
+Node.js runs JavaScript on a single thread but handles concurrency through the **event loop**. When you call an async operation (network request, file read, timer), Node.js delegates it to the OS or its thread pool, then continues executing your code. When the async operation completes, its callback is placed on a queue. The event loop picks up callbacks when the call stack is empty.
+
+```javascript
+// Visualizing event loop phases
+
+console.log("1: synchronous — runs first");
+
+setTimeout(() => {
+  console.log("4: timer callback — runs in timer phase");
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log("3: microtask — runs before timer callbacks");
+});
+
+process.nextTick?.(() => {
+  console.log("2: nextTick — runs before microtasks (Node.js only)");
+}) || console.log("2: (nextTick not available in browser)");
+
+// Output order: 1, 2, 3, 4
+// Microtasks (Promises) run between each event loop phase
+// This is why a Promise.resolve() callback fires before setTimeout(0)
+```
+
+The critical rule: **never block the event loop**. A CPU-intensive synchronous operation (parsing a large JSON, complex regex, sorting millions of items) freezes the entire server. No requests are processed until that computation finishes.
+
+```javascript
+// BAD: blocking the event loop
+function blockingOperation() {
+  const start = Date.now();
+  while (Date.now() - start < 100) {
+    // Simulates 100ms of CPU-bound work
+    // During this time, zero other requests are handled
+  }
+  return "done";
+}
+
+// BETTER: break work into chunks with setImmediate
+async function nonBlockingOperation(items) {
+  const results = [];
+  const chunkSize = 1000;
+
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize);
+    chunk.forEach((item) => results.push(item * 2));
+
+    // Yield to the event loop between chunks
+    if (i + chunkSize < items.length) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  return results;
+}
+
+const data = Array.from({ length: 50000 }, (_, i) => i);
+nonBlockingOperation(data).then((r) => console.log("Processed", r.length, "items"));
+console.log("Event loop is free while processing happens");
+```
+
+## Back-pressure: producer faster than consumer
+
+Back-pressure occurs when a data producer generates items faster than the consumer can process them. Without handling this, queues grow unbounded, memory is exhausted, and the system crashes. Streams in Node.js handle back-pressure automatically through the `pause`/`resume` mechanism. In custom systems, you must implement it yourself.
+
+```javascript
+// Demonstrating back-pressure with a rate limiter
+
+class BackPressureQueue {
+  constructor(maxSize, processFn) {
+    this.queue = [];
+    this.maxSize = maxSize;
+    this.processFn = processFn;
+    this.processing = false;
+    this.dropped = 0;
+  }
+
+  push(item) {
+    if (this.queue.length >= this.maxSize) {
+      this.dropped++;
+      console.log(`Back-pressure! Dropped item (${this.dropped} total drops)`);
+      return false; // signal to producer: slow down
+    }
+    this.queue.push(item);
+    this.startProcessing();
+    return true;
+  }
+
+  async startProcessing() {
+    if (this.processing) return;
+    this.processing = true;
+
+    while (this.queue.length > 0) {
+      const item = this.queue.shift();
+      await this.processFn(item);
+    }
+
+    this.processing = false;
+  }
+}
+
+// Slow consumer: takes 50ms per item
+const queue = new BackPressureQueue(5, async (item) => {
+  await new Promise((r) => setTimeout(r, 50));
+  console.log(`Processed: ${item}`);
+});
+
+// Fast producer: pushes 20 items instantly
+for (let i = 0; i < 20; i++) {
+  queue.push(`item-${i}`);
+}
+```
+
+## Web Workers in the browser
+
+Web Workers run JavaScript in a separate OS thread. They communicate with the main thread through message passing (`postMessage` / `onmessage`). Workers cannot access the DOM, but they can perform CPU-intensive work without freezing the UI.
+
+```javascript
+// Main thread code
+// In a real app, this would be in a separate file
+
+// Simulating Web Worker communication pattern
+// (actual Workers require separate files or Blob URLs)
+
+function simulateWorkerPattern() {
+  // The "worker" processes data without blocking the main thread
+  async function workerTask(data) {
+    // Heavy computation
+    let result = 0;
+    for (let i = 0; i < data.length; i++) {
+      result += Math.sqrt(data[i]) * Math.sin(data[i]);
+    }
+    return result;
+  }
+
+  // Main thread sends data, receives result
+  const data = Array.from({ length: 100000 }, () => Math.random() * 1000);
+
+  const start = performance.now();
+  workerTask(data).then((result) => {
+    const elapsed = performance.now() - start;
+    console.log(`Worker result: ${result.toFixed(2)}`);
+    console.log(`Computed in: ${elapsed.toFixed(2)}ms`);
+    console.log("Main thread was free during computation");
+  });
+
+  console.log("Main thread continues immediately");
+}
+
+simulateWorkerPattern();
+```
+
+## SharedArrayBuffer
+
+`SharedArrayBuffer` allows multiple Workers (or a Worker and the main thread) to access the same block of memory without copying. Combined with `Atomics` for synchronization, this enables true shared-memory parallelism in JavaScript. Use it for performance-critical concurrent algorithms — but be aware of race conditions.
+
+```javascript
+// SharedArrayBuffer + Atomics pattern
+
+// Create shared memory visible to multiple threads
+const shared = new SharedArrayBuffer(4 * Int32Array.BYTES_PER_ELEMENT);
+const view = new Int32Array(shared);
+
+// Atomics prevent race conditions on shared memory
+Atomics.store(view, 0, 0); // initialize counter
+
+// Simulate concurrent increments (in practice, from different Workers)
+function atomicIncrement(arr, index, times) {
+  for (let i = 0; i < times; i++) {
+    Atomics.add(arr, index, 1); // atomic: no race condition
+  }
+}
+
+// Without Atomics, concurrent increments can lose updates
+function unsafeIncrement(arr, index, times) {
+  for (let i = 0; i < times; i++) {
+    arr[index] = arr[index] + 1; // NOT atomic: read-modify-write race
+  }
+}
+
+atomicIncrement(view, 0, 1000);
+atomicIncrement(view, 0, 1000);
+console.log("Atomic counter:", Atomics.load(view, 0)); // exactly 2000
+
+// Compare with non-atomic (in single thread, both work — the
+// race condition manifests only with actual concurrent threads)
+const regular = new Int32Array(4);
+unsafeIncrement(regular, 0, 1000);
+unsafeIncrement(regular, 0, 1000);
+console.log("Non-atomic counter:", regular[0]); // 2000 here, but unsafe in real concurrency
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// Implement a task pool that limits concurrency.
+// The pool should run at most N tasks simultaneously,
+// queuing the rest until a slot opens.
+
+class ConcurrencyPool {
+constructor(limit) {
+this.limit = limit;
+this.running = 0;
+this.queue = [];
+}
+
+async execute(asyncFn) {
+// If running < limit, execute immediately
+// Otherwise, wait in the queue until a slot opens
+// Hint: return a new Promise and push the resolver
+// into the queue. In the finally block, drain the queue.
+}
+}
+
+// Test: 10 tasks, max 3 concurrent
+async function test() {
+const pool = new ConcurrencyPool(3);
+const log = [];
+
+const task = (id) => pool.execute(async () => {
+log.push('start-' + id);
+await new Promise(r => setTimeout(r, 50));
+log.push('end-' + id);
+return id;
+});
+
+const results = await Promise.all(
+Array.from({ length: 6 }, (\_, i) => task(i))
+);
+
+console.log('Results:', results);
+console.log('All 6 tasks completed:', results.length === 6);
+
+// Check that no more than 3 ran at once
+let maxConcurrent = 0;
+let current = 0;
+for (const entry of log) {
+if (entry.startsWith('start')) current++;
+else current--;
+maxConcurrent = Math.max(maxConcurrent, current);
+}
+console.log('Max concurrent:', maxConcurrent);
+console.log('Respected limit:', maxConcurrent <= 3);
+}
+
+test();`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why does a Promise.resolve().then() callback execute before a setTimeout(fn, 0) callback?"
+  options={[
+    "Promises are faster than timers",
+    "Microtasks (Promise callbacks) are processed before the next event loop phase where timer callbacks run",
+    "setTimeout always has a minimum delay of 4ms",
+    "The JavaScript engine prioritizes Promise callbacks arbitrarily",
+  ]}
+  answer={1}
+  explanation="The event loop processes all microtasks (including Promise callbacks) between each phase. Timer callbacks run in the timer phase, which comes after the current batch of microtasks is drained."
+/>
+
+<Quiz
+  question="What problem does back-pressure solve?"
+  options={[
+    "Preventing deadlocks in multithreaded code",
+    "Stopping a producer from overwhelming a slower consumer with unbounded queued data",
+    "Reducing CPU usage by pausing all threads",
+    "Eliminating race conditions in shared memory",
+  ]}
+  answer={1}
+  explanation="Back-pressure signals a fast producer to slow down when the consumer cannot keep up, preventing unbounded memory growth and eventual system crashes."
+/>
+
+<FillBlank
+  question="Web Workers communicate with the main thread using ______ passing via postMessage."
+  answer="message"
+/>
+
+## What you learned
+
+- Thread pools reuse a fixed number of workers to avoid the overhead of creating threads per task, and Node.js uses this pattern internally via libuv
+- The event loop processes microtasks between phases, and blocking it with synchronous CPU work freezes the entire application
+- Back-pressure prevents unbounded queue growth when producers outpace consumers, and Web Workers enable true parallel computation in browsers
