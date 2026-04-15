@@ -1,212 +1,203 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { buildMetadata } from "@/lib/og";
 
-export const metadata: Metadata = buildMetadata({
-  title: "Terms of Service",
+export const metadata: Metadata = {
+  title: "Terms of Service — DURA",
   description:
-    "Terms of service for DURA, the free and open-source engineering education platform by Durwood Studios LLC.",
-  path: "/terms",
-});
+    "Terms of use for DURA, the free and open-source engineering education platform by Durwood Studios LLC.",
+  openGraph: {
+    title: "Terms of Service — DURA",
+    description: "Terms of use for DURA, the free and open-source engineering education platform.",
+  },
+};
 
 export default function TermsPage(): React.ReactElement {
   return (
-    <main className="mx-auto max-w-[720px] px-6 py-16">
-      <header className="mb-12">
-        <p className="font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
-          Legal
-        </p>
-        <h1 className="mt-2 text-4xl font-semibold text-[var(--color-text-primary)]">
-          Terms of Service
-        </h1>
-        <p className="mt-4 text-lg leading-relaxed text-[var(--color-text-secondary)]">
-          Plain language. No legalese traps. You&apos;re here to learn — these terms exist to keep
-          the platform fair for everyone.
-        </p>
-      </header>
+    <main className="mx-auto max-w-[700px] px-4 py-16 sm:py-24">
+      <h1 className="text-3xl font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-4xl">
+        Terms of Service
+      </h1>
+      <p className="mt-2 text-sm text-[var(--color-text-muted)]">Last updated: April 14, 2026</p>
+      <p className="mt-6 leading-relaxed text-[var(--color-text-secondary)]">
+        DURA is operated by Durwood Studios LLC. By using DURA, you agree to these terms. They are
+        short and written in plain language.
+      </p>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          1. The Platform
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          DURA is a free, open-source engineering education platform built and maintained by Durwood
-          Studios LLC. The entire codebase is licensed under the{" "}
-          <Link
-            href="https://www.gnu.org/licenses/agpl-3.0.en.html"
-            className="text-emerald-400 underline underline-offset-2 hover:text-emerald-300"
+      <Section title="The platform">
+        <p>
+          DURA is a free, open-source learning platform for software engineering, AI engineering,
+          and technology leadership. The source code is available under the AGPLv3 license at{" "}
+          <a
+            href="https://github.com/Durwood-Studios/Dura"
             target="_blank"
             rel="noopener noreferrer"
+            className="text-[var(--color-accent-emerald)] underline underline-offset-2"
           >
-            GNU Affero General Public License v3
-          </Link>
+            github.com/Durwood-Studios/Dura
+          </a>
           .
         </p>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          The core platform is free. Permanently. No feature gates. No paywalls. No premium tiers.
-          By using DURA, you agree to the terms outlined on this page.
+        <p className="mt-3">
+          The core platform is free. Permanently. There are no premium tiers, no paywalls, and no
+          features locked behind payment. This is a commitment, not a trial period.
         </p>
-      </section>
+      </Section>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          2. Educational Content
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          All lessons, exercises, dictionary terms, and assessments are provided for educational
-          purposes. We work hard to make the content accurate, standards-aligned, and useful — but
-          we do not guarantee specific outcomes, employment, or career advancement.
+      <Section title="What DURA provides">
+        <p>
+          DURA provides educational content, interactive exercises, spaced repetition flashcards,
+          code sandboxes, assessments, and verified certificates of completion. All content is
+          provided for educational purposes.
         </p>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          We provide the means. The learner provides the will.
+        <p className="mt-3">
+          DURA does not guarantee employment, career outcomes, or professional certification. We
+          provide the means for learning. The outcomes depend on you.
         </p>
-      </section>
+      </Section>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          3. User Content
-        </h2>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          Any code you write in DURA&apos;s sandboxes, editors, or exercises belongs to you. We do
-          not claim ownership of your work. Your sandbox code is yours — use it, share it, ship it,
-          delete it. We store it only to provide the service and will remove it if you ask.
+      <Section title="Accounts">
+        <p>
+          Account creation is optional. DURA works fully without one. If you create an account, you
+          are responsible for keeping your credentials secure.
         </p>
-      </section>
+        <p className="mt-3">
+          You can delete your account at any time from Settings. Deleting your account removes all
+          server-side data associated with it. Local data on your device remains until you clear it
+          manually.
+        </p>
+      </Section>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          4. Certificates
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          DURA certificates represent completion of hardened assessments mapped to recognized
-          standards (ACM CS2023, SWEBOK v4, SFIA 9). Each certificate states: &ldquo;Demonstrated
-          mastery of [topics] through verified assessment.&rdquo;
+      <Section title="Your content">
+        <p>
+          Code you write in DURA&apos;s sandbox editor belongs to you. DURA does not claim ownership
+          of anything you create on the platform.
         </p>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          Certificates are not professional certifications, academic degrees, or government-issued
-          credentials. They are verifiable proof that you passed the assessment at the required
-          threshold. What employers or institutions make of that is between you and them.
+        <p className="mt-3">
+          If you contribute to DURA&apos;s open-source repository (dictionary terms, bug fixes,
+          features), your contributions are licensed under the same terms as the project (AGPLv3 for
+          the core, Apache 2.0 for APIs).
         </p>
-      </section>
+      </Section>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          5. Voluntary Tips
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          DURA offers a voluntary tip option powered by Stripe. Tips are gratitude, not purchases.
-          They unlock nothing — every feature is available to every user regardless of whether
-          they&apos;ve tipped.
+      <Section title="Certificates">
+        <p>
+          DURA issues certificates when you complete phase verification tests. These certificates
+          attest that you demonstrated mastery of specific topics through DURA&apos;s assessment
+          system. They are not professional certifications, academic degrees, or government-issued
+          credentials.
         </p>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          Because tips are voluntary contributions and not transactions for goods or services, they
-          are non-refundable. If Stripe&apos;s processing encounters an issue, contact us and
-          we&apos;ll work it out.
+        <p className="mt-3">
+          Certificate language states:{" "}
+          <em>&ldquo;Demonstrated mastery of [topics] through verified assessment.&rdquo;</em>{" "}
+          Nothing more, nothing less.
         </p>
-      </section>
+      </Section>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          6. Account &amp; Data
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          Accounts are optional. DURA works offline and without authentication for all core
-          features. If you create an account for cross-device sync, you control your data.
+      <Section title="Voluntary tips">
+        <p>
+          DURA offers a voluntary tip button powered by Stripe. Tips are exactly that — voluntary
+          expressions of support. They do not unlock features, grant premium access, or provide any
+          benefit beyond supporting the developer.
         </p>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          You can delete your account and all associated data at any time. Deletion is permanent and
-          immediate. We do not retain your data after deletion, and we do not sell or share your
-          data with third parties. Ever.
+        <p className="mt-3">
+          Tips are non-refundable. Stripe processes the payment. DURA does not store your payment
+          information. See{" "}
+          <a
+            href="https://stripe.com/legal/consumer"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[var(--color-accent-emerald)] underline underline-offset-2"
+          >
+            Stripe&apos;s terms
+          </a>{" "}
+          for payment-specific policies.
         </p>
-      </section>
+      </Section>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          7. Acceptable Use
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          Use DURA to learn. That&apos;s what it&apos;s for. Don&apos;t:
-        </p>
-        <ul className="mb-4 ml-6 list-disc space-y-2 leading-[1.9] text-[var(--color-text-primary)]">
-          <li>Abuse the platform or harass other users.</li>
-          <li>
-            Attack, probe, or attempt to compromise DURA&apos;s infrastructure, servers, or
-            services.
-          </li>
-          <li>
-            Scrape content in bulk to build competing products. The source is open — fork it
-            honestly under AGPLv3 if you want to build something similar.
-          </li>
-          <li>
-            Use automated tools to generate fake accounts, inflate progress, or manipulate
-            assessments.
-          </li>
+      <Section title="Acceptable use">
+        <p>Use DURA for learning. Do not use it to:</p>
+        <ul className="mt-3 list-disc space-y-1.5 pl-5">
+          <li>Distribute malware or malicious code through the sandbox</li>
+          <li>Scrape content in bulk for commercial redistribution</li>
+          <li>Misrepresent DURA certificates as professional or academic credentials</li>
+          <li>Attempt to compromise the platform or other users&apos; data</li>
         </ul>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          We reserve the right to suspend accounts that violate these terms.
+        <p className="mt-3">
+          The source code is open. You can fork it, self-host it, modify it, and build on it under
+          the AGPLv3 license. That is encouraged, not restricted.
         </p>
-      </section>
+      </Section>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          8. Limitation of Liability
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          DURA is provided &ldquo;as is&rdquo; and &ldquo;as available&rdquo; without warranties of
-          any kind, express or implied. We do our best to keep the platform running, the content
-          accurate, and the assessments fair — but we cannot guarantee uninterrupted service or
+      <Section title="Availability and warranty">
+        <p>
+          DURA is provided &ldquo;as is&rdquo; without warranty of any kind. We do our best to keep
+          the platform available and accurate, but we do not guarantee uninterrupted access or
           error-free content.
         </p>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          To the maximum extent permitted by law, Durwood Studios LLC shall not be liable for any
-          indirect, incidental, special, consequential, or punitive damages arising from your use of
-          the platform. Our total liability for any claim shall not exceed the amount you&apos;ve
-          paid us — which, for most users, is zero.
+        <p className="mt-3">
+          Because DURA is a Progressive Web App with offline support, most features continue to work
+          without an internet connection after your first visit. Your progress is stored locally and
+          is not at risk if our servers go down.
         </p>
-      </section>
+      </Section>
 
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          9. Dispute Resolution
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          If something goes wrong, talk to us first. Send an email and we&apos;ll try to resolve it
-          informally within 30 days. Most issues can be worked out with a conversation.
-        </p>
-        <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          If informal resolution fails, any dispute shall be resolved through binding arbitration
-          conducted in the state of South Carolina, United States, under the rules of the American
-          Arbitration Association. You agree to waive any right to a jury trial or to participate in
-          a class action.
-        </p>
-      </section>
-
-      <section className="mb-12">
-        <h2 className="mb-3 text-2xl font-semibold text-[var(--color-text-primary)]">
-          10. Changes to These Terms
-        </h2>
-        <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          We may update these terms as the platform evolves. When we do, we&apos;ll update the date
-          below and, for significant changes, notify users through the platform. Continued use after
-          changes constitutes acceptance.
-        </p>
-        <p className="font-mono text-sm text-[var(--color-text-muted)]">
-          Last updated: April 14, 2026
-        </p>
-      </section>
-
-      <footer className="border-t border-[var(--color-border)] pt-8 text-sm text-[var(--color-text-secondary)]">
+      <Section title="Limitation of liability">
         <p>
-          Questions about these terms?{" "}
-          <Link
-            href="/about"
-            className="text-emerald-400 underline underline-offset-2 hover:text-emerald-300"
-          >
-            Learn more about Durwood Studios
-          </Link>{" "}
-          or reach out directly.
+          To the maximum extent permitted by law, Durwood Studios LLC is not liable for any
+          indirect, incidental, or consequential damages arising from your use of DURA. Our total
+          liability is limited to the amount you have paid us, which for most users is zero.
         </p>
-      </footer>
+      </Section>
+
+      <Section title="Disputes">
+        <p>
+          If you have a concern, email us at{" "}
+          <a
+            href="mailto:legal@dura.dev"
+            className="text-[var(--color-accent-emerald)] underline underline-offset-2"
+          >
+            legal@dura.dev
+          </a>{" "}
+          first. We will try to resolve it informally. If we cannot, disputes will be resolved
+          through binding arbitration under the laws of the State of South Carolina, United States.
+        </p>
+      </Section>
+
+      <Section title="Changes to these terms">
+        <p>
+          We may update these terms. If we make material changes, we will notify users via an in-app
+          banner before the changes take effect. Continued use after changes constitutes acceptance.
+        </p>
+      </Section>
+
+      <div className="mt-16 flex gap-6 text-sm">
+        <Link
+          href="/privacy"
+          className="text-[var(--color-accent-emerald)] underline underline-offset-2"
+        >
+          Privacy Policy
+        </Link>
+        <Link href="/" className="text-[var(--color-text-muted)] underline underline-offset-2">
+          Back to DURA
+        </Link>
+      </div>
     </main>
+  );
+}
+
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <section className="mt-12">
+      <h2 className="text-xl font-semibold text-[var(--color-text-primary)]">{title}</h2>
+      <div className="mt-4 space-y-0 leading-relaxed text-[var(--color-text-secondary)]">
+        {children}
+      </div>
+    </section>
   );
 }
