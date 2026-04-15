@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Download, Trash2, AlertTriangle } from "lucide-react";
+import { Download, Trash2, AlertTriangle, Shield } from "lucide-react";
 import { usePreferencesStore } from "@/stores/preferences";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
-import { getDB } from "@/lib/db";
+import { clearAllData, exportAllData } from "@/lib/clearAllData";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 import type { FontSize, StudyMode } from "@/types/preferences";
@@ -22,44 +22,6 @@ const STUDY_MODES: { value: StudyMode; label: string; hint: string }[] = [
   { value: "focus", label: "Focus", hint: "Hide nav, full-width content" },
   { value: "sprint", label: "Sprint", hint: "Pomodoro timer in top bar" },
 ];
-
-const STORES_TO_EXPORT = [
-  "progress",
-  "flashcards",
-  "reviewLogs",
-  "goals",
-  "preferences",
-  "analytics",
-  "assessment-results",
-  "certificates",
-  "xp-events",
-  "sandbox-saves",
-] as const;
-
-async function exportAllData(): Promise<string> {
-  const db = await getDB();
-  const dump: Record<string, unknown> = { exportedAt: new Date().toISOString(), version: 4 };
-  for (const store of STORES_TO_EXPORT) {
-    try {
-      dump[store] = await db.getAll(store);
-    } catch (error) {
-      console.error(`[settings] export failed for ${store}`, error);
-      dump[store] = [];
-    }
-  }
-  return JSON.stringify(dump, null, 2);
-}
-
-async function clearAllData(): Promise<void> {
-  const db = await getDB();
-  for (const store of STORES_TO_EXPORT) {
-    try {
-      await db.clear(store);
-    } catch (error) {
-      console.error(`[settings] clear failed for ${store}`, error);
-    }
-  }
-}
 
 export function SettingsClient(): React.ReactElement {
   const prefs = usePreferencesStore((s) => s.prefs);
@@ -80,7 +42,7 @@ export function SettingsClient(): React.ReactElement {
   const handleClear = async () => {
     await clearAllData();
     setConfirmingClear(false);
-    window.location.reload();
+    window.location.href = "/";
   };
 
   return (
@@ -193,6 +155,31 @@ export function SettingsClient(): React.ReactElement {
             Clear all data
           </button>
         </div>
+      </Section>
+
+      {/* Privacy */}
+      <Section title="Privacy">
+        <div className="flex items-start gap-3">
+          <Shield className="mt-0.5 h-4 w-4 text-emerald-500" />
+          <div className="text-xs text-[var(--color-text-secondary)]">
+            <p>All your data is stored locally on this device. No cookies. No tracking.</p>
+            <p className="mt-2 flex gap-3">
+              <Link href="/privacy" className="text-emerald-600 hover:underline">
+                Privacy Policy
+              </Link>
+              <Link href="/terms" className="text-emerald-600 hover:underline">
+                Terms of Service
+              </Link>
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          disabled
+          className="mt-3 inline-flex cursor-not-allowed items-center gap-2 rounded-lg border border-[var(--color-border)] px-4 py-2 text-xs font-medium text-[var(--color-text-muted)] opacity-50"
+        >
+          Delete Account — available when signed in
+        </button>
       </Section>
 
       {/* About */}
