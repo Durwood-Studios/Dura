@@ -7,6 +7,7 @@ import { FocusExitButton } from "@/components/study/FocusExitButton";
 import { ToastLayer } from "@/components/gamification/ToastLayer";
 import { TipButton } from "@/components/support/TipButton";
 import { CommandPalette } from "@/components/nav/CommandPalette";
+import { LenisProvider } from "@/components/providers/LenisProvider";
 
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
@@ -17,21 +18,23 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
       >
         Skip to content
       </a>
-      <FocusModeProvider />
-      <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar />
-        <Breadcrumbs />
-        <main id="main-content" className="flex-1 pb-20 lg:pb-0">
-          {children}
-        </main>
-      </div>
-      <MobileBottomTabs />
-      <MobileDrawer />
-      <FocusExitButton />
-      <ToastLayer />
-      <TipButton />
-      <CommandPalette />
+      <LenisProvider>
+        <FocusModeProvider />
+        <Sidebar />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <TopBar />
+          <Breadcrumbs />
+          <main id="main-content" className="flex-1 pb-20 lg:pb-0">
+            {children}
+          </main>
+        </div>
+        <MobileBottomTabs />
+        <MobileDrawer />
+        <FocusExitButton />
+        <ToastLayer />
+        <TipButton />
+        <CommandPalette />
+      </LenisProvider>
     </div>
   );
 }

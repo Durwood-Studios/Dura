@@ -214,7 +214,10 @@ export default function SandboxExerciseInner({
       files={{ "/index.js": initialCode }}
       options={{ recompileMode: "delayed", recompileDelay: 500 }}
     >
-      <figure className="my-8 overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]">
+      <figure
+        data-lenis-prevent
+        className="my-8 overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)]"
+      >
         <figcaption className="border-b border-[var(--color-border)] px-4 py-3 text-sm text-[var(--color-text-secondary)]">
           {instructions}
         </figcaption>
