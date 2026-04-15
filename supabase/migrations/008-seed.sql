@@ -1,0 +1,16 @@
+-- 008-seed.sql
+-- Development seed data for DURA
+--
+-- This migration intentionally contains NO user data.
+-- User profiles are auto-created by the handle_new_user() trigger
+-- when a user signs up through Supabase Auth.
+--
+-- To seed development data:
+--   1. Create a test user in the Supabase Dashboard → Authentication → Users
+--   2. Sign in via the app's auth flow
+--   3. Use the app normally — progress, flashcards, goals, etc. are
+--      created through regular user interaction and synced to Supabase.
+--
+-- If you need bulk test data, consider writing a script in
+-- scripts/seed.ts that uses the Supabase client to insert rows
+-- programmatically. That approach respects RLS and triggers.
