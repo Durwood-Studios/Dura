@@ -1,0 +1,614 @@
+---
+title: "Build a Dependency Graph Visualizer"
+description: "Build a React application that parses package.json files, constructs dependency trees, and renders them as interactive force-directed graphs with D3."
+slug: "dependency-graph"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["visualization", "graphs", "react", "d3", "analysis"]
+---
+
+## Overview
+
+Every JavaScript project depends on dozens or hundreds of packages, each with their own dependencies. Understanding this dependency tree is critical for security audits, bundle size optimization, and debugging version conflicts. But most developers never see their dependency graph — they just run `npm install` and hope for the best.
+
+In this tutorial, you will build a dependency graph visualizer that parses `package.json` files, resolves the dependency tree, and renders it as an interactive force-directed graph using D3.js. Users will be able to search for packages, zoom and pan the graph, hover over nodes for details, and identify the most connected (and therefore most critical) dependencies.
+
+The combination of React for UI and D3 for the simulation is a powerful pattern used in production tools like GitHub's dependency graph, npm's package explorer, and countless data visualization dashboards.
+
+## Step 1: Set Up the Project
+
+Create a React project and install D3 for the graph rendering.
+
+```bash
+npx create-next-app@latest dep-graph --typescript --app --tailwind
+cd dep-graph
+npm install d3
+npm install -D @types/d3
+```
+
+Define the types that model your graph structure:
+
+```typescript
+// src/lib/types.ts
+export interface PackageJson {
+  name: string;
+  version: string;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+}
+
+export interface GraphNode {
+  id: string;
+  name: string;
+  version: string;
+  depth: number;
+  dependencyCount: number;
+  isDev: boolean;
+}
+
+export interface GraphLink {
+  source: string;
+  target: string;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  links: GraphLink[];
+}
+```
+
+Each node represents a package. Each link represents a dependency relationship. The `depth` field tracks how far a node is from the root package — depth 0 is your project, depth 1 is a direct dependency, depth 2 is a transitive dependency.
+
+## Step 2: Parse the Dependency Tree
+
+Build the parser that reads `package.json` and `node_modules` to construct the full dependency tree.
+
+```typescript
+// src/lib/parser.ts
+import { PackageJson, GraphData, GraphNode, GraphLink } from "./types";
+
+export function parsePackageJson(raw: string): PackageJson {
+  try {
+    return JSON.parse(raw) as PackageJson;
+  } catch (error) {
+    throw new Error(`Invalid package.json: ${error}`);
+  }
+}
+
+export function buildGraph(pkg: PackageJson, maxDepth = 2): GraphData {
+  const nodes = new Map<string, GraphNode>();
+  const links: GraphLink[] = [];
+  const visited = new Set<string>();
+
+  function addNode(name: string, version: string, depth: number, isDev: boolean): void {
+    if (visited.has(name)) return;
+    visited.add(name);
+
+    nodes.set(name, {
+      id: name,
+      name,
+      version,
+      depth,
+      dependencyCount: 0,
+      isDev,
+    });
+  }
+
+  function addDependencies(
+    parentName: string,
+    deps: Record<string, string>,
+    depth: number,
+    isDev: boolean
+  ): void {
+    for (const [name, version] of Object.entries(deps)) {
+      addNode(name, version, depth, isDev);
+      links.push({ source: parentName, target: name });
+
+      const parent = nodes.get(parentName);
+      if (parent) parent.dependencyCount++;
+    }
+  }
+
+  // Root node
+  addNode(pkg.name || "root", pkg.version || "0.0.0", 0, false);
+
+  // Direct dependencies
+  if (pkg.dependencies) {
+    addDependencies(pkg.name || "root", pkg.dependencies, 1, false);
+  }
+
+  if (pkg.devDependencies) {
+    addDependencies(pkg.name || "root", pkg.devDependencies, 1, true);
+  }
+
+  return {
+    nodes: Array.from(nodes.values()),
+    links,
+  };
+}
+
+export function getStats(data: GraphData): {
+  totalPackages: number;
+  directDeps: number;
+  devDeps: number;
+  mostConnected: string;
+} {
+  const directDeps = data.nodes.filter((n) => n.depth === 1 && !n.isDev).length;
+  const devDeps = data.nodes.filter((n) => n.isDev).length;
+
+  const targetCounts = new Map<string, number>();
+  for (const link of data.links) {
+    const target =
+      typeof link.target === "string" ? link.target : (link.target as unknown as GraphNode).id;
+    targetCounts.set(target, (targetCounts.get(target) ?? 0) + 1);
+  }
+
+  let mostConnected = "";
+  let maxCount = 0;
+  for (const [name, count] of targetCounts) {
+    if (count > maxCount) {
+      mostConnected = name;
+      maxCount = count;
+    }
+  }
+
+  return {
+    totalPackages: data.nodes.length,
+    directDeps,
+    devDeps,
+    mostConnected: mostConnected || "none",
+  };
+}
+```
+
+The graph is built to a configurable depth. Depth 1 shows only direct dependencies. Depth 2 includes their dependencies too. Going deeper than 2 often produces graphs that are too dense to be useful visually.
+
+## Step 3: Build the Force-Directed Graph
+
+Create the D3 force simulation that positions nodes and links.
+
+```typescript
+"use client";
+
+// src/components/ForceGraph.tsx
+import { useEffect, useRef, useCallback } from "react";
+import * as d3 from "d3";
+import { GraphData, GraphNode, GraphLink } from "@/lib/types";
+
+interface ForceGraphProps {
+  data: GraphData;
+  width: number;
+  height: number;
+  onNodeClick?: (node: GraphNode) => void;
+}
+
+interface SimNode extends d3.SimulationNodeDatum {
+  id: string;
+  name: string;
+  depth: number;
+  dependencyCount: number;
+  isDev: boolean;
+}
+
+export function ForceGraph({ data, width, height, onNodeClick }: ForceGraphProps) {
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const renderGraph = useCallback(() => {
+    if (!svgRef.current || data.nodes.length === 0) return;
+
+    const svg = d3.select(svgRef.current);
+    svg.selectAll("*").remove();
+
+    const simNodes: SimNode[] = data.nodes.map((n) => ({ ...n }));
+    const simLinks = data.links.map((l) => ({ ...l }));
+
+    const simulation = d3
+      .forceSimulation<SimNode>(simNodes)
+      .force("link", d3.forceLink(simLinks).id((d: d3.SimulationNodeDatum) => (d as SimNode).id).distance(80))
+      .force("charge", d3.forceManyBody().strength(-200))
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("collision", d3.forceCollide().radius(20));
+
+    const g = svg.append("g");
+
+    // Zoom behavior
+    const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.1, 4]).on("zoom", (event) => {
+      g.attr("transform", event.transform);
+    });
+    svg.call(zoom);
+
+    // Links
+    const link = g
+      .append("g")
+      .selectAll("line")
+      .data(simLinks)
+      .join("line")
+      .attr("stroke", "#4b5563")
+      .attr("stroke-opacity", 0.4)
+      .attr("stroke-width", 1);
+
+    // Nodes
+    const nodeRadius = (d: SimNode) => Math.max(6, 4 + d.dependencyCount * 2);
+    const nodeColor = (d: SimNode) => {
+      if (d.depth === 0) return "#10b981";
+      if (d.isDev) return "#f59e0b";
+      return "#3b82f6";
+    };
+
+    const node = g
+      .append("g")
+      .selectAll<SVGCircleElement, SimNode>("circle")
+      .data(simNodes)
+      .join("circle")
+      .attr("r", nodeRadius)
+      .attr("fill", nodeColor)
+      .attr("stroke", "#1f2937")
+      .attr("stroke-width", 1.5)
+      .attr("cursor", "pointer")
+      .on("click", (_, d) => {
+        const original = data.nodes.find((n) => n.id === d.id);
+        if (original && onNodeClick) onNodeClick(original);
+      });
+
+    // Labels
+    const labels = g
+      .append("g")
+      .selectAll("text")
+      .data(simNodes)
+      .join("text")
+      .text((d) => d.name)
+      .attr("font-size", 10)
+      .attr("fill", "#d1d5db")
+      .attr("dx", 12)
+      .attr("dy", 4);
+
+    // Drag behavior
+    const drag = d3.drag<SVGCircleElement, SimNode>()
+      .on("start", (event, d) => {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on("drag", (event, d) => {
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on("end", (event, d) => {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      });
+
+    node.call(drag);
+
+    simulation.on("tick", () => {
+      link
+        .attr("x1", (d: d3.SimulationLinkDatum<SimNode>) => (d.source as SimNode).x ?? 0)
+        .attr("y1", (d: d3.SimulationLinkDatum<SimNode>) => (d.source as SimNode).y ?? 0)
+        .attr("x2", (d: d3.SimulationLinkDatum<SimNode>) => (d.target as SimNode).x ?? 0)
+        .attr("y2", (d: d3.SimulationLinkDatum<SimNode>) => (d.target as SimNode).y ?? 0);
+
+      node.attr("cx", (d) => d.x ?? 0).attr("cy", (d) => d.y ?? 0);
+      labels.attr("x", (d) => d.x ?? 0).attr("y", (d) => d.y ?? 0);
+    });
+
+    return () => simulation.stop();
+  }, [data, width, height, onNodeClick]);
+
+  useEffect(() => {
+    const cleanup = renderGraph();
+    return () => cleanup?.();
+  }, [renderGraph]);
+
+  return <svg ref={svgRef} width={width} height={height} className="bg-gray-950 rounded-lg" />;
+}
+```
+
+The force simulation positions nodes using physics: charge force pushes nodes apart, link force pulls connected nodes together, and center force keeps the whole graph centered in the viewport. The result is an organic, readable layout that emerges naturally from the structure of your dependencies.
+
+## Step 4: Add Search and Filtering
+
+Build a search component that highlights matching nodes in the graph.
+
+```typescript
+"use client";
+
+// src/components/SearchBar.tsx
+import { useState } from "react";
+
+interface SearchBarProps {
+  nodes: Array<{ name: string }>;
+  onSelect: (name: string) => void;
+}
+
+export function SearchBar({ nodes, onSelect }: SearchBarProps) {
+  const [query, setQuery] = useState("");
+
+  const matches = query.length > 1
+    ? nodes.filter((n) => n.name.toLowerCase().includes(query.toLowerCase())).slice(0, 10)
+    : [];
+
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search packages..."
+        className="w-64 rounded-lg border border-gray-700 bg-gray-900 px-4 py-2 text-sm text-white placeholder-gray-500"
+      />
+      {matches.length > 0 && (
+        <ul className="absolute z-10 mt-1 w-64 rounded-lg border border-gray-700 bg-gray-900 shadow-lg">
+          {matches.map((m) => (
+            <li key={m.name}>
+              <button
+                onClick={() => { onSelect(m.name); setQuery(""); }}
+                className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-800"
+              >
+                {m.name}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+## Step 5: Build the Node Detail Panel
+
+Show detailed information when a user clicks on a node.
+
+```typescript
+"use client";
+
+// src/components/NodeDetail.tsx
+import { GraphNode, GraphLink } from "@/lib/types";
+
+interface NodeDetailProps {
+  node: GraphNode;
+  links: GraphLink[];
+  onClose: () => void;
+}
+
+export function NodeDetail({ node, links, onClose }: NodeDetailProps) {
+  const dependsOn = links
+    .filter((l) => (typeof l.source === "string" ? l.source : (l.source as unknown as GraphNode).id) === node.id)
+    .map((l) => (typeof l.target === "string" ? l.target : (l.target as unknown as GraphNode).id));
+
+  const dependedBy = links
+    .filter((l) => (typeof l.target === "string" ? l.target : (l.target as unknown as GraphNode).id) === node.id)
+    .map((l) => (typeof l.source === "string" ? l.source : (l.source as unknown as GraphNode).id));
+
+  return (
+    <div className="w-80 rounded-lg border border-gray-700 bg-gray-900 p-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-semibold text-white">{node.name}</h3>
+        <button onClick={onClose} className="text-gray-400 hover:text-white">x</button>
+      </div>
+      <p className="mt-1 text-sm text-gray-400">v{node.version}</p>
+      <p className="text-sm text-gray-400">Depth: {node.depth}</p>
+      <p className="text-sm text-gray-400">{node.isDev ? "Dev dependency" : "Production dependency"}</p>
+
+      {dependsOn.length > 0 && (
+        <div className="mt-3">
+          <h4 className="text-xs font-medium uppercase text-gray-500">Depends on ({dependsOn.length})</h4>
+          <ul className="mt-1 space-y-1">
+            {dependsOn.map((d) => (
+              <li key={d} className="text-sm text-gray-300">{d}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {dependedBy.length > 0 && (
+        <div className="mt-3">
+          <h4 className="text-xs font-medium uppercase text-gray-500">Depended by ({dependedBy.length})</h4>
+          <ul className="mt-1 space-y-1">
+            {dependedBy.map((d) => (
+              <li key={d} className="text-sm text-gray-300">{d}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <a
+        href={`https://www.npmjs.com/package/${node.name}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-3 inline-block text-sm text-blue-400 hover:underline"
+      >
+        View on npm
+      </a>
+    </div>
+  );
+}
+```
+
+## Step 6: Add Statistics Dashboard
+
+Display aggregate statistics about the dependency graph.
+
+```typescript
+"use client";
+
+// src/components/Stats.tsx
+import { GraphData } from "@/lib/types";
+import { getStats } from "@/lib/parser";
+
+interface StatsProps {
+  data: GraphData;
+}
+
+export function Stats({ data }: StatsProps) {
+  const stats = getStats(data);
+
+  const items = [
+    { label: "Total Packages", value: stats.totalPackages },
+    { label: "Direct Dependencies", value: stats.directDeps },
+    { label: "Dev Dependencies", value: stats.devDeps },
+    { label: "Most Connected", value: stats.mostConnected },
+  ];
+
+  return (
+    <div className="grid grid-cols-4 gap-4">
+      {items.map((item) => (
+        <div key={item.label} className="rounded-lg border border-gray-700 bg-gray-900 p-3">
+          <p className="text-xs text-gray-500">{item.label}</p>
+          <p className="text-lg font-semibold text-white">{item.value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+## Step 7: Add File Upload
+
+Let users upload their own `package.json` files.
+
+```typescript
+"use client";
+
+// src/components/FileUpload.tsx
+import { useCallback } from "react";
+
+interface FileUploadProps {
+  onFileLoad: (content: string) => void;
+}
+
+export function FileUpload({ onFileLoad }: FileUploadProps) {
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const content = event.target?.result as string;
+          if (content) onFileLoad(content);
+        };
+        reader.readAsText(file);
+      }
+    },
+    [onFileLoad]
+  );
+
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const content = event.target?.result as string;
+          if (content) onFileLoad(content);
+        };
+        reader.readAsText(file);
+      }
+    },
+    [onFileLoad]
+  );
+
+  return (
+    <div
+      onDrop={handleDrop}
+      onDragOver={(e) => e.preventDefault()}
+      className="flex items-center justify-center rounded-lg border-2 border-dashed border-gray-600 p-8 transition-colors hover:border-gray-400"
+    >
+      <label className="cursor-pointer text-center">
+        <p className="text-gray-400">Drop a package.json here or click to upload</p>
+        <input type="file" accept=".json" onChange={handleChange} className="hidden" />
+      </label>
+    </div>
+  );
+}
+```
+
+## Step 8: Assemble the Application
+
+Wire everything together in the main page.
+
+```typescript
+"use client";
+
+// src/app/page.tsx
+import { useState } from "react";
+import { ForceGraph } from "@/components/ForceGraph";
+import { SearchBar } from "@/components/SearchBar";
+import { NodeDetail } from "@/components/NodeDetail";
+import { Stats } from "@/components/Stats";
+import { FileUpload } from "@/components/FileUpload";
+import { parsePackageJson, buildGraph } from "@/lib/parser";
+import { GraphData, GraphNode } from "@/lib/types";
+
+export default function Home() {
+  const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+
+  function handleFileLoad(content: string): void {
+    try {
+      const pkg = parsePackageJson(content);
+      const data = buildGraph(pkg, 2);
+      setGraphData(data);
+      setSelectedNode(null);
+    } catch (error) {
+      console.error("Failed to parse package.json:", error);
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-gray-950 p-8">
+      <h1 className="mb-6 text-3xl font-bold text-white">Dependency Graph</h1>
+
+      {!graphData ? (
+        <FileUpload onFileLoad={handleFileLoad} />
+      ) : (
+        <div className="space-y-4">
+          <div className="flex items-center gap-4">
+            <SearchBar nodes={graphData.nodes} onSelect={(name) => {
+              const node = graphData.nodes.find((n) => n.id === name);
+              if (node) setSelectedNode(node);
+            }} />
+            <button
+              onClick={() => { setGraphData(null); setSelectedNode(null); }}
+              className="rounded-lg bg-gray-800 px-4 py-2 text-sm text-gray-300 hover:bg-gray-700"
+            >
+              Load new file
+            </button>
+          </div>
+
+          <Stats data={graphData} />
+
+          <div className="flex gap-4">
+            <ForceGraph
+              data={graphData}
+              width={selectedNode ? 900 : 1200}
+              height={600}
+              onNodeClick={setSelectedNode}
+            />
+            {selectedNode && (
+              <NodeDetail
+                node={selectedNode}
+                links={graphData.links}
+                onClose={() => setSelectedNode(null)}
+              />
+            )}
+          </div>
+
+          <div className="flex gap-4 text-xs text-gray-500">
+            <span><span className="mr-1 inline-block h-2 w-2 rounded-full bg-emerald-500" />Root</span>
+            <span><span className="mr-1 inline-block h-2 w-2 rounded-full bg-blue-500" />Production</span>
+            <span><span className="mr-1 inline-block h-2 w-2 rounded-full bg-amber-500" />Dev</span>
+          </div>
+        </div>
+      )}
+    </main>
+  );
+}
+```
+
+Run `npm run dev` and drop a `package.json` file onto the page. Your dependencies appear as an interactive force-directed graph. Click nodes to see details, search to find specific packages, drag nodes to rearrange the layout, and scroll to zoom.
+
+The most valuable insight from this visualization is identifying hub packages — nodes with many connections. If a hub package has a security vulnerability or breaks in an update, the blast radius is proportional to its connectivity in your graph. This is exactly how tools like Snyk and Socket assess supply chain risk.

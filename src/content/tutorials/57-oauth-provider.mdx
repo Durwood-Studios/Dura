@@ -1,0 +1,628 @@
+---
+title: "Build an OAuth 2.0 Provider"
+description: "Build a complete OAuth 2.0 authorization server with authorization code flow, PKCE, token endpoints, scopes, client registration, and refresh tokens."
+slug: "oauth-provider"
+difficulty: "advanced"
+estimatedMinutes: 210
+steps: 10
+tags: ["auth", "oauth", "security", "node", "tokens"]
+---
+
+## Overview
+
+OAuth 2.0 is the authorization framework that powers "Sign in with Google," "Connect your GitHub," and virtually every third-party integration on the web. Understanding how OAuth works at the protocol level — not just as a library consumer — is essential for any developer building authentication systems, APIs, or platform integrations.
+
+In this tutorial, you will build a complete OAuth 2.0 authorization server from scratch. You will implement the authorization code grant flow (the most secure and most common flow), PKCE for public clients, token issuance and refresh, scope-based access control, and client registration. By the end, third-party applications will be able to authenticate users through your server and receive scoped access tokens.
+
+This is not a toy implementation. Every design decision follows the OAuth 2.0 specification (RFC 6749) and current best practices (RFC 7636 for PKCE, RFC 6819 for security considerations).
+
+## Step 1: Set Up the Project
+
+Initialize the project with the cryptographic and web server dependencies.
+
+```bash
+mkdir oauth-provider && cd oauth-provider
+npm init -y
+npm install express better-sqlite3 jsonwebtoken bcryptjs
+npm install -D typescript @types/node @types/express @types/better-sqlite3 @types/jsonwebtoken @types/bcryptjs tsx
+npx tsc --init --target ES2022 --module NodeNext --moduleResolution NodeNext
+```
+
+Define the core types:
+
+```typescript
+// src/types.ts
+export interface OAuthClient {
+  clientId: string;
+  clientSecret: string;
+  name: string;
+  redirectUris: string[];
+  scopes: string[];
+  isPublic: boolean;
+}
+
+export interface AuthorizationCode {
+  code: string;
+  clientId: string;
+  userId: string;
+  redirectUri: string;
+  scopes: string[];
+  codeChallenge?: string;
+  codeChallengeMethod?: string;
+  expiresAt: number;
+}
+
+export interface TokenPayload {
+  sub: string;
+  clientId: string;
+  scopes: string[];
+  type: "access" | "refresh";
+}
+```
+
+The `AuthorizationCode` type includes PKCE fields (`codeChallenge`, `codeChallengeMethod`) which are optional for confidential clients but required for public clients like SPAs and mobile apps.
+
+## Step 2: Build the Database Layer
+
+Store clients, authorization codes, and refresh tokens in SQLite.
+
+```typescript
+// src/database.ts
+import Database from "better-sqlite3";
+import { OAuthClient, AuthorizationCode } from "./types.js";
+
+export class OAuthDatabase {
+  private db: Database.Database;
+
+  constructor() {
+    this.db = new Database("oauth.db");
+    this.db.pragma("journal_mode = WAL");
+    this.initialize();
+  }
+
+  private initialize(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS clients (
+        client_id TEXT PRIMARY KEY,
+        client_secret TEXT NOT NULL,
+        name TEXT NOT NULL,
+        redirect_uris TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        is_public INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS auth_codes (
+        code TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        code_challenge TEXT,
+        code_challenge_method TEXT,
+        expires_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
+        token TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        name TEXT NOT NULL
+      );
+    `);
+  }
+
+  getClient(clientId: string): OAuthClient | null {
+    const row = this.db.prepare("SELECT * FROM clients WHERE client_id = ?").get(clientId) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+
+    return {
+      clientId: row.client_id as string,
+      clientSecret: row.client_secret as string,
+      name: row.name as string,
+      redirectUris: JSON.parse(row.redirect_uris as string),
+      scopes: JSON.parse(row.scopes as string),
+      isPublic: Boolean(row.is_public),
+    };
+  }
+
+  saveAuthCode(code: AuthorizationCode): void {
+    this.db
+      .prepare(
+        `
+      INSERT INTO auth_codes (code, client_id, user_id, redirect_uri, scopes, code_challenge, code_challenge_method, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `
+      )
+      .run(
+        code.code,
+        code.clientId,
+        code.userId,
+        code.redirectUri,
+        JSON.stringify(code.scopes),
+        code.codeChallenge ?? null,
+        code.codeChallengeMethod ?? null,
+        code.expiresAt
+      );
+  }
+
+  consumeAuthCode(code: string): AuthorizationCode | null {
+    const row = this.db
+      .prepare("SELECT * FROM auth_codes WHERE code = ? AND expires_at > ?")
+      .get(code, Date.now()) as Record<string, unknown> | undefined;
+    if (!row) return null;
+
+    this.db.prepare("DELETE FROM auth_codes WHERE code = ?").run(code);
+
+    return {
+      code: row.code as string,
+      clientId: row.client_id as string,
+      userId: row.user_id as string,
+      redirectUri: row.redirect_uri as string,
+      scopes: JSON.parse(row.scopes as string),
+      codeChallenge: row.code_challenge as string | undefined,
+      codeChallengeMethod: row.code_challenge_method as string | undefined,
+      expiresAt: row.expires_at as number,
+    };
+  }
+
+  saveRefreshToken(token: string, clientId: string, userId: string, scopes: string[]): void {
+    const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days
+    this.db
+      .prepare(
+        `
+      INSERT INTO refresh_tokens (token, client_id, user_id, scopes, expires_at)
+      VALUES (?, ?, ?, ?, ?)
+    `
+      )
+      .run(token, clientId, userId, JSON.stringify(scopes), expiresAt);
+  }
+
+  getRefreshToken(token: string): { clientId: string; userId: string; scopes: string[] } | null {
+    const row = this.db
+      .prepare("SELECT * FROM refresh_tokens WHERE token = ? AND revoked = 0 AND expires_at > ?")
+      .get(token, Date.now()) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    return {
+      clientId: row.client_id as string,
+      userId: row.user_id as string,
+      scopes: JSON.parse(row.scopes as string),
+    };
+  }
+
+  revokeRefreshToken(token: string): void {
+    this.db.prepare("UPDATE refresh_tokens SET revoked = 1 WHERE token = ?").run(token);
+  }
+}
+```
+
+Authorization codes are consumed (deleted) on use — this is a critical security requirement. A code can only be exchanged for tokens once. If an attacker intercepts a code, the legitimate exchange will fail, alerting the user.
+
+## Step 3: Implement PKCE Verification
+
+PKCE (Proof Key for Code Exchange) prevents authorization code interception attacks.
+
+```typescript
+// src/pkce.ts
+import crypto from "crypto";
+
+export function verifyCodeChallenge(
+  codeVerifier: string,
+  codeChallenge: string,
+  method: string
+): boolean {
+  if (method === "S256") {
+    const hash = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+    return hash === codeChallenge;
+  }
+
+  if (method === "plain") {
+    return codeVerifier === codeChallenge;
+  }
+
+  return false;
+}
+
+export function generateCodeChallenge(verifier: string): string {
+  return crypto.createHash("sha256").update(verifier).digest("base64url");
+}
+```
+
+The client generates a random `code_verifier`, hashes it to produce a `code_challenge`, and sends the challenge with the authorization request. When exchanging the code for tokens, the client sends the original verifier. The server hashes the verifier and compares it to the stored challenge. An attacker who intercepts the code does not have the verifier and cannot complete the exchange.
+
+## Step 4: Build Token Generation
+
+Create utilities for generating and verifying JWTs.
+
+```typescript
+// src/tokens.ts
+import jwt from "jsonwebtoken";
+import crypto from "crypto";
+import { TokenPayload } from "./types.js";
+
+const JWT_SECRET = process.env.JWT_SECRET ?? "change-this-in-production";
+const ACCESS_TOKEN_TTL = "15m";
+const REFRESH_TOKEN_TTL = "30d";
+
+export function generateAccessToken(userId: string, clientId: string, scopes: string[]): string {
+  const payload: TokenPayload = {
+    sub: userId,
+    clientId,
+    scopes,
+    type: "access",
+  };
+
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
+}
+
+export function generateRefreshToken(): string {
+  return crypto.randomBytes(48).toString("base64url");
+}
+
+export function verifyAccessToken(token: string): TokenPayload | null {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as TokenPayload;
+    if (decoded.type !== "access") return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+```
+
+Access tokens are short-lived JWTs (15 minutes). Refresh tokens are opaque random strings stored in the database (30 days). This separation means access tokens can be validated without a database lookup, while refresh tokens can be revoked instantly by marking them in the database.
+
+## Step 5: Build the Authorization Endpoint
+
+The authorization endpoint is where users grant permission to third-party apps.
+
+```typescript
+// src/routes/authorize.ts
+import { Router, Request, Response } from "express";
+import crypto from "crypto";
+import { OAuthDatabase } from "../database.js";
+
+export function createAuthorizeRouter(db: OAuthDatabase): Router {
+  const router = Router();
+
+  router.get("/authorize", (req: Request, res: Response) => {
+    const {
+      client_id,
+      redirect_uri,
+      response_type,
+      scope,
+      state,
+      code_challenge,
+      code_challenge_method,
+    } = req.query;
+
+    if (response_type !== "code") {
+      res.status(400).json({ error: "unsupported_response_type" });
+      return;
+    }
+
+    const client = db.getClient(client_id as string);
+    if (!client) {
+      res.status(400).json({ error: "invalid_client" });
+      return;
+    }
+
+    if (!client.redirectUris.includes(redirect_uri as string)) {
+      res.status(400).json({ error: "invalid_redirect_uri" });
+      return;
+    }
+
+    if (client.isPublic && !code_challenge) {
+      res.status(400).json({ error: "PKCE required for public clients" });
+      return;
+    }
+
+    const requestedScopes = ((scope as string) ?? "").split(" ").filter(Boolean);
+    const validScopes = requestedScopes.filter((s) => client.scopes.includes(s));
+
+    // In production, render a consent screen here
+    // For this tutorial, auto-approve with a hardcoded user
+    const userId = "user-1";
+    const code = crypto.randomBytes(32).toString("base64url");
+
+    db.saveAuthCode({
+      code,
+      clientId: client.clientId,
+      userId,
+      redirectUri: redirect_uri as string,
+      scopes: validScopes,
+      codeChallenge: code_challenge as string | undefined,
+      codeChallengeMethod: (code_challenge_method as string) ?? "S256",
+      expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+    });
+
+    const redirectUrl = new URL(redirect_uri as string);
+    redirectUrl.searchParams.set("code", code);
+    if (state) redirectUrl.searchParams.set("state", state as string);
+
+    res.redirect(redirectUrl.toString());
+  });
+
+  return router;
+}
+```
+
+The `state` parameter is echoed back to prevent CSRF attacks. The authorization code expires in 10 minutes — short enough to limit the window of interception, long enough for users to complete the flow.
+
+## Step 6: Build the Token Endpoint
+
+The token endpoint exchanges authorization codes for access and refresh tokens.
+
+```typescript
+// src/routes/token.ts
+import { Router, Request, Response } from "express";
+import { OAuthDatabase } from "../database.js";
+import { generateAccessToken, generateRefreshToken } from "../tokens.js";
+import { verifyCodeChallenge } from "../pkce.js";
+
+export function createTokenRouter(db: OAuthDatabase): Router {
+  const router = Router();
+
+  router.post("/token", (req: Request, res: Response) => {
+    const { grant_type } = req.body;
+
+    if (grant_type === "authorization_code") {
+      handleAuthorizationCode(req, res, db);
+    } else if (grant_type === "refresh_token") {
+      handleRefreshToken(req, res, db);
+    } else {
+      res.status(400).json({ error: "unsupported_grant_type" });
+    }
+  });
+
+  return router;
+}
+
+function handleAuthorizationCode(req: Request, res: Response, db: OAuthDatabase): void {
+  const { code, redirect_uri, client_id, client_secret, code_verifier } = req.body;
+
+  const authCode = db.consumeAuthCode(code);
+  if (!authCode) {
+    res.status(400).json({ error: "invalid_grant" });
+    return;
+  }
+
+  if (authCode.redirectUri !== redirect_uri) {
+    res.status(400).json({ error: "invalid_grant" });
+    return;
+  }
+
+  const client = db.getClient(authCode.clientId);
+  if (!client) {
+    res.status(400).json({ error: "invalid_client" });
+    return;
+  }
+
+  if (!client.isPublic) {
+    if (client.clientSecret !== client_secret) {
+      res.status(401).json({ error: "invalid_client" });
+      return;
+    }
+  }
+
+  if (authCode.codeChallenge && code_verifier) {
+    const valid = verifyCodeChallenge(
+      code_verifier,
+      authCode.codeChallenge,
+      authCode.codeChallengeMethod ?? "S256"
+    );
+    if (!valid) {
+      res.status(400).json({ error: "invalid_grant", description: "PKCE verification failed" });
+      return;
+    }
+  }
+
+  const accessToken = generateAccessToken(authCode.userId, authCode.clientId, authCode.scopes);
+  const refreshToken = generateRefreshToken();
+
+  db.saveRefreshToken(refreshToken, authCode.clientId, authCode.userId, authCode.scopes);
+
+  res.json({
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: 900,
+    refresh_token: refreshToken,
+    scope: authCode.scopes.join(" "),
+  });
+}
+
+function handleRefreshToken(req: Request, res: Response, db: OAuthDatabase): void {
+  const { refresh_token } = req.body;
+
+  const stored = db.getRefreshToken(refresh_token);
+  if (!stored) {
+    res.status(400).json({ error: "invalid_grant" });
+    return;
+  }
+
+  // Rotate refresh token
+  db.revokeRefreshToken(refresh_token);
+  const newRefreshToken = generateRefreshToken();
+  db.saveRefreshToken(newRefreshToken, stored.clientId, stored.userId, stored.scopes);
+
+  const accessToken = generateAccessToken(stored.userId, stored.clientId, stored.scopes);
+
+  res.json({
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: 900,
+    refresh_token: newRefreshToken,
+    scope: stored.scopes.join(" "),
+  });
+}
+```
+
+Refresh token rotation is a security best practice: each time a refresh token is used, a new one is issued and the old one is revoked. If an attacker steals a refresh token and uses it, the legitimate user's next refresh will fail (because the token was already rotated), signaling a compromise.
+
+## Step 7: Build Scope Validation Middleware
+
+Create middleware that validates access tokens and checks scopes.
+
+```typescript
+// src/middleware/scope.ts
+import { Request, Response, NextFunction } from "express";
+import { verifyAccessToken } from "../tokens.js";
+
+export function requireScopes(...requiredScopes: string[]) {
+  return function scopeMiddleware(req: Request, res: Response, next: NextFunction): void {
+    const header = req.headers.authorization;
+    if (!header?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "missing_token" });
+      return;
+    }
+
+    const token = header.slice(7);
+    const payload = verifyAccessToken(token);
+
+    if (!payload) {
+      res.status(401).json({ error: "invalid_token" });
+      return;
+    }
+
+    const hasScopes = requiredScopes.every((s) => payload.scopes.includes(s));
+    if (!hasScopes) {
+      res.status(403).json({ error: "insufficient_scope", required: requiredScopes });
+      return;
+    }
+
+    (req as Record<string, unknown>).tokenPayload = payload;
+    next();
+  };
+}
+```
+
+## Step 8: Implement Client Registration
+
+Allow developers to register new OAuth clients.
+
+```typescript
+// src/routes/register.ts
+import { Router, Request, Response } from "express";
+import crypto from "crypto";
+import bcrypt from "bcryptjs";
+import { OAuthDatabase } from "../database.js";
+
+export function createRegisterRouter(db: OAuthDatabase): Router {
+  const router = Router();
+
+  router.post("/register", async (req: Request, res: Response) => {
+    const { name, redirect_uris, scopes, is_public } = req.body;
+
+    if (!name || !redirect_uris?.length) {
+      res.status(400).json({ error: "name and redirect_uris are required" });
+      return;
+    }
+
+    const clientId = crypto.randomBytes(16).toString("hex");
+    const clientSecret = crypto.randomBytes(32).toString("base64url");
+    const hashedSecret = await bcrypt.hash(clientSecret, 12);
+
+    db.registerClient({
+      clientId,
+      clientSecret: hashedSecret,
+      name,
+      redirectUris: redirect_uris,
+      scopes: scopes ?? ["read"],
+      isPublic: is_public ?? false,
+    });
+
+    res.status(201).json({
+      client_id: clientId,
+      client_secret: is_public ? undefined : clientSecret,
+      name,
+      redirect_uris,
+    });
+  });
+
+  return router;
+}
+```
+
+The client secret is shown exactly once during registration and stored as a bcrypt hash. Public clients (SPAs, mobile apps) do not receive a secret — they use PKCE instead.
+
+## Step 9: Add Token Revocation
+
+Implement the revocation endpoint per RFC 7009.
+
+```typescript
+// src/routes/revoke.ts
+import { Router, Request, Response } from "express";
+import { OAuthDatabase } from "../database.js";
+
+export function createRevokeRouter(db: OAuthDatabase): Router {
+  const router = Router();
+
+  router.post("/revoke", (req: Request, res: Response) => {
+    const { token } = req.body;
+
+    if (!token) {
+      res.status(400).json({ error: "token is required" });
+      return;
+    }
+
+    db.revokeRefreshToken(token);
+
+    // Always return 200 per spec, even if token was not found
+    res.status(200).json({ revoked: true });
+  });
+
+  return router;
+}
+```
+
+## Step 10: Assemble the Server
+
+Wire all routes together and start the server.
+
+```typescript
+// src/index.ts
+import express from "express";
+import { OAuthDatabase } from "./database.js";
+import { createAuthorizeRouter } from "./routes/authorize.js";
+import { createTokenRouter } from "./routes/token.js";
+import { createRegisterRouter } from "./routes/register.js";
+import { createRevokeRouter } from "./routes/revoke.js";
+import { requireScopes } from "./middleware/scope.js";
+
+const db = new OAuthDatabase();
+const app = express();
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.use(createAuthorizeRouter(db));
+app.use(createTokenRouter(db));
+app.use(createRegisterRouter(db));
+app.use(createRevokeRouter(db));
+
+// Protected resource example
+app.get("/api/profile", requireScopes("profile:read"), (req, res) => {
+  const payload = (req as Record<string, unknown>).tokenPayload;
+  res.json({ user: payload });
+});
+
+app.listen(4000, () => {
+  console.log("OAuth provider running on port 4000");
+});
+```
+
+Test the full flow: register a client, visit `/authorize` with the client's parameters, exchange the authorization code at `/token`, and use the access token to hit `/api/profile`. You have built a standards-compliant OAuth 2.0 authorization server.
+
+For production use, add TLS everywhere, implement the consent screen UI, add rate limiting on the token endpoint, log all authorization events for audit, and consider adding OpenID Connect (OIDC) for identity on top of the authorization layer.

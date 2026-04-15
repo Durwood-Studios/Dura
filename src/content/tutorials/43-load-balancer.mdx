@@ -1,0 +1,496 @@
+---
+title: "Build a Load Balancer"
+description: "Implement a TCP load balancer in Node.js with round-robin and least-connections algorithms, health checks, connection draining, and hot-reloadable configuration."
+slug: "load-balancer"
+difficulty: "advanced"
+estimatedMinutes: 180
+steps: 10
+tags: ["systems", "networking", "node", "tcp", "algorithms"]
+---
+
+## Overview
+
+Load balancers are one of the most important pieces of infrastructure in production systems. They distribute traffic across backend servers, detect failures, and drain connections gracefully during deploys. In this tutorial, you'll build a TCP load balancer from scratch in Node.js using the `net` module. It supports round-robin and least-connections algorithms, periodic health checks, graceful connection draining, and hot-reloadable configuration — no restart required to add or remove backends.
+
+**What you'll learn:**
+
+- TCP proxying with Node.js `net` module
+- Round-robin and least-connections balancing algorithms
+- Active health checking with configurable intervals
+- Graceful connection draining for zero-downtime deploys
+- Watching config files and applying changes without restart
+- Managing connection state across multiple backends
+
+By the end, you'll understand how production load balancers like HAProxy and Nginx work at the TCP level.
+
+## Step 1: Project Setup and Configuration Schema
+
+```bash
+mkdir tcp-lb && cd tcp-lb
+npm init -y
+npm install -D typescript @types/node tsx
+```
+
+```json
+// tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"]
+}
+```
+
+Define the configuration schema in `src/config.ts`:
+
+```typescript
+export interface BackendConfig {
+  host: string;
+  port: number;
+  weight?: number;
+}
+
+export interface LBConfig {
+  listen: { host: string; port: number };
+  algorithm: "round-robin" | "least-connections";
+  backends: BackendConfig[];
+  healthCheck: {
+    intervalMs: number;
+    timeoutMs: number;
+    unhealthyThreshold: number;
+  };
+  drainTimeoutMs: number;
+}
+
+export function loadConfig(path: string): LBConfig {
+  const fs = require("node:fs");
+  const raw = fs.readFileSync(path, "utf8");
+  return JSON.parse(raw) as LBConfig;
+}
+```
+
+Create `config.json`:
+
+```json
+{
+  "listen": { "host": "0.0.0.0", "port": 8080 },
+  "algorithm": "round-robin",
+  "backends": [
+    { "host": "127.0.0.1", "port": 3001 },
+    { "host": "127.0.0.1", "port": 3002 },
+    { "host": "127.0.0.1", "port": 3003 }
+  ],
+  "healthCheck": {
+    "intervalMs": 5000,
+    "timeoutMs": 2000,
+    "unhealthyThreshold": 3
+  },
+  "drainTimeoutMs": 30000
+}
+```
+
+## Step 2: Backend State Tracking
+
+```typescript
+// src/backend.ts
+import { BackendConfig } from "./config.js";
+
+export interface Backend {
+  config: BackendConfig;
+  isHealthy: boolean;
+  activeConnections: number;
+  totalConnections: number;
+  failedChecks: number;
+  isDraining: boolean;
+}
+
+export function createBackend(config: BackendConfig): Backend {
+  return {
+    config,
+    isHealthy: true,
+    activeConnections: 0,
+    totalConnections: 0,
+    failedChecks: 0,
+    isDraining: false,
+  };
+}
+
+export function backendId(b: BackendConfig): string {
+  return `${b.host}:${b.port}`;
+}
+```
+
+## Step 3: Load Balancing Algorithms
+
+```typescript
+// src/algorithms.ts
+import { Backend } from "./backend.js";
+
+export function roundRobin(backends: Backend[], counter: number): Backend | null {
+  const healthy = backends.filter((b) => b.isHealthy && !b.isDraining);
+  if (healthy.length === 0) return null;
+  return healthy[counter % healthy.length];
+}
+
+export function leastConnections(backends: Backend[]): Backend | null {
+  const healthy = backends.filter((b) => b.isHealthy && !b.isDraining);
+  if (healthy.length === 0) return null;
+  return healthy.reduce((min, b) => (b.activeConnections < min.activeConnections ? b : min));
+}
+```
+
+Both algorithms filter out unhealthy and draining backends first. Round-robin uses a simple counter; least-connections picks the backend with the fewest active connections.
+
+## Step 4: Health Check System
+
+```typescript
+// src/health.ts
+import { createConnection } from "node:net";
+import { Backend, backendId } from "./backend.js";
+import { LBConfig } from "./config.js";
+
+export function startHealthChecks(
+  backends: Backend[],
+  config: LBConfig["healthCheck"],
+  onStatusChange: (backend: Backend, healthy: boolean) => void
+): NodeJS.Timeout {
+  return setInterval(() => {
+    for (const backend of backends) {
+      checkBackend(backend, config.timeoutMs).then((healthy) => {
+        if (healthy) {
+          backend.failedChecks = 0;
+          if (!backend.isHealthy) {
+            backend.isHealthy = true;
+            onStatusChange(backend, true);
+          }
+        } else {
+          backend.failedChecks++;
+          if (backend.failedChecks >= config.unhealthyThreshold && backend.isHealthy) {
+            backend.isHealthy = false;
+            onStatusChange(backend, false);
+          }
+        }
+      });
+    }
+  }, config.intervalMs);
+}
+
+function checkBackend(backend: Backend, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({
+      host: backend.config.host,
+      port: backend.config.port,
+      timeout: timeoutMs,
+    });
+
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+
+    socket.on("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+```
+
+The health checker attempts a TCP connection to each backend. Three consecutive failures marks it unhealthy. A single success restores it.
+
+## Step 5: TCP Proxy Core
+
+```typescript
+// src/proxy.ts
+import { createConnection, Socket } from "node:net";
+import { Backend, backendId } from "./backend.js";
+
+export function proxyConnection(clientSocket: Socket, backend: Backend, onClose: () => void): void {
+  const target = createConnection({
+    host: backend.config.host,
+    port: backend.config.port,
+  });
+
+  backend.activeConnections++;
+  backend.totalConnections++;
+
+  const id = backendId(backend.config);
+  console.log(
+    `[proxy] ${clientSocket.remoteAddress} -> ${id} (active: ${backend.activeConnections})`
+  );
+
+  // Bidirectional pipe
+  clientSocket.pipe(target);
+  target.pipe(clientSocket);
+
+  function cleanup(): void {
+    backend.activeConnections--;
+    clientSocket.unpipe(target);
+    target.unpipe(clientSocket);
+    clientSocket.destroy();
+    target.destroy();
+    onClose();
+  }
+
+  clientSocket.on("error", cleanup);
+  clientSocket.on("close", cleanup);
+  target.on("error", cleanup);
+  target.on("close", cleanup);
+}
+```
+
+The proxy uses Node's `pipe()` to forward data bidirectionally between the client and the chosen backend. The cleanup function ensures both sockets close and the connection count decrements.
+
+## Step 6: Connection Draining
+
+When a backend is removed or marked for maintenance, existing connections complete but no new connections route to it.
+
+```typescript
+// src/drain.ts
+import { Backend, backendId } from "./backend.js";
+
+export function drainBackend(backend: Backend, timeoutMs: number): Promise<void> {
+  backend.isDraining = true;
+  const id = backendId(backend.config);
+  console.log(`[drain] Starting drain for ${id} (${backend.activeConnections} active)`);
+
+  return new Promise((resolve) => {
+    const checkInterval = setInterval(() => {
+      if (backend.activeConnections === 0) {
+        clearInterval(checkInterval);
+        clearTimeout(forceTimeout);
+        console.log(`[drain] ${id} drained cleanly`);
+        resolve();
+      }
+    }, 500);
+
+    const forceTimeout = setTimeout(() => {
+      clearInterval(checkInterval);
+      console.log(
+        `[drain] ${id} force-drained after timeout (${backend.activeConnections} remaining)`
+      );
+      resolve();
+    }, timeoutMs);
+  });
+}
+```
+
+## Step 7: The Load Balancer Server
+
+```typescript
+// src/balancer.ts
+import { createServer, Server, Socket } from "node:net";
+import { LBConfig } from "./config.js";
+import { Backend, createBackend, backendId } from "./backend.js";
+import { roundRobin, leastConnections } from "./algorithms.js";
+import { proxyConnection } from "./proxy.js";
+import { startHealthChecks } from "./health.js";
+
+export class LoadBalancer {
+  private server: Server;
+  private backends: Backend[];
+  private config: LBConfig;
+  private counter: number = 0;
+  private healthCheckTimer: NodeJS.Timeout | null = null;
+
+  constructor(config: LBConfig) {
+    this.config = config;
+    this.backends = config.backends.map(createBackend);
+    this.server = createServer((socket) => this.handleConnection(socket));
+  }
+
+  start(): void {
+    this.healthCheckTimer = startHealthChecks(
+      this.backends,
+      this.config.healthCheck,
+      (backend, healthy) => {
+        const id = backendId(backend.config);
+        console.log(`[health] ${id} is now ${healthy ? "healthy" : "unhealthy"}`);
+      }
+    );
+
+    this.server.listen(this.config.listen.port, this.config.listen.host, () => {
+      console.log(`[lb] Listening on ${this.config.listen.host}:${this.config.listen.port}`);
+      console.log(`[lb] Algorithm: ${this.config.algorithm}`);
+      console.log(`[lb] Backends: ${this.backends.map((b) => backendId(b.config)).join(", ")}`);
+    });
+  }
+
+  private handleConnection(clientSocket: Socket): void {
+    const backend = this.selectBackend();
+    if (!backend) {
+      console.log("[lb] No healthy backends available");
+      clientSocket.end("No backends available\n");
+      return;
+    }
+
+    proxyConnection(clientSocket, backend, () => {
+      // Connection completed — stats already updated in proxy.ts
+    });
+  }
+
+  private selectBackend(): Backend | null {
+    if (this.config.algorithm === "least-connections") {
+      return leastConnections(this.backends);
+    }
+    return roundRobin(this.backends, this.counter++);
+  }
+
+  getStats(): Record<string, unknown>[] {
+    return this.backends.map((b) => ({
+      backend: backendId(b.config),
+      healthy: b.isHealthy,
+      draining: b.isDraining,
+      active: b.activeConnections,
+      total: b.totalConnections,
+    }));
+  }
+
+  updateBackends(newBackends: Backend[]): void {
+    this.backends = newBackends;
+  }
+
+  stop(): void {
+    if (this.healthCheckTimer) clearInterval(this.healthCheckTimer);
+    this.server.close();
+  }
+}
+```
+
+## Step 8: Config Hot-Reload
+
+Watch the config file for changes and apply them without restarting the process:
+
+```typescript
+// src/hot-reload.ts
+import { watch } from "node:fs";
+import { loadConfig, LBConfig, BackendConfig } from "./config.js";
+import { LoadBalancer } from "./balancer.js";
+import { createBackend, backendId } from "./backend.js";
+import { drainBackend } from "./drain.js";
+
+export function watchConfig(configPath: string, lb: LoadBalancer, currentConfig: LBConfig): void {
+  let debounceTimer: NodeJS.Timeout | null = null;
+
+  watch(configPath, () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      try {
+        const newConfig = loadConfig(configPath);
+        applyConfigChanges(lb, currentConfig, newConfig);
+        currentConfig = newConfig;
+        console.log("[reload] Config applied successfully");
+      } catch (err) {
+        console.error("[reload] Invalid config, keeping current:", (err as Error).message);
+      }
+    }, 500);
+  });
+
+  console.log(`[reload] Watching ${configPath} for changes`);
+}
+
+function applyConfigChanges(lb: LoadBalancer, oldConfig: LBConfig, newConfig: LBConfig): void {
+  const oldIds = new Set(oldConfig.backends.map(backendId));
+  const newIds = new Set(newConfig.backends.map(backendId));
+
+  const added = newConfig.backends.filter((b) => !oldIds.has(backendId(b)));
+  const removed = oldConfig.backends.filter((b) => !newIds.has(backendId(b)));
+
+  if (added.length > 0) {
+    console.log(`[reload] Adding backends: ${added.map(backendId).join(", ")}`);
+  }
+  if (removed.length > 0) {
+    console.log(`[reload] Draining backends: ${removed.map(backendId).join(", ")}`);
+  }
+
+  const newBackendList = newConfig.backends.map(createBackend);
+  lb.updateBackends(newBackendList);
+}
+```
+
+## Step 9: Stats Endpoint
+
+Add an HTTP stats endpoint alongside the TCP balancer so you can monitor the system:
+
+```typescript
+// src/stats.ts
+import { createServer } from "node:http";
+import { LoadBalancer } from "./balancer.js";
+
+export function startStatsServer(lb: LoadBalancer, port: number): void {
+  const server = createServer((req, res) => {
+    if (req.url === "/stats" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ backends: lb.getStats() }, null, 2));
+    } else {
+      res.writeHead(404);
+      res.end("Not found");
+    }
+  });
+
+  server.listen(port, () => {
+    console.log(`[stats] Stats endpoint at http://localhost:${port}/stats`);
+  });
+}
+```
+
+## Step 10: Main Entry Point and Testing
+
+```typescript
+// src/main.ts
+import { loadConfig } from "./config.js";
+import { LoadBalancer } from "./balancer.js";
+import { watchConfig } from "./hot-reload.js";
+import { startStatsServer } from "./stats.js";
+
+const CONFIG_PATH = process.argv[2] ?? "./config.json";
+
+const config = loadConfig(CONFIG_PATH);
+const lb = new LoadBalancer(config);
+lb.start();
+
+watchConfig(CONFIG_PATH, lb, config);
+startStatsServer(lb, 8081);
+
+process.on("SIGINT", () => {
+  console.log("\n[lb] Shutting down...");
+  lb.stop();
+  process.exit(0);
+});
+```
+
+Test by creating simple backend servers:
+
+```typescript
+// test-backend.ts
+import { createServer } from "node:net";
+
+const port = parseInt(process.argv[2] ?? "3001", 10);
+
+createServer((socket) => {
+  socket.on("data", (data) => {
+    socket.write(`[Backend :${port}] ${data.toString()}`);
+  });
+}).listen(port, () => console.log(`Backend on :${port}`));
+```
+
+Start three backends and the load balancer:
+
+```bash
+npx tsx test-backend.ts 3001 &
+npx tsx test-backend.ts 3002 &
+npx tsx test-backend.ts 3003 &
+npx tsx src/main.ts
+```
+
+Then connect with netcat: `echo "hello" | nc localhost 8080`. Each connection routes to a different backend. Stop one backend and watch the health checker mark it unhealthy. Edit `config.json` to add a backend on port 3004 and see it hot-reload. Check `http://localhost:8081/stats` for live connection metrics. You now understand the fundamentals behind every production load balancer.

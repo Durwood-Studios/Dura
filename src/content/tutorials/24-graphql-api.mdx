@@ -1,0 +1,505 @@
+---
+title: "Build a GraphQL API"
+description: "Design a type-safe GraphQL API from scratch with schema-first design, resolvers, queries, mutations, and error handling."
+slug: "graphql-api"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["graphql", "api", "node", "typescript", "schema"]
+---
+
+## Overview
+
+You're going to build a GraphQL API for a book review platform. Users can query books, authors, and reviews, add new books, and submit reviews with ratings. The API features schema-first design, TypeScript resolvers, input validation, custom error handling, and a playground for testing.
+
+GraphQL solves real problems that REST introduces: over-fetching (getting 50 fields when you need 3), under-fetching (making 5 requests to assemble one view), and the constant API versioning dance. By the end of this tutorial, you'll understand when GraphQL is the right tool and how to build it properly.
+
+You'll use Apollo Server 4, TypeScript, and Zod for input validation. No database — we'll use an in-memory store so you can focus entirely on the GraphQL layer.
+
+## Step 1: Project Setup
+
+```bash
+mkdir graphql-api && cd graphql-api
+npm init -y
+npm install @apollo/server graphql zod
+npm install -D typescript @types/node tsx
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist
+```
+
+Create the source directory:
+
+```bash
+mkdir -p src/resolvers src/data
+```
+
+Add a start script to `package.json`:
+
+```json
+{
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  }
+}
+```
+
+## Step 2: Define the Schema
+
+Schema-first means you design your API contract before writing any resolver logic.
+
+```typescript
+// src/schema.ts
+export const typeDefs = `#graphql
+  type Book {
+    id: ID!
+    title: String!
+    description: String!
+    isbn: String!
+    publishedYear: Int!
+    author: Author!
+    reviews: [Review!]!
+    averageRating: Float
+  }
+
+  type Author {
+    id: ID!
+    name: String!
+    bio: String
+    books: [Book!]!
+  }
+
+  type Review {
+    id: ID!
+    rating: Int!
+    comment: String!
+    createdAt: String!
+    book: Book!
+  }
+
+  type Query {
+    books(limit: Int, offset: Int): [Book!]!
+    book(id: ID!): Book
+    authors: [Author!]!
+    author(id: ID!): Author
+    search(query: String!): [Book!]!
+  }
+
+  input CreateBookInput {
+    title: String!
+    description: String!
+    isbn: String!
+    publishedYear: Int!
+    authorId: ID!
+  }
+
+  input CreateReviewInput {
+    bookId: ID!
+    rating: Int!
+    comment: String!
+  }
+
+  type Mutation {
+    createBook(input: CreateBookInput!): Book!
+    createReview(input: CreateReviewInput!): Review!
+    deleteBook(id: ID!): Boolean!
+  }
+`;
+```
+
+Notice the `!` suffix means non-nullable. `[Book!]!` means the array itself is non-null AND every element in it is non-null. This is a contract — the client knows exactly what it will receive.
+
+## Step 3: In-Memory Data Store
+
+```typescript
+// src/data/store.ts
+export interface BookRecord {
+  id: string;
+  title: string;
+  description: string;
+  isbn: string;
+  publishedYear: number;
+  authorId: string;
+}
+
+export interface AuthorRecord {
+  id: string;
+  name: string;
+  bio: string | null;
+}
+
+export interface ReviewRecord {
+  id: string;
+  bookId: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
+}
+
+let nextId = 100;
+function generateId(): string {
+  return String(++nextId);
+}
+
+const authors: AuthorRecord[] = [
+  { id: "1", name: "Octavia Butler", bio: "American science fiction author." },
+  { id: "2", name: "Ted Chiang", bio: "American science fiction writer." },
+  { id: "3", name: "Ursula K. Le Guin", bio: null },
+];
+
+const books: BookRecord[] = [
+  {
+    id: "1",
+    title: "Kindred",
+    description: "A time-travel novel about slavery.",
+    isbn: "978-0807083697",
+    publishedYear: 1979,
+    authorId: "1",
+  },
+  {
+    id: "2",
+    title: "Stories of Your Life and Others",
+    description: "A collection of short stories.",
+    isbn: "978-1101972120",
+    publishedYear: 2002,
+    authorId: "2",
+  },
+  {
+    id: "3",
+    title: "The Left Hand of Darkness",
+    description: "A sci-fi novel exploring gender.",
+    isbn: "978-0441478125",
+    publishedYear: 1969,
+    authorId: "3",
+  },
+];
+
+const reviews: ReviewRecord[] = [
+  {
+    id: "1",
+    bookId: "1",
+    rating: 5,
+    comment: "A masterpiece of American fiction.",
+    createdAt: "2024-01-15T10:00:00Z",
+  },
+  {
+    id: "2",
+    bookId: "1",
+    rating: 4,
+    comment: "Powerful and uncomfortable in the best way.",
+    createdAt: "2024-02-20T14:30:00Z",
+  },
+];
+
+export const store = {
+  authors: {
+    getAll: (): AuthorRecord[] => authors,
+    getById: (id: string): AuthorRecord | undefined => authors.find((a) => a.id === id),
+  },
+  books: {
+    getAll: (limit?: number, offset?: number): BookRecord[] => {
+      const start = offset ?? 0;
+      const end = limit ? start + limit : undefined;
+      return books.slice(start, end);
+    },
+    getById: (id: string): BookRecord | undefined => books.find((b) => b.id === id),
+    getByAuthor: (authorId: string): BookRecord[] => books.filter((b) => b.authorId === authorId),
+    search: (query: string): BookRecord[] => {
+      const lower = query.toLowerCase();
+      return books.filter(
+        (b) => b.title.toLowerCase().includes(lower) || b.description.toLowerCase().includes(lower)
+      );
+    },
+    create: (input: Omit<BookRecord, "id">): BookRecord => {
+      const book: BookRecord = { ...input, id: generateId() };
+      books.push(book);
+      return book;
+    },
+    delete: (id: string): boolean => {
+      const index = books.findIndex((b) => b.id === id);
+      if (index === -1) return false;
+      books.splice(index, 1);
+      return true;
+    },
+  },
+  reviews: {
+    getByBook: (bookId: string): ReviewRecord[] => reviews.filter((r) => r.bookId === bookId),
+    create: (input: Omit<ReviewRecord, "id" | "createdAt">): ReviewRecord => {
+      const review: ReviewRecord = {
+        ...input,
+        id: generateId(),
+        createdAt: new Date().toISOString(),
+      };
+      reviews.push(review);
+      return review;
+    },
+  },
+};
+```
+
+## Step 4: Input Validation with Zod
+
+Validate inputs before they reach your data layer.
+
+```typescript
+// src/validation.ts
+import { z } from "zod";
+
+export const createBookSchema = z.object({
+  title: z.string().min(1).max(200),
+  description: z.string().min(1).max(2000),
+  isbn: z.string().regex(/^978-\d{10}$/, "ISBN must be in format 978-XXXXXXXXXX"),
+  publishedYear: z.number().int().min(1000).max(new Date().getFullYear()),
+  authorId: z.string().min(1),
+});
+
+export const createReviewSchema = z.object({
+  bookId: z.string().min(1),
+  rating: z.number().int().min(1).max(5),
+  comment: z.string().min(1).max(5000),
+});
+```
+
+## Step 5: Query Resolvers
+
+Resolvers map schema fields to data. Field resolvers on types handle relationships.
+
+```typescript
+// src/resolvers/queries.ts
+import { store } from "../data/store.js";
+import { GraphQLError } from "graphql";
+
+export const queryResolvers = {
+  Query: {
+    books: (_: unknown, args: { limit?: number; offset?: number }) => {
+      return store.books.getAll(args.limit, args.offset);
+    },
+    book: (_: unknown, args: { id: string }) => {
+      const book = store.books.getById(args.id);
+      if (!book) {
+        throw new GraphQLError("Book not found", {
+          extensions: { code: "NOT_FOUND" },
+        });
+      }
+      return book;
+    },
+    authors: () => store.authors.getAll(),
+    author: (_: unknown, args: { id: string }) => {
+      const author = store.authors.getById(args.id);
+      if (!author) {
+        throw new GraphQLError("Author not found", {
+          extensions: { code: "NOT_FOUND" },
+        });
+      }
+      return author;
+    },
+    search: (_: unknown, args: { query: string }) => {
+      return store.books.search(args.query);
+    },
+  },
+};
+```
+
+## Step 6: Type Resolvers for Relationships
+
+These resolve the `author` field on `Book`, the `books` field on `Author`, and so on.
+
+```typescript
+// src/resolvers/types.ts
+import { store, BookRecord, ReviewRecord } from "../data/store.js";
+
+export const typeResolvers = {
+  Book: {
+    author: (parent: BookRecord) => store.authors.getById(parent.authorId),
+    reviews: (parent: BookRecord) => store.reviews.getByBook(parent.id),
+    averageRating: (parent: BookRecord): number | null => {
+      const reviews = store.reviews.getByBook(parent.id);
+      if (reviews.length === 0) return null;
+      const sum = reviews.reduce((acc, r) => acc + r.rating, 0);
+      return Math.round((sum / reviews.length) * 10) / 10;
+    },
+  },
+  Author: {
+    books: (parent: { id: string }) => store.books.getByAuthor(parent.id),
+  },
+  Review: {
+    book: (parent: ReviewRecord) => store.books.getById(parent.bookId),
+  },
+};
+```
+
+This is the power of GraphQL. When a client queries `{ books { title author { name } } }`, the `Book.author` resolver runs only if the client requested the `author` field. No wasted computation.
+
+## Step 7: Mutation Resolvers
+
+```typescript
+// src/resolvers/mutations.ts
+import { GraphQLError } from "graphql";
+import { store } from "../data/store.js";
+import { createBookSchema, createReviewSchema } from "../validation.js";
+
+export const mutationResolvers = {
+  Mutation: {
+    createBook: (_: unknown, args: { input: Record<string, unknown> }) => {
+      const result = createBookSchema.safeParse(args.input);
+      if (!result.success) {
+        throw new GraphQLError("Validation failed", {
+          extensions: {
+            code: "BAD_USER_INPUT",
+            errors: result.error.flatten().fieldErrors,
+          },
+        });
+      }
+
+      const author = store.authors.getById(result.data.authorId);
+      if (!author) {
+        throw new GraphQLError("Author not found", {
+          extensions: { code: "NOT_FOUND" },
+        });
+      }
+
+      return store.books.create(result.data);
+    },
+
+    createReview: (_: unknown, args: { input: Record<string, unknown> }) => {
+      const result = createReviewSchema.safeParse(args.input);
+      if (!result.success) {
+        throw new GraphQLError("Validation failed", {
+          extensions: {
+            code: "BAD_USER_INPUT",
+            errors: result.error.flatten().fieldErrors,
+          },
+        });
+      }
+
+      const book = store.books.getById(result.data.bookId);
+      if (!book) {
+        throw new GraphQLError("Book not found", {
+          extensions: { code: "NOT_FOUND" },
+        });
+      }
+
+      return store.reviews.create(result.data);
+    },
+
+    deleteBook: (_: unknown, args: { id: string }) => {
+      return store.books.delete(args.id);
+    },
+  },
+};
+```
+
+## Step 8: Error Handling and Formatting
+
+GraphQL has a standardized error format. Apollo Server lets you customize error responses.
+
+```typescript
+// src/errors.ts
+import { GraphQLError, GraphQLFormattedError } from "graphql";
+
+export function formatError(
+  formattedError: GraphQLFormattedError,
+  error: unknown
+): GraphQLFormattedError {
+  // Don't expose internal errors to clients
+  if (
+    error instanceof GraphQLError &&
+    error.extensions?.code &&
+    typeof error.extensions.code === "string" &&
+    ["NOT_FOUND", "BAD_USER_INPUT", "UNAUTHENTICATED", "FORBIDDEN"].includes(error.extensions.code)
+  ) {
+    return formattedError;
+  }
+
+  console.error("Unexpected GraphQL error:", error);
+  return {
+    message: "Internal server error",
+    extensions: { code: "INTERNAL_SERVER_ERROR" },
+  };
+}
+```
+
+This ensures validation errors and not-found errors are returned to the client with useful details, but unexpected errors (database failures, null pointer exceptions) are masked to prevent information leakage.
+
+## Step 9: Server Entry Point
+
+```typescript
+// src/index.ts
+import { ApolloServer } from "@apollo/server";
+import { startStandaloneServer } from "@apollo/server/dist/esm/standalone/index.js";
+import { typeDefs } from "./schema.js";
+import { queryResolvers } from "./resolvers/queries.js";
+import { typeResolvers } from "./resolvers/types.js";
+import { mutationResolvers } from "./resolvers/mutations.js";
+import { formatError } from "./errors.js";
+
+const resolvers = {
+  ...queryResolvers,
+  ...typeResolvers,
+  ...mutationResolvers,
+};
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  formatError,
+  introspection: true,
+});
+
+async function main(): Promise<void> {
+  const { url } = await startStandaloneServer(server, {
+    listen: { port: 4000 },
+  });
+  console.log(`GraphQL server running at ${url}`);
+}
+
+main().catch(console.error);
+```
+
+## Step 10: Testing with the Playground
+
+Start the server with `npm run dev` and open `http://localhost:4000` in your browser. Apollo Server 4 includes Apollo Sandbox for testing queries.
+
+Try a nested query to see GraphQL's power:
+
+```graphql
+query {
+  books(limit: 2) {
+    title
+    publishedYear
+    author {
+      name
+      books {
+        title
+      }
+    }
+    reviews {
+      rating
+      comment
+    }
+    averageRating
+  }
+}
+```
+
+This single request replaces what would be 3-4 REST calls: one for books, one for each author, and one for reviews per book. The client declares exactly what shape of data it needs, and the server resolves it in a single round trip.
+
+Test a mutation:
+
+```graphql
+mutation {
+  createReview(
+    input: { bookId: "1", rating: 5, comment: "Changed my perspective on American history." }
+  ) {
+    id
+    rating
+    comment
+    book {
+      title
+      averageRating
+    }
+  }
+}
+```
+
+The response includes the newly created review AND the updated average rating for the book — all in one request. Test error handling by submitting a rating of 6 or a non-existent book ID and inspect the structured error response with field-level validation messages.

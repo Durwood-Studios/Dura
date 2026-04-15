@@ -1,0 +1,513 @@
+---
+title: "Build an HTTP Server from Scratch"
+description: "Implement an HTTP/1.1 server using raw TCP sockets in Node.js — parse requests, serve static files, and build a routing layer."
+slug: "http-server"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["http", "networking", "node", "tcp", "server"]
+---
+
+## Overview
+
+You're going to build an HTTP server from raw TCP sockets in Node.js. No Express. No Fastify. No `http` module. Just `net.createServer`, a TCP socket, and your understanding of the HTTP/1.1 specification.
+
+By the end of this tutorial, you'll understand what actually happens when a browser sends a request: the TCP connection, the plaintext HTTP message format, header parsing, content-length calculation, MIME type detection, and response framing. Every HTTP framework you've ever used is an abstraction over exactly what you're about to build.
+
+The finished server parses HTTP/1.1 requests, routes them to handler functions, serves static files with correct MIME types, supports a middleware pattern, and handles errors gracefully.
+
+## Step 1: TCP Foundation
+
+Every HTTP connection starts as a TCP connection. The browser opens a socket, sends bytes, and waits for bytes back.
+
+```typescript
+// src/server.ts
+import net from "node:net";
+
+const server = net.createServer((socket) => {
+  socket.on("data", (data) => {
+    const raw = data.toString();
+    console.log("Received:\n", raw);
+
+    // Send a minimal valid HTTP response
+    const body = "Hello from raw TCP";
+    const response = [
+      "HTTP/1.1 200 OK",
+      `Content-Length: ${Buffer.byteLength(body)}`,
+      "Content-Type: text/plain",
+      "Connection: close",
+      "",
+      body,
+    ].join("\r\n");
+
+    socket.write(response);
+    socket.end();
+  });
+});
+
+server.listen(3000, () => console.log("Server on port 3000"));
+```
+
+Run this and open `http://localhost:3000` in a browser. It works. That's the entire magic behind HTTP — a plaintext message format over a TCP stream. The `\r\n` line endings are part of the HTTP spec (RFC 7230). The empty line between headers and body is required — it's how the parser knows where headers end.
+
+## Step 2: Request Parser
+
+HTTP requests have a defined structure: request line, headers, optional body.
+
+```typescript
+// src/parser.ts
+export interface HttpRequest {
+  method: string;
+  path: string;
+  query: Record<string, string>;
+  httpVersion: string;
+  headers: Record<string, string>;
+  body: string;
+}
+
+export function parseRequest(raw: string): HttpRequest {
+  const [headerSection, body = ""] = raw.split("\r\n\r\n");
+  const lines = headerSection.split("\r\n");
+  const [requestLine, ...headerLines] = lines;
+
+  const [method, fullPath, httpVersion] = requestLine.split(" ");
+
+  // Parse path and query string
+  const [path, queryString] = fullPath.split("?");
+  const query: Record<string, string> = {};
+  if (queryString) {
+    for (const pair of queryString.split("&")) {
+      const [key, value] = pair.split("=");
+      query[decodeURIComponent(key)] = decodeURIComponent(value || "");
+    }
+  }
+
+  // Parse headers
+  const headers: Record<string, string> = {};
+  for (const line of headerLines) {
+    const colonIndex = line.indexOf(":");
+    if (colonIndex === -1) continue;
+    const key = line.slice(0, colonIndex).trim().toLowerCase();
+    const value = line.slice(colonIndex + 1).trim();
+    headers[key] = value;
+  }
+
+  return { method, path, query, httpVersion, headers, body };
+}
+```
+
+Headers are case-insensitive per the spec, so we normalize to lowercase. The query string parser handles URL-encoded characters. The body is everything after the `\r\n\r\n` separator.
+
+## Step 3: Response Builder
+
+```typescript
+// src/response.ts
+export interface HttpResponse {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body: string | Buffer;
+}
+
+const STATUS_TEXTS: Record<number, string> = {
+  200: "OK",
+  201: "Created",
+  301: "Moved Permanently",
+  304: "Not Modified",
+  400: "Bad Request",
+  404: "Not Found",
+  405: "Method Not Allowed",
+  500: "Internal Server Error",
+};
+
+export function buildResponse(res: HttpResponse): Buffer {
+  const statusText = res.statusText || STATUS_TEXTS[res.status] || "Unknown";
+  const body = typeof res.body === "string" ? Buffer.from(res.body) : res.body;
+
+  const headers: Record<string, string> = {
+    "Content-Length": String(body.length),
+    Date: new Date().toUTCString(),
+    Connection: "close",
+    ...res.headers,
+  };
+
+  const headerLines = Object.entries(headers)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("\r\n");
+
+  const head = `HTTP/1.1 ${res.status} ${statusText}\r\n${headerLines}\r\n\r\n`;
+  return Buffer.concat([Buffer.from(head), body]);
+}
+
+export function jsonResponse(data: unknown, status: number = 200): HttpResponse {
+  const body = JSON.stringify(data);
+  return {
+    status,
+    statusText: STATUS_TEXTS[status] || "OK",
+    headers: { "Content-Type": "application/json" },
+    body,
+  };
+}
+
+export function textResponse(text: string, status: number = 200): HttpResponse {
+  return {
+    status,
+    statusText: STATUS_TEXTS[status] || "OK",
+    headers: { "Content-Type": "text/plain" },
+    body: text,
+  };
+}
+```
+
+`Content-Length` uses the byte length of the buffer, not the string length. This matters for multi-byte characters — the string "cafe\u0301" is 5 characters but 6 bytes in UTF-8.
+
+## Step 4: Router
+
+```typescript
+// src/router.ts
+import { HttpRequest, HttpResponse } from "./types.js";
+
+type Handler = (req: HttpRequest) => HttpResponse | Promise<HttpResponse>;
+
+interface Route {
+  method: string;
+  pattern: RegExp;
+  paramNames: string[];
+  handler: Handler;
+}
+
+export class Router {
+  private routes: Route[] = [];
+
+  get(path: string, handler: Handler): void {
+    this.addRoute("GET", path, handler);
+  }
+
+  post(path: string, handler: Handler): void {
+    this.addRoute("POST", path, handler);
+  }
+
+  delete(path: string, handler: Handler): void {
+    this.addRoute("DELETE", path, handler);
+  }
+
+  private addRoute(method: string, path: string, handler: Handler): void {
+    const paramNames: string[] = [];
+    const pattern = path.replace(/:(\w+)/g, (_, name) => {
+      paramNames.push(name);
+      return "([^/]+)";
+    });
+    this.routes.push({
+      method,
+      pattern: new RegExp(`^${pattern}$`),
+      paramNames,
+      handler,
+    });
+  }
+
+  resolve(
+    method: string,
+    path: string
+  ): { handler: Handler; params: Record<string, string> } | null {
+    for (const route of this.routes) {
+      if (route.method !== method) continue;
+      const match = path.match(route.pattern);
+      if (!match) continue;
+
+      const params: Record<string, string> = {};
+      route.paramNames.forEach((name, i) => {
+        params[name] = match[i + 1];
+      });
+
+      return { handler: route.handler, params };
+    }
+    return null;
+  }
+}
+```
+
+The `:param` syntax (like `/users/:id`) is converted to a regex capture group. When a request matches, the captured values are extracted into a params object. This is the same pattern Express uses internally.
+
+## Step 5: Static File Server
+
+```typescript
+// src/static.ts
+import fs from "node:fs";
+import path from "node:path";
+import { HttpResponse } from "./types.js";
+
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html",
+  ".css": "text/css",
+  ".js": "application/javascript",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain",
+};
+
+export function serveStatic(rootDir: string): (filePath: string) => HttpResponse {
+  const absoluteRoot = path.resolve(rootDir);
+
+  return (filePath: string): HttpResponse => {
+    // Prevent directory traversal attacks
+    const resolved = path.resolve(absoluteRoot, filePath.replace(/^\//, ""));
+    if (!resolved.startsWith(absoluteRoot)) {
+      return { status: 403, statusText: "Forbidden", headers: {}, body: "Forbidden" };
+    }
+
+    if (!fs.existsSync(resolved)) {
+      return { status: 404, statusText: "Not Found", headers: {}, body: "Not Found" };
+    }
+
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) {
+      const indexPath = path.join(resolved, "index.html");
+      if (fs.existsSync(indexPath)) {
+        return serveFile(indexPath);
+      }
+      return { status: 404, statusText: "Not Found", headers: {}, body: "Not Found" };
+    }
+
+    return serveFile(resolved);
+  };
+}
+
+function serveFile(filePath: string): HttpResponse {
+  const ext = path.extname(filePath);
+  const contentType = MIME_TYPES[ext] || "application/octet-stream";
+  const body = fs.readFileSync(filePath);
+
+  return {
+    status: 200,
+    statusText: "OK",
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=3600",
+    },
+    body,
+  };
+}
+```
+
+The directory traversal prevention is critical. Without the `startsWith` check, a request for `/../../../etc/passwd` would resolve outside your public directory. This is one of the most common web server vulnerabilities.
+
+## Step 6: Middleware Pattern
+
+```typescript
+// src/middleware.ts
+import { HttpRequest, HttpResponse } from "./types.js";
+
+type Middleware = (
+  req: HttpRequest,
+  next: () => HttpResponse | Promise<HttpResponse>
+) => HttpResponse | Promise<HttpResponse>;
+
+export function composeMiddleware(
+  middlewares: Middleware[],
+  finalHandler: (req: HttpRequest) => HttpResponse | Promise<HttpResponse>
+): (req: HttpRequest) => Promise<HttpResponse> {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    let index = -1;
+
+    async function dispatch(i: number): Promise<HttpResponse> {
+      if (i <= index) throw new Error("next() called multiple times");
+      index = i;
+
+      if (i === middlewares.length) {
+        return finalHandler(req);
+      }
+
+      return middlewares[i](req, () => dispatch(i + 1));
+    }
+
+    return dispatch(0);
+  };
+}
+
+// Example: request logger
+export function logger(): Middleware {
+  return (req, next) => {
+    const start = performance.now();
+    const response = next();
+    const ms = (performance.now() - start).toFixed(1);
+    console.log(`${req.method} ${req.path} → ${ms}ms`);
+    return response;
+  };
+}
+
+// Example: CORS headers
+export function cors(origin: string = "*"): Middleware {
+  return async (req, next) => {
+    const response = await next();
+    response.headers["Access-Control-Allow-Origin"] = origin;
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE";
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type";
+    return response;
+  };
+}
+```
+
+## Step 7: Assemble the Server
+
+```typescript
+// src/index.ts
+import net from "node:net";
+import { parseRequest } from "./parser.js";
+import { buildResponse, jsonResponse, textResponse } from "./response.js";
+import { Router } from "./router.js";
+import { serveStatic } from "./static.js";
+import { composeMiddleware, logger, cors } from "./middleware.js";
+
+const router = new Router();
+const staticHandler = serveStatic("./public");
+
+// API routes
+router.get("/api/health", () => jsonResponse({ status: "ok", uptime: process.uptime() }));
+
+router.get("/api/users/:id", (req) => {
+  return jsonResponse({ id: req.params?.id, name: "Test User" });
+});
+
+router.post("/api/echo", (req) => {
+  return jsonResponse({ received: req.body });
+});
+
+// Request handler with middleware
+const handle = composeMiddleware([logger(), cors()], async (req) => {
+  const route = router.resolve(req.method, req.path);
+  if (route) {
+    (req as any).params = route.params;
+    return route.handler(req);
+  }
+  // Fall through to static files
+  return staticHandler(req.path);
+});
+
+const server = net.createServer((socket) => {
+  let buffer = "";
+
+  socket.on("data", async (data) => {
+    buffer += data.toString();
+
+    // Check if we have a complete request (headers end with \r\n\r\n)
+    if (!buffer.includes("\r\n\r\n")) return;
+
+    try {
+      const req = parseRequest(buffer);
+      buffer = "";
+      const res = await handle(req);
+      socket.write(buildResponse(res));
+    } catch (error) {
+      console.error("Request error:", error);
+      const res = textResponse("Internal Server Error", 500);
+      socket.write(buildResponse(res));
+    }
+    socket.end();
+  });
+
+  socket.on("error", (err) => {
+    console.error("Socket error:", err.message);
+  });
+});
+
+server.listen(3000, () => {
+  console.log("HTTP server on http://localhost:3000");
+});
+```
+
+## Step 8: Request Body Handling
+
+POST requests include a body. The `Content-Length` header tells you how many bytes to expect.
+
+```typescript
+// Enhanced buffer handling in server
+socket.on("data", async (data) => {
+  buffer += data.toString();
+
+  const headerEnd = buffer.indexOf("\r\n\r\n");
+  if (headerEnd === -1) return;
+
+  // Extract Content-Length from headers
+  const headerSection = buffer.slice(0, headerEnd);
+  const contentLengthMatch = headerSection.match(/content-length:\s*(\d+)/i);
+  const contentLength = contentLengthMatch ? parseInt(contentLengthMatch[1], 10) : 0;
+
+  // Check if we have the full body
+  const bodyStart = headerEnd + 4;
+  const bodyReceived = Buffer.byteLength(buffer.slice(bodyStart));
+
+  if (bodyReceived < contentLength) return; // Wait for more data
+
+  // Full request received — process it
+  const req = parseRequest(buffer.slice(0, bodyStart + contentLength));
+  buffer = buffer.slice(bodyStart + contentLength);
+  // ... handle request
+});
+```
+
+This is the buffering strategy every HTTP server uses. Without checking `Content-Length`, you'd process the request before the body arrives — POST handlers would see an empty body for large payloads.
+
+## Step 9: Error Handling
+
+Robust error handling prevents the server from crashing on malformed requests.
+
+```typescript
+// src/errors.ts
+export function safeParseRequest(raw: string): HttpRequest | null {
+  try {
+    const request = parseRequest(raw);
+    // Validate method
+    const validMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+    if (!validMethods.includes(request.method)) return null;
+    // Validate path
+    if (!request.path.startsWith("/")) return null;
+    return request;
+  } catch {
+    return null;
+  }
+}
+```
+
+Add a timeout to prevent slow-loris attacks — connections that send data one byte at a time to exhaust server resources:
+
+```typescript
+socket.setTimeout(30000); // 30 second timeout
+socket.on("timeout", () => {
+  socket.write(buildResponse(textResponse("Request Timeout", 408)));
+  socket.end();
+});
+```
+
+## Step 10: Testing with curl
+
+Test your server with increasingly complex requests:
+
+```bash
+# Simple GET
+curl -v http://localhost:3000/api/health
+
+# GET with route params
+curl http://localhost:3000/api/users/42
+
+# POST with JSON body
+curl -X POST http://localhost:3000/api/echo \
+  -H "Content-Type: application/json" \
+  -d '{"message": "hello"}'
+
+# Static file
+echo "<h1>It works</h1>" > public/index.html
+curl http://localhost:3000/
+
+# Verify security: directory traversal should fail
+curl http://localhost:3000/../../../etc/passwd
+# Should return 403 Forbidden
+```
+
+Compare your server's response headers with those from Express by running both and inspecting with `curl -v`. You'll notice Express adds headers like `X-Powered-By` and `ETag` — features you could add to your server as middleware. The fundamental structure is identical: status line, headers, empty line, body. Every HTTP server in every language follows this exact format because the protocol demands it.
+
+You now understand the full stack: TCP bytes arrive, get buffered until a complete HTTP message is received, parsed into a structured object, routed to a handler, and the response is serialized back to bytes and written to the socket. That's all HTTP is. Everything else — frameworks, middlewares, template engines — is ergonomics on top of this foundation.

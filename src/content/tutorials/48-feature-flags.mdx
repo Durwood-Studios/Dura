@@ -1,0 +1,699 @@
+---
+title: "Build a Feature Flag Service"
+description: "Create a feature flag service with flag definitions, percentage rollouts, user targeting rules, a client SDK, admin dashboard, and audit logging."
+slug: "feature-flags"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["devops", "feature-flags", "rollouts", "sdk", "api"]
+---
+
+## Overview
+
+Feature flags decouple deployment from release. You ship code to production behind a flag, then enable it for 1% of users, then 10%, then everyone — or kill it instantly if something breaks. In this tutorial, you'll build a complete feature flag service: a backend API for managing flags, percentage-based rollouts, user targeting rules, a lightweight client SDK, an admin dashboard, and an audit log that tracks every change.
+
+**What you'll learn:**
+
+- Designing a flag evaluation engine with targeting rules
+- Consistent hashing for percentage rollouts (same user always gets the same result)
+- Building a client SDK with local caching and polling
+- Admin UI for managing flags without touching code
+- Audit logging for compliance and debugging
+- API design for feature flag services
+
+The final system supports boolean flags, percentage rollouts, and rule-based targeting by user attributes like plan, country, or any custom property.
+
+## Step 1: Project Setup
+
+```bash
+mkdir feature-flags && cd feature-flags
+npm init -y
+npm install express cors
+npm install -D typescript @types/node @types/express tsx
+```
+
+```json
+// tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"]
+}
+```
+
+## Step 2: Flag Data Model
+
+```typescript
+// src/types.ts
+export interface TargetingRule {
+  attribute: string;
+  operator: "eq" | "neq" | "in" | "nin" | "gt" | "lt" | "contains";
+  value: string | number | string[];
+}
+
+export interface Flag {
+  key: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  rolloutPercentage: number; // 0-100
+  targetingRules: TargetingRule[];
+  defaultValue: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserContext {
+  userId: string;
+  [key: string]: string | number | boolean | string[];
+}
+
+export interface EvaluationResult {
+  flagKey: string;
+  value: boolean;
+  reason: "disabled" | "targeted" | "rollout" | "default";
+}
+
+export interface AuditEntry {
+  timestamp: string;
+  actor: string;
+  action: "create" | "update" | "delete" | "toggle";
+  flagKey: string;
+  changes: Record<string, { from: unknown; to: unknown }>;
+}
+```
+
+## Step 3: Flag Store
+
+```typescript
+// src/store.ts
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { Flag, AuditEntry } from "./types.js";
+
+interface StoreData {
+  flags: Record<string, Flag>;
+  audit: AuditEntry[];
+}
+
+export class FlagStore {
+  private data: StoreData;
+  private filePath: string;
+
+  constructor(filePath: string) {
+    this.filePath = filePath;
+    this.data = existsSync(filePath)
+      ? JSON.parse(readFileSync(filePath, "utf8"))
+      : { flags: {}, audit: [] };
+  }
+
+  getFlag(key: string): Flag | undefined {
+    return this.data.flags[key];
+  }
+
+  getAllFlags(): Flag[] {
+    return Object.values(this.data.flags);
+  }
+
+  setFlag(flag: Flag, actor: string, action: AuditEntry["action"] = "update"): void {
+    const existing = this.data.flags[flag.key];
+    const changes: Record<string, { from: unknown; to: unknown }> = {};
+
+    if (existing) {
+      for (const key of Object.keys(flag) as (keyof Flag)[]) {
+        if (JSON.stringify(existing[key]) !== JSON.stringify(flag[key])) {
+          changes[key] = { from: existing[key], to: flag[key] };
+        }
+      }
+    }
+
+    this.data.flags[flag.key] = { ...flag, updatedAt: new Date().toISOString() };
+    this.data.audit.push({
+      timestamp: new Date().toISOString(),
+      actor,
+      action,
+      flagKey: flag.key,
+      changes,
+    });
+    this.persist();
+  }
+
+  deleteFlag(key: string, actor: string): boolean {
+    if (!this.data.flags[key]) return false;
+    delete this.data.flags[key];
+    this.data.audit.push({
+      timestamp: new Date().toISOString(),
+      actor,
+      action: "delete",
+      flagKey: key,
+      changes: {},
+    });
+    this.persist();
+    return true;
+  }
+
+  getAudit(flagKey?: string, limit: number = 50): AuditEntry[] {
+    let entries = this.data.audit;
+    if (flagKey) {
+      entries = entries.filter((e) => e.flagKey === flagKey);
+    }
+    return entries.slice(-limit).reverse();
+  }
+
+  private persist(): void {
+    writeFileSync(this.filePath, JSON.stringify(this.data, null, 2));
+  }
+}
+```
+
+## Step 4: Flag Evaluation Engine
+
+```typescript
+// src/evaluator.ts
+import { Flag, UserContext, EvaluationResult, TargetingRule } from "./types.js";
+import { createHash } from "node:crypto";
+
+export function evaluateFlag(flag: Flag, context: UserContext): EvaluationResult {
+  // If the flag is globally disabled, return default
+  if (!flag.enabled) {
+    return { flagKey: flag.key, value: flag.defaultValue, reason: "disabled" };
+  }
+
+  // Check targeting rules — if any rule matches, return true
+  if (flag.targetingRules.length > 0) {
+    const isTargeted = flag.targetingRules.every((rule) => matchesRule(rule, context));
+    if (isTargeted) {
+      return { flagKey: flag.key, value: true, reason: "targeted" };
+    }
+  }
+
+  // Percentage rollout — use consistent hashing so the same user always
+  // gets the same result for the same flag
+  if (flag.rolloutPercentage < 100) {
+    const hash = consistentHash(flag.key, context.userId);
+    const inRollout = hash < flag.rolloutPercentage;
+    return { flagKey: flag.key, value: inRollout, reason: "rollout" };
+  }
+
+  return { flagKey: flag.key, value: true, reason: "default" };
+}
+
+function consistentHash(flagKey: string, userId: string): number {
+  const input = `${flagKey}:${userId}`;
+  const hash = createHash("md5").update(input).digest("hex");
+  // Take the first 8 hex chars and convert to a number between 0-100
+  const num = parseInt(hash.substring(0, 8), 16);
+  return num % 100;
+}
+
+function matchesRule(rule: TargetingRule, context: UserContext): boolean {
+  const userValue = context[rule.attribute];
+  if (userValue === undefined) return false;
+
+  switch (rule.operator) {
+    case "eq":
+      return userValue === rule.value;
+    case "neq":
+      return userValue !== rule.value;
+    case "in":
+      return Array.isArray(rule.value) && rule.value.includes(String(userValue));
+    case "nin":
+      return Array.isArray(rule.value) && !rule.value.includes(String(userValue));
+    case "gt":
+      return typeof userValue === "number" && userValue > (rule.value as number);
+    case "lt":
+      return typeof userValue === "number" && userValue < (rule.value as number);
+    case "contains":
+      return typeof userValue === "string" && userValue.includes(String(rule.value));
+    default:
+      return false;
+  }
+}
+
+export function evaluateAllFlags(
+  flags: Flag[],
+  context: UserContext
+): Record<string, EvaluationResult> {
+  const results: Record<string, EvaluationResult> = {};
+  for (const flag of flags) {
+    results[flag.key] = evaluateFlag(flag, context);
+  }
+  return results;
+}
+```
+
+Consistent hashing ensures that if user "abc123" falls in the 10% rollout bucket for a flag, they'll always be in that bucket — no random flickering between page loads.
+
+## Step 5: REST API
+
+```typescript
+// src/server.ts
+import express from "express";
+import cors from "cors";
+import { FlagStore } from "./store.js";
+import { evaluateFlag, evaluateAllFlags } from "./evaluator.js";
+import { Flag, UserContext } from "./types.js";
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const store = new FlagStore("./flags.json");
+
+// Admin: List all flags
+app.get("/api/flags", (req, res) => {
+  res.json(store.getAllFlags());
+});
+
+// Admin: Get a flag
+app.get("/api/flags/:key", (req, res) => {
+  const flag = store.getFlag(req.params.key);
+  if (!flag) return res.status(404).json({ error: "Flag not found" });
+  res.json(flag);
+});
+
+// Admin: Create/update a flag
+app.put("/api/flags/:key", (req, res) => {
+  const actor = (req.headers["x-actor"] as string) ?? "api";
+  const existing = store.getFlag(req.params.key);
+  const flag: Flag = {
+    key: req.params.key,
+    name: req.body.name ?? req.params.key,
+    description: req.body.description ?? "",
+    enabled: req.body.enabled ?? false,
+    rolloutPercentage: req.body.rolloutPercentage ?? 100,
+    targetingRules: req.body.targetingRules ?? [],
+    defaultValue: req.body.defaultValue ?? false,
+    createdAt: existing?.createdAt ?? new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  store.setFlag(flag, actor, existing ? "update" : "create");
+  res.json(flag);
+});
+
+// Admin: Toggle a flag
+app.post("/api/flags/:key/toggle", (req, res) => {
+  const flag = store.getFlag(req.params.key);
+  if (!flag) return res.status(404).json({ error: "Flag not found" });
+
+  const actor = (req.headers["x-actor"] as string) ?? "api";
+  store.setFlag({ ...flag, enabled: !flag.enabled }, actor, "toggle");
+  res.json({ ...flag, enabled: !flag.enabled });
+});
+
+// Admin: Delete a flag
+app.delete("/api/flags/:key", (req, res) => {
+  const actor = (req.headers["x-actor"] as string) ?? "api";
+  if (!store.deleteFlag(req.params.key, actor)) {
+    return res.status(404).json({ error: "Flag not found" });
+  }
+  res.json({ deleted: req.params.key });
+});
+
+// Client: Evaluate flags for a user
+app.post("/api/evaluate", (req, res) => {
+  const context = req.body as UserContext;
+  if (!context.userId) return res.status(400).json({ error: "userId required" });
+  const flags = store.getAllFlags();
+  res.json(evaluateAllFlags(flags, context));
+});
+
+// Client: Evaluate a single flag
+app.post("/api/evaluate/:key", (req, res) => {
+  const flag = store.getFlag(req.params.key);
+  if (!flag) return res.json({ flagKey: req.params.key, value: false, reason: "not-found" });
+  const context = req.body as UserContext;
+  res.json(evaluateFlag(flag, context));
+});
+
+// Audit log
+app.get("/api/audit", (req, res) => {
+  const flagKey = req.query.flag as string | undefined;
+  res.json(store.getAudit(flagKey));
+});
+
+const PORT = parseInt(process.env.PORT ?? "3100", 10);
+app.listen(PORT, () => console.log(`Feature flag service on :${PORT}`));
+```
+
+## Step 6: Client SDK
+
+```typescript
+// sdk/index.ts
+interface SDKConfig {
+  baseUrl: string;
+  pollingIntervalMs?: number;
+}
+
+interface UserContext {
+  userId: string;
+  [key: string]: string | number | boolean | string[];
+}
+
+interface EvalResult {
+  flagKey: string;
+  value: boolean;
+  reason: string;
+}
+
+export class FeatureFlagClient {
+  private baseUrl: string;
+  private cache: Map<string, EvalResult> = new Map();
+  private context: UserContext;
+  private pollingTimer: ReturnType<typeof setInterval> | null = null;
+  private listeners: Map<string, Set<(value: boolean) => void>> = new Map();
+
+  constructor(config: SDKConfig, context: UserContext) {
+    this.baseUrl = config.baseUrl.replace(/\/$/, "");
+    this.context = context;
+
+    if (config.pollingIntervalMs) {
+      this.startPolling(config.pollingIntervalMs);
+    }
+  }
+
+  async isEnabled(flagKey: string): Promise<boolean> {
+    const cached = this.cache.get(flagKey);
+    if (cached) return cached.value;
+
+    const result = await this.fetchFlag(flagKey);
+    this.cache.set(flagKey, result);
+    return result.value;
+  }
+
+  isEnabledSync(flagKey: string): boolean {
+    return this.cache.get(flagKey)?.value ?? false;
+  }
+
+  onChange(flagKey: string, callback: (value: boolean) => void): () => void {
+    if (!this.listeners.has(flagKey)) {
+      this.listeners.set(flagKey, new Set());
+    }
+    this.listeners.get(flagKey)!.add(callback);
+    return () => this.listeners.get(flagKey)?.delete(callback);
+  }
+
+  async refresh(): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/api/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(this.context),
+    });
+    const results: Record<string, EvalResult> = await response.json();
+
+    for (const [key, result] of Object.entries(results)) {
+      const previous = this.cache.get(key);
+      this.cache.set(key, result);
+
+      if (previous && previous.value !== result.value) {
+        this.listeners.get(key)?.forEach((cb) => cb(result.value));
+      }
+    }
+  }
+
+  private async fetchFlag(flagKey: string): Promise<EvalResult> {
+    const response = await fetch(`${this.baseUrl}/api/evaluate/${flagKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(this.context),
+    });
+    return response.json();
+  }
+
+  private startPolling(intervalMs: number): void {
+    this.refresh();
+    this.pollingTimer = setInterval(() => this.refresh(), intervalMs);
+  }
+
+  destroy(): void {
+    if (this.pollingTimer) clearInterval(this.pollingTimer);
+    this.listeners.clear();
+    this.cache.clear();
+  }
+}
+```
+
+## Step 7: React Hook
+
+```typescript
+// sdk/react.ts
+import { useState, useEffect, useRef } from "react";
+import { FeatureFlagClient } from "./index.js";
+
+export function useFeatureFlag(client: FeatureFlagClient, flagKey: string): boolean {
+  const [value, setValue] = useState(() => client.isEnabledSync(flagKey));
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+
+    // Fetch initial value
+    client.isEnabled(flagKey).then((v) => {
+      if (mounted.current) setValue(v);
+    });
+
+    // Listen for changes
+    const unsubscribe = client.onChange(flagKey, (v) => {
+      if (mounted.current) setValue(v);
+    });
+
+    return () => {
+      mounted.current = false;
+      unsubscribe();
+    };
+  }, [client, flagKey]);
+
+  return value;
+}
+```
+
+Usage in a component:
+
+```tsx
+function CheckoutPage() {
+  const showNewCheckout = useFeatureFlag(flagClient, "new-checkout-flow");
+
+  return showNewCheckout ? <NewCheckoutFlow /> : <LegacyCheckout />;
+}
+```
+
+## Step 8: Admin Dashboard
+
+```html
+<!-- public/admin.html -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Feature Flags Admin</title>
+    <style>
+      body {
+        font-family: system-ui;
+        background: #08080d;
+        color: #f0f0f0;
+        margin: 0;
+        padding: 2rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 0.75rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .badge {
+        display: inline-block;
+        padding: 0.125rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+      }
+      .badge-on {
+        background: #10b981;
+        color: #fff;
+      }
+      .badge-off {
+        background: #4a5568;
+        color: #fff;
+      }
+      button {
+        background: #10b981;
+        color: #fff;
+        border: none;
+        padding: 0.375rem 0.75rem;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      button.danger {
+        background: #ef4444;
+      }
+      input,
+      select {
+        background: #111;
+        color: #f0f0f0;
+        border: 1px solid #333;
+        padding: 0.375rem;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Feature Flags</h1>
+    <div id="create-form" style="margin-bottom:2rem">
+      <input id="new-key" placeholder="flag-key" />
+      <input id="new-name" placeholder="Display name" />
+      <input id="new-rollout" type="number" min="0" max="100" value="100" style="width:80px" />
+      <span>%</span>
+      <button onclick="createFlag()">Create Flag</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Key</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Rollout</th>
+          <th>Rules</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="flags-table"></tbody>
+    </table>
+    <h2 style="margin-top:2rem">Audit Log</h2>
+    <div id="audit-log"></div>
+    <script src="/admin.js"></script>
+  </body>
+</html>
+```
+
+```javascript
+// public/admin.js
+const API = "";
+
+async function loadFlags() {
+  const res = await fetch(`${API}/api/flags`);
+  const flags = await res.json();
+  const tbody = document.getElementById("flags-table");
+  tbody.innerHTML = flags
+    .map(
+      (f) => `
+    <tr>
+      <td><code>${f.key}</code></td>
+      <td>${f.name}</td>
+      <td><span class="badge ${f.enabled ? "badge-on" : "badge-off"}">${f.enabled ? "ON" : "OFF"}</span></td>
+      <td>${f.rolloutPercentage}%</td>
+      <td>${f.targetingRules.length} rules</td>
+      <td>
+        <button onclick="toggleFlag('${f.key}')">${f.enabled ? "Disable" : "Enable"}</button>
+        <button class="danger" onclick="deleteFlag('${f.key}')">Delete</button>
+      </td>
+    </tr>
+  `
+    )
+    .join("");
+}
+
+async function toggleFlag(key) {
+  await fetch(`${API}/api/flags/${key}/toggle`, {
+    method: "POST",
+    headers: { "x-actor": "admin-ui" },
+  });
+  loadFlags();
+  loadAudit();
+}
+
+async function deleteFlag(key) {
+  if (!confirm(`Delete flag "${key}"?`)) return;
+  await fetch(`${API}/api/flags/${key}`, { method: "DELETE", headers: { "x-actor": "admin-ui" } });
+  loadFlags();
+  loadAudit();
+}
+
+async function createFlag() {
+  const key = document.getElementById("new-key").value;
+  const name = document.getElementById("new-name").value;
+  const rollout = parseInt(document.getElementById("new-rollout").value, 10);
+  if (!key) return;
+  await fetch(`${API}/api/flags/${key}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "x-actor": "admin-ui" },
+    body: JSON.stringify({ name, enabled: false, rolloutPercentage: rollout }),
+  });
+  loadFlags();
+  loadAudit();
+}
+
+async function loadAudit() {
+  const res = await fetch(`${API}/api/audit`);
+  const entries = await res.json();
+  document.getElementById("audit-log").innerHTML = entries
+    .slice(0, 20)
+    .map(
+      (e) =>
+        `<div style="margin-bottom:0.5rem;padding:0.5rem;background:rgba(255,255,255,0.04);border-radius:8px">
+      <strong>${e.action}</strong> ${e.flagKey} by ${e.actor} — ${new Date(e.timestamp).toLocaleString()}
+    </div>`
+    )
+    .join("");
+}
+
+loadFlags();
+loadAudit();
+```
+
+## Step 9: Serve the Dashboard
+
+Add static file serving to the Express server:
+
+```typescript
+// Add to src/server.ts before the listen call
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+app.use(express.static(join(__dirname, "../public")));
+```
+
+## Step 10: Testing the Complete System
+
+Start the server and test the full flow:
+
+```bash
+npx tsx src/server.ts
+```
+
+Create a flag with targeting:
+
+```bash
+# Create a flag with 50% rollout and targeting
+curl -X PUT http://localhost:3100/api/flags/new-checkout \
+  -H "Content-Type: application/json" \
+  -H "x-actor: test" \
+  -d '{
+    "name": "New Checkout Flow",
+    "enabled": true,
+    "rolloutPercentage": 50,
+    "targetingRules": [
+      { "attribute": "plan", "operator": "eq", "value": "pro" }
+    ]
+  }'
+
+# Evaluate for a pro user (always true — targeted)
+curl -X POST http://localhost:3100/api/evaluate/new-checkout \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "user-123", "plan": "pro"}'
+
+# Evaluate for a free user (50% chance — rollout)
+curl -X POST http://localhost:3100/api/evaluate/new-checkout \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "user-456", "plan": "free"}'
+```
+
+Open `http://localhost:3100/admin.html` for the dashboard. The audit log shows every change with diffs. The SDK caches evaluations and notifies your UI when flags change. From here, extend with flag variants (string values instead of booleans), flag dependencies, environment scoping (staging vs production), and a proper database backend.

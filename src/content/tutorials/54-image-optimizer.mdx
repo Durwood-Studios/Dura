@@ -1,0 +1,386 @@
+---
+title: "Build an Image Optimization Service"
+description: "Build a Node.js image optimization service that resizes, converts to modern formats like WebP and AVIF, caches results, and serves with CDN-ready headers."
+slug: "image-optimizer"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["node", "images", "optimization", "sharp", "api"]
+---
+
+## Overview
+
+Images account for the majority of bytes transferred on most web pages. Serving unoptimized images wastes bandwidth, slows page loads, and hurts SEO rankings. An image optimization service solves this by processing images on demand — resizing them to the exact dimensions needed, converting them to modern formats like WebP and AVIF, and caching the results for instant subsequent delivery.
+
+In this tutorial, you will build a complete image optimization service using Node.js and Sharp, the fastest image processing library in the Node ecosystem. Your service will accept image uploads, resize to specified dimensions, convert between formats, apply quality settings, cache processed images to disk, and serve them with proper CDN headers for production use.
+
+Sharp is built on libvips, a C library that processes images without loading the entire file into memory. This makes it dramatically faster and more memory-efficient than alternatives like ImageMagick or Canvas.
+
+## Step 1: Set Up the Project
+
+Initialize the project and install dependencies.
+
+```bash
+mkdir image-optimizer && cd image-optimizer
+npm init -y
+npm install express sharp multer
+npm install -D typescript @types/node @types/express @types/multer tsx
+npx tsc --init --target ES2022 --module NodeNext --moduleResolution NodeNext
+mkdir -p uploads cache
+```
+
+Define the types for your optimization pipeline:
+
+```typescript
+// src/types.ts
+export interface OptimizeOptions {
+  width?: number;
+  height?: number;
+  format: "webp" | "avif" | "jpeg" | "png";
+  quality: number;
+  fit: "cover" | "contain" | "fill" | "inside" | "outside";
+}
+
+export interface ProcessedImage {
+  buffer: Buffer;
+  format: string;
+  width: number;
+  height: number;
+  size: number;
+}
+```
+
+The `fit` option controls how the image fits within the target dimensions — `cover` crops to fill, `contain` scales to fit within the bounds with possible letterboxing, and `inside` scales down only if the image is larger than the target.
+
+## Step 2: Build the Image Processor
+
+Create the core processing module that uses Sharp to transform images.
+
+```typescript
+// src/processor.ts
+import sharp from "sharp";
+import { OptimizeOptions, ProcessedImage } from "./types.js";
+
+export async function processImage(
+  inputBuffer: Buffer,
+  options: OptimizeOptions
+): Promise<ProcessedImage> {
+  let pipeline = sharp(inputBuffer);
+
+  if (options.width || options.height) {
+    pipeline = pipeline.resize({
+      width: options.width,
+      height: options.height,
+      fit: options.fit,
+      withoutEnlargement: true,
+    });
+  }
+
+  switch (options.format) {
+    case "webp":
+      pipeline = pipeline.webp({ quality: options.quality });
+      break;
+    case "avif":
+      pipeline = pipeline.avif({ quality: options.quality });
+      break;
+    case "jpeg":
+      pipeline = pipeline.jpeg({ quality: options.quality, mozjpeg: true });
+      break;
+    case "png":
+      pipeline = pipeline.png({ compressionLevel: 9 });
+      break;
+  }
+
+  const buffer = await pipeline.toBuffer();
+  const metadata = await sharp(buffer).metadata();
+
+  return {
+    buffer,
+    format: options.format,
+    width: metadata.width ?? 0,
+    height: metadata.height ?? 0,
+    size: buffer.length,
+  };
+}
+
+export async function getImageMetadata(inputBuffer: Buffer): Promise<sharp.Metadata> {
+  return sharp(inputBuffer).metadata();
+}
+```
+
+The `withoutEnlargement` option prevents upscaling — if you request 1200px wide but the source is only 800px, Sharp returns the 800px original rather than creating a blurry upscaled version. The `mozjpeg` option uses Mozilla's optimized JPEG encoder, which produces smaller files at equivalent quality.
+
+## Step 3: Implement Disk Caching
+
+Cache processed images so identical requests are served instantly from disk.
+
+```typescript
+// src/cache.ts
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+import { OptimizeOptions } from "./types.js";
+
+const CACHE_DIR = path.join(process.cwd(), "cache");
+
+export function getCacheKey(originalName: string, options: OptimizeOptions): string {
+  const hash = crypto
+    .createHash("md5")
+    .update(JSON.stringify({ originalName, ...options }))
+    .digest("hex");
+
+  return `${hash}.${options.format}`;
+}
+
+export function getCachedImage(cacheKey: string): Buffer | null {
+  const filePath = path.join(CACHE_DIR, cacheKey);
+
+  try {
+    return fs.readFileSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+export function cacheImage(cacheKey: string, buffer: Buffer): void {
+  const filePath = path.join(CACHE_DIR, cacheKey);
+  fs.writeFileSync(filePath, buffer);
+}
+
+export function getCacheStats(): { files: number; totalSize: number } {
+  try {
+    const files = fs.readdirSync(CACHE_DIR);
+    let totalSize = 0;
+
+    for (const file of files) {
+      const stats = fs.statSync(path.join(CACHE_DIR, file));
+      totalSize += stats.size;
+    }
+
+    return { files: files.length, totalSize };
+  } catch {
+    return { files: 0, totalSize: 0 };
+  }
+}
+
+export function clearCache(): number {
+  try {
+    const files = fs.readdirSync(CACHE_DIR);
+    for (const file of files) {
+      fs.unlinkSync(path.join(CACHE_DIR, file));
+    }
+    return files.length;
+  } catch {
+    return 0;
+  }
+}
+```
+
+The cache key is a hash of the original filename combined with all transformation options. This means the same source image with different dimensions or formats produces different cache entries, while identical requests hit the cache.
+
+## Step 4: Parse Optimization Parameters
+
+Build a parameter parser that extracts optimization options from URL query strings.
+
+```typescript
+// src/params.ts
+import { OptimizeOptions } from "./types.js";
+
+const VALID_FORMATS = ["webp", "avif", "jpeg", "png"] as const;
+const VALID_FITS = ["cover", "contain", "fill", "inside", "outside"] as const;
+const MAX_DIMENSION = 4096;
+const MIN_QUALITY = 1;
+const MAX_QUALITY = 100;
+
+export function parseOptions(query: Record<string, unknown>): OptimizeOptions {
+  const width = clampDimension(Number(query.w) || undefined);
+  const height = clampDimension(Number(query.h) || undefined);
+
+  const formatInput = String(query.format ?? "webp").toLowerCase();
+  const format = VALID_FORMATS.includes(formatInput as (typeof VALID_FORMATS)[number])
+    ? (formatInput as OptimizeOptions["format"])
+    : "webp";
+
+  const fitInput = String(query.fit ?? "cover").toLowerCase();
+  const fit = VALID_FITS.includes(fitInput as (typeof VALID_FITS)[number])
+    ? (fitInput as OptimizeOptions["fit"])
+    : "cover";
+
+  const quality = Math.min(MAX_QUALITY, Math.max(MIN_QUALITY, Number(query.q) || 80));
+
+  return { width, height, format, quality, fit };
+}
+
+function clampDimension(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (value < 1) return undefined;
+  return Math.min(value, MAX_DIMENSION);
+}
+```
+
+Clamping dimensions to 4096px prevents abuse — someone cannot request a 50,000px resize that would exhaust server memory. The quality default of 80 provides an excellent balance between file size and visual quality for most images.
+
+## Step 5: Set Up File Upload Handling
+
+Configure Multer to handle multipart file uploads with validation.
+
+```typescript
+// src/upload.ts
+import multer from "multer";
+import path from "path";
+
+const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp", "image/avif", "image/gif"];
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+const storage = multer.memoryStorage();
+
+export const upload = multer({
+  storage,
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter: (_, file, callback) => {
+    if (ALLOWED_TYPES.includes(file.mimetype)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`Unsupported file type: ${file.mimetype}`));
+    }
+  },
+});
+```
+
+Using `memoryStorage` keeps the uploaded file in a Buffer rather than writing it to disk. Since Sharp operates on Buffers, this avoids an unnecessary disk read. The 10MB limit prevents abuse while accommodating high-resolution photos.
+
+## Step 6: Set CDN-Ready Response Headers
+
+Proper cache headers let CDNs and browsers cache your optimized images.
+
+```typescript
+// src/headers.ts
+import { Response } from "express";
+
+export function setCacheHeaders(res: Response, format: string, maxAge: number = 31536000): void {
+  const contentTypes: Record<string, string> = {
+    webp: "image/webp",
+    avif: "image/avif",
+    jpeg: "image/jpeg",
+    png: "image/png",
+  };
+
+  res.setHeader("Content-Type", contentTypes[format] ?? "application/octet-stream");
+  res.setHeader("Cache-Control", `public, max-age=${maxAge}, immutable`);
+  res.setHeader("Vary", "Accept");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+}
+```
+
+The `immutable` directive tells caches that this response will never change at this URL — which is true when the URL includes dimension and format parameters. The `Vary: Accept` header ensures caches serve the right format based on what the client supports.
+
+## Step 7: Build the API Routes
+
+Create the Express server with routes for uploading, optimizing, and serving images.
+
+```typescript
+// src/server.ts
+import express from "express";
+import { upload } from "./upload.js";
+import { processImage, getImageMetadata } from "./processor.js";
+import { parseOptions } from "./params.js";
+import { getCacheKey, getCachedImage, cacheImage, getCacheStats, clearCache } from "./cache.js";
+import { setCacheHeaders } from "./headers.js";
+
+const app = express();
+
+app.post("/upload", upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: "No image file provided" });
+      return;
+    }
+
+    const metadata = await getImageMetadata(req.file.buffer);
+    const options = parseOptions(req.query as Record<string, unknown>);
+    const cacheKey = getCacheKey(req.file.originalname, options);
+
+    const cached = getCachedImage(cacheKey);
+    if (cached) {
+      setCacheHeaders(res, options.format);
+      res.send(cached);
+      return;
+    }
+
+    const result = await processImage(req.file.buffer, options);
+    cacheImage(cacheKey, result.buffer);
+
+    const savings = req.file.size > 0 ? Math.round((1 - result.size / req.file.size) * 100) : 0;
+
+    res.json({
+      original: { width: metadata.width, height: metadata.height, size: req.file.size },
+      optimized: { width: result.width, height: result.height, size: result.size },
+      savings: `${savings}%`,
+      cacheKey,
+    });
+  } catch (error) {
+    res.status(500).json({ error: `Processing failed: ${error}` });
+  }
+});
+
+app.get("/image/:cacheKey", (req, res) => {
+  const cached = getCachedImage(req.params.cacheKey);
+
+  if (!cached) {
+    res.status(404).json({ error: "Image not found" });
+    return;
+  }
+
+  const format = req.params.cacheKey.split(".").pop() ?? "webp";
+  setCacheHeaders(res, format);
+  res.send(cached);
+});
+
+app.get("/stats", (_, res) => {
+  const stats = getCacheStats();
+  res.json({
+    cachedImages: stats.files,
+    totalCacheSize: `${(stats.totalSize / 1024 / 1024).toFixed(2)} MB`,
+  });
+});
+
+app.delete("/cache", (_, res) => {
+  const cleared = clearCache();
+  res.json({ cleared });
+});
+
+export { app };
+```
+
+## Step 8: Run and Test the Service
+
+Create the entry point and test the full pipeline.
+
+```typescript
+// src/index.ts
+import { app } from "./server.js";
+
+const PORT = process.env.PORT ?? 3000;
+
+app.listen(PORT, () => {
+  console.log(`Image optimizer running on port ${PORT}`);
+});
+```
+
+Test with curl:
+
+```bash
+# Upload and optimize an image
+curl -X POST -F "image=@photo.jpg" \
+  "http://localhost:3000/upload?w=800&h=600&format=webp&q=80"
+
+# Retrieve the cached optimized image
+curl "http://localhost:3000/image/<cacheKey>" -o optimized.webp
+
+# Check cache statistics
+curl "http://localhost:3000/stats"
+```
+
+A typical JPEG photo at 3MB optimized to WebP at 800px width and quality 80 will be around 50-150KB — a 95%+ reduction. AVIF provides even better compression but takes longer to encode. For real-time optimization, WebP is the sweet spot between compression ratio and encoding speed.
+
+To take this further, add content-negotiation that automatically serves AVIF to browsers that support it and WebP as a fallback. Add a URL-based optimization endpoint that fetches remote images by URL. And add a cleanup job that evicts cache entries older than a configurable TTL.

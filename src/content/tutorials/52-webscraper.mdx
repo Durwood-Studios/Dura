@@ -1,0 +1,335 @@
+---
+title: "Build a Web Scraper"
+description: "Build a Node.js web scraper that fetches pages, parses HTML with Cheerio, handles pagination and rate limiting, and exports structured data to JSON and CSV."
+slug: "webscraper"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["node", "scraping", "cheerio", "data", "automation"]
+---
+
+## Overview
+
+Web scraping is the process of programmatically extracting data from websites. It is a critical skill for data engineering, market research, content aggregation, and competitive analysis. When an API does not exist, scraping is often the only way to get the data you need.
+
+In this tutorial, you will build a robust web scraper in Node.js using Cheerio for HTML parsing. Your scraper will handle pagination, respect rate limits, retry on failure, and output structured data to both JSON and CSV formats. You will also learn responsible scraping practices — checking `robots.txt`, setting appropriate delays, and identifying your bot with a user agent string.
+
+The tools are simple: Node.js for the runtime, `node-fetch` or the built-in `fetch` for HTTP requests, `cheerio` for parsing HTML into a jQuery-like API, and `csv-stringify` for CSV output. No browser automation needed for server-rendered pages.
+
+## Step 1: Set Up the Project
+
+Initialize a TypeScript Node.js project with the dependencies you need.
+
+```bash
+mkdir web-scraper && cd web-scraper
+npm init -y
+npm install cheerio csv-stringify
+npm install -D typescript @types/node tsx
+npx tsc --init --target ES2022 --module NodeNext --moduleResolution NodeNext
+```
+
+Create the entry point and types:
+
+```typescript
+// src/types.ts
+export interface ScrapedItem {
+  title: string;
+  url: string;
+  price: string;
+  rating: string;
+  description: string;
+}
+
+export interface ScrapeConfig {
+  baseUrl: string;
+  maxPages: number;
+  delayMs: number;
+  userAgent: string;
+}
+```
+
+The `ScrapeConfig` interface centralizes all scraper behavior. The `delayMs` field controls the pause between requests — this is how you avoid overwhelming target servers.
+
+## Step 2: Build the HTTP Fetcher
+
+Create a fetch wrapper that handles retries, timeouts, and rate limiting.
+
+```typescript
+// src/fetcher.ts
+import { ScrapeConfig } from "./types.js";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function fetchPage(url: string, config: ScrapeConfig, retries = 3): Promise<string> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": config.userAgent,
+          Accept: "text/html",
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (response.status === 429) {
+        const backoff = config.delayMs * attempt * 2;
+        console.warn(`Rate limited. Waiting ${backoff}ms before retry.`);
+        await sleep(backoff);
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return await response.text();
+    } catch (error) {
+      if (attempt === retries) {
+        throw new Error(`Failed to fetch ${url} after ${retries} attempts: ${error}`);
+      }
+      await sleep(config.delayMs * attempt);
+    }
+  }
+
+  throw new Error(`Unreachable: fetch loop exited without return or throw`);
+}
+```
+
+The fetcher implements exponential backoff: each retry waits longer than the last. This is respectful to the target server and dramatically improves success rates when dealing with transient failures or rate limits.
+
+## Step 3: Parse HTML with Cheerio
+
+Cheerio loads HTML into a DOM-like structure you can query with CSS selectors — the same selectors you use in browser DevTools.
+
+```typescript
+// src/parser.ts
+import * as cheerio from "cheerio";
+import { ScrapedItem } from "./types.js";
+
+export function parseListingPage(html: string): ScrapedItem[] {
+  const $ = cheerio.load(html);
+  const items: ScrapedItem[] = [];
+
+  $(".product-card").each((_, element) => {
+    const card = $(element);
+    const item: ScrapedItem = {
+      title: card.find(".product-title").text().trim(),
+      url: card.find("a").attr("href") ?? "",
+      price: card.find(".price").text().trim(),
+      rating: card.find(".rating").attr("data-value") ?? "0",
+      description: card.find(".description").text().trim(),
+    };
+
+    if (item.title && item.url) {
+      items.push(item);
+    }
+  });
+
+  return items;
+}
+
+export function getNextPageUrl(html: string, baseUrl: string): string | null {
+  const $ = cheerio.load(html);
+  const nextLink = $(".pagination .next a").attr("href");
+
+  if (!nextLink) return null;
+
+  return nextLink.startsWith("http") ? nextLink : `${baseUrl}${nextLink}`;
+}
+```
+
+The key insight with Cheerio is that you need to inspect the target site's HTML structure first. Open browser DevTools, find the elements you want, note their CSS classes or attributes, then translate those into selectors.
+
+## Step 4: Handle Pagination
+
+Most data worth scraping spans multiple pages. Build a pagination loop that follows "next" links until there are no more pages or you hit your configured limit.
+
+```typescript
+// src/scraper.ts
+import { ScrapeConfig, ScrapedItem } from "./types.js";
+import { fetchPage } from "./fetcher.js";
+import { parseListingPage, getNextPageUrl } from "./parser.js";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function scrapeAll(config: ScrapeConfig): Promise<ScrapedItem[]> {
+  const allItems: ScrapedItem[] = [];
+  let currentUrl: string | null = config.baseUrl;
+  let page = 1;
+
+  while (currentUrl && page <= config.maxPages) {
+    console.log(`Scraping page ${page}: ${currentUrl}`);
+
+    const html = await fetchPage(currentUrl, config);
+    const items = parseListingPage(html);
+
+    allItems.push(...items);
+    console.log(`Found ${items.length} items (${allItems.length} total)`);
+
+    currentUrl = getNextPageUrl(html, config.baseUrl);
+    page++;
+
+    if (currentUrl) {
+      await sleep(config.delayMs);
+    }
+  }
+
+  return allItems;
+}
+```
+
+The delay between pages is not optional. Hammering a server with rapid-fire requests gets your IP banned and puts unnecessary load on someone else's infrastructure. A delay of 1-2 seconds between requests is a reasonable starting point.
+
+## Step 5: Implement Rate Limiting
+
+For more sophisticated rate limiting, build a token bucket that controls requests per second across your entire application.
+
+```typescript
+// src/rate-limiter.ts
+export class RateLimiter {
+  private tokens: number;
+  private lastRefill: number;
+  private readonly maxTokens: number;
+  private readonly refillRate: number;
+
+  constructor(requestsPerSecond: number) {
+    this.maxTokens = requestsPerSecond;
+    this.tokens = requestsPerSecond;
+    this.refillRate = requestsPerSecond;
+    this.lastRefill = Date.now();
+  }
+
+  async acquire(): Promise<void> {
+    this.refill();
+
+    while (this.tokens < 1) {
+      const waitTime = (1 / this.refillRate) * 1000;
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+      this.refill();
+    }
+
+    this.tokens -= 1;
+  }
+
+  private refill(): void {
+    const now = Date.now();
+    const elapsed = (now - this.lastRefill) / 1000;
+    this.tokens = Math.min(this.maxTokens, this.tokens + elapsed * this.refillRate);
+    this.lastRefill = now;
+  }
+}
+```
+
+The token bucket algorithm is the industry standard for rate limiting. Tokens accumulate over time up to a maximum. Each request consumes one token. When tokens are exhausted, requests wait until a token becomes available.
+
+## Step 6: Check robots.txt
+
+Responsible scraping starts with checking the site's `robots.txt` file to see which paths are allowed.
+
+```typescript
+// src/robots.ts
+export async function checkRobotsTxt(baseUrl: string, userAgent: string): Promise<Set<string>> {
+  const disallowed = new Set<string>();
+
+  try {
+    const response = await fetch(`${baseUrl}/robots.txt`);
+    if (!response.ok) return disallowed;
+
+    const text = await response.text();
+    let isRelevantAgent = false;
+
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim().toLowerCase();
+
+      if (trimmed.startsWith("user-agent:")) {
+        const agent = trimmed.replace("user-agent:", "").trim();
+        isRelevantAgent = agent === "*" || agent === userAgent.toLowerCase();
+      }
+
+      if (isRelevantAgent && trimmed.startsWith("disallow:")) {
+        const path = trimmed.replace("disallow:", "").trim();
+        if (path) disallowed.add(path);
+      }
+    }
+  } catch (error) {
+    console.warn(`Could not fetch robots.txt: ${error}`);
+  }
+
+  return disallowed;
+}
+```
+
+## Step 7: Export to JSON and CSV
+
+Build output formatters that write your scraped data to files.
+
+```typescript
+// src/output.ts
+import fs from "fs";
+import { stringify } from "csv-stringify/sync";
+import { ScrapedItem } from "./types.js";
+
+export function writeJson(items: ScrapedItem[], filepath: string): void {
+  fs.writeFileSync(filepath, JSON.stringify(items, null, 2));
+  console.log(`Wrote ${items.length} items to ${filepath}`);
+}
+
+export function writeCsv(items: ScrapedItem[], filepath: string): void {
+  const headers = Object.keys(items[0] ?? {}) as (keyof ScrapedItem)[];
+  const rows = items.map((item) => headers.map((h) => item[h]));
+
+  const csv = stringify([headers, ...rows]);
+  fs.writeFileSync(filepath, csv);
+  console.log(`Wrote ${items.length} items to ${filepath}`);
+}
+```
+
+JSON is ideal for programmatic consumption — pipe it into another script, load it into a database, or use it as an API fixture. CSV is ideal for analysis in spreadsheets or data tools like pandas.
+
+## Step 8: Wire It All Together
+
+Create the main entry point that orchestrates the full scraping pipeline.
+
+```typescript
+// src/index.ts
+import { ScrapeConfig } from "./types.js";
+import { scrapeAll } from "./scraper.js";
+import { writeJson, writeCsv } from "./output.js";
+import { checkRobotsTxt } from "./robots.js";
+
+async function main(): Promise<void> {
+  const config: ScrapeConfig = {
+    baseUrl: "https://example-store.com/products",
+    maxPages: 10,
+    delayMs: 1500,
+    userAgent: "MyScraper/1.0 (contact@example.com)",
+  };
+
+  const disallowed = await checkRobotsTxt(config.baseUrl, config.userAgent);
+  if (disallowed.size > 0) {
+    console.log("Disallowed paths:", [...disallowed]);
+  }
+
+  const items = await scrapeAll(config);
+
+  if (items.length === 0) {
+    console.log("No items scraped. Check your selectors.");
+    return;
+  }
+
+  writeJson(items, "output/data.json");
+  writeCsv(items, "output/data.csv");
+
+  console.log(`Scraping complete. ${items.length} items collected.`);
+}
+
+main().catch(console.error);
+```
+
+Run the scraper with `npx tsx src/index.ts`. To adapt this to any website, you only need to change the CSS selectors in `parser.ts` and the configuration in `index.ts`. The fetching, rate limiting, pagination, and output infrastructure stays the same.
+
+Remember: always check a site's terms of service before scraping. Use delays between requests. Identify your bot with a descriptive user agent. And never scrape personal data without consent. Responsible scraping is sustainable scraping.

@@ -1,0 +1,570 @@
+---
+title: "Build a Static Site Generator"
+description: "Read Markdown files, parse frontmatter, apply templates, generate HTML output, and add watch mode with a live-reloading dev server."
+slug: "static-site-gen"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["tooling", "markdown", "templates", "node", "typescript"]
+---
+
+## Overview
+
+Static site generators transform Markdown files into fast, deployable websites. They power blogs, documentation sites, and landing pages across the web. Tools like Hugo, Jekyll, and Eleventy all follow the same fundamental pipeline: read source files, parse metadata, apply templates, write HTML. Understanding this pipeline demystifies the tools you use daily and gives you the power to customize your build process without fighting framework constraints.
+
+In this tutorial, you will build a complete static site generator from scratch. You will parse Markdown with frontmatter, build a template engine, generate an HTML site with navigation and pagination, add a watch mode for development, and serve the output with live reload. The final tool handles everything a personal blog or documentation site needs.
+
+**What you will build:**
+
+- A Markdown-to-HTML pipeline with frontmatter parsing
+- A template engine with layout inheritance and partials
+- Automatic navigation and pagination generation
+- An asset pipeline for CSS and images
+- Watch mode with live-reloading dev server
+
+## Step 1: Project Structure and File Discovery
+
+Define the source directory convention and build a file scanner that discovers all content files recursively.
+
+```typescript
+// src/scanner.ts
+import { readdir, stat } from "fs/promises";
+import { join, extname, relative } from "path";
+
+interface SourceFile {
+  absolutePath: string;
+  relativePath: string;
+  extension: string;
+  type: "content" | "template" | "asset";
+}
+
+async function scanDirectory(baseDir: string): Promise<SourceFile[]> {
+  const files: SourceFile[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    const entries = await readdir(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        await walk(fullPath);
+      } else {
+        const ext = extname(entry.name);
+        const relPath = relative(baseDir, fullPath);
+
+        let type: SourceFile["type"] = "asset";
+        if (ext === ".md" || ext === ".mdx") type = "content";
+        else if (ext === ".html") type = "template";
+
+        files.push({ absolutePath: fullPath, relativePath: relPath, extension: ext, type });
+      }
+    }
+  }
+
+  await walk(baseDir);
+  return files;
+}
+```
+
+## Step 2: Frontmatter Parser
+
+Frontmatter is YAML metadata at the top of a Markdown file, delimited by `---`. Parse it into a typed object and separate it from the content body.
+
+```typescript
+// src/frontmatter.ts
+interface ParsedFile {
+  metadata: Record<string, unknown>;
+  content: string;
+  rawFrontmatter: string;
+}
+
+function parseFrontmatter(raw: string): ParsedFile {
+  const fmRegex = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/;
+  const match = raw.match(fmRegex);
+
+  if (!match) {
+    return { metadata: {}, content: raw, rawFrontmatter: "" };
+  }
+
+  const rawFrontmatter = match[1];
+  const content = match[2];
+  const metadata = parseYaml(rawFrontmatter);
+
+  return { metadata, content, rawFrontmatter };
+}
+
+function parseYaml(yaml: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  for (const line of yaml.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const colonIndex = trimmed.indexOf(":");
+    if (colonIndex === -1) continue;
+
+    const key = trimmed.slice(0, colonIndex).trim();
+    let value: unknown = trimmed.slice(colonIndex + 1).trim();
+
+    // Handle arrays (simple single-line format: [a, b, c])
+    if (typeof value === "string" && value.startsWith("[") && value.endsWith("]")) {
+      value = value
+        .slice(1, -1)
+        .split(",")
+        .map((s) => s.trim().replace(/^["']|["']$/g, ""));
+    }
+    // Handle booleans and numbers
+    else if (value === "true") value = true;
+    else if (value === "false") value = false;
+    else if (typeof value === "string" && /^\d+$/.test(value)) value = parseInt(value);
+    // Strip quotes from strings
+    else if (typeof value === "string") value = value.replace(/^["']|["']$/g, "");
+
+    result[key] = value;
+  }
+
+  return result;
+}
+```
+
+This is a minimal YAML parser that handles the most common frontmatter patterns. For full YAML spec support, you would use the `yaml` package, but for a tutorial the hand-written parser illuminates how the format works.
+
+## Step 3: Markdown to HTML Conversion
+
+Convert Markdown to HTML. Implement the core syntax: headings, paragraphs, bold, italic, code blocks, links, images, lists, and blockquotes.
+
+````typescript
+// src/markdown.ts
+function markdownToHtml(markdown: string): string {
+  let html = markdown;
+
+  // Code blocks (must come before inline code to avoid conflicts)
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const escaped = escapeHtml(code.trim());
+    return `<pre><code class="language-${lang || "text"}">${escaped}</code></pre>`;
+  });
+
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+
+  // Headings
+  html = html.replace(/^#{6}\s+(.*)$/gm, "<h6>$1</h6>");
+  html = html.replace(/^#{5}\s+(.*)$/gm, "<h5>$1</h5>");
+  html = html.replace(/^#{4}\s+(.*)$/gm, "<h4>$1</h4>");
+  html = html.replace(/^###\s+(.*)$/gm, "<h3>$1</h3>");
+  html = html.replace(/^##\s+(.*)$/gm, "<h2>$1</h2>");
+  html = html.replace(/^#\s+(.*)$/gm, (_, text) => {
+    const id = text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    return `<h1 id="${id}">${text}</h1>`;
+  });
+
+  // Bold and italic
+  html = html.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+
+  // Links and images
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" loading="lazy" />');
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+  // Blockquotes
+  html = html.replace(/^>\s+(.*)$/gm, "<blockquote><p>$1</p></blockquote>");
+
+  // Horizontal rules
+  html = html.replace(/^---$/gm, "<hr />");
+
+  // Paragraphs: wrap remaining standalone lines
+  html = html.replace(/^(?!<[a-z])((?!\s*$).+)$/gm, "<p>$1</p>");
+
+  // Clean up empty paragraphs
+  html = html.replace(/<p>\s*<\/p>/g, "");
+
+  return html;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+````
+
+## Step 4: Template Engine
+
+Build a template engine that supports variable interpolation, conditionals, loops, and layout inheritance. Templates use a familiar `{{ variable }}` syntax.
+
+```typescript
+// src/templates/engine.ts
+interface TemplateContext {
+  [key: string]: unknown;
+}
+
+function renderTemplate(template: string, context: TemplateContext): string {
+  let output = template;
+
+  // Process loops: {% for item in items %} ... {% endfor %}
+  output = output.replace(
+    /\{%\s*for\s+(\w+)\s+in\s+(\w+)\s*%\}([\s\S]*?)\{%\s*endfor\s*%\}/g,
+    (_, itemName, listName, body) => {
+      const list = context[listName];
+      if (!Array.isArray(list)) return "";
+      return list.map((item) => renderTemplate(body, { ...context, [itemName]: item })).join("");
+    }
+  );
+
+  // Process conditionals: {% if condition %} ... {% else %} ... {% endif %}
+  output = output.replace(
+    /\{%\s*if\s+(\w+)\s*%\}([\s\S]*?)(?:\{%\s*else\s*%\}([\s\S]*?))?\{%\s*endif\s*%\}/g,
+    (_, condName, trueBlock, falseBlock) => {
+      return context[condName] ? trueBlock : (falseBlock ?? "");
+    }
+  );
+
+  // Variable interpolation: {{ variable }}
+  output = output.replace(/\{\{\s*(\w+(?:\.\w+)*)\s*\}\}/g, (_, path) => {
+    const value = resolvePath(context, path);
+    return value !== undefined ? String(value) : "";
+  });
+
+  return output;
+}
+
+function resolvePath(obj: unknown, path: string): unknown {
+  return path.split(".").reduce((current: unknown, key: string) => {
+    if (current === null || current === undefined) return undefined;
+    return (current as Record<string, unknown>)[key];
+  }, obj);
+}
+```
+
+## Step 5: Layout System
+
+Layouts wrap page content in a common shell (header, footer, navigation). Pages declare their layout in frontmatter, and the engine nests the page content inside the layout's `{{ content }}` slot.
+
+```typescript
+// src/templates/layouts.ts
+import { readFileSync } from "fs";
+import { join } from "path";
+
+class LayoutManager {
+  private layouts: Map<string, string> = new Map();
+
+  loadFromDirectory(dir: string): void {
+    const files = readdirSync(dir).filter((f) => f.endsWith(".html"));
+    for (const file of files) {
+      const name = file.replace(".html", "");
+      const content = readFileSync(join(dir, file), "utf-8");
+      this.layouts.set(name, content);
+    }
+  }
+
+  apply(layoutName: string, content: string, context: TemplateContext): string {
+    const layout = this.layouts.get(layoutName);
+    if (!layout) {
+      throw new Error(`Layout "${layoutName}" not found`);
+    }
+    return renderTemplate(layout, { ...context, content });
+  }
+}
+```
+
+A base layout looks like this:
+
+```html
+<!-- layouts/base.html -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ title }} — {{ siteName }}</title>
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <nav>
+      {% for item in navigation %}
+      <a href="{{ item.url }}">{{ item.label }}</a>
+      {% endfor %}
+    </nav>
+    <main>{{ content }}</main>
+    <footer><p>{{ copyright }}</p></footer>
+  </body>
+</html>
+```
+
+## Step 6: Build Pipeline
+
+Orchestrate the full build: scan source files, parse each content file, render Markdown to HTML, apply templates and layouts, write the output, and copy assets.
+
+```typescript
+// src/build.ts
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync } from "fs";
+import { join, dirname } from "path";
+
+interface SiteConfig {
+  sourceDir: string;
+  outputDir: string;
+  layoutsDir: string;
+  siteName: string;
+}
+
+async function build(config: SiteConfig): Promise<void> {
+  const startTime = Date.now();
+  const sourceFiles = await scanDirectory(config.sourceDir);
+  const layouts = new LayoutManager();
+  layouts.loadFromDirectory(config.layoutsDir);
+
+  const contentFiles = sourceFiles.filter((f) => f.type === "content");
+  const pages: Array<{ slug: string; title: string; date: string; url: string }> = [];
+  let filesWritten = 0;
+
+  for (const file of contentFiles) {
+    const raw = readFileSync(file.absolutePath, "utf-8");
+    const { metadata, content } = parseFrontmatter(raw);
+
+    const htmlContent = markdownToHtml(content);
+    const slug = file.relativePath.replace(/\.mdx?$/, "");
+    const outputPath = join(config.outputDir, slug, "index.html");
+    const url = `/${slug}/`;
+
+    const context: TemplateContext = {
+      ...metadata,
+      content: htmlContent,
+      siteName: config.siteName,
+      url,
+      navigation: pages,
+    };
+
+    const layoutName = (metadata.layout as string) ?? "base";
+    const finalHtml = layouts.apply(layoutName, htmlContent, context);
+
+    mkdirSync(dirname(outputPath), { recursive: true });
+    writeFileSync(outputPath, finalHtml);
+    filesWritten++;
+
+    pages.push({
+      slug,
+      title: (metadata.title as string) ?? slug,
+      date: (metadata.date as string) ?? "",
+      url,
+    });
+  }
+
+  // Copy assets
+  const assetFiles = sourceFiles.filter((f) => f.type === "asset");
+  for (const asset of assetFiles) {
+    const dest = join(config.outputDir, asset.relativePath);
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(asset.absolutePath, dest);
+  }
+
+  const elapsed = Date.now() - startTime;
+  console.log(`Built ${filesWritten} pages and ${assetFiles.length} assets in ${elapsed}ms`);
+}
+```
+
+## Step 7: Index and Pagination
+
+Generate an index page that lists all posts sorted by date. For large sites, split the index into paginated pages.
+
+```typescript
+// src/pagination.ts
+interface PaginationResult {
+  pages: Array<{
+    pageNumber: number;
+    items: typeof pages;
+    isFirst: boolean;
+    isLast: boolean;
+    prevUrl: string | null;
+    nextUrl: string | null;
+  }>;
+}
+
+function paginate(
+  items: Array<{ slug: string; title: string; date: string; url: string }>,
+  perPage: number = 10
+): PaginationResult {
+  const sorted = [...items].sort((a, b) => b.date.localeCompare(a.date));
+  const totalPages = Math.ceil(sorted.length / perPage);
+  const pages = [];
+
+  for (let i = 0; i < totalPages; i++) {
+    const start = i * perPage;
+    pages.push({
+      pageNumber: i + 1,
+      items: sorted.slice(start, start + perPage),
+      isFirst: i === 0,
+      isLast: i === totalPages - 1,
+      prevUrl: i > 0 ? (i === 1 ? "/" : `/page/${i}/`) : null,
+      nextUrl: i < totalPages - 1 ? `/page/${i + 2}/` : null,
+    });
+  }
+
+  return { pages };
+}
+```
+
+## Step 8: Watch Mode with File System Events
+
+Add a watch mode that rebuilds only changed files when source files are modified. Use the Node.js `fs.watch` API with debouncing to avoid redundant rebuilds.
+
+```typescript
+// src/watch.ts
+import { watch } from "fs";
+
+function watchSource(sourceDir: string, onChanged: (path: string) => void): void {
+  const timers: Map<string, NodeJS.Timeout> = new Map();
+  const debounceMs = 100;
+
+  watch(sourceDir, { recursive: true }, (_event, filename) => {
+    if (!filename) return;
+
+    const existing = timers.get(filename);
+    if (existing) clearTimeout(existing);
+
+    timers.set(
+      filename,
+      setTimeout(() => {
+        timers.delete(filename);
+        onChanged(filename);
+      }, debounceMs)
+    );
+  });
+
+  console.log(`Watching ${sourceDir} for changes...`);
+}
+```
+
+## Step 9: Dev Server with Live Reload
+
+Serve the output directory over HTTP and inject a live-reload script that reconnects when the server signals a rebuild.
+
+```typescript
+// src/server.ts
+import { createServer } from "http";
+import { readFileSync, existsSync } from "fs";
+import { join, extname } from "path";
+
+function startDevServer(outputDir: string, port: number = 3000): void {
+  const clients: Set<import("http").ServerResponse> = new Set();
+
+  const mimeTypes: Record<string, string> = {
+    ".html": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".svg": "image/svg+xml",
+  };
+
+  const liveReloadScript = `
+    <script>
+      const es = new EventSource("/__reload");
+      es.onmessage = () => location.reload();
+    </script>
+  `;
+
+  const server = createServer((req, res) => {
+    if (req.url === "/__reload") {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      });
+      clients.add(res);
+      req.on("close", () => clients.delete(res));
+      return;
+    }
+
+    let filePath = join(outputDir, req.url ?? "/");
+    if (filePath.endsWith("/")) filePath = join(filePath, "index.html");
+    if (!extname(filePath)) filePath = join(filePath, "index.html");
+
+    if (!existsSync(filePath)) {
+      res.writeHead(404);
+      res.end("Not found");
+      return;
+    }
+
+    let content = readFileSync(filePath);
+    const mime = mimeTypes[extname(filePath)] ?? "application/octet-stream";
+
+    // Inject live reload script into HTML pages
+    if (mime === "text/html") {
+      content = Buffer.from(content.toString().replace("</body>", `${liveReloadScript}</body>`));
+    }
+
+    res.writeHead(200, { "Content-Type": mime });
+    res.end(content);
+  });
+
+  server.listen(port, () => {
+    console.log(`Dev server running at http://localhost:${port}`);
+  });
+
+  return {
+    notifyReload: () => {
+      for (const client of clients) {
+        client.write("data: reload\n\n");
+      }
+    },
+  };
+}
+```
+
+## Step 10: CLI Interface and Configuration
+
+Wrap everything in a CLI that supports `build`, `serve`, and `watch` commands. Read configuration from a `site.config.json` file or command-line flags.
+
+```typescript
+// src/cli.ts
+async function main(): Promise<void> {
+  const command = process.argv[2] ?? "build";
+  const config = loadConfig();
+
+  switch (command) {
+    case "build": {
+      await build(config);
+      break;
+    }
+    case "serve": {
+      await build(config);
+      const { notifyReload } = startDevServer(config.outputDir, 3000);
+      watchSource(config.sourceDir, async (changedFile) => {
+        console.log(`Changed: ${changedFile}`);
+        await build(config);
+        notifyReload();
+      });
+      break;
+    }
+    default:
+      console.error(`Unknown command: ${command}`);
+      console.log("Usage: ssg [build|serve]");
+      process.exit(1);
+  }
+}
+
+function loadConfig(): SiteConfig {
+  const defaults: SiteConfig = {
+    sourceDir: "content",
+    outputDir: "dist",
+    layoutsDir: "layouts",
+    siteName: "My Site",
+  };
+
+  try {
+    const userConfig = JSON.parse(readFileSync("site.config.json", "utf-8"));
+    return { ...defaults, ...userConfig };
+  } catch {
+    return defaults;
+  }
+}
+
+main().catch(console.error);
+```
+
+Run `npx ts-node src/cli.ts serve` to start the development workflow. Create a Markdown file in the content directory and watch it appear in the browser immediately. The full pipeline — scan, parse, render, template, write, reload — completes in milliseconds for typical sites, making the feedback loop nearly instant.

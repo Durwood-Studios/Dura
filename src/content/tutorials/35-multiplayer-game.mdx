@@ -1,0 +1,581 @@
+---
+title: "Build a WebSocket Multiplayer Game"
+description: "Create a real-time shared canvas drawing game with lobbies, rooms, server-authoritative state, and client interpolation."
+slug: "multiplayer-game"
+difficulty: "advanced"
+estimatedMinutes: 240
+steps: 12
+tags: ["websocket", "game", "multiplayer", "real-time", "node"]
+---
+
+## Overview
+
+Multiplayer games are one of the hardest real-time systems to build correctly. Every player must see a consistent world despite network latency, packet loss, and the speed of light. A drawing game is the ideal vehicle for learning these concepts — it requires real-time state sync, handles high-frequency input events, and produces immediately visible results when something goes wrong.
+
+In this tutorial, you will build a collaborative drawing game where players join rooms, draw on a shared canvas, and see each other's strokes in real-time. You will implement a WebSocket server with lobby management, server-authoritative state, client-side prediction, and interpolation to smooth out network jitter. The result is a polished multiplayer experience that teaches networking fundamentals applicable to any real-time application.
+
+**What you will build:**
+
+- A WebSocket server with room and lobby management
+- A shared canvas drawing system with real-time sync
+- Server-authoritative game state with client prediction
+- Player presence indicators and cursor tracking
+- A lobby UI for creating and joining rooms
+
+## Step 1: WebSocket Server Foundation
+
+Start with a bare WebSocket server using the `ws` library. Define the message protocol as TypeScript types — every message between client and server must be typed.
+
+```typescript
+// src/server/protocol.ts
+interface JoinMessage {
+  type: "join";
+  roomId: string;
+  playerName: string;
+}
+
+interface DrawMessage {
+  type: "draw";
+  stroke: StrokeData;
+}
+
+interface CursorMessage {
+  type: "cursor";
+  x: number;
+  y: number;
+}
+
+interface StateMessage {
+  type: "state";
+  strokes: StrokeData[];
+  players: PlayerInfo[];
+}
+
+interface StrokeData {
+  id: string;
+  playerId: string;
+  color: string;
+  width: number;
+  points: Array<{ x: number; y: number; t: number }>;
+}
+
+interface PlayerInfo {
+  id: string;
+  name: string;
+  color: string;
+  cursor: { x: number; y: number } | null;
+}
+
+type ClientMessage = JoinMessage | DrawMessage | CursorMessage;
+type ServerMessage =
+  | StateMessage
+  | { type: "player-joined"; player: PlayerInfo }
+  | { type: "player-left"; playerId: string }
+  | { type: "stroke"; stroke: StrokeData }
+  | { type: "cursor-update"; playerId: string; x: number; y: number };
+```
+
+## Step 2: Room Management
+
+Rooms isolate groups of players. Each room holds its own canvas state, player list, and handles message routing.
+
+```typescript
+// src/server/room.ts
+import { WebSocket } from "ws";
+
+class Room {
+  readonly id: string;
+  private players: Map<string, { ws: WebSocket; info: PlayerInfo }> = new Map();
+  private strokes: StrokeData[] = [];
+  private maxPlayers = 8;
+
+  constructor(id: string) {
+    this.id = id;
+  }
+
+  join(playerId: string, name: string, ws: WebSocket): boolean {
+    if (this.players.size >= this.maxPlayers) return false;
+
+    const colors = [
+      "#10b981",
+      "#3b82f6",
+      "#f59e0b",
+      "#ef4444",
+      "#8b5cf6",
+      "#ec4899",
+      "#06b6d4",
+      "#f97316",
+    ];
+    const color = colors[this.players.size % colors.length];
+
+    const info: PlayerInfo = { id: playerId, name, color, cursor: null };
+    this.players.set(playerId, { ws, info });
+
+    // Send current state to new player
+    this.send(ws, { type: "state", strokes: this.strokes, players: this.getPlayerList() });
+
+    // Notify others
+    this.broadcast({ type: "player-joined", player: info }, playerId);
+    return true;
+  }
+
+  leave(playerId: string): void {
+    this.players.delete(playerId);
+    this.broadcast({ type: "player-left", playerId });
+  }
+
+  addStroke(playerId: string, stroke: StrokeData): void {
+    stroke.playerId = playerId;
+    this.strokes.push(stroke);
+    this.broadcast({ type: "stroke", stroke });
+  }
+
+  updateCursor(playerId: string, x: number, y: number): void {
+    const player = this.players.get(playerId);
+    if (player) {
+      player.info.cursor = { x, y };
+      this.broadcast({ type: "cursor-update", playerId, x, y }, playerId);
+    }
+  }
+
+  private broadcast(message: ServerMessage, excludeId?: string): void {
+    for (const [id, { ws }] of this.players) {
+      if (id !== excludeId && ws.readyState === WebSocket.OPEN) {
+        this.send(ws, message);
+      }
+    }
+  }
+
+  private send(ws: WebSocket, message: ServerMessage): void {
+    ws.send(JSON.stringify(message));
+  }
+
+  private getPlayerList(): PlayerInfo[] {
+    return Array.from(this.players.values()).map((p) => p.info);
+  }
+
+  get playerCount(): number {
+    return this.players.size;
+  }
+
+  get isEmpty(): boolean {
+    return this.players.size === 0;
+  }
+}
+```
+
+## Step 3: Lobby System
+
+The lobby lets players browse available rooms, create new ones, and see player counts before joining.
+
+```typescript
+// src/server/lobby.ts
+class Lobby {
+  private rooms: Map<string, Room> = new Map();
+
+  createRoom(id?: string): Room {
+    const roomId = id ?? this.generateId();
+    const room = new Room(roomId);
+    this.rooms.set(roomId, room);
+    return room;
+  }
+
+  getRoom(id: string): Room | undefined {
+    return this.rooms.get(id);
+  }
+
+  listRooms(): Array<{ id: string; players: number }> {
+    return Array.from(this.rooms.values())
+      .filter((r) => !r.isEmpty)
+      .map((r) => ({ id: r.id, players: r.playerCount }));
+  }
+
+  cleanup(): void {
+    for (const [id, room] of this.rooms) {
+      if (room.isEmpty) this.rooms.delete(id);
+    }
+  }
+
+  private generateId(): string {
+    const adjectives = ["swift", "bright", "calm", "wild", "bold"];
+    const nouns = ["fox", "river", "peak", "star", "wave"];
+    const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+    const noun = nouns[Math.floor(Math.random() * nouns.length)];
+    const num = Math.floor(Math.random() * 100);
+    return `${adj}-${noun}-${num}`;
+  }
+}
+```
+
+## Step 4: Server Message Routing
+
+Wire the WebSocket server to the lobby and rooms. Each connection gets a unique player ID, and messages are routed based on the player's current room.
+
+```typescript
+// src/server/index.ts
+import { WebSocketServer, WebSocket } from "ws";
+
+const wss = new WebSocketServer({ port: 8080 });
+const lobby = new Lobby();
+
+const playerRooms: Map<string, string> = new Map();
+let nextPlayerId = 1;
+
+wss.on("connection", (ws: WebSocket) => {
+  const playerId = `player-${nextPlayerId++}`;
+
+  ws.on("message", (raw: Buffer) => {
+    try {
+      const message: ClientMessage = JSON.parse(raw.toString());
+
+      switch (message.type) {
+        case "join": {
+          let room = lobby.getRoom(message.roomId);
+          if (!room) room = lobby.createRoom(message.roomId);
+          if (room.join(playerId, message.playerName, ws)) {
+            playerRooms.set(playerId, room.id);
+          }
+          break;
+        }
+        case "draw": {
+          const roomId = playerRooms.get(playerId);
+          if (roomId) {
+            const room = lobby.getRoom(roomId);
+            room?.addStroke(playerId, message.stroke);
+          }
+          break;
+        }
+        case "cursor": {
+          const roomId = playerRooms.get(playerId);
+          if (roomId) {
+            const room = lobby.getRoom(roomId);
+            room?.updateCursor(playerId, message.x, message.y);
+          }
+          break;
+        }
+      }
+    } catch (error) {
+      console.error("Invalid message from", playerId, error);
+    }
+  });
+
+  ws.on("close", () => {
+    const roomId = playerRooms.get(playerId);
+    if (roomId) {
+      lobby.getRoom(roomId)?.leave(playerId);
+      playerRooms.delete(playerId);
+    }
+    lobby.cleanup();
+  });
+});
+```
+
+## Step 5: Client Canvas Setup
+
+Set up the HTML5 Canvas with proper scaling for high-DPI displays. The canvas needs to track mouse and touch events for drawing.
+
+```typescript
+// src/client/canvas.ts
+function setupCanvas(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  canvas.style.width = `${rect.width}px`;
+  canvas.style.height = `${rect.height}px`;
+
+  const ctx = canvas.getContext("2d")!;
+  ctx.scale(dpr, dpr);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  return ctx;
+}
+
+function canvasToLocal(
+  canvas: HTMLCanvasElement,
+  clientX: number,
+  clientY: number
+): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: clientX - rect.left,
+    y: clientY - rect.top,
+  };
+}
+```
+
+## Step 6: Drawing Engine
+
+The drawing engine converts pointer events into strokes and renders them to the canvas. Each stroke is a series of points with timestamps.
+
+```typescript
+// src/client/drawing.ts
+class DrawingEngine {
+  private ctx: CanvasRenderingContext2D;
+  private currentStroke: StrokeData | null = null;
+  private allStrokes: StrokeData[] = [];
+
+  constructor(ctx: CanvasRenderingContext2D) {
+    this.ctx = ctx;
+  }
+
+  startStroke(x: number, y: number, color: string, width: number): StrokeData {
+    this.currentStroke = {
+      id: crypto.randomUUID(),
+      playerId: "",
+      color,
+      width,
+      points: [{ x, y, t: Date.now() }],
+    };
+    return this.currentStroke;
+  }
+
+  addPoint(x: number, y: number): void {
+    if (!this.currentStroke) return;
+    this.currentStroke.points.push({ x, y, t: Date.now() });
+    this.renderStroke(this.currentStroke);
+  }
+
+  endStroke(): StrokeData | null {
+    const stroke = this.currentStroke;
+    if (stroke) {
+      this.allStrokes.push(stroke);
+      this.currentStroke = null;
+    }
+    return stroke;
+  }
+
+  addRemoteStroke(stroke: StrokeData): void {
+    this.allStrokes.push(stroke);
+    this.renderStroke(stroke);
+  }
+
+  private renderStroke(stroke: StrokeData): void {
+    const { ctx } = this;
+    const { points, color, width } = stroke;
+    if (points.length < 2) return;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+
+    for (let i = 1; i < points.length; i++) {
+      const prev = points[i - 1];
+      const curr = points[i];
+      const midX = (prev.x + curr.x) / 2;
+      const midY = (prev.y + curr.y) / 2;
+      ctx.quadraticCurveTo(prev.x, prev.y, midX, midY);
+    }
+    ctx.stroke();
+  }
+
+  redrawAll(): void {
+    this.ctx.clearRect(0, 0, this.ctx.canvas.width, this.ctx.canvas.height);
+    for (const stroke of this.allStrokes) {
+      this.renderStroke(stroke);
+    }
+  }
+
+  loadState(strokes: StrokeData[]): void {
+    this.allStrokes = strokes;
+    this.redrawAll();
+  }
+}
+```
+
+Using `quadraticCurveTo` instead of straight `lineTo` produces smooth curves that look natural, especially at the velocity of freehand drawing.
+
+## Step 7: WebSocket Client
+
+Connect to the server and handle incoming messages. The client must gracefully handle disconnections and reconnection.
+
+```typescript
+// src/client/network.ts
+class GameClient {
+  private ws: WebSocket | null = null;
+  private handlers: Map<string, (data: unknown) => void> = new Map();
+  private reconnectAttempts = 0;
+  private maxReconnects = 5;
+
+  connect(url: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(url);
+
+      this.ws.onopen = () => {
+        this.reconnectAttempts = 0;
+        resolve();
+      };
+
+      this.ws.onmessage = (event) => {
+        const message = JSON.parse(event.data as string);
+        const handler = this.handlers.get(message.type);
+        handler?.(message);
+      };
+
+      this.ws.onclose = () => {
+        if (this.reconnectAttempts < this.maxReconnects) {
+          const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 10000);
+          this.reconnectAttempts++;
+          setTimeout(() => this.connect(url), delay);
+        }
+      };
+
+      this.ws.onerror = () => reject(new Error("WebSocket connection failed"));
+    });
+  }
+
+  on(type: string, handler: (data: unknown) => void): void {
+    this.handlers.set(type, handler);
+  }
+
+  send(message: ClientMessage): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+}
+```
+
+## Step 8: Cursor Tracking
+
+Show each player's cursor position on the canvas in real-time. Throttle cursor updates to avoid flooding the network.
+
+```typescript
+// src/client/cursors.ts
+class CursorRenderer {
+  private cursors: Map<string, { x: number; y: number; name: string; color: string }> = new Map();
+
+  update(playerId: string, x: number, y: number, name: string, color: string): void {
+    this.cursors.set(playerId, { x, y, name, color });
+  }
+
+  remove(playerId: string): void {
+    this.cursors.delete(playerId);
+  }
+
+  render(ctx: CanvasRenderingContext2D): void {
+    for (const [, cursor] of this.cursors) {
+      ctx.fillStyle = cursor.color;
+      ctx.beginPath();
+      ctx.arc(cursor.x, cursor.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = "12px sans-serif";
+      ctx.fillText(cursor.name, cursor.x + 8, cursor.y - 8);
+    }
+  }
+}
+
+// Throttle cursor sends to 20fps
+function throttle<T extends (...args: unknown[]) => void>(fn: T, ms: number): T {
+  let lastCall = 0;
+  return ((...args: unknown[]) => {
+    const now = Date.now();
+    if (now - lastCall >= ms) {
+      lastCall = now;
+      fn(...args);
+    }
+  }) as T;
+}
+```
+
+## Step 9: Client-Side Prediction
+
+When a player draws, they see their stroke immediately — before the server confirms it. This is client-side prediction. If the server rejects the stroke (unlikely in a drawing game, but essential in competitive games), the client rolls back.
+
+```typescript
+// src/client/prediction.ts
+class PredictionBuffer {
+  private pending: Map<string, StrokeData> = new Map();
+
+  addPrediction(stroke: StrokeData): void {
+    this.pending.set(stroke.id, stroke);
+  }
+
+  confirm(strokeId: string): void {
+    this.pending.delete(strokeId);
+  }
+
+  reject(strokeId: string): StrokeData | undefined {
+    const stroke = this.pending.get(strokeId);
+    this.pending.delete(strokeId);
+    return stroke;
+  }
+
+  getPendingCount(): number {
+    return this.pending.size;
+  }
+}
+```
+
+## Step 10: Interpolation for Smooth Remote Rendering
+
+Remote strokes arrive in bursts due to network jitter. Instead of rendering them instantly (which looks jerky), buffer incoming points and interpolate them over time.
+
+```typescript
+class StrokeInterpolator {
+  private queue: Array<{ x: number; y: number; t: number }> = [];
+  private renderDelay = 100; // ms behind real-time
+
+  addPoints(points: Array<{ x: number; y: number; t: number }>): void {
+    this.queue.push(...points);
+  }
+
+  getPointsUpTo(now: number): Array<{ x: number; y: number }> {
+    const cutoff = now - this.renderDelay;
+    const ready = this.queue.filter((p) => p.t <= cutoff);
+    this.queue = this.queue.filter((p) => p.t > cutoff);
+    return ready;
+  }
+}
+```
+
+The 100ms render delay trades a small amount of perceived latency for dramatically smoother rendering. Players rarely notice the delay, but they absolutely notice jitter.
+
+## Step 11: Game Loop
+
+Tie everything together in a requestAnimationFrame loop. The loop redraws the canvas, renders remote cursors, and processes interpolated strokes.
+
+```typescript
+function gameLoop(
+  engine: DrawingEngine,
+  cursors: CursorRenderer,
+  ctx: CanvasRenderingContext2D
+): void {
+  function tick(): void {
+    engine.redrawAll();
+    cursors.render(ctx);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+```
+
+## Step 12: Lobby UI and Polish
+
+Build the lobby interface where players enter their name, browse rooms, and create new ones. Add visual polish: a player list sidebar, a color picker for brush color, a width slider, and an undo button that removes the last stroke.
+
+```html
+<div class="lobby">
+  <h1>Draw Together</h1>
+  <input id="player-name" placeholder="Your name" maxlength="20" />
+  <div id="room-list"></div>
+  <button id="create-room">Create Room</button>
+</div>
+
+<div class="game hidden">
+  <aside class="player-list" id="players"></aside>
+  <canvas id="canvas"></canvas>
+  <div class="toolbar">
+    <input type="color" id="color-picker" value="#10b981" />
+    <input type="range" id="brush-width" min="2" max="20" value="4" />
+    <button id="undo">Undo</button>
+    <button id="clear">Clear</button>
+  </div>
+</div>
+```
+
+The complete game handles creation and joining of rooms, real-time drawing with smooth interpolation, player cursors visible to all participants, and graceful reconnection when the network drops. These patterns — authoritative server state, client prediction, interpolation buffers, and lobby management — transfer directly to any multiplayer application, from collaborative editors to competitive games.

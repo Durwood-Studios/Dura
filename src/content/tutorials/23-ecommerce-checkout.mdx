@@ -1,0 +1,524 @@
+---
+title: "Build an E-Commerce Checkout Flow"
+description: "Build a complete e-commerce checkout with product pages, cart state management, Stripe integration, and order confirmation in Next.js."
+slug: "ecommerce-checkout"
+difficulty: "intermediate"
+estimatedMinutes: 240
+steps: 12
+tags: ["nextjs", "stripe", "full-stack", "ecommerce", "typescript"]
+---
+
+## Overview
+
+You're going to build a complete e-commerce checkout flow in Next.js: a product listing page, a shopping cart with persistent state, a Stripe Checkout integration in test mode, webhook handling for order fulfillment, and an order confirmation page.
+
+This is a full-stack tutorial. You'll write Server Components for the product catalog, Client Components for the cart, API routes for Stripe session creation, and webhook endpoints for payment confirmation. By the end, you'll understand how modern e-commerce apps handle the purchase flow from browse to receipt.
+
+The finished app uses Next.js App Router, TypeScript, Zustand for cart state, and Stripe's hosted checkout page. No custom payment forms — Stripe handles PCI compliance so you don't have to.
+
+## Step 1: Project Setup
+
+```bash
+npx create-next-app@latest checkout-flow --typescript --tailwind --app --src-dir
+cd checkout-flow
+npm install stripe @stripe/stripe-js zustand
+```
+
+Create a `.env.local` file with your Stripe test keys:
+
+```bash
+STRIPE_SECRET_KEY=sk_test_your_secret_key
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_your_publishable_key
+STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret
+```
+
+Get these from the [Stripe Dashboard](https://dashboard.stripe.com/test/apikeys). The `sk_test_` prefix means you're in test mode — no real charges will occur.
+
+## Step 2: Product Data Layer
+
+Start with a static product catalog. In production this would come from a database, but the interface stays the same.
+
+```typescript
+// src/lib/products.ts
+export interface Product {
+  id: string;
+  name: string;
+  description: string;
+  price: number; // in cents
+  image: string;
+  category: string;
+}
+
+export const products: Product[] = [
+  {
+    id: "mech-keyboard",
+    name: "Mechanical Keyboard",
+    description: "Hot-swappable switches, aluminum frame, per-key RGB.",
+    price: 14900,
+    image: "/images/keyboard.jpg",
+    category: "peripherals",
+  },
+  {
+    id: "monitor-arm",
+    name: "Monitor Arm",
+    description: "Gas spring arm, holds up to 32 inches, cable management.",
+    price: 8900,
+    image: "/images/arm.jpg",
+    category: "accessories",
+  },
+  {
+    id: "desk-mat",
+    name: "Desk Mat XL",
+    description: "900x400mm, stitched edges, non-slip rubber base.",
+    price: 3400,
+    image: "/images/mat.jpg",
+    category: "accessories",
+  },
+];
+
+export function getProduct(id: string): Product | undefined {
+  return products.find((p) => p.id === id);
+}
+
+export function formatPrice(cents: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(cents / 100);
+}
+```
+
+Prices are stored in cents. This avoids floating-point issues (`0.1 + 0.2 !== 0.3` in JavaScript). Stripe also expects amounts in the smallest currency unit, so this aligns perfectly.
+
+## Step 3: Cart State with Zustand
+
+The cart needs to persist across page navigations and survive page refreshes.
+
+```typescript
+// src/lib/cart-store.ts
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import { Product } from "./products";
+
+interface CartItem {
+  product: Product;
+  quantity: number;
+}
+
+interface CartStore {
+  items: CartItem[];
+  addItem: (product: Product) => void;
+  removeItem: (productId: string) => void;
+  updateQuantity: (productId: string, quantity: number) => void;
+  clearCart: () => void;
+  totalItems: () => number;
+  totalPrice: () => number;
+}
+
+export const useCartStore = create<CartStore>()(
+  persist(
+    (set, get) => ({
+      items: [],
+      addItem: (product: Product) => {
+        set((state) => {
+          const existing = state.items.find((i) => i.product.id === product.id);
+          if (existing) {
+            return {
+              items: state.items.map((i) =>
+                i.product.id === product.id ? { ...i, quantity: i.quantity + 1 } : i
+              ),
+            };
+          }
+          return { items: [...state.items, { product, quantity: 1 }] };
+        });
+      },
+      removeItem: (productId: string) => {
+        set((state) => ({
+          items: state.items.filter((i) => i.product.id !== productId),
+        }));
+      },
+      updateQuantity: (productId: string, quantity: number) => {
+        set((state) => ({
+          items:
+            quantity <= 0
+              ? state.items.filter((i) => i.product.id !== productId)
+              : state.items.map((i) => (i.product.id === productId ? { ...i, quantity } : i)),
+        }));
+      },
+      clearCart: () => set({ items: [] }),
+      totalItems: () => get().items.reduce((sum, i) => sum + i.quantity, 0),
+      totalPrice: () => get().items.reduce((sum, i) => sum + i.product.price * i.quantity, 0),
+    }),
+    { name: "cart-storage" }
+  )
+);
+```
+
+The `persist` middleware serializes the cart to `localStorage` automatically. Users can close the tab and come back to find their cart intact.
+
+## Step 4: Product Listing Page
+
+A Server Component that renders the product catalog.
+
+```tsx
+// src/app/page.tsx
+import { products, formatPrice } from "@/lib/products";
+import { AddToCartButton } from "@/components/AddToCartButton";
+
+export default function ProductsPage() {
+  return (
+    <main className="mx-auto max-w-6xl px-4 py-12">
+      <h1 className="mb-8 text-3xl font-bold">Products</h1>
+      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+        {products.map((product) => (
+          <article key={product.id} className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+            <div className="mb-4 aspect-video rounded-lg bg-zinc-800" />
+            <h2 className="text-lg font-semibold">{product.name}</h2>
+            <p className="mt-1 text-sm text-zinc-400">{product.description}</p>
+            <div className="mt-4 flex items-center justify-between">
+              <span className="text-xl font-bold">{formatPrice(product.price)}</span>
+              <AddToCartButton product={product} />
+            </div>
+          </article>
+        ))}
+      </div>
+    </main>
+  );
+}
+```
+
+The page itself is a Server Component — no JavaScript shipped for the product grid. Only `AddToCartButton` is a Client Component because it needs `onClick`.
+
+## Step 5: Add to Cart Button
+
+```tsx
+// src/components/AddToCartButton.tsx
+"use client";
+
+import { Product } from "@/lib/products";
+import { useCartStore } from "@/lib/cart-store";
+import { useState } from "react";
+
+interface AddToCartButtonProps {
+  product: Product;
+}
+
+export function AddToCartButton({ product }: AddToCartButtonProps) {
+  const addItem = useCartStore((s) => s.addItem);
+  const [added, setAdded] = useState(false);
+
+  const handleClick = (): void => {
+    addItem(product);
+    setAdded(true);
+    setTimeout(() => setAdded(false), 1500);
+  };
+
+  return (
+    <button
+      onClick={handleClick}
+      className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-400"
+    >
+      {added ? "Added!" : "Add to Cart"}
+    </button>
+  );
+}
+```
+
+## Step 6: Cart Page
+
+Display cart contents with quantity controls and a checkout button.
+
+```tsx
+// src/app/cart/page.tsx
+"use client";
+
+import { useCartStore } from "@/lib/cart-store";
+import { formatPrice } from "@/lib/products";
+import { useState } from "react";
+
+export default function CartPage() {
+  const { items, removeItem, updateQuantity, totalPrice } = useCartStore();
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleCheckout = async (): Promise<void> => {
+    setIsLoading(true);
+    try {
+      const response = await fetch("/api/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: items.map((i) => ({
+            id: i.product.id,
+            quantity: i.quantity,
+          })),
+        }),
+      });
+      const { url } = await response.json();
+      window.location.href = url;
+    } catch (error) {
+      console.error("Checkout failed:", error);
+      setIsLoading(false);
+    }
+  };
+
+  if (items.length === 0) {
+    return (
+      <main className="mx-auto max-w-2xl px-4 py-12 text-center">
+        <h1 className="text-2xl font-bold">Your cart is empty</h1>
+        <a href="/" className="mt-4 inline-block text-indigo-400 hover:underline">
+          Continue shopping
+        </a>
+      </main>
+    );
+  }
+
+  return (
+    <main className="mx-auto max-w-2xl px-4 py-12">
+      <h1 className="mb-8 text-2xl font-bold">Your Cart</h1>
+      <ul className="space-y-4">
+        {items.map((item) => (
+          <li
+            key={item.product.id}
+            className="flex items-center gap-4 rounded-lg border border-zinc-800 p-4"
+          >
+            <div className="h-16 w-16 rounded bg-zinc-800" />
+            <div className="flex-1">
+              <h2 className="font-medium">{item.product.name}</h2>
+              <p className="text-sm text-zinc-400">{formatPrice(item.product.price)}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => updateQuantity(item.product.id, item.quantity - 1)}
+                className="h-8 w-8 rounded border border-zinc-700 text-zinc-400 hover:bg-zinc-800"
+              >
+                -
+              </button>
+              <span className="w-8 text-center">{item.quantity}</span>
+              <button
+                onClick={() => updateQuantity(item.product.id, item.quantity + 1)}
+                className="h-8 w-8 rounded border border-zinc-700 text-zinc-400 hover:bg-zinc-800"
+              >
+                +
+              </button>
+            </div>
+            <button
+              onClick={() => removeItem(item.product.id)}
+              className="text-sm text-red-400 hover:underline"
+            >
+              Remove
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-8 border-t border-zinc-800 pt-6">
+        <div className="flex justify-between text-lg font-bold">
+          <span>Total</span>
+          <span>{formatPrice(totalPrice())}</span>
+        </div>
+        <button
+          onClick={handleCheckout}
+          disabled={isLoading}
+          className="mt-4 w-full rounded-lg bg-indigo-500 py-3 font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+        >
+          {isLoading ? "Redirecting to Stripe..." : "Checkout"}
+        </button>
+      </div>
+    </main>
+  );
+}
+```
+
+## Step 7: Stripe Checkout API Route
+
+The API route creates a Stripe Checkout Session and returns the URL.
+
+```typescript
+// src/app/api/checkout/route.ts
+import { NextResponse } from "next/server";
+import Stripe from "stripe";
+import { getProduct } from "@/lib/products";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: "2024-06-20",
+});
+
+interface CheckoutItem {
+  id: string;
+  quantity: number;
+}
+
+export async function POST(request: Request): Promise<NextResponse> {
+  try {
+    const { items } = (await request.json()) as { items: CheckoutItem[] };
+
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = items
+      .map((item) => {
+        const product = getProduct(item.id);
+        if (!product) return null;
+        return {
+          price_data: {
+            currency: "usd",
+            product_data: { name: product.name },
+            unit_amount: product.price,
+          },
+          quantity: item.quantity,
+        };
+      })
+      .filter((item): item is Stripe.Checkout.SessionCreateParams.LineItem => item !== null);
+
+    if (lineItems.length === 0) {
+      return NextResponse.json({ error: "No valid items" }, { status: 400 });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      line_items: lineItems,
+      success_url: `${request.headers.get("origin")}/order/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${request.headers.get("origin")}/cart`,
+    });
+
+    return NextResponse.json({ url: session.url });
+  } catch (error) {
+    console.error("Stripe session creation failed:", error);
+    return NextResponse.json({ error: "Checkout failed" }, { status: 500 });
+  }
+}
+```
+
+## Step 8: Stripe Webhook Handler
+
+Webhooks confirm payment was actually received. Never rely solely on the redirect URL — users can navigate directly to your success page.
+
+```typescript
+// src/app/api/webhooks/stripe/route.ts
+import { NextResponse } from "next/server";
+import Stripe from "stripe";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: "2024-06-20",
+});
+
+export async function POST(request: Request): Promise<NextResponse> {
+  const body = await request.text();
+  const signature = request.headers.get("stripe-signature");
+
+  if (!signature) {
+    return NextResponse.json({ error: "Missing signature" }, { status: 400 });
+  }
+
+  try {
+    const event = stripe.webhooks.constructEvent(
+      body,
+      signature,
+      process.env.STRIPE_WEBHOOK_SECRET!
+    );
+
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object as Stripe.Checkout.Session;
+      // In production: save order to database, send confirmation email,
+      // update inventory, trigger fulfillment
+      console.log("Payment received for session:", session.id);
+    }
+
+    return NextResponse.json({ received: true });
+  } catch (error) {
+    console.error("Webhook verification failed:", error);
+    return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+  }
+}
+```
+
+## Step 9: Order Confirmation Page
+
+```tsx
+// src/app/order/success/page.tsx
+import { redirect } from "next/navigation";
+import Stripe from "stripe";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: "2024-06-20",
+});
+
+interface SuccessPageProps {
+  searchParams: Promise<{ session_id?: string }>;
+}
+
+export default async function SuccessPage({ searchParams }: SuccessPageProps) {
+  const { session_id } = await searchParams;
+  if (!session_id) redirect("/");
+
+  let session: Stripe.Checkout.Session;
+  try {
+    session = await stripe.checkout.sessions.retrieve(session_id);
+  } catch {
+    redirect("/");
+  }
+
+  return (
+    <main className="mx-auto max-w-lg px-4 py-12 text-center">
+      <div className="mb-6 text-5xl">&#10003;</div>
+      <h1 className="text-2xl font-bold">Order Confirmed</h1>
+      <p className="mt-2 text-zinc-400">
+        Your payment of{" "}
+        {new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: session.currency || "usd",
+        }).format((session.amount_total || 0) / 100)}{" "}
+        was successful.
+      </p>
+      <p className="mt-1 text-sm text-zinc-500">Order ID: {session.id}</p>
+      <a href="/" className="mt-6 inline-block text-indigo-400 hover:underline">
+        Continue Shopping
+      </a>
+    </main>
+  );
+}
+```
+
+This is a Server Component. It fetches the session from Stripe on the server and renders the confirmation. No Stripe data leaks to the client.
+
+## Step 10: Test with Stripe CLI
+
+Install the Stripe CLI and forward webhooks to your local server:
+
+```bash
+stripe listen --forward-to localhost:3000/api/webhooks/stripe
+```
+
+Use test card `4242 4242 4242 4242` with any future expiry date and any CVC. This completes a successful payment in test mode.
+
+## Step 11: Cart Clearing After Purchase
+
+Add cart clearing on the success page. Create a Client Component that clears the cart when it mounts:
+
+```tsx
+// src/components/ClearCart.tsx
+"use client";
+
+import { useEffect } from "react";
+import { useCartStore } from "@/lib/cart-store";
+
+export function ClearCart() {
+  const clearCart = useCartStore((s) => s.clearCart);
+  useEffect(() => {
+    clearCart();
+  }, [clearCart]);
+  return null;
+}
+```
+
+Drop `<ClearCart />` into the success page. It clears localStorage-persisted cart state without requiring the success page to become a Client Component.
+
+## Step 12: Security and Production Considerations
+
+Before going live, address these critical concerns:
+
+Validate cart items server-side in your checkout route. Never trust client-sent prices — always look up the canonical price from your product catalog on the server. A malicious client could send `price: 1` for a $149 keyboard.
+
+Rate-limit the checkout API route. Without limits, automated scripts can create thousands of Stripe sessions. Use middleware or a rate-limiting library.
+
+Enable Stripe's fraud protection (Radar) in your dashboard. It's free for basic rules and catches the most common card testing attacks.
+
+Set `idempotencyKey` on Stripe API calls to prevent duplicate charges from retried requests. Stripe automatically deduplicates calls with the same idempotency key within 24 hours.
+
+Always verify webhook signatures. The `constructEvent` method in Step 8 does this — never skip it, and never parse the webhook body as JSON before passing it to Stripe's verification.

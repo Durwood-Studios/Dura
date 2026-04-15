@@ -1,0 +1,512 @@
+---
+title: "Build an API Gateway"
+description: "Build a production-grade API gateway with request routing, rate limiting, authentication middleware, request transforms, logging, and a circuit breaker."
+slug: "api-gateway"
+difficulty: "advanced"
+estimatedMinutes: 210
+steps: 10
+tags: ["backend", "api-gateway", "proxy", "middleware", "node"]
+---
+
+## Overview
+
+An API gateway sits between clients and your backend services. It handles concerns that every service needs but no individual service should own: authentication, rate limiting, routing, logging, and fault tolerance. Companies like Netflix, Amazon, and Stripe all run API gateways as critical infrastructure.
+
+In this tutorial, you will build an API gateway from scratch in Node.js. You will implement request routing to multiple backend services, JWT-based authentication middleware, a sliding-window rate limiter, request and response transformations, structured logging, and a circuit breaker that protects your system from cascading failures.
+
+This is an advanced project. You should be comfortable with HTTP, middleware patterns, and asynchronous programming before starting.
+
+## Step 1: Set Up the Project
+
+Initialize a Node.js project with TypeScript and a minimal HTTP framework.
+
+```bash
+mkdir api-gateway && cd api-gateway
+npm init -y
+npm install express jsonwebtoken
+npm install -D typescript @types/node @types/express @types/jsonwebtoken tsx
+npx tsc --init --target ES2022 --module NodeNext --moduleResolution NodeNext
+```
+
+Define the core types that model your gateway's configuration:
+
+```typescript
+// src/types.ts
+export interface RouteConfig {
+  path: string;
+  target: string;
+  methods: string[];
+  requiresAuth: boolean;
+  rateLimit: { windowMs: number; maxRequests: number };
+}
+
+export interface GatewayConfig {
+  port: number;
+  routes: RouteConfig[];
+  jwtSecret: string;
+}
+```
+
+Each route maps an incoming path to a backend service URL. The gateway will proxy requests to the appropriate service based on the path prefix.
+
+## Step 2: Build the Request Router
+
+The router matches incoming requests to backend services and proxies them.
+
+```typescript
+// src/router.ts
+import { Request, Response } from "express";
+import { RouteConfig } from "./types.js";
+
+export function findRoute(
+  path: string,
+  method: string,
+  routes: RouteConfig[]
+): RouteConfig | undefined {
+  return routes.find(
+    (route) => path.startsWith(route.path) && route.methods.includes(method.toUpperCase())
+  );
+}
+
+export async function proxyRequest(req: Request, res: Response, route: RouteConfig): Promise<void> {
+  const targetUrl = `${route.target}${req.originalUrl.replace(route.path, "")}`;
+
+  try {
+    const proxyResponse = await fetch(targetUrl, {
+      method: req.method,
+      headers: {
+        "Content-Type": req.headers["content-type"] ?? "application/json",
+        "X-Forwarded-For": req.ip ?? "unknown",
+        "X-Request-Id": (req.headers["x-request-id"] as string) ?? crypto.randomUUID(),
+      },
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    const body = await proxyResponse.text();
+    res.status(proxyResponse.status);
+
+    proxyResponse.headers.forEach((value, key) => {
+      if (!["transfer-encoding", "connection"].includes(key.toLowerCase())) {
+        res.setHeader(key, value);
+      }
+    });
+
+    res.send(body);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      res.status(504).json({ error: "Gateway timeout" });
+    } else {
+      res.status(502).json({ error: "Bad gateway" });
+    }
+  }
+}
+```
+
+The router strips the gateway prefix from the URL before forwarding. It adds standard proxy headers like `X-Forwarded-For` and `X-Request-Id` so backend services know the original client identity and can correlate logs.
+
+## Step 3: Implement JWT Authentication
+
+Build middleware that validates JWT tokens and attaches the decoded payload to the request.
+
+```typescript
+// src/middleware/auth.ts
+import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
+
+export function createAuthMiddleware(secret: string) {
+  return function authMiddleware(req: Request, res: Response, next: NextFunction): void {
+    const header = req.headers.authorization;
+
+    if (!header || !header.startsWith("Bearer ")) {
+      res.status(401).json({ error: "Missing or invalid authorization header" });
+      return;
+    }
+
+    const token = header.slice(7);
+
+    try {
+      const decoded = jwt.verify(token, secret);
+      (req as Record<string, unknown>).user = decoded;
+      next();
+    } catch (error) {
+      res.status(401).json({ error: "Invalid or expired token" });
+    }
+  };
+}
+```
+
+This middleware runs before the proxy layer. Unauthenticated requests are rejected at the gateway — they never reach your backend services.
+
+## Step 4: Build a Sliding Window Rate Limiter
+
+Rate limiting prevents abuse and protects backend services from being overwhelmed.
+
+```typescript
+// src/middleware/rate-limiter.ts
+interface WindowEntry {
+  count: number;
+  resetAt: number;
+}
+
+export class SlidingWindowRateLimiter {
+  private windows = new Map<string, WindowEntry>();
+
+  check(key: string, maxRequests: number, windowMs: number): boolean {
+    const now = Date.now();
+    const entry = this.windows.get(key);
+
+    if (!entry || now > entry.resetAt) {
+      this.windows.set(key, { count: 1, resetAt: now + windowMs });
+      return true;
+    }
+
+    if (entry.count >= maxRequests) {
+      return false;
+    }
+
+    entry.count += 1;
+    return true;
+  }
+
+  getRemainingRequests(key: string, maxRequests: number): number {
+    const entry = this.windows.get(key);
+    if (!entry) return maxRequests;
+    return Math.max(0, maxRequests - entry.count);
+  }
+
+  cleanup(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.windows) {
+      if (now > entry.resetAt) {
+        this.windows.delete(key);
+      }
+    }
+  }
+}
+```
+
+In production, you would replace the in-memory `Map` with Redis so rate limit state is shared across gateway instances. The algorithm stays the same.
+
+## Step 5: Add Request and Response Transforms
+
+Transforms let the gateway modify requests before forwarding and responses before returning them.
+
+```typescript
+// src/transforms.ts
+import { Request } from "express";
+
+export interface TransformRule {
+  type: "add-header" | "remove-header" | "rewrite-path";
+  key: string;
+  value?: string;
+}
+
+export function applyRequestTransforms(
+  req: Request,
+  rules: TransformRule[]
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+
+  for (const rule of rules) {
+    switch (rule.type) {
+      case "add-header":
+        if (rule.value) headers[rule.key] = rule.value;
+        break;
+      case "remove-header":
+        delete req.headers[rule.key.toLowerCase()];
+        break;
+    }
+  }
+
+  return headers;
+}
+
+export function applyResponseTransforms(
+  body: string,
+  headers: Record<string, string>,
+  rules: TransformRule[]
+): { body: string; headers: Record<string, string> } {
+  const transformed = { ...headers };
+
+  for (const rule of rules) {
+    if (rule.type === "add-header" && rule.value) {
+      transformed[rule.key] = rule.value;
+    } else if (rule.type === "remove-header") {
+      delete transformed[rule.key];
+    }
+  }
+
+  return { body, headers: transformed };
+}
+```
+
+Common transforms include adding CORS headers, injecting internal service tokens, stripping sensitive headers from responses, and rewriting URLs between internal and external formats.
+
+## Step 6: Build the Circuit Breaker
+
+A circuit breaker prevents your gateway from repeatedly calling a failing service. After a threshold of failures, it "opens" the circuit and returns errors immediately.
+
+```typescript
+// src/circuit-breaker.ts
+type CircuitState = "closed" | "open" | "half-open";
+
+export class CircuitBreaker {
+  private state: CircuitState = "closed";
+  private failures = 0;
+  private lastFailureTime = 0;
+  private readonly threshold: number;
+  private readonly resetTimeoutMs: number;
+
+  constructor(threshold = 5, resetTimeoutMs = 30000) {
+    this.threshold = threshold;
+    this.resetTimeoutMs = resetTimeoutMs;
+  }
+
+  canExecute(): boolean {
+    if (this.state === "closed") return true;
+
+    if (this.state === "open") {
+      if (Date.now() - this.lastFailureTime > this.resetTimeoutMs) {
+        this.state = "half-open";
+        return true;
+      }
+      return false;
+    }
+
+    return true; // half-open allows one request through
+  }
+
+  recordSuccess(): void {
+    this.failures = 0;
+    this.state = "closed";
+  }
+
+  recordFailure(): void {
+    this.failures += 1;
+    this.lastFailureTime = Date.now();
+
+    if (this.failures >= this.threshold) {
+      this.state = "open";
+    }
+  }
+
+  getState(): CircuitState {
+    return this.state;
+  }
+}
+```
+
+The three states work like a real circuit breaker: **closed** means traffic flows normally. **Open** means all requests fail fast without hitting the backend. **Half-open** means one test request is allowed through — if it succeeds, the circuit closes; if it fails, it opens again.
+
+## Step 7: Add Structured Logging
+
+Structured logs in JSON format are searchable and parseable by log aggregation tools.
+
+```typescript
+// src/logger.ts
+type LogLevel = "info" | "warn" | "error";
+
+interface LogEntry {
+  timestamp: string;
+  level: LogLevel;
+  requestId: string;
+  method: string;
+  path: string;
+  statusCode?: number;
+  durationMs?: number;
+  message: string;
+}
+
+export function log(entry: LogEntry): void {
+  const output = JSON.stringify(entry);
+  if (entry.level === "error") {
+    console.error(output);
+  } else {
+    console.log(output);
+  }
+}
+
+export function createRequestLogger() {
+  return function requestLogger(
+    req: { method: string; path: string; headers: Record<string, unknown> },
+    startTime: number,
+    statusCode: number
+  ): void {
+    log({
+      timestamp: new Date().toISOString(),
+      level: statusCode >= 500 ? "error" : "info",
+      requestId: (req.headers["x-request-id"] as string) ?? "unknown",
+      method: req.method,
+      path: req.path,
+      statusCode,
+      durationMs: Date.now() - startTime,
+      message: `${req.method} ${req.path} ${statusCode}`,
+    });
+  };
+}
+```
+
+## Step 8: Create Health Check Endpoints
+
+The gateway needs health endpoints for load balancers and monitoring systems.
+
+```typescript
+// src/health.ts
+import { CircuitBreaker } from "./circuit-breaker.js";
+
+interface HealthStatus {
+  status: "healthy" | "degraded" | "unhealthy";
+  uptime: number;
+  circuits: Record<string, string>;
+}
+
+export function checkHealth(
+  startTime: number,
+  circuits: Map<string, CircuitBreaker>
+): HealthStatus {
+  const circuitStates: Record<string, string> = {};
+  let hasDegraded = false;
+
+  for (const [name, breaker] of circuits) {
+    circuitStates[name] = breaker.getState();
+    if (breaker.getState() === "open") hasDegraded = true;
+  }
+
+  return {
+    status: hasDegraded ? "degraded" : "healthy",
+    uptime: Date.now() - startTime,
+    circuits: circuitStates,
+  };
+}
+```
+
+## Step 9: Implement CORS Handling
+
+The gateway should handle CORS so individual services do not need to.
+
+```typescript
+// src/middleware/cors.ts
+import { Request, Response, NextFunction } from "express";
+
+const ALLOWED_ORIGINS = ["http://localhost:3000", "https://yourdomain.com"];
+
+export function corsMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const origin = req.headers.origin;
+
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+
+  next();
+}
+```
+
+## Step 10: Assemble the Gateway
+
+Wire everything together into a running server.
+
+```typescript
+// src/index.ts
+import express from "express";
+import { GatewayConfig } from "./types.js";
+import { findRoute, proxyRequest } from "./router.js";
+import { createAuthMiddleware } from "./middleware/auth.js";
+import { SlidingWindowRateLimiter } from "./middleware/rate-limiter.js";
+import { CircuitBreaker } from "./circuit-breaker.js";
+import { corsMiddleware } from "./middleware/cors.js";
+import { checkHealth } from "./health.js";
+import { log } from "./logger.js";
+
+const config: GatewayConfig = {
+  port: 4000,
+  jwtSecret: process.env.JWT_SECRET ?? "change-me",
+  routes: [
+    {
+      path: "/api/users",
+      target: "http://localhost:3001",
+      methods: ["GET", "POST"],
+      requiresAuth: true,
+      rateLimit: { windowMs: 60000, maxRequests: 100 },
+    },
+    {
+      path: "/api/products",
+      target: "http://localhost:3002",
+      methods: ["GET"],
+      requiresAuth: false,
+      rateLimit: { windowMs: 60000, maxRequests: 200 },
+    },
+  ],
+};
+
+const app = express();
+const rateLimiter = new SlidingWindowRateLimiter();
+const circuits = new Map<string, CircuitBreaker>();
+const startTime = Date.now();
+const authMiddleware = createAuthMiddleware(config.jwtSecret);
+
+app.use(express.json());
+app.use(corsMiddleware);
+
+app.get("/health", (_, res) => {
+  res.json(checkHealth(startTime, circuits));
+});
+
+app.all("/*", (req, res) => {
+  const route = findRoute(req.path, req.method, config.routes);
+
+  if (!route) {
+    res.status(404).json({ error: "Route not found" });
+    return;
+  }
+
+  const clientKey = req.ip ?? "unknown";
+  if (!rateLimiter.check(clientKey, route.rateLimit.maxRequests, route.rateLimit.windowMs)) {
+    res.status(429).json({ error: "Rate limit exceeded" });
+    return;
+  }
+
+  if (!circuits.has(route.target)) {
+    circuits.set(route.target, new CircuitBreaker());
+  }
+
+  const breaker = circuits.get(route.target)!;
+  if (!breaker.canExecute()) {
+    res.status(503).json({ error: "Service temporarily unavailable" });
+    return;
+  }
+
+  if (route.requiresAuth) {
+    authMiddleware(req, res, () => {
+      proxyRequest(req, res, route)
+        .then(() => breaker.recordSuccess())
+        .catch(() => breaker.recordFailure());
+    });
+  } else {
+    proxyRequest(req, res, route)
+      .then(() => breaker.recordSuccess())
+      .catch(() => breaker.recordFailure());
+  }
+});
+
+app.listen(config.port, () => {
+  log({
+    timestamp: new Date().toISOString(),
+    level: "info",
+    requestId: "startup",
+    method: "",
+    path: "",
+    message: `Gateway running on port ${config.port}`,
+  });
+});
+```
+
+Run with `npx tsx src/index.ts`. You now have a fully functional API gateway. To take it further, add metrics collection with Prometheus, WebSocket proxying, request caching, and configuration hot-reloading via a watched config file.

@@ -1,0 +1,569 @@
+---
+title: "Build an RBAC Authorization System"
+description: "Implement role-based access control with roles, permissions, resource-level guards, middleware, an admin panel, and an audit log."
+slug: "rbac-system"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["security", "authorization", "rbac", "middleware", "node"]
+---
+
+## Overview
+
+Authentication answers "who are you?" Authorization answers "what can you do?" Role-Based Access Control (RBAC) is the most widely deployed authorization model because it maps cleanly to how organizations actually work: people have roles, roles have permissions, and permissions gate access to resources.
+
+In this tutorial, you will build a complete RBAC system. You will define roles and permissions, implement hierarchical role inheritance, build middleware that enforces access at the route level, add resource-level ownership checks, create an admin panel for managing roles, and log every authorization decision for audit compliance.
+
+**What you will build:**
+
+- A role and permission model with hierarchical inheritance
+- Express middleware for route-level authorization
+- Resource-level ownership and access checks
+- An admin panel for role management
+- A comprehensive audit log
+
+## Step 1: Permission and Role Model
+
+Start with the data model. Permissions are fine-grained actions (`articles:create`, `users:delete`). Roles are named collections of permissions. Roles can inherit from other roles to form a hierarchy.
+
+```typescript
+// src/rbac/types.ts
+interface Permission {
+  resource: string; // e.g., "articles", "users", "settings"
+  action: string; // e.g., "create", "read", "update", "delete"
+}
+
+interface Role {
+  name: string;
+  description: string;
+  permissions: Permission[];
+  inherits: string[]; // Role names this role inherits from
+}
+
+interface User {
+  id: string;
+  email: string;
+  roles: string[];
+}
+
+// Permission string format: "resource:action"
+function permissionToString(p: Permission): string {
+  return `${p.resource}:${p.action}`;
+}
+
+function parsePermission(str: string): Permission {
+  const [resource, action] = str.split(":");
+  if (!resource || !action) throw new Error(`Invalid permission format: ${str}`);
+  return { resource, action };
+}
+```
+
+## Step 2: Role Registry with Inheritance Resolution
+
+Build a registry that stores roles and resolves the full permission set for any role, including inherited permissions. Use depth-first traversal with cycle detection to prevent infinite loops.
+
+```typescript
+// src/rbac/registry.ts
+class RoleRegistry {
+  private roles: Map<string, Role> = new Map();
+
+  addRole(role: Role): void {
+    // Validate that inherited roles exist
+    for (const parent of role.inherits) {
+      if (!this.roles.has(parent)) {
+        throw new Error(`Role "${role.name}" inherits from unknown role "${parent}"`);
+      }
+    }
+    this.roles.set(role.name, role);
+  }
+
+  getRole(name: string): Role | undefined {
+    return this.roles.get(name);
+  }
+
+  resolvePermissions(roleName: string, visited: Set<string> = new Set()): Set<string> {
+    if (visited.has(roleName)) {
+      throw new Error(`Circular inheritance detected at role "${roleName}"`);
+    }
+    visited.add(roleName);
+
+    const role = this.roles.get(roleName);
+    if (!role) return new Set();
+
+    const permissions = new Set(role.permissions.map(permissionToString));
+
+    for (const parentName of role.inherits) {
+      const parentPerms = this.resolvePermissions(parentName, new Set(visited));
+      for (const perm of parentPerms) {
+        permissions.add(perm);
+      }
+    }
+
+    return permissions;
+  }
+
+  getUserPermissions(user: User): Set<string> {
+    const allPermissions = new Set<string>();
+    for (const roleName of user.roles) {
+      const rolePerms = this.resolvePermissions(roleName);
+      for (const perm of rolePerms) {
+        allPermissions.add(perm);
+      }
+    }
+    return allPermissions;
+  }
+}
+```
+
+## Step 3: Default Role Hierarchy
+
+Set up a practical default hierarchy. Most applications need at least viewer, editor, admin, and super-admin roles. Each level inherits everything from the level below.
+
+```typescript
+// src/rbac/defaults.ts
+function setupDefaultRoles(registry: RoleRegistry): void {
+  registry.addRole({
+    name: "viewer",
+    description: "Can view all public resources",
+    permissions: [
+      { resource: "articles", action: "read" },
+      { resource: "comments", action: "read" },
+      { resource: "profiles", action: "read" },
+    ],
+    inherits: [],
+  });
+
+  registry.addRole({
+    name: "editor",
+    description: "Can create and edit content",
+    permissions: [
+      { resource: "articles", action: "create" },
+      { resource: "articles", action: "update" },
+      { resource: "comments", action: "create" },
+      { resource: "comments", action: "update" },
+      { resource: "comments", action: "delete" },
+    ],
+    inherits: ["viewer"],
+  });
+
+  registry.addRole({
+    name: "admin",
+    description: "Can manage users and all content",
+    permissions: [
+      { resource: "articles", action: "delete" },
+      { resource: "users", action: "read" },
+      { resource: "users", action: "update" },
+      { resource: "roles", action: "read" },
+    ],
+    inherits: ["editor"],
+  });
+
+  registry.addRole({
+    name: "super-admin",
+    description: "Unrestricted access",
+    permissions: [
+      { resource: "users", action: "create" },
+      { resource: "users", action: "delete" },
+      { resource: "roles", action: "create" },
+      { resource: "roles", action: "update" },
+      { resource: "roles", action: "delete" },
+      { resource: "settings", action: "read" },
+      { resource: "settings", action: "update" },
+      { resource: "audit", action: "read" },
+    ],
+    inherits: ["admin"],
+  });
+}
+```
+
+## Step 4: Authorization Checker
+
+Build the core authorization function. It takes a user and a required permission, resolves the user's full permission set, and returns an allow/deny decision.
+
+```typescript
+// src/rbac/authorize.ts
+interface AuthzDecision {
+  allowed: boolean;
+  reason: string;
+  matchedRole: string | null;
+  checkedPermission: string;
+}
+
+function authorize(user: User, required: Permission, registry: RoleRegistry): AuthzDecision {
+  const requiredStr = permissionToString(required);
+
+  if (user.roles.length === 0) {
+    return {
+      allowed: false,
+      reason: "User has no assigned roles",
+      matchedRole: null,
+      checkedPermission: requiredStr,
+    };
+  }
+
+  for (const roleName of user.roles) {
+    const permissions = registry.resolvePermissions(roleName);
+    if (permissions.has(requiredStr)) {
+      return {
+        allowed: true,
+        reason: `Granted via role "${roleName}"`,
+        matchedRole: roleName,
+        checkedPermission: requiredStr,
+      };
+    }
+
+    // Check for wildcard permission (resource:*)
+    const wildcardPerm = `${required.resource}:*`;
+    if (permissions.has(wildcardPerm)) {
+      return {
+        allowed: true,
+        reason: `Granted via wildcard in role "${roleName}"`,
+        matchedRole: roleName,
+        checkedPermission: requiredStr,
+      };
+    }
+  }
+
+  return {
+    allowed: false,
+    reason: `No role grants "${requiredStr}"`,
+    matchedRole: null,
+    checkedPermission: requiredStr,
+  };
+}
+```
+
+## Step 5: Express Middleware
+
+Wrap the authorization checker in Express middleware. The middleware reads the user from the request (set by authentication middleware upstream), checks the required permission, and either passes through or returns 403.
+
+```typescript
+// src/middleware/authorize.ts
+import { Request, Response, NextFunction } from "express";
+
+function requirePermission(resource: string, action: string) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const user = req.user as User | undefined;
+
+    if (!user) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const decision = authorize(user, { resource, action }, registry);
+
+    // Always log the decision for audit
+    auditLog.record({
+      userId: user.id,
+      permission: decision.checkedPermission,
+      allowed: decision.allowed,
+      reason: decision.reason,
+      ip: req.ip ?? "unknown",
+      path: req.path,
+      method: req.method,
+      timestamp: new Date(),
+    });
+
+    if (!decision.allowed) {
+      res.status(403).json({
+        error: "Forbidden",
+        message: `You do not have permission to ${action} ${resource}`,
+      });
+      return;
+    }
+
+    next();
+  };
+}
+
+// Usage on routes
+app.get("/api/articles", requirePermission("articles", "read"), listArticles);
+app.post("/api/articles", requirePermission("articles", "create"), createArticle);
+app.delete("/api/articles/:id", requirePermission("articles", "delete"), deleteArticle);
+app.get("/api/users", requirePermission("users", "read"), listUsers);
+```
+
+## Step 6: Resource-Level Ownership Checks
+
+Route-level permissions are not enough. An editor should be able to update their own articles but not articles written by others. Add resource-level ownership checks.
+
+```typescript
+// src/middleware/ownership.ts
+type ResourceFetcher = (req: Request) => Promise<{ ownerId: string } | null>;
+
+function requireOwnershipOrPermission(
+  resource: string,
+  action: string,
+  fetchResource: ResourceFetcher
+) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const user = req.user as User | undefined;
+    if (!user) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    // Check if user has the unrestricted permission (e.g., admin)
+    const decision = authorize(user, { resource, action }, registry);
+    if (decision.allowed) {
+      next();
+      return;
+    }
+
+    // Fall back to ownership check
+    try {
+      const resourceObj = await fetchResource(req);
+      if (!resourceObj) {
+        res.status(404).json({ error: "Resource not found" });
+        return;
+      }
+
+      if (resourceObj.ownerId === user.id) {
+        auditLog.record({
+          userId: user.id,
+          permission: `${resource}:${action}:own`,
+          allowed: true,
+          reason: "Granted via resource ownership",
+          ip: req.ip ?? "unknown",
+          path: req.path,
+          method: req.method,
+          timestamp: new Date(),
+        });
+        next();
+        return;
+      }
+
+      res
+        .status(403)
+        .json({ error: "Forbidden", message: "You can only modify your own resources" });
+    } catch (error) {
+      console.error("Ownership check failed:", error);
+      res.status(500).json({ error: "Authorization check failed" });
+    }
+  };
+}
+
+// Usage
+app.put(
+  "/api/articles/:id",
+  requireOwnershipOrPermission("articles", "update", async (req) => {
+    return db.articles.findById(req.params.id);
+  }),
+  updateArticle
+);
+```
+
+## Step 7: Audit Log
+
+Every authorization decision gets logged. The audit log is essential for security compliance and debugging access issues.
+
+```typescript
+// src/audit/log.ts
+interface AuditEntry {
+  userId: string;
+  permission: string;
+  allowed: boolean;
+  reason: string;
+  ip: string;
+  path: string;
+  method: string;
+  timestamp: Date;
+}
+
+class AuditLog {
+  private entries: AuditEntry[] = [];
+  private maxEntries = 10000;
+
+  record(entry: AuditEntry): void {
+    this.entries.push(entry);
+    if (this.entries.length > this.maxEntries) {
+      // In production, flush to persistent storage before trimming
+      this.entries = this.entries.slice(-5000);
+    }
+  }
+
+  query(filters: {
+    userId?: string;
+    permission?: string;
+    allowed?: boolean;
+    since?: Date;
+    limit?: number;
+  }): AuditEntry[] {
+    let results = this.entries;
+
+    if (filters.userId) results = results.filter((e) => e.userId === filters.userId);
+    if (filters.permission) results = results.filter((e) => e.permission === filters.permission);
+    if (filters.allowed !== undefined)
+      results = results.filter((e) => e.allowed === filters.allowed);
+    if (filters.since) results = results.filter((e) => e.timestamp >= filters.since);
+
+    results = results.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+    return results.slice(0, filters.limit ?? 100);
+  }
+
+  getDeniedSummary(since: Date): Array<{ userId: string; count: number; permissions: string[] }> {
+    const denied = this.entries.filter((e) => !e.allowed && e.timestamp >= since);
+    const byUser = new Map<string, { count: number; permissions: Set<string> }>();
+
+    for (const entry of denied) {
+      const existing = byUser.get(entry.userId) ?? { count: 0, permissions: new Set<string>() };
+      existing.count++;
+      existing.permissions.add(entry.permission);
+      byUser.set(entry.userId, existing);
+    }
+
+    return Array.from(byUser.entries()).map(([userId, data]) => ({
+      userId,
+      count: data.count,
+      permissions: Array.from(data.permissions),
+    }));
+  }
+}
+```
+
+## Step 8: Admin API Endpoints
+
+Expose endpoints for managing roles, assigning roles to users, and querying the audit log. These endpoints are themselves protected by RBAC.
+
+```typescript
+// src/api/admin.ts
+app.get("/api/admin/roles", requirePermission("roles", "read"), (_req, res) => {
+  const roles = registry.getAll();
+  res.json(
+    roles.map((r) => ({
+      name: r.name,
+      description: r.description,
+      permissionCount: registry.resolvePermissions(r.name).size,
+      inherits: r.inherits,
+    }))
+  );
+});
+
+app.post("/api/admin/users/:userId/roles", requirePermission("roles", "update"), (req, res) => {
+  const { userId } = req.params;
+  const { role } = req.body;
+
+  if (!registry.getRole(role)) {
+    res.status(400).json({ error: `Role "${role}" does not exist` });
+    return;
+  }
+
+  // In production, update in database
+  const user = users.get(userId);
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+
+  if (!user.roles.includes(role)) {
+    user.roles.push(role);
+  }
+
+  res.json({ userId, roles: user.roles });
+});
+
+app.get("/api/admin/audit", requirePermission("audit", "read"), (req, res) => {
+  const since = req.query.since ? new Date(req.query.since as string) : undefined;
+  const entries = auditLog.query({
+    userId: req.query.userId as string,
+    allowed: req.query.allowed ? req.query.allowed === "true" : undefined,
+    since,
+    limit: parseInt(req.query.limit as string) || 100,
+  });
+  res.json(entries);
+});
+```
+
+## Step 9: Admin Dashboard UI
+
+Build a dashboard that visualizes the role hierarchy, shows user-role assignments, and displays the audit log with filtering.
+
+```typescript
+// src/ui/admin.ts
+async function renderRoleHierarchy(): Promise<void> {
+  const roles = await fetch("/api/admin/roles").then((r) => r.json());
+  const container = document.getElementById("role-tree")!;
+
+  container.innerHTML = roles
+    .map(
+      (role: Record<string, unknown>) => `
+    <div class="role-card">
+      <h3>${role.name}</h3>
+      <p class="description">${role.description}</p>
+      <div class="meta">
+        <span>${role.permissionCount} permissions</span>
+        ${
+          (role.inherits as string[]).length > 0
+            ? `<span>Inherits: ${(role.inherits as string[]).join(", ")}</span>`
+            : ""
+        }
+      </div>
+    </div>
+  `
+    )
+    .join("");
+}
+
+async function renderAuditLog(filters: Record<string, string> = {}): Promise<void> {
+  const params = new URLSearchParams(filters);
+  const entries = await fetch(`/api/admin/audit?${params}`).then((r) => r.json());
+  const tbody = document.getElementById("audit-tbody")!;
+
+  tbody.innerHTML = entries
+    .map(
+      (entry: AuditEntry) => `
+    <tr class="${entry.allowed ? "" : "row-denied"}">
+      <td>${new Date(entry.timestamp).toLocaleString()}</td>
+      <td>${entry.userId}</td>
+      <td><code>${entry.permission}</code></td>
+      <td>${entry.allowed ? "ALLOW" : "DENY"}</td>
+      <td>${entry.reason}</td>
+      <td>${entry.method} ${entry.path}</td>
+    </tr>
+  `
+    )
+    .join("");
+}
+```
+
+## Step 10: Security Hardening and Best Practices
+
+Finalize the system with security best practices that prevent common RBAC implementation mistakes.
+
+**Default deny.** If no permission explicitly allows an action, deny it. Never invert this — default allow with explicit denies is a recipe for security holes.
+
+**Permission caching.** Resolving the full permission set on every request is wasteful. Cache resolved permissions per user and invalidate when their roles change:
+
+```typescript
+class PermissionCache {
+  private cache: Map<string, { permissions: Set<string>; expiresAt: number }> = new Map();
+  private ttlMs = 300_000; // 5 minutes
+
+  get(userId: string): Set<string> | null {
+    const entry = this.cache.get(userId);
+    if (!entry || entry.expiresAt < Date.now()) {
+      this.cache.delete(userId);
+      return null;
+    }
+    return entry.permissions;
+  }
+
+  set(userId: string, permissions: Set<string>): void {
+    this.cache.set(userId, { permissions, expiresAt: Date.now() + this.ttlMs });
+  }
+
+  invalidate(userId: string): void {
+    this.cache.delete(userId);
+  }
+
+  invalidateAll(): void {
+    this.cache.clear();
+  }
+}
+```
+
+**Rate limit denied requests.** If a user repeatedly hits 403 errors, they might be probing for access. Track denied attempts per user and temporarily increase response latency or lock the account after a threshold.
+
+**Role assignment requires higher privilege.** A user should never be able to assign themselves a role equal to or higher than their own. The admin API should verify that the requesting user's highest role outranks the role being assigned. Without this check, horizontal privilege escalation is trivial.
+
+These patterns — hierarchical roles, resource ownership, audit logging, and default deny — form the foundation of authorization in production systems from SaaS platforms to enterprise applications.

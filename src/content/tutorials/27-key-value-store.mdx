@@ -1,0 +1,532 @@
+---
+title: "Build a Key-Value Store from Scratch"
+description: "Implement an in-memory key-value store with TTL expiry, disk persistence, a wire protocol, and performance benchmarking."
+slug: "key-value-store"
+difficulty: "advanced"
+estimatedMinutes: 240
+steps: 12
+tags: ["systems", "database", "typescript", "networking", "data-structures"]
+---
+
+## Overview
+
+You're going to build a key-value store from scratch in TypeScript. Not a wrapper around Redis. Not an abstraction over localStorage. A real key-value store with an in-memory hash map, TTL-based key expiry, append-only log persistence to disk, a TCP-based wire protocol, and benchmarking to measure operations per second.
+
+This is systems programming. You'll understand how databases store data, how network protocols work at the byte level, how persistence strategies trade off durability for performance, and how to measure whether your code is actually fast or just feels fast.
+
+The finished store supports GET, SET, DEL, EXPIRE, KEYS, and TTL commands over a TCP connection, persists data across restarts via an append-only file, and handles thousands of operations per second on a single core.
+
+## Step 1: Project Setup
+
+```bash
+mkdir kvstore && cd kvstore
+npm init -y
+npm install -D typescript @types/node tsx
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist
+mkdir src
+```
+
+## Step 2: Core Data Structure
+
+The heart of the store is a `Map` with TTL tracking.
+
+```typescript
+// src/store.ts
+interface Entry {
+  value: string;
+  expiresAt: number | null; // Unix timestamp in ms, null = no expiry
+}
+
+export class KeyValueStore {
+  private data: Map<string, Entry> = new Map();
+  private expiryTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
+  get(key: string): string | null {
+    const entry = this.data.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt !== null && Date.now() > entry.expiresAt) {
+      this.del(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  set(key: string, value: string, ttlMs?: number): void {
+    this.clearTimer(key);
+    const expiresAt = ttlMs ? Date.now() + ttlMs : null;
+    this.data.set(key, { value, expiresAt });
+
+    if (ttlMs) {
+      const timer = setTimeout(() => this.del(key), ttlMs);
+      this.expiryTimers.set(key, timer);
+    }
+  }
+
+  del(key: string): boolean {
+    this.clearTimer(key);
+    return this.data.delete(key);
+  }
+
+  expire(key: string, ttlMs: number): boolean {
+    const entry = this.data.get(key);
+    if (!entry) return false;
+    this.clearTimer(key);
+    entry.expiresAt = Date.now() + ttlMs;
+    const timer = setTimeout(() => this.del(key), ttlMs);
+    this.expiryTimers.set(key, timer);
+    return true;
+  }
+
+  ttl(key: string): number {
+    const entry = this.data.get(key);
+    if (!entry) return -2; // Key doesn't exist
+    if (entry.expiresAt === null) return -1; // No expiry
+    const remaining = entry.expiresAt - Date.now();
+    return remaining > 0 ? remaining : -2;
+  }
+
+  keys(pattern?: string): string[] {
+    const result: string[] = [];
+    const regex = pattern ? new RegExp(`^${pattern.replace(/\*/g, ".*")}$`) : null;
+    for (const [key, entry] of this.data) {
+      if (entry.expiresAt !== null && Date.now() > entry.expiresAt) {
+        this.del(key);
+        continue;
+      }
+      if (!regex || regex.test(key)) {
+        result.push(key);
+      }
+    }
+    return result;
+  }
+
+  size(): number {
+    return this.data.size;
+  }
+
+  private clearTimer(key: string): void {
+    const timer = this.expiryTimers.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.expiryTimers.delete(key);
+    }
+  }
+}
+```
+
+The TTL implementation uses both lazy expiry (checking on read) and active expiry (setTimeout). Lazy expiry alone would leave expired keys in memory until accessed. Active expiry alone would flood the event loop with timers for millions of keys. The combination gives you accurate TTL behavior without overwhelming either system.
+
+## Step 3: Command Parser
+
+Define a simple text protocol. Each command is a single line terminated by `\r\n`.
+
+```typescript
+// src/protocol.ts
+export interface Command {
+  name: string;
+  args: string[];
+}
+
+export function parseCommand(line: string): Command | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  const parts = trimmed.split(/\s+/);
+  const name = parts[0].toUpperCase();
+  const args = parts.slice(1);
+
+  return { name, args };
+}
+
+export function formatResponse(value: string | null | boolean | number | string[]): string {
+  if (value === null) return "$-1\r\n"; // Null bulk string
+  if (typeof value === "boolean") return value ? "+OK\r\n" : "-ERR operation failed\r\n";
+  if (typeof value === "number") return `:${value}\r\n`;
+  if (Array.isArray(value)) {
+    const lines = [`*${value.length}\r\n`];
+    for (const item of value) {
+      lines.push(`$${Buffer.byteLength(item)}\r\n${item}\r\n`);
+    }
+    return lines.join("");
+  }
+  return `$${Buffer.byteLength(value)}\r\n${value}\r\n`;
+}
+```
+
+The response format borrows from Redis's RESP protocol. `+` prefixes simple strings, `:` prefixes integers, `$` prefixes bulk strings (with length), `*` prefixes arrays, and `-` prefixes errors.
+
+## Step 4: Command Executor
+
+```typescript
+// src/executor.ts
+import { KeyValueStore } from "./store.js";
+import { Command, formatResponse } from "./protocol.js";
+
+export class CommandExecutor {
+  constructor(private store: KeyValueStore) {}
+
+  execute(cmd: Command): string {
+    switch (cmd.name) {
+      case "GET": {
+        if (cmd.args.length !== 1) return "-ERR wrong number of arguments\r\n";
+        return formatResponse(this.store.get(cmd.args[0]));
+      }
+      case "SET": {
+        if (cmd.args.length < 2 || cmd.args.length > 4) return "-ERR wrong number of arguments\r\n";
+        const [key, value] = cmd.args;
+        let ttl: number | undefined;
+        if (cmd.args.length >= 4 && cmd.args[2].toUpperCase() === "EX") {
+          ttl = parseInt(cmd.args[3], 10) * 1000;
+          if (isNaN(ttl) || ttl <= 0) return "-ERR invalid expire time\r\n";
+        }
+        if (cmd.args.length >= 4 && cmd.args[2].toUpperCase() === "PX") {
+          ttl = parseInt(cmd.args[3], 10);
+          if (isNaN(ttl) || ttl <= 0) return "-ERR invalid expire time\r\n";
+        }
+        this.store.set(key, value, ttl);
+        return formatResponse(true);
+      }
+      case "DEL": {
+        if (cmd.args.length !== 1) return "-ERR wrong number of arguments\r\n";
+        return formatResponse(this.store.del(cmd.args[0]));
+      }
+      case "EXPIRE": {
+        if (cmd.args.length !== 2) return "-ERR wrong number of arguments\r\n";
+        const ms = parseInt(cmd.args[1], 10) * 1000;
+        if (isNaN(ms)) return "-ERR invalid seconds\r\n";
+        return formatResponse(this.store.expire(cmd.args[0], ms));
+      }
+      case "TTL": {
+        if (cmd.args.length !== 1) return "-ERR wrong number of arguments\r\n";
+        return formatResponse(this.store.ttl(cmd.args[0]));
+      }
+      case "KEYS": {
+        const pattern = cmd.args[0] || "*";
+        return formatResponse(this.store.keys(pattern));
+      }
+      case "DBSIZE": {
+        return formatResponse(this.store.size());
+      }
+      case "PING": {
+        return "+PONG\r\n";
+      }
+      default:
+        return `-ERR unknown command '${cmd.name}'\r\n`;
+    }
+  }
+}
+```
+
+## Step 5: TCP Server
+
+```typescript
+// src/server.ts
+import net from "node:net";
+import { KeyValueStore } from "./store.js";
+import { CommandExecutor } from "./executor.js";
+import { parseCommand } from "./protocol.js";
+
+export function createServer(store: KeyValueStore, port: number): net.Server {
+  const executor = new CommandExecutor(store);
+
+  const server = net.createServer((socket) => {
+    let buffer = "";
+
+    socket.on("data", (data) => {
+      buffer += data.toString();
+      let newlineIndex: number;
+
+      while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+
+        const cmd = parseCommand(line);
+        if (!cmd) continue;
+
+        const response = executor.execute(cmd);
+        socket.write(response);
+      }
+    });
+
+    socket.on("error", (err) => {
+      console.error("Socket error:", err.message);
+    });
+  });
+
+  server.listen(port, () => {
+    console.log(`KV store listening on port ${port}`);
+  });
+
+  return server;
+}
+```
+
+The buffer accumulation pattern handles TCP's stream nature. TCP doesn't guarantee that each `data` event contains exactly one command — a single event might contain half a command, two commands, or one and a half commands. The buffer collects bytes until a complete line is available.
+
+## Step 6: Append-Only Log Persistence
+
+```typescript
+// src/aol.ts
+import fs from "node:fs";
+import path from "node:path";
+import { KeyValueStore } from "./store.js";
+import { parseCommand } from "./protocol.js";
+
+export class AppendOnlyLog {
+  private fd: number;
+  private writeQueue: string[] = [];
+  private flushing = false;
+
+  constructor(private filePath: string) {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    this.fd = fs.openSync(filePath, "a+");
+  }
+
+  append(command: string): void {
+    this.writeQueue.push(command + "\n");
+    if (!this.flushing) this.flush();
+  }
+
+  private flush(): void {
+    this.flushing = true;
+    while (this.writeQueue.length > 0) {
+      const batch = this.writeQueue.splice(0, 100).join("");
+      fs.writeSync(this.fd, batch);
+    }
+    fs.fsyncSync(this.fd);
+    this.flushing = false;
+  }
+
+  replay(store: KeyValueStore): number {
+    const content = fs.readFileSync(this.filePath, "utf-8");
+    const lines = content.split("\n").filter(Boolean);
+    let replayed = 0;
+
+    for (const line of lines) {
+      const cmd = parseCommand(line);
+      if (!cmd) continue;
+
+      switch (cmd.name) {
+        case "SET":
+          store.set(cmd.args[0], cmd.args[1]);
+          replayed++;
+          break;
+        case "DEL":
+          store.del(cmd.args[0]);
+          replayed++;
+          break;
+      }
+    }
+
+    return replayed;
+  }
+
+  close(): void {
+    fs.closeSync(this.fd);
+  }
+}
+```
+
+The append-only log is the same persistence strategy Redis uses (AOF). Every write operation is appended to a file. On startup, the file is replayed to reconstruct state. The `fsyncSync` call ensures data reaches the disk — without it, data could sit in the OS buffer and be lost on a crash.
+
+## Step 7: Wire Persistence into the Store
+
+```typescript
+// src/persistent-store.ts
+import { KeyValueStore } from "./store.js";
+import { AppendOnlyLog } from "./aol.js";
+
+export class PersistentKeyValueStore extends KeyValueStore {
+  private log: AppendOnlyLog;
+
+  constructor(logPath: string) {
+    super();
+    this.log = new AppendOnlyLog(logPath);
+    const count = this.log.replay(this);
+    console.log(`Replayed ${count} commands from AOL`);
+  }
+
+  override set(key: string, value: string, ttlMs?: number): void {
+    super.set(key, value, ttlMs);
+    this.log.append(`SET ${key} ${value}`);
+  }
+
+  override del(key: string): boolean {
+    const result = super.del(key);
+    if (result) this.log.append(`DEL ${key}`);
+    return result;
+  }
+
+  shutdown(): void {
+    this.log.close();
+  }
+}
+```
+
+## Step 8: Entry Point
+
+```typescript
+// src/index.ts
+import { PersistentKeyValueStore } from "./persistent-store.js";
+import { createServer } from "./server.js";
+
+const PORT = parseInt(process.env.PORT || "6380", 10);
+const DATA_DIR = process.env.DATA_DIR || "./data";
+
+const store = new PersistentKeyValueStore(`${DATA_DIR}/appendonly.log`);
+const server = createServer(store, PORT);
+
+process.on("SIGINT", () => {
+  console.log("\nShutting down...");
+  server.close();
+  store.shutdown();
+  process.exit(0);
+});
+```
+
+## Step 9: Client Implementation
+
+```typescript
+// src/client.ts
+import net from "node:net";
+
+export class KVClient {
+  private socket: net.Socket;
+  private responseBuffer: string = "";
+  private pendingCallbacks: Array<(response: string) => void> = [];
+
+  constructor(host: string, port: number) {
+    this.socket = net.createConnection({ host, port });
+    this.socket.on("data", (data) => {
+      this.responseBuffer += data.toString();
+      this.processResponses();
+    });
+  }
+
+  private processResponses(): void {
+    while (this.responseBuffer.includes("\r\n") && this.pendingCallbacks.length > 0) {
+      const endIndex = this.responseBuffer.indexOf("\r\n");
+      const line = this.responseBuffer.slice(0, endIndex);
+      this.responseBuffer = this.responseBuffer.slice(endIndex + 2);
+      const callback = this.pendingCallbacks.shift()!;
+      callback(line);
+    }
+  }
+
+  send(command: string): Promise<string> {
+    return new Promise((resolve) => {
+      this.pendingCallbacks.push(resolve);
+      this.socket.write(command + "\r\n");
+    });
+  }
+
+  async get(key: string): Promise<string | null> {
+    const response = await this.send(`GET ${key}`);
+    return response === "$-1" ? null : response;
+  }
+
+  async set(key: string, value: string): Promise<boolean> {
+    const response = await this.send(`SET ${key} ${value}`);
+    return response === "+OK";
+  }
+
+  async del(key: string): Promise<boolean> {
+    const response = await this.send(`DEL ${key}`);
+    return response === "+OK" || response === ":1";
+  }
+
+  close(): void {
+    this.socket.end();
+  }
+}
+```
+
+## Step 10: Benchmarking
+
+```typescript
+// src/benchmark.ts
+import { KVClient } from "./client.js";
+
+async function benchmark(): Promise<void> {
+  const client = new KVClient("localhost", 6380);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const iterations = 10000;
+
+  // Write benchmark
+  const writeStart = performance.now();
+  for (let i = 0; i < iterations; i++) {
+    await client.set(`bench:${i}`, `value-${i}`);
+  }
+  const writeMs = performance.now() - writeStart;
+  const writeOps = Math.round(iterations / (writeMs / 1000));
+
+  // Read benchmark
+  const readStart = performance.now();
+  for (let i = 0; i < iterations; i++) {
+    await client.get(`bench:${i}`);
+  }
+  const readMs = performance.now() - readStart;
+  const readOps = Math.round(iterations / (readMs / 1000));
+
+  console.log(`\nBenchmark Results (${iterations} operations):`);
+  console.log(`  SET: ${writeOps.toLocaleString()} ops/sec (${writeMs.toFixed(1)}ms total)`);
+  console.log(`  GET: ${readOps.toLocaleString()} ops/sec (${readMs.toFixed(1)}ms total)`);
+
+  client.close();
+}
+
+benchmark().catch(console.error);
+```
+
+## Step 11: Log Compaction
+
+The append-only log grows forever. Compaction rewrites it with only the current state.
+
+```typescript
+// Add to aol.ts
+compact(store: KeyValueStore): void {
+  const tempPath = this.filePath + ".tmp";
+  const keys = store.keys();
+  const lines: string[] = [];
+
+  for (const key of keys) {
+    const value = store.get(key);
+    if (value !== null) {
+      lines.push(`SET ${key} ${value}`);
+    }
+  }
+
+  fs.writeFileSync(tempPath, lines.join("\n") + "\n");
+  fs.renameSync(tempPath, this.filePath);
+  fs.closeSync(this.fd);
+  this.fd = fs.openSync(this.filePath, "a+");
+}
+```
+
+The atomic rename (`renameSync`) ensures the log file is never in a partially-written state. If the process crashes during compaction, the old file is still intact.
+
+## Step 12: Production Hardening
+
+Add connection limits to prevent resource exhaustion:
+
+```typescript
+const MAX_CONNECTIONS = 1024;
+let connectionCount = 0;
+
+const server = net.createServer((socket) => {
+  if (connectionCount >= MAX_CONNECTIONS) {
+    socket.write("-ERR max connections reached\r\n");
+    socket.end();
+    return;
+  }
+  connectionCount++;
+  socket.on("close", () => connectionCount--);
+  // ... rest of handler
+});
+```
+
+Add memory limits by tracking approximate memory usage and rejecting writes when the limit is reached. Add key size limits to prevent a single key from consuming all available memory. Add command timeout to kill long-running KEYS operations on large datasets.
+
+Run your benchmark with increasing data sizes (10K, 100K, 1M keys) and plot the results. You'll observe that GET remains O(1) regardless of dataset size (thanks to the hash map), while KEYS degrades linearly. This is exactly the same performance profile as Redis — because the underlying data structures are the same.

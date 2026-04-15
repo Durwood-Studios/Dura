@@ -1,0 +1,409 @@
+---
+title: "Build a Fine-Tuning Pipeline"
+description: "Prepare a dataset, fine-tune a language model with LoRA, evaluate with metrics, and compare against the base model."
+slug: "fine-tuning"
+difficulty: "advanced"
+estimatedMinutes: 240
+steps: 12
+tags: ["ai", "fine-tuning", "lora", "python", "evaluation"]
+---
+
+## Overview
+
+You're going to build a complete fine-tuning pipeline that takes a base language model, adapts it to a specific task using LoRA (Low-Rank Adaptation), evaluates the result with quantitative metrics, and compares it against the unmodified base model.
+
+Fine-tuning is how you take a general-purpose model and make it excellent at a specific task — customer support tone, medical terminology, code generation in a particular framework, or structured data extraction. LoRA makes this practical: instead of updating all model parameters (which requires enormous compute), you train small adapter matrices that modify the model's behavior with a fraction of the memory and cost.
+
+You'll fine-tune a model to generate structured JSON from natural language product descriptions. The pipeline includes dataset preparation, training configuration, LoRA adapter training, evaluation with exact-match and field-level accuracy, and A/B comparison against the base model.
+
+## Step 1: Environment Setup
+
+```bash
+python -m venv finetune-env
+source finetune-env/bin/activate  # Windows: finetune-env\Scripts\activate
+
+pip install torch transformers datasets peft accelerate bitsandbytes evaluate
+pip install trl  # Transformer Reinforcement Learning — includes SFTTrainer
+```
+
+Verify GPU access:
+
+```python
+import torch
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
+```
+
+LoRA reduces memory requirements dramatically — you can fine-tune a 7B model on a single GPU with 16GB VRAM. Without LoRA, you'd need 4x that.
+
+## Step 2: Dataset Preparation
+
+Create a dataset of natural language product descriptions paired with structured JSON output.
+
+```python
+# prepare_dataset.py
+import json
+from pathlib import Path
+
+raw_data = [
+    {
+        "input": "Blue cotton t-shirt, men's large, $29.99, in stock",
+        "output": {
+            "name": "Blue Cotton T-Shirt",
+            "color": "blue",
+            "material": "cotton",
+            "size": "L",
+            "gender": "men",
+            "price": 29.99,
+            "in_stock": True
+        }
+    },
+    {
+        "input": "Women's red leather handbag, medium size, $149, sold out",
+        "output": {
+            "name": "Red Leather Handbag",
+            "color": "red",
+            "material": "leather",
+            "size": "M",
+            "gender": "women",
+            "price": 149.00,
+            "in_stock": False
+        }
+    },
+    # Add 200+ examples for meaningful fine-tuning
+]
+
+def format_example(item: dict) -> dict:
+    """Format a single example into the chat template."""
+    return {
+        "text": (
+            f"### Instruction:\nExtract structured product data from the following description.\n\n"
+            f"### Input:\n{item['input']}\n\n"
+            f"### Output:\n{json.dumps(item['output'], indent=2)}"
+        )
+    }
+
+def prepare_splits(data: list, train_ratio: float = 0.85) -> None:
+    formatted = [format_example(item) for item in data]
+    split_idx = int(len(formatted) * train_ratio)
+
+    train_data = formatted[:split_idx]
+    eval_data = formatted[split_idx:]
+
+    Path("data").mkdir(exist_ok=True)
+    for name, split in [("train", train_data), ("eval", eval_data)]:
+        with open(f"data/{name}.jsonl", "w") as f:
+            for item in split:
+                f.write(json.dumps(item) + "\n")
+
+    print(f"Train: {len(train_data)} examples, Eval: {len(eval_data)} examples")
+
+prepare_splits(raw_data)
+```
+
+The instruction format follows a standard template that the model can learn to recognize. Consistency in formatting is critical — if your training examples use different prompt structures, the model has to learn the format AND the task simultaneously.
+
+## Step 3: Load and Inspect the Base Model
+
+```python
+# load_model.py
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import torch
+
+MODEL_ID = "mistralai/Mistral-7B-v0.1"
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+)
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    quantization_config=bnb_config,
+    device_map="auto",
+    torch_dtype=torch.bfloat16,
+)
+model.config.use_cache = False
+```
+
+4-bit quantization via `BitsAndBytesConfig` loads the 7B model in roughly 4GB of VRAM instead of 14GB. The `nf4` quantization type (normal float 4-bit) is specifically designed for normally distributed weights, which is what transformer models have.
+
+## Step 4: Configure LoRA
+
+```python
+# lora_config.py
+from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+
+model = prepare_model_for_kbit_training(model)
+
+lora_config = LoraConfig(
+    r=16,                        # Rank — higher = more capacity, more memory
+    lora_alpha=32,               # Scaling factor
+    target_modules=[
+        "q_proj", "k_proj",      # Attention query and key projections
+        "v_proj", "o_proj",      # Attention value and output projections
+        "gate_proj", "up_proj",  # MLP layers
+        "down_proj",
+    ],
+    lora_dropout=0.05,
+    bias="none",
+    task_type=TaskType.CAUSAL_LM,
+)
+
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
+# Output: trainable params: 13,631,488 || all params: 3,752,071,168 || trainable%: 0.3633
+```
+
+Only 0.36% of parameters are trained. The `r=16` rank means each adapter matrix is decomposed into two small matrices of rank 16. The `lora_alpha=32` scaling factor controls how much the adapters influence the original weights — a ratio of alpha/rank = 2 is a common starting point.
+
+## Step 5: Training Configuration
+
+```python
+# train.py
+from transformers import TrainingArguments
+from trl import SFTTrainer
+from datasets import load_dataset
+
+dataset = load_dataset("json", data_files={
+    "train": "data/train.jsonl",
+    "eval": "data/eval.jsonl",
+})
+
+training_args = TrainingArguments(
+    output_dir="./output",
+    num_train_epochs=3,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=4,  # Effective batch size = 16
+    learning_rate=2e-4,
+    weight_decay=0.01,
+    warmup_ratio=0.03,
+    lr_scheduler_type="cosine",
+    logging_steps=10,
+    eval_strategy="steps",
+    eval_steps=50,
+    save_strategy="steps",
+    save_steps=50,
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    bf16=True,
+    report_to="none",
+)
+
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["eval"],
+    args=training_args,
+    max_seq_length=512,
+    dataset_text_field="text",
+)
+```
+
+## Step 6: Run Training
+
+```python
+trainer.train()
+trainer.save_model("./output/final")
+tokenizer.save_pretrained("./output/final")
+```
+
+Monitor the training loss. It should decrease steadily. If eval loss starts increasing while train loss keeps decreasing, you're overfitting — reduce epochs or increase dropout.
+
+## Step 7: Load the Fine-Tuned Model
+
+```python
+# inference.py
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import torch
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    "mistralai/Mistral-7B-v0.1",
+    quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16),
+    device_map="auto",
+)
+finetuned_model = PeftModel.from_pretrained(base_model, "./output/final")
+tokenizer = AutoTokenizer.from_pretrained("./output/final")
+
+def generate(model, prompt: str, max_new_tokens: int = 256) -> str:
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=0.1,
+            do_sample=True,
+            top_p=0.95,
+        )
+    return tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+```
+
+## Step 8: Evaluation Framework
+
+```python
+# evaluate.py
+import json
+from typing import Any
+
+def parse_json_output(text: str) -> dict | None:
+    """Attempt to extract JSON from model output."""
+    try:
+        # Find the first { and last } to handle surrounding text
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        return json.loads(text[start:end])
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+def field_accuracy(predicted: dict | None, expected: dict) -> dict[str, bool]:
+    """Check each field individually."""
+    if predicted is None:
+        return {k: False for k in expected}
+    results = {}
+    for key, expected_val in expected.items():
+        results[key] = predicted.get(key) == expected_val
+    return results
+
+def evaluate_model(model, eval_data: list[dict], model_name: str) -> dict[str, Any]:
+    exact_matches = 0
+    field_scores: dict[str, list[bool]] = {}
+    parse_failures = 0
+
+    for item in eval_data:
+        prompt = (
+            f"### Instruction:\nExtract structured product data.\n\n"
+            f"### Input:\n{item['input']}\n\n"
+            f"### Output:\n"
+        )
+        output = generate(model, prompt)
+        predicted = parse_json_output(output)
+
+        if predicted is None:
+            parse_failures += 1
+            for key in item["output"]:
+                field_scores.setdefault(key, []).append(False)
+            continue
+
+        if predicted == item["output"]:
+            exact_matches += 1
+
+        for key, correct in field_accuracy(predicted, item["output"]).items():
+            field_scores.setdefault(key, []).append(correct)
+
+    total = len(eval_data)
+    results = {
+        "model": model_name,
+        "exact_match": exact_matches / total,
+        "parse_rate": 1 - (parse_failures / total),
+        "field_accuracy": {k: sum(v) / len(v) for k, v in field_scores.items()},
+    }
+    return results
+```
+
+## Step 9: Compare Base vs Fine-Tuned
+
+```python
+base_results = evaluate_model(base_model, eval_data, "Base Mistral-7B")
+ft_results = evaluate_model(finetuned_model, eval_data, "Fine-Tuned Mistral-7B")
+
+print(f"\n{'Metric':<25} {'Base':>10} {'Fine-Tuned':>12}")
+print("-" * 50)
+print(f"{'Exact Match':<25} {base_results['exact_match']:>10.1%} {ft_results['exact_match']:>12.1%}")
+print(f"{'Parse Rate':<25} {base_results['parse_rate']:>10.1%} {ft_results['parse_rate']:>12.1%}")
+for field in ft_results["field_accuracy"]:
+    base_acc = base_results["field_accuracy"].get(field, 0)
+    ft_acc = ft_results["field_accuracy"][field]
+    print(f"  {field:<23} {base_acc:>10.1%} {ft_acc:>12.1%}")
+```
+
+You should see dramatic improvements: the base model might produce valid JSON 30-40% of the time, while the fine-tuned model should hit 90%+ parse rate and much higher field accuracy.
+
+## Step 10: Error Analysis
+
+```python
+def analyze_errors(model, eval_data: list[dict]) -> None:
+    """Categorize and display failure modes."""
+    errors = {"parse_failure": [], "wrong_type": [], "wrong_value": [], "missing_field": []}
+
+    for item in eval_data:
+        prompt = f"### Instruction:\nExtract structured product data.\n\n### Input:\n{item['input']}\n\n### Output:\n"
+        output = generate(model, prompt)
+        predicted = parse_json_output(output)
+
+        if predicted is None:
+            errors["parse_failure"].append({"input": item["input"], "raw_output": output})
+            continue
+
+        for key, expected_val in item["output"].items():
+            if key not in predicted:
+                errors["missing_field"].append({"field": key, "input": item["input"]})
+            elif type(predicted[key]) != type(expected_val):
+                errors["wrong_type"].append({"field": key, "expected": type(expected_val).__name__, "got": type(predicted[key]).__name__})
+            elif predicted[key] != expected_val:
+                errors["wrong_value"].append({"field": key, "expected": expected_val, "got": predicted[key]})
+
+    for category, items in errors.items():
+        print(f"\n{category}: {len(items)} errors")
+        for item in items[:3]:
+            print(f"  {item}")
+```
+
+## Step 11: Merge and Export
+
+Once you're satisfied with performance, merge the LoRA adapters back into the base model for deployment.
+
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Load in full precision for merging
+base = AutoModelForCausalLM.from_pretrained(
+    "mistralai/Mistral-7B-v0.1",
+    torch_dtype=torch.float16,
+    device_map="auto",
+)
+merged = PeftModel.from_pretrained(base, "./output/final")
+merged = merged.merge_and_unload()
+
+merged.save_pretrained("./output/merged")
+tokenizer.save_pretrained("./output/merged")
+```
+
+The merged model is a standard transformer model — no PEFT dependency needed at inference time. This simplifies deployment considerably.
+
+## Step 12: Deployment Considerations
+
+For production serving, quantize the merged model with GPTQ or AWQ for faster inference:
+
+```bash
+pip install auto-gptq
+```
+
+```python
+from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
+
+quantize_config = BaseQuantizeConfig(bits=4, group_size=128, damp_percent=0.1)
+quantized = AutoGPTQForCausalLM.from_pretrained("./output/merged", quantize_config)
+quantized.quantize(calibration_dataset)
+quantized.save_quantized("./output/quantized")
+```
+
+Serve with vLLM for production throughput:
+
+```bash
+pip install vllm
+python -m vllm.entrypoints.openai.api_server \
+  --model ./output/quantized \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+This gives you an OpenAI-compatible API endpoint running your fine-tuned model. Batch requests are automatically paged and scheduled for optimal GPU utilization. Monitor the model in production by logging a sample of inputs and outputs, then periodically running your evaluation suite against the production logs to detect performance drift over time.

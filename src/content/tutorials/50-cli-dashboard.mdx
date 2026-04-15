@@ -1,0 +1,552 @@
+---
+title: "Build a CLI Dashboard"
+description: "Create a terminal UI dashboard with real-time stats, colored output, keyboard navigation, multiple panels, and auto-refresh."
+slug: "cli-dashboard"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["cli", "terminal", "node", "real-time", "devops"]
+---
+
+## Overview
+
+Terminal dashboards put system metrics front and center without leaving the command line. They're indispensable for SSH sessions, headless servers, and engineers who live in the terminal. In this tutorial, you'll build a CLI dashboard in Node.js that renders real-time statistics with colored output, supports keyboard navigation between panels, auto-refreshes data, and adapts to terminal size changes.
+
+**What you'll learn:**
+
+- Raw terminal control with ANSI escape codes
+- Reading terminal dimensions and handling resize events
+- Keyboard input in raw mode
+- Efficient screen rendering with double buffering
+- Box drawing and layout without external libraries
+- Real-time data sources (system stats, process info)
+
+No external libraries — just Node.js built-ins. You'll understand exactly how tools like htop and k9s render their interfaces.
+
+## Step 1: Project Setup and Terminal Basics
+
+```bash
+mkdir cli-dashboard && cd cli-dashboard
+npm init -y
+npm install -D typescript @types/node tsx
+```
+
+```typescript
+// src/terminal.ts
+import { WriteStream } from "node:tty";
+
+export const ESC = "\x1b[";
+
+export const ansi = {
+  clear: `${ESC}2J`,
+  home: `${ESC}H`,
+  hideCursor: `${ESC}?25l`,
+  showCursor: `${ESC}?25h`,
+  bold: `${ESC}1m`,
+  reset: `${ESC}0m`,
+  dim: `${ESC}2m`,
+
+  fg: {
+    red: `${ESC}31m`,
+    green: `${ESC}32m`,
+    yellow: `${ESC}33m`,
+    blue: `${ESC}34m`,
+    magenta: `${ESC}35m`,
+    cyan: `${ESC}36m`,
+    white: `${ESC}37m`,
+    gray: `${ESC}90m`,
+  },
+
+  bg: {
+    black: `${ESC}40m`,
+    red: `${ESC}41m`,
+    green: `${ESC}42m`,
+    blue: `${ESC}44m`,
+  },
+
+  moveTo(row: number, col: number): string {
+    return `${ESC}${row};${col}H`;
+  },
+};
+
+export function getTerminalSize(): { rows: number; cols: number } {
+  const stream = process.stdout as WriteStream;
+  return {
+    rows: stream.rows ?? 24,
+    cols: stream.columns ?? 80,
+  };
+}
+```
+
+ANSI escape codes are the protocol terminals understand. Every color, cursor movement, and screen clear is just a special character sequence written to stdout.
+
+## Step 2: Screen Buffer
+
+Rendering directly to stdout on every change causes flicker. A screen buffer collects all drawing operations and flushes once per frame.
+
+```typescript
+// src/buffer.ts
+import { ansi, getTerminalSize } from "./terminal.js";
+
+export class ScreenBuffer {
+  private lines: string[];
+  private rows: number;
+  private cols: number;
+
+  constructor() {
+    const size = getTerminalSize();
+    this.rows = size.rows;
+    this.cols = size.cols;
+    this.lines = Array(this.rows).fill("");
+  }
+
+  resize(): void {
+    const size = getTerminalSize();
+    this.rows = size.rows;
+    this.cols = size.cols;
+    this.lines = Array(this.rows).fill("");
+  }
+
+  clear(): void {
+    this.lines = Array(this.rows).fill("");
+  }
+
+  write(row: number, col: number, text: string): void {
+    if (row < 0 || row >= this.rows) return;
+    const line = this.lines[row];
+    const before = line.substring(0, col);
+    const after = line.substring(col + stripAnsi(text).length);
+    this.lines[row] = before.padEnd(col, " ") + text + after;
+  }
+
+  flush(): void {
+    let output = ansi.home;
+    for (const line of this.lines) {
+      output += line + "\n";
+    }
+    process.stdout.write(output);
+  }
+
+  getSize(): { rows: number; cols: number } {
+    return { rows: this.rows, cols: this.cols };
+  }
+}
+
+// Strip ANSI codes to get visible text length
+function stripAnsi(str: string): string {
+  return str.replace(/\x1b\[[0-9;]*m/g, "");
+}
+```
+
+## Step 3: Box Drawing and Layout
+
+```typescript
+// src/box.ts
+import { ScreenBuffer } from "./buffer.js";
+import { ansi } from "./terminal.js";
+
+const CHARS = {
+  topLeft: "┌",
+  topRight: "┐",
+  bottomLeft: "└",
+  bottomRight: "┘",
+  horizontal: "─",
+  vertical: "│",
+};
+
+export function drawBox(
+  buffer: ScreenBuffer,
+  row: number,
+  col: number,
+  width: number,
+  height: number,
+  title: string,
+  isActive: boolean
+): void {
+  const borderColor = isActive ? ansi.fg.cyan : ansi.fg.gray;
+  const titleColor = isActive ? `${ansi.bold}${ansi.fg.cyan}` : ansi.fg.white;
+
+  // Top border
+  const titleStr = title ? ` ${title} ` : "";
+  const topLine = CHARS.horizontal.repeat(Math.max(0, width - 2 - titleStr.length));
+  buffer.write(
+    row,
+    col,
+    `${borderColor}${CHARS.topLeft}${titleColor}${titleStr}${borderColor}${topLine}${CHARS.topRight}${ansi.reset}`
+  );
+
+  // Side borders
+  for (let r = row + 1; r < row + height - 1; r++) {
+    buffer.write(r, col, `${borderColor}${CHARS.vertical}${ansi.reset}`);
+    buffer.write(r, col + width - 1, `${borderColor}${CHARS.vertical}${ansi.reset}`);
+  }
+
+  // Bottom border
+  const bottomLine = CHARS.horizontal.repeat(Math.max(0, width - 2));
+  buffer.write(
+    row + height - 1,
+    col,
+    `${borderColor}${CHARS.bottomLeft}${bottomLine}${CHARS.bottomRight}${ansi.reset}`
+  );
+}
+
+export function writeInBox(
+  buffer: ScreenBuffer,
+  boxRow: number,
+  boxCol: number,
+  lineOffset: number,
+  text: string
+): void {
+  buffer.write(boxRow + 1 + lineOffset, boxCol + 2, text);
+}
+```
+
+## Step 4: Data Sources
+
+```typescript
+// src/data.ts
+import { cpus, totalmem, freemem, loadavg, uptime, hostname } from "node:os";
+
+export interface SystemStats {
+  hostname: string;
+  uptime: string;
+  loadAvg: number[];
+  cpuCount: number;
+  cpuUsage: number[];
+  memTotal: number;
+  memUsed: number;
+  memPercent: number;
+}
+
+let previousCpuTimes: { idle: number; total: number }[] = [];
+
+export function getSystemStats(): SystemStats {
+  const cpuInfo = cpus();
+  const memTotal = totalmem();
+  const memFree = freemem();
+  const memUsed = memTotal - memFree;
+
+  // Calculate per-core CPU usage
+  const currentTimes = cpuInfo.map((cpu) => {
+    const times = cpu.times;
+    const idle = times.idle;
+    const total = times.user + times.nice + times.sys + times.idle + times.irq;
+    return { idle, total };
+  });
+
+  const cpuUsage = currentTimes.map((current, i) => {
+    if (!previousCpuTimes[i]) return 0;
+    const idleDelta = current.idle - previousCpuTimes[i].idle;
+    const totalDelta = current.total - previousCpuTimes[i].total;
+    return totalDelta === 0 ? 0 : Math.round((1 - idleDelta / totalDelta) * 100);
+  });
+
+  previousCpuTimes = currentTimes;
+
+  const uptimeSec = uptime();
+  const hours = Math.floor(uptimeSec / 3600);
+  const minutes = Math.floor((uptimeSec % 3600) / 60);
+
+  return {
+    hostname: hostname(),
+    uptime: `${hours}h ${minutes}m`,
+    loadAvg: loadavg().map((l) => Math.round(l * 100) / 100),
+    cpuCount: cpuInfo.length,
+    cpuUsage,
+    memTotal: Math.round(memTotal / 1024 / 1024),
+    memUsed: Math.round(memUsed / 1024 / 1024),
+    memPercent: Math.round((memUsed / memTotal) * 100),
+  };
+}
+
+export interface ProcessInfo {
+  pid: number;
+  memoryMB: number;
+  uptimeSeconds: number;
+  cpuUser: number;
+  cpuSystem: number;
+}
+
+export function getProcessInfo(): ProcessInfo {
+  const mem = process.memoryUsage();
+  const cpu = process.cpuUsage();
+  return {
+    pid: process.pid,
+    memoryMB: Math.round((mem.heapUsed / 1024 / 1024) * 10) / 10,
+    uptimeSeconds: Math.round(process.uptime()),
+    cpuUser: Math.round(cpu.user / 1000),
+    cpuSystem: Math.round(cpu.system / 1000),
+  };
+}
+```
+
+## Step 5: Panel Renderers
+
+```typescript
+// src/panels.ts
+import { ScreenBuffer } from "./buffer.js";
+import { drawBox, writeInBox } from "./box.js";
+import { SystemStats, ProcessInfo } from "./data.js";
+import { ansi } from "./terminal.js";
+
+function progressBar(percent: number, width: number, color: string): string {
+  const filled = Math.round((percent / 100) * width);
+  const empty = width - filled;
+  return `${color}${"█".repeat(filled)}${ansi.fg.gray}${"░".repeat(empty)}${ansi.reset} ${percent}%`;
+}
+
+export function renderSystemPanel(
+  buffer: ScreenBuffer,
+  row: number,
+  col: number,
+  width: number,
+  height: number,
+  stats: SystemStats,
+  isActive: boolean
+): void {
+  drawBox(buffer, row, col, width, height, "System", isActive);
+  writeInBox(buffer, row, col, 0, `${ansi.bold}${stats.hostname}${ansi.reset}  up ${stats.uptime}`);
+  writeInBox(buffer, row, col, 1, `Load: ${stats.loadAvg.join("  ")}`);
+  writeInBox(buffer, row, col, 3, `${ansi.bold}Memory${ansi.reset}`);
+  const memColor =
+    stats.memPercent > 80 ? ansi.fg.red : stats.memPercent > 60 ? ansi.fg.yellow : ansi.fg.green;
+  writeInBox(buffer, row, col, 4, progressBar(stats.memPercent, width - 14, memColor));
+  writeInBox(
+    buffer,
+    row,
+    col,
+    5,
+    `${ansi.dim}${stats.memUsed}MB / ${stats.memTotal}MB${ansi.reset}`
+  );
+}
+
+export function renderCpuPanel(
+  buffer: ScreenBuffer,
+  row: number,
+  col: number,
+  width: number,
+  height: number,
+  stats: SystemStats,
+  isActive: boolean
+): void {
+  drawBox(buffer, row, col, width, height, "CPU Cores", isActive);
+  stats.cpuUsage.forEach((usage, i) => {
+    if (i >= height - 2) return;
+    const color = usage > 80 ? ansi.fg.red : usage > 50 ? ansi.fg.yellow : ansi.fg.green;
+    const label = `Core ${i}: `;
+    writeInBox(
+      buffer,
+      row,
+      col,
+      i,
+      `${ansi.dim}${label}${ansi.reset}${progressBar(usage, width - label.length - 12, color)}`
+    );
+  });
+}
+
+export function renderProcessPanel(
+  buffer: ScreenBuffer,
+  row: number,
+  col: number,
+  width: number,
+  height: number,
+  info: ProcessInfo,
+  isActive: boolean
+): void {
+  drawBox(buffer, row, col, width, height, "Dashboard Process", isActive);
+  writeInBox(buffer, row, col, 0, `PID: ${info.pid}`);
+  writeInBox(buffer, row, col, 1, `Memory: ${info.memoryMB} MB`);
+  writeInBox(buffer, row, col, 2, `Uptime: ${info.uptimeSeconds}s`);
+  writeInBox(buffer, row, col, 3, `CPU User: ${info.cpuUser}ms`);
+  writeInBox(buffer, row, col, 4, `CPU System: ${info.cpuSystem}ms`);
+}
+
+export function renderHelpPanel(
+  buffer: ScreenBuffer,
+  row: number,
+  col: number,
+  width: number,
+  isActive: boolean
+): void {
+  drawBox(buffer, row, col, width, 3, "Help", isActive);
+  writeInBox(
+    buffer,
+    row,
+    col,
+    0,
+    `${ansi.dim}Tab${ansi.reset} Switch panel  ${ansi.dim}q${ansi.reset} Quit  ${ansi.dim}r${ansi.reset} Force refresh`
+  );
+}
+```
+
+## Step 6: Keyboard Input Handler
+
+```typescript
+// src/input.ts
+export type KeyAction = "next-panel" | "prev-panel" | "quit" | "refresh";
+
+export function setupKeyboardInput(onAction: (action: KeyAction) => void): void {
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.setEncoding("utf8");
+
+  process.stdin.on("data", (key: string) => {
+    switch (key) {
+      case "\t":
+        onAction("next-panel");
+        break;
+      case "\x1b[Z": // Shift+Tab
+        onAction("prev-panel");
+        break;
+      case "q":
+      case "\x03": // Ctrl+C
+        onAction("quit");
+        break;
+      case "r":
+        onAction("refresh");
+        break;
+    }
+  });
+}
+```
+
+Setting `setRawMode(true)` tells Node to pass every keypress directly to our handler instead of waiting for Enter. This enables real-time keyboard navigation.
+
+## Step 7: Layout Engine
+
+```typescript
+// src/layout.ts
+import { ScreenBuffer } from "./buffer.js";
+import { SystemStats, ProcessInfo } from "./data.js";
+import {
+  renderSystemPanel,
+  renderCpuPanel,
+  renderProcessPanel,
+  renderHelpPanel,
+} from "./panels.js";
+import { ansi } from "./terminal.js";
+
+export function renderLayout(
+  buffer: ScreenBuffer,
+  stats: SystemStats,
+  processInfo: ProcessInfo,
+  activePanel: number
+): void {
+  buffer.clear();
+  const { rows, cols } = buffer.getSize();
+
+  // Title bar
+  buffer.write(
+    0,
+    0,
+    `${ansi.bg.blue}${ansi.bold} CLI Dashboard ${ansi.reset}${ansi.dim} ${new Date().toLocaleTimeString()} ${ansi.reset}`
+  );
+
+  const halfWidth = Math.floor(cols / 2);
+  const topHeight = Math.min(10, Math.floor((rows - 4) / 2));
+  const bottomHeight = rows - topHeight - 4;
+
+  // Top left: System stats
+  renderSystemPanel(buffer, 2, 0, halfWidth, topHeight, stats, activePanel === 0);
+
+  // Top right: CPU cores
+  renderCpuPanel(buffer, 2, halfWidth, cols - halfWidth, topHeight, stats, activePanel === 1);
+
+  // Bottom left: Process info
+  renderProcessPanel(
+    buffer,
+    2 + topHeight,
+    0,
+    halfWidth,
+    bottomHeight,
+    processInfo,
+    activePanel === 2
+  );
+
+  // Help bar at the bottom
+  renderHelpPanel(buffer, rows - 3, 0, cols, activePanel === -1);
+
+  buffer.flush();
+}
+```
+
+## Step 8: Main Loop — Putting It All Together
+
+```typescript
+// src/main.ts
+import { ScreenBuffer } from "./buffer.js";
+import { getSystemStats, getProcessInfo } from "./data.js";
+import { setupKeyboardInput, KeyAction } from "./input.js";
+import { renderLayout } from "./layout.js";
+import { ansi } from "./terminal.js";
+
+const REFRESH_INTERVAL_MS = 1000;
+const PANEL_COUNT = 3;
+
+let activePanel = 0;
+const buffer = new ScreenBuffer();
+
+function render(): void {
+  const stats = getSystemStats();
+  const processInfo = getProcessInfo();
+  renderLayout(buffer, stats, processInfo, activePanel);
+}
+
+function handleAction(action: KeyAction): void {
+  switch (action) {
+    case "next-panel":
+      activePanel = (activePanel + 1) % PANEL_COUNT;
+      render();
+      break;
+    case "prev-panel":
+      activePanel = (activePanel - 1 + PANEL_COUNT) % PANEL_COUNT;
+      render();
+      break;
+    case "refresh":
+      render();
+      break;
+    case "quit":
+      cleanup();
+      process.exit(0);
+  }
+}
+
+function cleanup(): void {
+  process.stdout.write(ansi.showCursor + ansi.clear + ansi.home);
+  process.stdin.setRawMode(false);
+}
+
+// Handle terminal resize
+process.stdout.on("resize", () => {
+  buffer.resize();
+  render();
+});
+
+// Handle unexpected exits
+process.on("SIGINT", () => {
+  cleanup();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  cleanup();
+  process.exit(0);
+});
+
+// Initialize
+process.stdout.write(ansi.hideCursor + ansi.clear);
+setupKeyboardInput(handleAction);
+
+// Initial render + auto-refresh
+render();
+setInterval(render, REFRESH_INTERVAL_MS);
+
+console.error("[dashboard] Running. Press 'q' to quit.");
+```
+
+Run it:
+
+```bash
+npx tsx src/main.ts
+```
+
+You'll see a full-terminal dashboard with system stats, CPU usage bars per core, and process information — all updating every second. Press Tab to cycle through panels (the active panel's border turns cyan). Press `r` to force a refresh, `q` to quit cleanly. Resize your terminal and the layout adapts. The entire thing runs on ANSI escape codes and Node.js built-ins — no blessed, no ink, no dependencies. From here, add network throughput stats, disk I/O panels, Docker container status, or pipe in custom metrics from your application via stdin.

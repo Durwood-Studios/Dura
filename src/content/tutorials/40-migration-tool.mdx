@@ -1,0 +1,255 @@
+---
+title: "Build a Database Migration Tool"
+description: "Create a CLI migration tool with up/down scripts, version tracking, rollback support, and schema validation."
+slug: "migration-tool"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["database", "migrations", "cli", "postgresql", "node"]
+---
+
+## Overview
+
+Database migration tools solve a critical problem: how do you evolve a database schema safely, reproducibly, and reversibly across multiple environments? In this tutorial, you'll build a migration CLI from scratch that manages SQL migration files, tracks which migrations have been applied, and supports rollback.
+
+**What you'll build:**
+
+- A CLI tool (`migrate up`, `migrate down`, `migrate status`, `migrate create`)
+- A migrations table that tracks applied versions
+- Timestamped migration files with `up` and `down` SQL
+- Rollback to any previous version
+- Dry-run mode that shows what would change without executing
+
+**What you'll learn:**
+
+- Database schema versioning strategies
+- SQL transaction safety for DDL operations
+- CLI argument parsing in Node.js
+- File-based migration ordering
+- The expand-contract pattern for zero-downtime migrations
+
+## Step 1: Project Setup
+
+Create the project structure:
+
+```bash
+mkdir db-migrate && cd db-migrate
+npm init -y
+```
+
+Create the directory layout:
+
+```
+db-migrate/
+  src/
+    cli.js          # CLI entry point
+    migrator.js     # Core migration logic
+    connection.js   # Database connection
+  migrations/       # Migration files go here
+```
+
+## Step 2: Database Connection
+
+Create a connection helper. For this tutorial we'll use a simple connection string pattern that works on macOS, Windows, and Linux:
+
+```javascript
+// src/connection.js
+const { Client } = require("pg");
+
+function createClient() {
+  const url = process.env.DATABASE_URL || "postgresql://localhost:5432/migrate_demo";
+  return new Client({ connectionString: url });
+}
+
+module.exports = { createClient };
+```
+
+The `DATABASE_URL` environment variable works identically on macOS, Windows (PowerShell: `$env:DATABASE_URL = "..."`), and Linux.
+
+## Step 3: Migration Table
+
+Before running any migrations, ensure the tracking table exists:
+
+```javascript
+const MIGRATIONS_TABLE = `
+  CREATE TABLE IF NOT EXISTS _migrations (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`;
+```
+
+This table records which migrations have been applied and when. The `name` column stores the migration filename.
+
+## Step 4: Create Migration Command
+
+The `create` command generates a timestamped migration file:
+
+```javascript
+function createMigration(name) {
+  const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+  const filename = `${timestamp}_${name}.sql`;
+  const template = `-- Up\n\n-- Down\n`;
+  fs.writeFileSync(path.join("migrations", filename), template);
+  console.log(`Created: migrations/${filename}`);
+}
+```
+
+The timestamp prefix ensures migrations are ordered chronologically. The file contains `-- Up` and `-- Down` sections that the migrator parses.
+
+## Step 5: Parse Migration Files
+
+Split each migration file into its up and down SQL:
+
+```javascript
+function parseMigration(content) {
+  const upMatch = content.indexOf("-- Down");
+  if (upMatch === -1) throw new Error('Missing "-- Down" marker');
+  const up = content.slice(content.indexOf("-- Up") + 5, upMatch).trim();
+  const down = content.slice(upMatch + 7).trim();
+  return { up, down };
+}
+```
+
+## Step 6: Run Migrations Up
+
+The `up` command applies all pending migrations in order, each wrapped in a transaction:
+
+```javascript
+async function migrateUp(client, options = {}) {
+  const applied = await getApplied(client);
+  const pending = getAllMigrations().filter((m) => !applied.includes(m.name));
+
+  for (const migration of pending) {
+    const { up } = parseMigration(migration.content);
+    if (options.dryRun) {
+      console.log(`[DRY RUN] Would apply: ${migration.name}`);
+      console.log(up);
+      continue;
+    }
+    await client.query("BEGIN");
+    try {
+      await client.query(up);
+      await client.query("INSERT INTO _migrations (name) VALUES ($1)", [migration.name]);
+      await client.query("COMMIT");
+      console.log(`Applied: ${migration.name}`);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw new Error(`Migration ${migration.name} failed: ${err.message}`);
+    }
+  }
+}
+```
+
+Each migration runs in its own transaction. If the SQL fails, the transaction rolls back and the migration is not recorded as applied.
+
+## Step 7: Run Migrations Down
+
+The `down` command rolls back the most recently applied migration:
+
+```javascript
+async function migrateDown(client, options = {}) {
+  const applied = await getApplied(client);
+  if (applied.length === 0) {
+    console.log("Nothing to roll back");
+    return;
+  }
+  const latest = applied[applied.length - 1];
+  const file = findMigration(latest);
+  const { down } = parseMigration(file.content);
+
+  if (options.dryRun) {
+    console.log(`[DRY RUN] Would rollback: ${latest}`);
+    console.log(down);
+    return;
+  }
+
+  await client.query("BEGIN");
+  try {
+    await client.query(down);
+    await client.query("DELETE FROM _migrations WHERE name = $1", [latest]);
+    await client.query("COMMIT");
+    console.log(`Rolled back: ${latest}`);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw new Error(`Rollback of ${latest} failed: ${err.message}`);
+  }
+}
+```
+
+## Step 8: Status Command
+
+Show which migrations are applied and which are pending:
+
+```javascript
+async function status(client) {
+  const applied = await getApplied(client);
+  const all = getAllMigrations();
+  for (const m of all) {
+    const isApplied = applied.includes(m.name);
+    const marker = isApplied ? "✓" : "○";
+    console.log(`${marker}  ${m.name}`);
+  }
+}
+```
+
+## Step 9: CLI Entry Point
+
+Wire everything together with a simple argument parser:
+
+```javascript
+const [, , command, ...args] = process.argv;
+
+switch (command) {
+  case "create":
+    createMigration(args[0] || "unnamed");
+    break;
+  case "up":
+    run(migrateUp, args.includes("--dry-run"));
+    break;
+  case "down":
+    run(migrateDown, args.includes("--dry-run"));
+    break;
+  case "status":
+    run(status);
+    break;
+  default:
+    console.log("Usage: migrate <create|up|down|status>");
+}
+```
+
+This works on macOS, Windows, and Linux — `process.argv` is cross-platform.
+
+## Step 10: Test the Full Workflow
+
+Create your first migration:
+
+```bash
+node src/cli.js create add_users_table
+```
+
+Edit the generated file:
+
+```sql
+-- Up
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Down
+DROP TABLE IF EXISTS users;
+```
+
+Run the migration:
+
+```bash
+node src/cli.js up
+node src/cli.js status
+node src/cli.js down
+node src/cli.js status
+```
+
+You now have a working migration tool. Extend it with features like: target version rollback (`down --to 20240101`), migration locking to prevent concurrent runs, and validation that ensures every `up` has a corresponding `down`.

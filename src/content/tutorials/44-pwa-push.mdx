@@ -1,0 +1,554 @@
+---
+title: "Build a PWA with Push Notifications"
+description: "Create a Progressive Web App with service worker lifecycle management, cache strategies, Web Push API integration, install prompt handling, and offline fallback."
+slug: "pwa-push"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["pwa", "service-worker", "push-notifications", "mobile", "offline"]
+---
+
+## Overview
+
+Progressive Web Apps bridge the gap between websites and native apps. They load instantly on slow networks, work offline, and can send push notifications even when the browser is closed. In this tutorial, you'll build a complete PWA from scratch — no framework magic. You'll implement the service worker lifecycle, multiple caching strategies, the Web Push API with VAPID authentication, a custom install prompt, and an offline fallback page.
+
+**What you'll learn:**
+
+- Service worker registration, installation, activation, and update lifecycle
+- Cache-first, network-first, and stale-while-revalidate strategies
+- Web Push API with VAPID keys and subscription management
+- Triggering the browser install prompt at the right moment
+- Building an offline fallback experience
+- Background sync for queuing actions while offline
+
+The app is a simple notes tool that works offline and notifies users about shared note updates.
+
+## Step 1: Project Structure and Web App Manifest
+
+```bash
+mkdir pwa-notes && cd pwa-notes
+npm init -y
+npm install express web-push
+npm install -D typescript @types/node @types/express tsx
+```
+
+Create `public/manifest.json`:
+
+```json
+{
+  "name": "PWA Notes",
+  "short_name": "Notes",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#08080d",
+  "theme_color": "#10b981",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
+```
+
+Create `public/index.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#10b981" />
+    <link rel="manifest" href="/manifest.json" />
+    <title>PWA Notes</title>
+    <style>
+      body {
+        font-family: system-ui;
+        background: #08080d;
+        color: #f0f0f0;
+        margin: 0;
+        padding: 1rem;
+      }
+      .note {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 0.5rem;
+      }
+      button {
+        background: #10b981;
+        color: #fff;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      #install-banner {
+        display: none;
+        position: fixed;
+        bottom: 1rem;
+        left: 1rem;
+        right: 1rem;
+        background: #1a1a2e;
+        padding: 1rem;
+        border-radius: 12px;
+        text-align: center;
+      }
+      #offline-indicator {
+        display: none;
+        background: #ef4444;
+        color: #fff;
+        text-align: center;
+        padding: 0.25rem;
+        font-size: 0.875rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="offline-indicator">You are offline</div>
+    <h1>Notes</h1>
+    <form id="note-form">
+      <textarea
+        id="note-input"
+        rows="3"
+        placeholder="Write a note..."
+        style="width:100%;background:#111;color:#f0f0f0;border:1px solid #333;border-radius:8px;padding:0.5rem;"
+      ></textarea>
+      <button type="submit">Save Note</button>
+      <button type="button" id="subscribe-btn">Enable Notifications</button>
+    </form>
+    <div id="notes"></div>
+    <div id="install-banner">
+      <p>Install this app for offline access</p>
+      <button id="install-btn">Install</button>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>
+```
+
+## Step 2: Service Worker Registration
+
+```javascript
+// public/app.js
+const NOTES_KEY = "pwa-notes";
+
+// Register service worker
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker
+    .register("/sw.js")
+    .then((reg) => {
+      console.log("SW registered, scope:", reg.scope);
+
+      // Check for updates every 60 seconds
+      setInterval(() => reg.update(), 60000);
+
+      reg.addEventListener("updatefound", () => {
+        const newWorker = reg.installing;
+        newWorker.addEventListener("statechange", () => {
+          if (newWorker.state === "activated" && navigator.serviceWorker.controller) {
+            showUpdateBanner();
+          }
+        });
+      });
+    })
+    .catch((err) => console.error("SW registration failed:", err));
+}
+
+// Offline indicator
+window.addEventListener("online", () => {
+  document.getElementById("offline-indicator").style.display = "none";
+});
+window.addEventListener("offline", () => {
+  document.getElementById("offline-indicator").style.display = "block";
+});
+
+function showUpdateBanner() {
+  if (confirm("New version available. Reload?")) {
+    window.location.reload();
+  }
+}
+```
+
+## Step 3: Service Worker — Install and Activate
+
+```javascript
+// public/sw.js
+const CACHE_NAME = "pwa-notes-v1";
+const STATIC_ASSETS = ["/", "/index.html", "/app.js", "/manifest.json", "/offline.html"];
+
+// Install — precache static assets
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      console.log("[SW] Precaching static assets");
+      return cache.addAll(STATIC_ASSETS);
+    })
+  );
+  // Activate immediately instead of waiting
+  self.skipWaiting();
+});
+
+// Activate — clean old caches
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => {
+      return Promise.all(
+        keys
+          .filter((key) => key !== CACHE_NAME)
+          .map((key) => {
+            console.log("[SW] Deleting old cache:", key);
+            return caches.delete(key);
+          })
+      );
+    })
+  );
+  // Take control of all pages immediately
+  self.clients.claim();
+});
+```
+
+## Step 4: Caching Strategies
+
+```javascript
+// Add to public/sw.js
+
+// Strategy: Cache first, then network (for static assets)
+function cacheFirst(request) {
+  return caches.match(request).then((cached) => {
+    if (cached) return cached;
+    return fetch(request).then((response) => {
+      if (response.ok) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+      }
+      return response;
+    });
+  });
+}
+
+// Strategy: Network first, fall back to cache (for API calls)
+function networkFirst(request) {
+  return fetch(request)
+    .then((response) => {
+      if (response.ok) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+      }
+      return response;
+    })
+    .catch(() => caches.match(request));
+}
+
+// Strategy: Stale while revalidate (for semi-dynamic content)
+function staleWhileRevalidate(request) {
+  return caches.match(request).then((cached) => {
+    const fetchPromise = fetch(request).then((response) => {
+      if (response.ok) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+      }
+      return response;
+    });
+    return cached || fetchPromise;
+  });
+}
+
+// Route requests to the right strategy
+self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+
+  if (url.pathname.startsWith("/api/")) {
+    event.respondWith(
+      networkFirst(event.request).then((response) => response || caches.match("/offline.html"))
+    );
+  } else if (event.request.destination === "image") {
+    event.respondWith(cacheFirst(event.request));
+  } else {
+    event.respondWith(
+      staleWhileRevalidate(event.request).then(
+        (response) => response || caches.match("/offline.html")
+      )
+    );
+  }
+});
+```
+
+## Step 5: Offline Fallback Page
+
+```html
+<!-- public/offline.html -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Offline — PWA Notes</title>
+    <style>
+      body {
+        font-family: system-ui;
+        background: #08080d;
+        color: #f0f0f0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        margin: 0;
+        text-align: center;
+      }
+      .container {
+        max-width: 400px;
+        padding: 2rem;
+      }
+      .icon {
+        font-size: 4rem;
+        margin-bottom: 1rem;
+      }
+      button {
+        background: #10b981;
+        color: #fff;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        cursor: pointer;
+        margin-top: 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="icon">&#9729;</div>
+      <h1>You're Offline</h1>
+      <p>Your notes are saved locally. New notes will sync when you reconnect.</p>
+      <button onclick="window.location.reload()">Try Again</button>
+    </div>
+  </body>
+</html>
+```
+
+## Step 6: VAPID Key Generation and Push Server
+
+```typescript
+// src/server.ts
+import express from "express";
+import webpush from "web-push";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+
+const app = express();
+app.use(express.json());
+app.use(express.static("public"));
+
+// Generate VAPID keys once, then reuse
+const KEYS_FILE = "./vapid-keys.json";
+
+interface VapidKeys {
+  publicKey: string;
+  privateKey: string;
+}
+
+let vapidKeys: VapidKeys;
+if (existsSync(KEYS_FILE)) {
+  vapidKeys = JSON.parse(readFileSync(KEYS_FILE, "utf8"));
+} else {
+  vapidKeys = webpush.generateVAPIDKeys();
+  writeFileSync(KEYS_FILE, JSON.stringify(vapidKeys, null, 2));
+}
+
+webpush.setVapidDetails("mailto:dev@example.com", vapidKeys.publicKey, vapidKeys.privateKey);
+
+// Store subscriptions in memory (use a database in production)
+const subscriptions: webpush.PushSubscription[] = [];
+
+app.get("/api/vapid-public-key", (req, res) => {
+  res.json({ publicKey: vapidKeys.publicKey });
+});
+
+app.post("/api/subscribe", (req, res) => {
+  const subscription = req.body as webpush.PushSubscription;
+  subscriptions.push(subscription);
+  console.log(`New subscription (total: ${subscriptions.length})`);
+  res.status(201).json({ ok: true });
+});
+
+app.post("/api/notify", async (req, res) => {
+  const { title, body } = req.body as { title: string; body: string };
+  const payload = JSON.stringify({ title, body });
+
+  const results = await Promise.allSettled(
+    subscriptions.map((sub) => webpush.sendNotification(sub, payload))
+  );
+
+  const succeeded = results.filter((r) => r.status === "fulfilled").length;
+  res.json({ sent: succeeded, total: subscriptions.length });
+});
+
+const PORT = parseInt(process.env.PORT ?? "3000", 10);
+app.listen(PORT, () => console.log(`Server on http://localhost:${PORT}`));
+```
+
+## Step 7: Client-Side Push Subscription
+
+```javascript
+// Add to public/app.js
+
+async function subscribeToPush() {
+  const reg = await navigator.serviceWorker.ready;
+
+  const response = await fetch("/api/vapid-public-key");
+  const { publicKey } = await response.json();
+
+  const subscription = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(publicKey),
+  });
+
+  await fetch("/api/subscribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(subscription),
+  });
+
+  console.log("Push subscription active");
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((char) => char.charCodeAt(0)));
+}
+
+document.getElementById("subscribe-btn").addEventListener("click", async () => {
+  const permission = await Notification.requestPermission();
+  if (permission === "granted") {
+    await subscribeToPush();
+    document.getElementById("subscribe-btn").textContent = "Notifications enabled";
+  }
+});
+```
+
+## Step 8: Service Worker Push Handler
+
+```javascript
+// Add to public/sw.js
+
+self.addEventListener("push", (event) => {
+  if (!event.data) return;
+
+  const data = event.data.json();
+  const options = {
+    body: data.body,
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    vibrate: [100, 50, 100],
+    data: { url: "/" },
+    actions: [{ action: "open", title: "Open Notes" }],
+  };
+
+  event.waitUntil(self.registration.showNotification(data.title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url === "/" && "focus" in client) {
+          return client.focus();
+        }
+      }
+      return clients.openWindow(event.notification.data.url || "/");
+    })
+  );
+});
+```
+
+## Step 9: Install Prompt Handling
+
+```javascript
+// Add to public/app.js
+
+let deferredPrompt = null;
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+
+  // Show install banner after user has interacted with the app
+  const noteCount = JSON.parse(localStorage.getItem(NOTES_KEY) || "[]").length;
+  if (noteCount >= 2) {
+    document.getElementById("install-banner").style.display = "block";
+  }
+});
+
+document.getElementById("install-btn").addEventListener("click", async () => {
+  if (!deferredPrompt) return;
+
+  deferredPrompt.prompt();
+  const result = await deferredPrompt.userChoice;
+  console.log("Install prompt result:", result.outcome);
+  deferredPrompt = null;
+  document.getElementById("install-banner").style.display = "none";
+});
+
+window.addEventListener("appinstalled", () => {
+  console.log("App installed");
+  document.getElementById("install-banner").style.display = "none";
+});
+```
+
+The install prompt only appears after the user has saved at least two notes, ensuring they've found value before being asked to install.
+
+## Step 10: Notes Logic with Local Persistence
+
+```javascript
+// Add to public/app.js
+
+function loadNotes() {
+  return JSON.parse(localStorage.getItem(NOTES_KEY) || "[]");
+}
+
+function saveNotes(notes) {
+  localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
+}
+
+function renderNotes() {
+  const notes = loadNotes();
+  const container = document.getElementById("notes");
+  container.innerHTML = notes
+    .map(
+      (note, i) =>
+        `<div class="note">
+          <p>${note.text}</p>
+          <small>${new Date(note.createdAt).toLocaleString()}</small>
+          <button onclick="deleteNote(${i})">Delete</button>
+        </div>`
+    )
+    .join("");
+}
+
+document.getElementById("note-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = document.getElementById("note-input");
+  const text = input.value.trim();
+  if (!text) return;
+
+  const notes = loadNotes();
+  notes.unshift({ text, createdAt: new Date().toISOString() });
+  saveNotes(notes);
+  input.value = "";
+  renderNotes();
+});
+
+window.deleteNote = function (index) {
+  const notes = loadNotes();
+  notes.splice(index, 1);
+  saveNotes(notes);
+  renderNotes();
+};
+
+renderNotes();
+```
+
+Run `npx tsx src/server.ts` and open `http://localhost:3000`. Create notes — they persist in localStorage and survive going offline. Enable notifications to receive push alerts. After saving two notes, the install banner appears. Open DevTools Application tab to inspect the service worker, cache storage, and manifest. You now have a fully functional PWA with every major capability: offline support, push notifications, installability, and multiple caching strategies.

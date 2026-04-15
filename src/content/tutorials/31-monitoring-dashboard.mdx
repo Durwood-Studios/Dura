@@ -1,0 +1,438 @@
+---
+title: "Build a Monitoring Dashboard"
+description: "Collect simulated metrics like CPU, memory, and request rate, then visualize them with time-series charts, threshold alerts, and auto-refresh."
+slug: "monitoring-dashboard"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["monitoring", "metrics", "charts", "devops", "prometheus"]
+---
+
+## Overview
+
+Production systems generate a constant stream of telemetry — CPU load, memory consumption, request latency, error rates. A monitoring dashboard transforms this raw data into actionable insight. In this tutorial, you will build a full monitoring dashboard from scratch: a metrics collection backend that simulates real infrastructure data, a time-series storage layer, threshold-based alerting, and a frontend with auto-refreshing charts.
+
+You will work with Express for the API layer, an in-memory ring buffer for time-series storage, Server-Sent Events for live updates, and Canvas-based charting on the frontend. By the end, you will have a dashboard that looks and behaves like a simplified Grafana — and you will understand every layer of the stack beneath it.
+
+**What you will build:**
+
+- A metrics simulator that produces realistic CPU, memory, disk, and request-rate data
+- A ring-buffer time-series store with configurable retention
+- A REST API for querying metric ranges
+- Server-Sent Events for real-time push updates
+- A responsive dashboard with multiple chart panels
+- Threshold alerts with visual and audio notifications
+
+## Step 1: Project Setup and Metrics Simulator
+
+Start by scaffolding the project and building the data source. The simulator produces metrics that mimic real server behavior — values drift gradually, spike occasionally, and correlate with each other.
+
+```typescript
+// src/metrics/simulator.ts
+interface MetricPoint {
+  timestamp: number;
+  value: number;
+}
+
+interface SimulatorConfig {
+  baseValue: number;
+  variance: number;
+  spikeProbability: number;
+  spikeMultiplier: number;
+}
+
+class MetricSimulator {
+  private current: number;
+  private config: SimulatorConfig;
+
+  constructor(config: SimulatorConfig) {
+    this.config = config;
+    this.current = config.baseValue;
+  }
+
+  tick(): MetricPoint {
+    const { variance, spikeProbability, spikeMultiplier } = this.config;
+    const drift = (Math.random() - 0.5) * variance;
+    const isSpike = Math.random() < spikeProbability;
+
+    this.current += drift;
+    this.current = Math.max(0, Math.min(100, this.current));
+
+    const value = isSpike ? Math.min(100, this.current * spikeMultiplier) : this.current;
+
+    return { timestamp: Date.now(), value: Math.round(value * 100) / 100 };
+  }
+}
+
+export const simulators = {
+  cpu: new MetricSimulator({
+    baseValue: 35,
+    variance: 8,
+    spikeProbability: 0.05,
+    spikeMultiplier: 2.2,
+  }),
+  memory: new MetricSimulator({
+    baseValue: 62,
+    variance: 3,
+    spikeProbability: 0.02,
+    spikeMultiplier: 1.4,
+  }),
+  disk: new MetricSimulator({
+    baseValue: 45,
+    variance: 1,
+    spikeProbability: 0.01,
+    spikeMultiplier: 1.2,
+  }),
+  requestRate: new MetricSimulator({
+    baseValue: 150,
+    variance: 40,
+    spikeProbability: 0.08,
+    spikeMultiplier: 3.0,
+  }),
+};
+```
+
+The drift model ensures values change smoothly rather than jumping randomly. Spikes are rare but dramatic — exactly like real infrastructure.
+
+## Step 2: Ring Buffer Time-Series Store
+
+Production monitoring systems like Prometheus use sophisticated storage engines. For this project, a ring buffer provides fixed-memory time-series storage with automatic expiration of old data.
+
+```typescript
+// src/storage/ring-buffer.ts
+class RingBuffer<T> {
+  private buffer: (T | undefined)[];
+  private head: number = 0;
+  private count: number = 0;
+
+  constructor(private capacity: number) {
+    this.buffer = new Array(capacity);
+  }
+
+  push(item: T): void {
+    this.buffer[this.head] = item;
+    this.head = (this.head + 1) % this.capacity;
+    this.count = Math.min(this.count + 1, this.capacity);
+  }
+
+  toArray(): T[] {
+    const result: T[] = [];
+    const start = this.count < this.capacity ? 0 : this.head;
+    for (let i = 0; i < this.count; i++) {
+      const index = (start + i) % this.capacity;
+      result.push(this.buffer[index] as T);
+    }
+    return result;
+  }
+
+  query(predicate: (item: T) => boolean): T[] {
+    return this.toArray().filter(predicate);
+  }
+}
+```
+
+Each metric gets its own ring buffer sized for the retention window. At one-second resolution, 3600 slots stores one hour of data using roughly 100KB of memory per metric.
+
+## Step 3: Collection Engine
+
+The collection engine ties simulators to storage. It runs on a configurable interval and broadcasts new data points to any connected listeners.
+
+```typescript
+// src/metrics/collector.ts
+import { EventEmitter } from "events";
+
+interface CollectorOptions {
+  intervalMs: number;
+  retentionSlots: number;
+}
+
+class MetricsCollector extends EventEmitter {
+  private timers: Map<string, NodeJS.Timeout> = new Map();
+  private stores: Map<string, RingBuffer<MetricPoint>> = new Map();
+
+  register(name: string, simulator: MetricSimulator, options: CollectorOptions): void {
+    const store = new RingBuffer<MetricPoint>(options.retentionSlots);
+    this.stores.set(name, store);
+
+    const timer = setInterval(() => {
+      const point = simulator.tick();
+      store.push(point);
+      this.emit("metric", { name, point });
+    }, options.intervalMs);
+
+    this.timers.set(name, timer);
+  }
+
+  getRange(name: string, startTs: number, endTs: number): MetricPoint[] {
+    const store = this.stores.get(name);
+    if (!store) return [];
+    return store.query((p) => p.timestamp >= startTs && p.timestamp <= endTs);
+  }
+
+  shutdown(): void {
+    for (const timer of this.timers.values()) clearInterval(timer);
+  }
+}
+```
+
+## Step 4: REST API for Metric Queries
+
+Expose the collected data through a clean REST interface. Clients request a metric name and a time range, and receive an array of data points suitable for charting.
+
+```typescript
+// src/api/routes.ts
+app.get("/api/metrics/:name", (req, res) => {
+  const { name } = req.params;
+  const duration = parseInt(req.query.duration as string) || 300000;
+  const now = Date.now();
+  const points = collector.getRange(name, now - duration, now);
+
+  res.json({
+    metric: name,
+    start: now - duration,
+    end: now,
+    resolution: "1s",
+    points,
+  });
+});
+
+app.get("/api/metrics", (_req, res) => {
+  const metrics = ["cpu", "memory", "disk", "requestRate"];
+  const summary = metrics.map((name) => {
+    const points = collector.getRange(name, Date.now() - 60000, Date.now());
+    const values = points.map((p) => p.value);
+    return {
+      name,
+      current: values.at(-1) ?? 0,
+      avg: values.reduce((a, b) => a + b, 0) / (values.length || 1),
+      max: Math.max(...values, 0),
+      min: Math.min(...values, 0),
+    };
+  });
+  res.json(summary);
+});
+```
+
+## Step 5: Server-Sent Events for Real-Time Updates
+
+Polling wastes bandwidth and adds latency. Server-Sent Events provide a one-way persistent connection — the server pushes each new metric as it arrives.
+
+```typescript
+// src/api/sse.ts
+app.get("/api/stream", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+
+  const handler = (data: { name: string; point: MetricPoint }) => {
+    res.write(`event: metric\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  collector.on("metric", handler);
+  req.on("close", () => collector.off("metric", handler));
+});
+```
+
+On the client, `EventSource` reconnects automatically if the connection drops — resilience built into the protocol.
+
+## Step 6: Threshold Alert Engine
+
+Monitoring without alerting is just watching. The alert engine evaluates rules against incoming metrics and fires when thresholds are breached.
+
+```typescript
+// src/alerts/engine.ts
+interface AlertRule {
+  metric: string;
+  operator: "gt" | "lt" | "eq";
+  threshold: number;
+  windowMs: number;
+  cooldownMs: number;
+}
+
+class AlertEngine {
+  private rules: AlertRule[] = [];
+  private lastFired: Map<string, number> = new Map();
+
+  addRule(rule: AlertRule): void {
+    this.rules.push(rule);
+  }
+
+  evaluate(name: string, points: MetricPoint[]): string[] {
+    const now = Date.now();
+    const fired: string[] = [];
+
+    for (const rule of this.rules.filter((r) => r.metric === name)) {
+      const key = `${rule.metric}-${rule.operator}-${rule.threshold}`;
+      const lastFire = this.lastFired.get(key) || 0;
+      if (now - lastFire < rule.cooldownMs) continue;
+
+      const recent = points.filter((p) => p.timestamp >= now - rule.windowMs);
+      const avg = recent.reduce((a, b) => a + b.value, 0) / (recent.length || 1);
+
+      const triggered =
+        (rule.operator === "gt" && avg > rule.threshold) ||
+        (rule.operator === "lt" && avg < rule.threshold);
+
+      if (triggered) {
+        this.lastFired.set(key, now);
+        fired.push(
+          `ALERT: ${name} ${rule.operator} ${rule.threshold} (current avg: ${avg.toFixed(1)})`
+        );
+      }
+    }
+    return fired;
+  }
+}
+```
+
+The cooldown prevents alert storms. In production you would integrate with PagerDuty or Slack — here we push alerts through the SSE stream.
+
+## Step 7: Frontend Chart Rendering
+
+Use the Canvas API for performant time-series rendering. Each chart panel draws axes, grid lines, the data series, and a threshold indicator line.
+
+```typescript
+// src/ui/chart.ts
+function renderChart(
+  ctx: CanvasRenderingContext2D,
+  points: MetricPoint[],
+  options: { width: number; height: number; threshold?: number; color: string }
+): void {
+  const { width, height, threshold, color } = options;
+  ctx.clearRect(0, 0, width, height);
+
+  if (points.length < 2) return;
+
+  const minTs = points[0].timestamp;
+  const maxTs = points[points.length - 1].timestamp;
+  const maxVal = Math.max(...points.map((p) => p.value)) * 1.1;
+
+  // Grid lines
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
+  for (let i = 0; i <= 4; i++) {
+    const y = (i / 4) * height;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+
+  // Threshold line
+  if (threshold !== undefined) {
+    const ty = height - (threshold / maxVal) * height;
+    ctx.strokeStyle = "rgba(239, 68, 68, 0.6)";
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, ty);
+    ctx.lineTo(width, ty);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Data series
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = ((p.timestamp - minTs) / (maxTs - minTs)) * width;
+    const y = height - (p.value / maxVal) * height;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+```
+
+## Step 8: Dashboard Layout and Auto-Refresh
+
+Compose multiple chart panels into a responsive grid. The EventSource connection drives updates — each incoming metric point appends to the relevant chart's data array and triggers a redraw.
+
+```html
+<div class="dashboard-grid">
+  <div class="panel" id="panel-cpu">
+    <h3>CPU Usage <span class="badge" id="cpu-current"></span></h3>
+    <canvas id="chart-cpu" width="600" height="200"></canvas>
+  </div>
+  <div class="panel" id="panel-memory">
+    <h3>Memory Usage <span class="badge" id="memory-current"></span></h3>
+    <canvas id="chart-memory" width="600" height="200"></canvas>
+  </div>
+  <!-- disk and requestRate panels follow the same pattern -->
+</div>
+```
+
+```typescript
+const source = new EventSource("/api/stream");
+const datasets: Record<string, MetricPoint[]> = {
+  cpu: [],
+  memory: [],
+  disk: [],
+  requestRate: [],
+};
+
+source.addEventListener("metric", (event) => {
+  const { name, point } = JSON.parse(event.data);
+  const arr = datasets[name];
+  arr.push(point);
+  if (arr.length > 300) arr.shift(); // Keep last 5 minutes at 1s resolution
+  renderChart(getContext(name), arr, chartConfigs[name]);
+  updateBadge(name, point.value);
+});
+```
+
+## Step 9: Alert Display and Notification
+
+Wire alerts into the UI. When a threshold breach arrives through the SSE stream, render a toast notification and optionally play an audio tone. Keep an alert history panel so operators can review past incidents.
+
+```typescript
+source.addEventListener("alert", (event) => {
+  const alert = JSON.parse(event.data);
+  const toast = document.createElement("div");
+  toast.className = "alert-toast";
+  toast.innerHTML = `
+    <strong>${alert.metric.toUpperCase()}</strong>
+    <span>${alert.message}</span>
+    <time>${new Date(alert.timestamp).toLocaleTimeString()}</time>
+  `;
+  document.getElementById("alert-container")?.prepend(toast);
+  setTimeout(() => toast.remove(), 10000);
+
+  // Flash the relevant panel border
+  const panel = document.getElementById(`panel-${alert.metric}`);
+  panel?.classList.add("alert-active");
+  setTimeout(() => panel?.classList.remove("alert-active"), 3000);
+});
+```
+
+Style the alert state with a red border pulse animation. The visual urgency should match the severity — warning thresholds get amber, critical thresholds get red.
+
+## Step 10: Performance Tuning and Production Hardening
+
+Before shipping, address the operational concerns that separate a demo from a tool you actually rely on.
+
+**Downsample for long ranges.** When the user requests 24 hours of data, you don't need 86,400 points. Implement a downsampling function that averages points into buckets:
+
+```typescript
+function downsample(points: MetricPoint[], buckets: number): MetricPoint[] {
+  if (points.length <= buckets) return points;
+  const bucketSize = Math.ceil(points.length / buckets);
+  const result: MetricPoint[] = [];
+
+  for (let i = 0; i < points.length; i += bucketSize) {
+    const slice = points.slice(i, i + bucketSize);
+    const avgValue = slice.reduce((s, p) => s + p.value, 0) / slice.length;
+    const midTs = slice[Math.floor(slice.length / 2)].timestamp;
+    result.push({ timestamp: midTs, value: Math.round(avgValue * 100) / 100 });
+  }
+  return result;
+}
+```
+
+**Backpressure on SSE.** If the client falls behind, buffer events and drop the oldest. Add a `retry` field to your SSE stream so clients reconnect with a reasonable delay. Track connected client count and set an upper bound.
+
+**Memory budget.** Each ring buffer has a fixed size, so memory usage is predictable. Log the total at startup: `metrics * slots * ~16 bytes/point`. For four metrics at one-hour retention, that is under 500KB.
+
+**Health endpoint.** Add `/api/health` that returns the collector uptime, active metric count, connected SSE clients, and alert rule count. Point your uptime checker at this endpoint.
+
+With these pieces in place, you have a monitoring dashboard that collects, stores, visualizes, and alerts on infrastructure metrics — all running in a single Node.js process with zero external dependencies.

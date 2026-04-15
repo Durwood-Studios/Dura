@@ -1,0 +1,728 @@
+---
+title: "Build an Incident Timeline Tool"
+description: "Create an incident management tool with an event ingestion API, interactive timeline visualization, severity classification, responder assignment, and postmortem export."
+slug: "incident-timeline"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["sre", "incidents", "visualization", "timeline", "react"]
+---
+
+## Overview
+
+When production breaks, clarity wins. The difference between a 10-minute and a 2-hour outage is often how quickly the team can see what happened, when, and who's working on it. In this tutorial, you'll build an incident timeline tool — the kind of tool SRE teams use during and after incidents. It includes an API for ingesting events, an interactive timeline visualization, severity classification, responder management, and a postmortem export that turns the timeline into a document.
+
+**What you'll learn:**
+
+- Designing an incident data model (events, responders, severity levels)
+- Building an event ingestion API with validation
+- Rendering an interactive timeline with SVG
+- Real-time updates with Server-Sent Events (SSE)
+- Severity classification and escalation logic
+- Generating structured postmortem documents from timeline data
+
+The final tool lets teams create incidents, log events as they happen, assign responders, and export a postmortem when the incident resolves.
+
+## Step 1: Project Setup and Data Model
+
+```bash
+mkdir incident-timeline && cd incident-timeline
+npm init -y
+npm install express cors
+npm install -D typescript @types/node @types/express tsx
+```
+
+```typescript
+// src/types.ts
+export type Severity = "sev1" | "sev2" | "sev3" | "sev4";
+export type IncidentStatus = "investigating" | "identified" | "monitoring" | "resolved";
+
+export interface TimelineEvent {
+  id: string;
+  incidentId: string;
+  timestamp: string;
+  type: "alert" | "action" | "communication" | "status_change" | "escalation" | "resolution";
+  description: string;
+  author: string;
+  metadata?: Record<string, string>;
+}
+
+export interface Responder {
+  id: string;
+  name: string;
+  role: string;
+  assignedAt: string;
+  acknowledgedAt?: string;
+}
+
+export interface Incident {
+  id: string;
+  title: string;
+  severity: Severity;
+  status: IncidentStatus;
+  commander: string;
+  responders: Responder[];
+  events: TimelineEvent[];
+  createdAt: string;
+  resolvedAt?: string;
+  summary?: string;
+}
+```
+
+## Step 2: Incident Store
+
+```typescript
+// src/store.ts
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { Incident, TimelineEvent, Responder } from "./types.js";
+import { randomUUID } from "node:crypto";
+
+export class IncidentStore {
+  private incidents: Map<string, Incident> = new Map();
+  private filePath: string;
+  private listeners: Set<(incident: Incident) => void> = new Set();
+
+  constructor(filePath: string) {
+    this.filePath = filePath;
+    if (existsSync(filePath)) {
+      const data: Incident[] = JSON.parse(readFileSync(filePath, "utf8"));
+      for (const inc of data) {
+        this.incidents.set(inc.id, inc);
+      }
+    }
+  }
+
+  create(title: string, severity: Incident["severity"], commander: string): Incident {
+    const incident: Incident = {
+      id: randomUUID(),
+      title,
+      severity,
+      status: "investigating",
+      commander,
+      responders: [],
+      events: [
+        {
+          id: randomUUID(),
+          incidentId: "",
+          timestamp: new Date().toISOString(),
+          type: "alert",
+          description: `Incident created: ${title}`,
+          author: commander,
+        },
+      ],
+      createdAt: new Date().toISOString(),
+    };
+    incident.events[0].incidentId = incident.id;
+    this.incidents.set(incident.id, incident);
+    this.persist();
+    this.notify(incident);
+    return incident;
+  }
+
+  get(id: string): Incident | undefined {
+    return this.incidents.get(id);
+  }
+
+  list(): Incident[] {
+    return Array.from(this.incidents.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }
+
+  addEvent(incidentId: string, event: Omit<TimelineEvent, "id" | "incidentId">): TimelineEvent {
+    const incident = this.incidents.get(incidentId);
+    if (!incident) throw new Error("Incident not found");
+
+    const fullEvent: TimelineEvent = {
+      ...event,
+      id: randomUUID(),
+      incidentId,
+    };
+    incident.events.push(fullEvent);
+    this.persist();
+    this.notify(incident);
+    return fullEvent;
+  }
+
+  updateStatus(incidentId: string, status: Incident["status"], author: string): void {
+    const incident = this.incidents.get(incidentId);
+    if (!incident) throw new Error("Incident not found");
+
+    const previousStatus = incident.status;
+    incident.status = status;
+
+    if (status === "resolved") {
+      incident.resolvedAt = new Date().toISOString();
+    }
+
+    this.addEvent(incidentId, {
+      timestamp: new Date().toISOString(),
+      type: "status_change",
+      description: `Status changed from ${previousStatus} to ${status}`,
+      author,
+      metadata: { from: previousStatus, to: status },
+    });
+  }
+
+  addResponder(incidentId: string, name: string, role: string): Responder {
+    const incident = this.incidents.get(incidentId);
+    if (!incident) throw new Error("Incident not found");
+
+    const responder: Responder = {
+      id: randomUUID(),
+      name,
+      role,
+      assignedAt: new Date().toISOString(),
+    };
+    incident.responders.push(responder);
+    this.addEvent(incidentId, {
+      timestamp: new Date().toISOString(),
+      type: "action",
+      description: `${name} joined as ${role}`,
+      author: incident.commander,
+    });
+    return responder;
+  }
+
+  subscribe(callback: (incident: Incident) => void): () => void {
+    this.listeners.add(callback);
+    return () => this.listeners.delete(callback);
+  }
+
+  private notify(incident: Incident): void {
+    for (const listener of this.listeners) {
+      listener(incident);
+    }
+  }
+
+  private persist(): void {
+    const data = Array.from(this.incidents.values());
+    writeFileSync(this.filePath, JSON.stringify(data, null, 2));
+  }
+}
+```
+
+## Step 3: REST API with SSE
+
+```typescript
+// src/server.ts
+import express from "express";
+import cors from "cors";
+import { IncidentStore } from "./store.js";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(join(__dirname, "../public")));
+
+const store = new IncidentStore("./incidents.json");
+
+// Create incident
+app.post("/api/incidents", (req, res) => {
+  const { title, severity, commander } = req.body;
+  if (!title || !severity || !commander) {
+    return res.status(400).json({ error: "title, severity, and commander are required" });
+  }
+  const incident = store.create(title, severity, commander);
+  res.status(201).json(incident);
+});
+
+// List incidents
+app.get("/api/incidents", (req, res) => {
+  res.json(store.list());
+});
+
+// Get single incident
+app.get("/api/incidents/:id", (req, res) => {
+  const incident = store.get(req.params.id);
+  if (!incident) return res.status(404).json({ error: "Not found" });
+  res.json(incident);
+});
+
+// Add event to incident
+app.post("/api/incidents/:id/events", (req, res) => {
+  try {
+    const event = store.addEvent(req.params.id, {
+      timestamp: req.body.timestamp ?? new Date().toISOString(),
+      type: req.body.type ?? "action",
+      description: req.body.description,
+      author: req.body.author,
+      metadata: req.body.metadata,
+    });
+    res.status(201).json(event);
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+// Update status
+app.patch("/api/incidents/:id/status", (req, res) => {
+  try {
+    store.updateStatus(req.params.id, req.body.status, req.body.author);
+    res.json(store.get(req.params.id));
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+// Add responder
+app.post("/api/incidents/:id/responders", (req, res) => {
+  try {
+    const responder = store.addResponder(req.params.id, req.body.name, req.body.role);
+    res.status(201).json(responder);
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+// SSE stream for real-time updates
+app.get("/api/incidents/:id/stream", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+
+  const unsubscribe = store.subscribe((incident) => {
+    if (incident.id === req.params.id) {
+      res.write(`data: ${JSON.stringify(incident)}\n\n`);
+    }
+  });
+
+  req.on("close", unsubscribe);
+});
+
+// Postmortem export
+app.get("/api/incidents/:id/postmortem", (req, res) => {
+  const incident = store.get(req.params.id);
+  if (!incident) return res.status(404).json({ error: "Not found" });
+  res.json(generatePostmortem(incident));
+});
+
+const PORT = parseInt(process.env.PORT ?? "3200", 10);
+app.listen(PORT, () => console.log(`Incident timeline on :${PORT}`));
+```
+
+## Step 4: Severity Classification
+
+```typescript
+// src/severity.ts
+import { Severity, Incident } from "./types.js";
+
+interface SeverityConfig {
+  level: Severity;
+  label: string;
+  color: string;
+  responseTimeMinutes: number;
+  notifyChannel: string;
+}
+
+export const SEVERITY_CONFIGS: Record<Severity, SeverityConfig> = {
+  sev1: {
+    level: "sev1",
+    label: "Critical",
+    color: "#ef4444",
+    responseTimeMinutes: 5,
+    notifyChannel: "#incidents-critical",
+  },
+  sev2: {
+    level: "sev2",
+    label: "Major",
+    color: "#f97316",
+    responseTimeMinutes: 15,
+    notifyChannel: "#incidents-major",
+  },
+  sev3: {
+    level: "sev3",
+    label: "Minor",
+    color: "#eab308",
+    responseTimeMinutes: 60,
+    notifyChannel: "#incidents",
+  },
+  sev4: {
+    level: "sev4",
+    label: "Low",
+    color: "#6b7280",
+    responseTimeMinutes: 480,
+    notifyChannel: "#incidents",
+  },
+};
+
+export function shouldEscalate(incident: Incident): boolean {
+  if (incident.status === "resolved") return false;
+
+  const config = SEVERITY_CONFIGS[incident.severity];
+  const createdAt = new Date(incident.createdAt).getTime();
+  const elapsed = (Date.now() - createdAt) / 60000;
+
+  // Escalate if past response time and still investigating
+  if (incident.status === "investigating" && elapsed > config.responseTimeMinutes) {
+    return true;
+  }
+
+  // Escalate if no responders after 10 minutes
+  if (incident.responders.length === 0 && elapsed > 10) {
+    return true;
+  }
+
+  return false;
+}
+```
+
+## Step 5: Postmortem Generator
+
+```typescript
+// src/postmortem.ts — add to server.ts or import
+import { Incident } from "./types.js";
+import { SEVERITY_CONFIGS } from "./severity.js";
+
+interface Postmortem {
+  title: string;
+  severity: string;
+  duration: string;
+  timeline: { time: string; description: string }[];
+  responders: { name: string; role: string }[];
+  summary: string;
+  impact: string;
+  rootCause: string;
+  actionItems: string[];
+}
+
+function generatePostmortem(incident: Incident): Postmortem {
+  const config = SEVERITY_CONFIGS[incident.severity];
+
+  const startTime = new Date(incident.createdAt);
+  const endTime = incident.resolvedAt ? new Date(incident.resolvedAt) : new Date();
+  const durationMs = endTime.getTime() - startTime.getTime();
+  const durationMinutes = Math.round(durationMs / 60000);
+
+  const timeline = incident.events.map((event) => ({
+    time: new Date(event.timestamp).toISOString(),
+    description: `[${event.type.toUpperCase()}] ${event.description} (${event.author})`,
+  }));
+
+  return {
+    title: `Postmortem: ${incident.title}`,
+    severity: `${config.label} (${incident.severity})`,
+    duration: `${durationMinutes} minutes`,
+    timeline,
+    responders: incident.responders.map((r) => ({ name: r.name, role: r.role })),
+    summary: incident.summary ?? "Summary to be filled in during postmortem review.",
+    impact: "Impact to be assessed during postmortem review.",
+    rootCause: "Root cause to be determined during postmortem review.",
+    actionItems: [
+      "Review monitoring gaps that delayed detection",
+      "Update runbooks based on this incident",
+      "Schedule follow-up review in 1 week",
+    ],
+  };
+}
+```
+
+## Step 6: Timeline Visualization (HTML)
+
+```html
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Incident Timeline</title>
+    <style>
+      body {
+        font-family: system-ui;
+        background: #08080d;
+        color: #f0f0f0;
+        margin: 0;
+        padding: 2rem;
+      }
+      .incident-card {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+        cursor: pointer;
+      }
+      .sev-badge {
+        display: inline-block;
+        padding: 0.125rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+      }
+      .timeline-container {
+        position: relative;
+        padding-left: 2rem;
+      }
+      .timeline-line {
+        position: absolute;
+        left: 0.75rem;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .timeline-event {
+        position: relative;
+        margin-bottom: 1.5rem;
+      }
+      .timeline-dot {
+        position: absolute;
+        left: -1.65rem;
+        top: 0.35rem;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 2px solid;
+      }
+      .timeline-time {
+        font-size: 0.75rem;
+        color: #6b6b75;
+      }
+      .timeline-desc {
+        margin-top: 0.25rem;
+      }
+      .type-badge {
+        font-size: 0.7rem;
+        padding: 0.1rem 0.4rem;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.08);
+        margin-right: 0.5rem;
+      }
+      input,
+      select,
+      textarea {
+        background: #111;
+        color: #f0f0f0;
+        border: 1px solid #333;
+        padding: 0.5rem;
+        border-radius: 8px;
+      }
+      button {
+        background: #10b981;
+        color: #fff;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      button.danger {
+        background: #ef4444;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Incident Timeline</h1>
+    <div id="app"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
+```
+
+## Step 7: Interactive Timeline Rendering
+
+```javascript
+// public/app.js
+const API = "";
+const sevColors = { sev1: "#ef4444", sev2: "#f97316", sev3: "#eab308", sev4: "#6b7280" };
+const typeColors = {
+  alert: "#ef4444",
+  action: "#10b981",
+  communication: "#3b82f6",
+  status_change: "#eab308",
+  escalation: "#f97316",
+  resolution: "#10b981",
+};
+
+let currentIncidentId = null;
+
+async function loadIncidents() {
+  const res = await fetch(`${API}/api/incidents`);
+  const incidents = await res.json();
+  const app = document.getElementById("app");
+
+  app.innerHTML = `
+    <div style="margin-bottom:2rem">
+      <h2>Create Incident</h2>
+      <input id="inc-title" placeholder="Incident title" />
+      <select id="inc-sev"><option value="sev1">SEV1</option><option value="sev2">SEV2</option><option value="sev3" selected>SEV3</option><option value="sev4">SEV4</option></select>
+      <input id="inc-commander" placeholder="Your name" />
+      <button onclick="createIncident()">Create</button>
+    </div>
+    <h2>Active Incidents</h2>
+    ${incidents
+      .map(
+        (inc) => `
+      <div class="incident-card" onclick="viewIncident('${inc.id}')">
+        <span class="sev-badge" style="background:${sevColors[inc.severity]};color:#fff">${inc.severity.toUpperCase()}</span>
+        <strong style="margin-left:0.5rem">${inc.title}</strong>
+        <span style="color:#a0a0a8;margin-left:1rem">${inc.status}</span>
+        <span style="color:#6b6b75;margin-left:1rem">${inc.events.length} events</span>
+      </div>
+    `
+      )
+      .join("")}
+  `;
+}
+
+async function createIncident() {
+  const title = document.getElementById("inc-title").value;
+  const severity = document.getElementById("inc-sev").value;
+  const commander = document.getElementById("inc-commander").value;
+  if (!title || !commander) return;
+
+  await fetch(`${API}/api/incidents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, severity, commander }),
+  });
+  loadIncidents();
+}
+```
+
+## Step 8: Detailed Incident View with SSE
+
+```javascript
+// Add to public/app.js
+
+async function viewIncident(id) {
+  currentIncidentId = id;
+  const res = await fetch(`${API}/api/incidents/${id}`);
+  const incident = await res.json();
+  renderIncidentDetail(incident);
+
+  // Subscribe to real-time updates
+  const eventSource = new EventSource(`${API}/api/incidents/${id}/stream`);
+  eventSource.onmessage = (e) => {
+    const updated = JSON.parse(e.data);
+    renderIncidentDetail(updated);
+  };
+}
+
+function renderIncidentDetail(incident) {
+  const app = document.getElementById("app");
+  const events = [...incident.events].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+  app.innerHTML = `
+    <button onclick="loadIncidents()" style="margin-bottom:1rem">Back</button>
+    <h2>
+      <span class="sev-badge" style="background:${sevColors[incident.severity]};color:#fff">${incident.severity.toUpperCase()}</span>
+      ${incident.title}
+      <span style="color:#a0a0a8;font-size:0.875rem;margin-left:1rem">${incident.status}</span>
+    </h2>
+    <div style="margin-bottom:1rem">
+      <strong>Commander:</strong> ${incident.commander}
+      | <strong>Responders:</strong> ${incident.responders.map((r) => `${r.name} (${r.role})`).join(", ") || "None"}
+    </div>
+    <div style="display:flex;gap:0.5rem;margin-bottom:2rem;flex-wrap:wrap">
+      <select id="status-select"><option value="investigating">Investigating</option><option value="identified">Identified</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option></select>
+      <input id="status-author" placeholder="Your name" />
+      <button onclick="updateStatus('${incident.id}')">Update Status</button>
+      <input id="resp-name" placeholder="Responder name" />
+      <input id="resp-role" placeholder="Role" />
+      <button onclick="addResponder('${incident.id}')">Add Responder</button>
+    </div>
+    <h3>Timeline</h3>
+    <div class="timeline-container">
+      <div class="timeline-line"></div>
+      ${events
+        .map(
+          (e) => `
+        <div class="timeline-event">
+          <div class="timeline-dot" style="border-color:${typeColors[e.type] || "#666"}"></div>
+          <div class="timeline-time">${new Date(e.timestamp).toLocaleTimeString()}</div>
+          <div class="timeline-desc">
+            <span class="type-badge">${e.type}</span>
+            ${e.description}
+            <span style="color:#6b6b75"> — ${e.author}</span>
+          </div>
+        </div>
+      `
+        )
+        .join("")}
+    </div>
+    <div style="margin-top:2rem">
+      <h3>Add Event</h3>
+      <input id="evt-desc" placeholder="What happened?" style="width:60%" />
+      <select id="evt-type"><option value="action">Action</option><option value="communication">Communication</option><option value="escalation">Escalation</option></select>
+      <input id="evt-author" placeholder="Your name" />
+      <button onclick="addEvent('${incident.id}')">Add</button>
+    </div>
+    <div style="margin-top:2rem"><button onclick="exportPostmortem('${incident.id}')">Export Postmortem</button></div>
+  `;
+}
+```
+
+## Step 9: Event Actions
+
+```javascript
+// Add to public/app.js
+
+async function addEvent(incidentId) {
+  const description = document.getElementById("evt-desc").value;
+  const type = document.getElementById("evt-type").value;
+  const author = document.getElementById("evt-author").value;
+  if (!description || !author) return;
+
+  await fetch(`${API}/api/incidents/${incidentId}/events`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ description, type, author }),
+  });
+  document.getElementById("evt-desc").value = "";
+}
+
+async function updateStatus(incidentId) {
+  const status = document.getElementById("status-select").value;
+  const author = document.getElementById("status-author").value;
+  if (!author) return;
+
+  await fetch(`${API}/api/incidents/${incidentId}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, author }),
+  });
+}
+
+async function addResponder(incidentId) {
+  const name = document.getElementById("resp-name").value;
+  const role = document.getElementById("resp-role").value;
+  if (!name || !role) return;
+
+  await fetch(`${API}/api/incidents/${incidentId}/responders`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, role }),
+  });
+}
+
+async function exportPostmortem(incidentId) {
+  const res = await fetch(`${API}/api/incidents/${incidentId}/postmortem`);
+  const postmortem = await res.json();
+  const blob = new Blob([JSON.stringify(postmortem, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `postmortem-${incidentId}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Initialize
+loadIncidents();
+```
+
+## Step 10: Testing the Flow
+
+Start the server and walk through a complete incident lifecycle:
+
+```bash
+npx tsx src/server.ts
+```
+
+Open `http://localhost:3200` and create a SEV2 incident. Add responders, log events as the investigation progresses, update the status from "investigating" to "identified" to "monitoring" to "resolved." Open a second browser tab to see SSE updates arrive in real time. Export the postmortem when done — it produces a structured JSON document with the full timeline, responders, and placeholder sections for root cause analysis. The tool captures the narrative of an incident as it unfolds, giving teams the foundation for effective postmortems and process improvement.

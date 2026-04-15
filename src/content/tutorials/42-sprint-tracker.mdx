@@ -1,0 +1,637 @@
+---
+title: "Build a Team Sprint Tracker"
+description: "Create a sprint management tool with backlog grooming, a drag-and-drop Kanban board, velocity and burndown charts, and team member assignment."
+slug: "sprint-tracker"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["project-management", "react", "kanban", "charts", "team"]
+---
+
+## Overview
+
+Sprint trackers are the heartbeat of agile teams, yet most tools are bloated beyond recognition. In this tutorial, you'll build a focused sprint tracker in React that covers the essentials: a backlog for grooming stories, a Kanban board with drag-and-drop, velocity and burndown charts for retrospectives, and team member assignment. Everything persists in localStorage so there's zero backend setup.
+
+**What you'll learn:**
+
+- Data modeling for sprints, stories, and team members
+- Drag-and-drop with the HTML5 Drag and Drop API (no library needed)
+- Computing velocity from historical sprint data
+- Rendering burndown charts with SVG
+- State management patterns for interconnected data
+
+The final app supports creating sprints, moving stories through columns, assigning team members, and visualizing team performance over time.
+
+## Step 1: Project Setup
+
+```bash
+npx create-react-app sprint-tracker --template typescript
+cd sprint-tracker
+```
+
+Define the core data types in `src/types.ts`:
+
+```typescript
+export type StoryStatus = "backlog" | "todo" | "in-progress" | "review" | "done";
+
+export interface TeamMember {
+  id: string;
+  name: string;
+  avatar: string; // emoji or initials
+}
+
+export interface Story {
+  id: string;
+  title: string;
+  description: string;
+  points: number;
+  status: StoryStatus;
+  assigneeId: string | null;
+  sprintId: string | null;
+  createdAt: string;
+}
+
+export interface Sprint {
+  id: string;
+  name: string;
+  startDate: string;
+  endDate: string;
+  isActive: boolean;
+}
+
+export interface AppState {
+  stories: Story[];
+  sprints: Sprint[];
+  team: TeamMember[];
+  activeSprint: string | null;
+}
+```
+
+## Step 2: State Management with Context and Reducer
+
+```typescript
+// src/store.ts
+import { useReducer, useEffect } from "react";
+import { AppState, Story, Sprint, TeamMember, StoryStatus } from "./types";
+
+type Action =
+  | { type: "ADD_STORY"; story: Story }
+  | { type: "UPDATE_STORY"; id: string; updates: Partial<Story> }
+  | { type: "MOVE_STORY"; id: string; status: StoryStatus }
+  | { type: "DELETE_STORY"; id: string }
+  | { type: "ADD_SPRINT"; sprint: Sprint }
+  | { type: "SET_ACTIVE_SPRINT"; sprintId: string | null }
+  | { type: "ADD_MEMBER"; member: TeamMember }
+  | { type: "ASSIGN_STORY"; storyId: string; memberId: string | null }
+  | { type: "LOAD"; state: AppState };
+
+const initialState: AppState = {
+  stories: [],
+  sprints: [],
+  team: [],
+  activeSprint: null,
+};
+
+function reducer(state: AppState, action: Action): AppState {
+  switch (action.type) {
+    case "ADD_STORY":
+      return { ...state, stories: [...state.stories, action.story] };
+    case "UPDATE_STORY":
+      return {
+        ...state,
+        stories: state.stories.map((s) => (s.id === action.id ? { ...s, ...action.updates } : s)),
+      };
+    case "MOVE_STORY":
+      return {
+        ...state,
+        stories: state.stories.map((s) =>
+          s.id === action.id ? { ...s, status: action.status } : s
+        ),
+      };
+    case "DELETE_STORY":
+      return { ...state, stories: state.stories.filter((s) => s.id !== action.id) };
+    case "ADD_SPRINT":
+      return { ...state, sprints: [...state.sprints, action.sprint] };
+    case "SET_ACTIVE_SPRINT":
+      return { ...state, activeSprint: action.sprintId };
+    case "ADD_MEMBER":
+      return { ...state, team: [...state.team, action.member] };
+    case "ASSIGN_STORY":
+      return {
+        ...state,
+        stories: state.stories.map((s) =>
+          s.id === action.storyId ? { ...s, assigneeId: action.memberId } : s
+        ),
+      };
+    case "LOAD":
+      return action.state;
+    default:
+      return state;
+  }
+}
+
+export function useAppState() {
+  const [state, dispatch] = useReducer(reducer, initialState);
+
+  useEffect(() => {
+    const saved = localStorage.getItem("sprint-tracker");
+    if (saved) {
+      dispatch({ type: "LOAD", state: JSON.parse(saved) });
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("sprint-tracker", JSON.stringify(state));
+  }, [state]);
+
+  return { state, dispatch };
+}
+```
+
+## Step 3: Backlog View
+
+The backlog shows all stories not assigned to a sprint. Users can create stories, set point estimates, and drag them into the active sprint.
+
+```tsx
+// src/components/Backlog.tsx
+import { Story, AppState } from "../types";
+
+interface BacklogProps {
+  stories: Story[];
+  onAddStory: (title: string, points: number) => void;
+  onAssignToSprint: (storyId: string) => void;
+}
+
+export function Backlog({ stories, onAddStory, onAssignToSprint }: BacklogProps) {
+  const backlogStories = stories.filter((s) => s.sprintId === null);
+
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>): void {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const data = new FormData(form);
+    const title = data.get("title") as string;
+    const points = parseInt(data.get("points") as string, 10);
+    if (title.trim()) {
+      onAddStory(title.trim(), points || 1);
+      form.reset();
+    }
+  }
+
+  function handleDragStart(e: React.DragEvent, storyId: string): void {
+    e.dataTransfer.setData("text/plain", storyId);
+    e.dataTransfer.effectAllowed = "move";
+  }
+
+  return (
+    <div className="backlog">
+      <h2>Backlog ({backlogStories.length} stories)</h2>
+      <form onSubmit={handleSubmit}>
+        <input name="title" placeholder="Story title" required />
+        <input name="points" type="number" min="1" max="13" defaultValue="1" />
+        <button type="submit">Add</button>
+      </form>
+      <ul>
+        {backlogStories.map((story) => (
+          <li key={story.id} draggable onDragStart={(e) => handleDragStart(e, story.id)}>
+            <span className="points">{story.points}pt</span>
+            <span className="title">{story.title}</span>
+            <button onClick={() => onAssignToSprint(story.id)}>→ Sprint</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+## Step 4: Kanban Board with Drag-and-Drop
+
+The board displays five columns. Stories move between columns via native HTML drag-and-drop — no library required.
+
+```tsx
+// src/components/Board.tsx
+import { Story, StoryStatus, TeamMember } from "../types";
+
+const COLUMNS: { status: StoryStatus; label: string }[] = [
+  { status: "todo", label: "To Do" },
+  { status: "in-progress", label: "In Progress" },
+  { status: "review", label: "Review" },
+  { status: "done", label: "Done" },
+];
+
+interface BoardProps {
+  stories: Story[];
+  team: TeamMember[];
+  sprintId: string;
+  onMove: (storyId: string, status: StoryStatus) => void;
+  onAssign: (storyId: string, memberId: string | null) => void;
+}
+
+export function Board({ stories, team, sprintId, onMove, onAssign }: BoardProps) {
+  const sprintStories = stories.filter((s) => s.sprintId === sprintId);
+
+  function handleDrop(e: React.DragEvent, status: StoryStatus): void {
+    e.preventDefault();
+    const storyId = e.dataTransfer.getData("text/plain");
+    onMove(storyId, status);
+  }
+
+  function handleDragOver(e: React.DragEvent): void {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  }
+
+  return (
+    <div className="board" style={{ display: "flex", gap: "1rem" }}>
+      {COLUMNS.map((col) => {
+        const colStories = sprintStories.filter((s) => s.status === col.status);
+        const totalPoints = colStories.reduce((sum, s) => sum + s.points, 0);
+
+        return (
+          <div
+            key={col.status}
+            className="column"
+            onDrop={(e) => handleDrop(e, col.status)}
+            onDragOver={handleDragOver}
+            style={{ flex: 1, minHeight: 200, padding: "0.5rem", border: "1px solid #333" }}
+          >
+            <h3>
+              {col.label} ({totalPoints}pt)
+            </h3>
+            {colStories.map((story) => (
+              <div
+                key={story.id}
+                draggable
+                onDragStart={(e) => e.dataTransfer.setData("text/plain", story.id)}
+                className="card"
+                style={{ padding: "0.5rem", marginBottom: "0.5rem", background: "#1a1a2e" }}
+              >
+                <strong>{story.title}</strong>
+                <div>{story.points}pt</div>
+                <select
+                  value={story.assigneeId ?? ""}
+                  onChange={(e) => onAssign(story.id, e.target.value || null)}
+                >
+                  <option value="">Unassigned</option>
+                  {team.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.avatar} {m.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+## Step 5: Sprint Management
+
+```tsx
+// src/components/SprintManager.tsx
+import { Sprint } from "../types";
+
+interface SprintManagerProps {
+  sprints: Sprint[];
+  activeSprint: string | null;
+  onCreateSprint: (name: string, startDate: string, endDate: string) => void;
+  onSetActive: (sprintId: string) => void;
+}
+
+export function SprintManager({
+  sprints,
+  activeSprint,
+  onCreateSprint,
+  onSetActive,
+}: SprintManagerProps) {
+  function handleCreate(e: React.FormEvent<HTMLFormElement>): void {
+    e.preventDefault();
+    const data = new FormData(e.currentTarget);
+    onCreateSprint(
+      data.get("name") as string,
+      data.get("start") as string,
+      data.get("end") as string
+    );
+    e.currentTarget.reset();
+  }
+
+  return (
+    <div className="sprint-manager">
+      <h2>Sprints</h2>
+      <form onSubmit={handleCreate}>
+        <input name="name" placeholder="Sprint name" required />
+        <input name="start" type="date" required />
+        <input name="end" type="date" required />
+        <button type="submit">Create Sprint</button>
+      </form>
+      <ul>
+        {sprints.map((sprint) => (
+          <li key={sprint.id}>
+            <strong>{sprint.name}</strong>
+            <span>
+              {" "}
+              ({sprint.startDate} to {sprint.endDate})
+            </span>
+            {sprint.id === activeSprint ? (
+              <span className="active-badge"> Active</span>
+            ) : (
+              <button onClick={() => onSetActive(sprint.id)}>Activate</button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+## Step 6: Team Member Management
+
+```tsx
+// src/components/TeamPanel.tsx
+import { TeamMember, Story } from "../types";
+
+interface TeamPanelProps {
+  team: TeamMember[];
+  stories: Story[];
+  onAddMember: (name: string, avatar: string) => void;
+}
+
+export function TeamPanel({ team, stories, onAddMember }: TeamPanelProps) {
+  function handleAdd(e: React.FormEvent<HTMLFormElement>): void {
+    e.preventDefault();
+    const data = new FormData(e.currentTarget);
+    onAddMember(data.get("name") as string, (data.get("avatar") as string) || "👤");
+    e.currentTarget.reset();
+  }
+
+  return (
+    <div className="team-panel">
+      <h2>Team</h2>
+      <form onSubmit={handleAdd}>
+        <input name="name" placeholder="Name" required />
+        <input name="avatar" placeholder="Emoji" maxLength={2} />
+        <button type="submit">Add</button>
+      </form>
+      {team.map((member) => {
+        const assigned = stories.filter((s) => s.assigneeId === member.id);
+        const totalPoints = assigned.reduce((sum, s) => sum + s.points, 0);
+        return (
+          <div key={member.id} className="member-card">
+            <span>
+              {member.avatar} {member.name}
+            </span>
+            <span>
+              {assigned.length} stories / {totalPoints}pt
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+## Step 7: Velocity Chart
+
+Velocity tracks how many story points the team completes per sprint. This SVG bar chart compares planned vs completed points.
+
+```tsx
+// src/components/VelocityChart.tsx
+import { Sprint, Story } from "../types";
+
+interface VelocityChartProps {
+  sprints: Sprint[];
+  stories: Story[];
+}
+
+export function VelocityChart({ sprints, stories }: VelocityChartProps) {
+  const data = sprints.map((sprint) => {
+    const sprintStories = stories.filter((s) => s.sprintId === sprint.id);
+    const planned = sprintStories.reduce((sum, s) => sum + s.points, 0);
+    const completed = sprintStories
+      .filter((s) => s.status === "done")
+      .reduce((sum, s) => sum + s.points, 0);
+    return { name: sprint.name, planned, completed };
+  });
+
+  const maxPoints = Math.max(...data.map((d) => Math.max(d.planned, d.completed)), 1);
+  const barWidth = 40;
+  const gap = 20;
+  const chartHeight = 200;
+  const chartWidth = data.length * (barWidth * 2 + gap) + gap;
+
+  return (
+    <div>
+      <h2>Velocity</h2>
+      <svg width={chartWidth} height={chartHeight + 40} style={{ background: "#111" }}>
+        {data.map((d, i) => {
+          const x = gap + i * (barWidth * 2 + gap);
+          const plannedHeight = (d.planned / maxPoints) * chartHeight;
+          const completedHeight = (d.completed / maxPoints) * chartHeight;
+          return (
+            <g key={d.name}>
+              <rect
+                x={x}
+                y={chartHeight - plannedHeight}
+                width={barWidth}
+                height={plannedHeight}
+                fill="#4a5568"
+              />
+              <rect
+                x={x + barWidth}
+                y={chartHeight - completedHeight}
+                width={barWidth}
+                height={completedHeight}
+                fill="#10b981"
+              />
+              <text
+                x={x + barWidth}
+                y={chartHeight + 20}
+                textAnchor="middle"
+                fill="#a0a0a8"
+                fontSize={12}
+              >
+                {d.name}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+```
+
+## Step 8: Burndown Chart
+
+The burndown chart shows remaining work over time during a sprint. The ideal line descends linearly from total points to zero.
+
+```tsx
+// src/components/BurndownChart.tsx
+import { Sprint, Story } from "../types";
+
+interface BurndownChartProps {
+  sprint: Sprint;
+  stories: Story[];
+}
+
+export function BurndownChart({ sprint, stories }: BurndownChartProps) {
+  const sprintStories = stories.filter((s) => s.sprintId === sprint.id);
+  const totalPoints = sprintStories.reduce((sum, s) => sum + s.points, 0);
+  const donePoints = sprintStories
+    .filter((s) => s.status === "done")
+    .reduce((sum, s) => sum + s.points, 0);
+
+  const start = new Date(sprint.startDate).getTime();
+  const end = new Date(sprint.endDate).getTime();
+  const now = Date.now();
+  const totalDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+  const elapsed = Math.min(Math.ceil((now - start) / (1000 * 60 * 60 * 24)), totalDays);
+
+  const width = 400;
+  const height = 200;
+
+  // Ideal line: from (0, totalPoints) to (totalDays, 0)
+  const idealPoints = [
+    { x: 0, y: 0 },
+    { x: width, y: height },
+  ];
+
+  // Actual remaining
+  const remaining = totalPoints - donePoints;
+  const actualX = (elapsed / totalDays) * width;
+  const actualY = height - (remaining / totalPoints) * height;
+
+  return (
+    <div>
+      <h2>Burndown — {sprint.name}</h2>
+      <svg width={width} height={height + 20} style={{ background: "#111" }}>
+        {/* Ideal line */}
+        <line x1={0} y1={0} x2={width} y2={height} stroke="#4a5568" strokeDasharray="4" />
+        {/* Actual point */}
+        <line x1={0} y1={0} x2={actualX} y2={actualY} stroke="#10b981" strokeWidth={2} />
+        <circle cx={actualX} cy={actualY} r={4} fill="#10b981" />
+        <text x={actualX + 8} y={actualY} fill="#f0f0f0" fontSize={12}>
+          {remaining}pt left
+        </text>
+      </svg>
+    </div>
+  );
+}
+```
+
+## Step 9: Bringing It All Together
+
+```tsx
+// src/App.tsx
+import { useAppState } from "./store";
+import { Backlog } from "./components/Backlog";
+import { Board } from "./components/Board";
+import { SprintManager } from "./components/SprintManager";
+import { TeamPanel } from "./components/TeamPanel";
+import { VelocityChart } from "./components/VelocityChart";
+import { BurndownChart } from "./components/BurndownChart";
+
+export default function App() {
+  const { state, dispatch } = useAppState();
+  const activeSprint = state.sprints.find((s) => s.id === state.activeSprint);
+
+  return (
+    <div style={{ padding: "2rem", color: "#f0f0f0", background: "#08080d", minHeight: "100vh" }}>
+      <h1>Sprint Tracker</h1>
+      <SprintManager
+        sprints={state.sprints}
+        activeSprint={state.activeSprint}
+        onCreateSprint={(name, start, end) =>
+          dispatch({
+            type: "ADD_SPRINT",
+            sprint: {
+              id: crypto.randomUUID(),
+              name,
+              startDate: start,
+              endDate: end,
+              isActive: false,
+            },
+          })
+        }
+        onSetActive={(id) => dispatch({ type: "SET_ACTIVE_SPRINT", sprintId: id })}
+      />
+      <TeamPanel
+        team={state.team}
+        stories={state.stories}
+        onAddMember={(name, avatar) =>
+          dispatch({ type: "ADD_MEMBER", member: { id: crypto.randomUUID(), name, avatar } })
+        }
+      />
+      <Backlog
+        stories={state.stories}
+        onAddStory={(title, points) =>
+          dispatch({
+            type: "ADD_STORY",
+            story: {
+              id: crypto.randomUUID(),
+              title,
+              description: "",
+              points,
+              status: "todo",
+              assigneeId: null,
+              sprintId: null,
+              createdAt: new Date().toISOString(),
+            },
+          })
+        }
+        onAssignToSprint={(id) =>
+          dispatch({ type: "UPDATE_STORY", id, updates: { sprintId: state.activeSprint } })
+        }
+      />
+      {activeSprint && (
+        <>
+          <Board
+            stories={state.stories}
+            team={state.team}
+            sprintId={activeSprint.id}
+            onMove={(id, status) => dispatch({ type: "MOVE_STORY", id, status })}
+            onAssign={(storyId, memberId) => dispatch({ type: "ASSIGN_STORY", storyId, memberId })}
+          />
+          <BurndownChart sprint={activeSprint} stories={state.stories} />
+        </>
+      )}
+      <VelocityChart sprints={state.sprints} stories={state.stories} />
+    </div>
+  );
+}
+```
+
+## Step 10: Polish and Extensions
+
+Add keyboard support for card movement — users press `1-4` while a card is focused to move it to the corresponding column:
+
+```typescript
+function useKeyboardNavigation(onMove: (storyId: string, status: StoryStatus) => void): void {
+  const statusMap: Record<string, StoryStatus> = {
+    "1": "todo",
+    "2": "in-progress",
+    "3": "review",
+    "4": "done",
+  };
+
+  useEffect(() => {
+    function handler(e: KeyboardEvent): void {
+      const target = e.target as HTMLElement;
+      const storyId = target.closest("[data-story-id]")?.getAttribute("data-story-id");
+      if (storyId && statusMap[e.key]) {
+        onMove(storyId, statusMap[e.key]);
+      }
+    }
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onMove]);
+}
+```
+
+You now have a functional sprint tracker with five interconnected features: backlog management, a Kanban board, team assignment, velocity tracking, and burndown visualization. To extend further, consider adding story filtering by assignee, sprint auto-completion logic, and localStorage export/import for team sharing.

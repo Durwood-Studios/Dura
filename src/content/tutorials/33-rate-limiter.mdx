@@ -1,0 +1,442 @@
+---
+title: "Build a Rate Limiter Service"
+description: "Implement token bucket and sliding window rate limiting algorithms with Express middleware and configurable per-route limits."
+slug: "rate-limiter"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["backend", "rate-limiting", "algorithms", "middleware", "node"]
+---
+
+## Overview
+
+Every public API needs rate limiting. Without it, a single misbehaving client can exhaust your server's resources, starve other users, and run up your infrastructure bill. Rate limiting is also a key defense against credential stuffing, scraping, and denial-of-service attacks.
+
+In this tutorial, you will implement two industry-standard rate limiting algorithms — token bucket and sliding window — from scratch in TypeScript. You will wrap them in Express middleware, add per-route configuration, build an in-memory store with automatic cleanup, and return proper HTTP headers so clients can self-regulate. By the end, you will understand not just how to use rate limiting, but how it works at the algorithmic level.
+
+**What you will build:**
+
+- A token bucket algorithm implementation
+- A sliding window counter implementation
+- A flexible Express middleware with per-route configuration
+- Proper rate limit HTTP response headers
+- An in-memory store with TTL-based cleanup
+- A test harness for verifying rate limit behavior
+
+## Step 1: The Token Bucket Algorithm
+
+The token bucket is the most intuitive rate limiting algorithm. Imagine a bucket that holds tokens. Each request consumes one token. Tokens regenerate at a fixed rate. When the bucket is empty, requests are rejected until tokens refill.
+
+```typescript
+// src/algorithms/token-bucket.ts
+interface TokenBucket {
+  tokens: number;
+  lastRefill: number;
+}
+
+interface TokenBucketConfig {
+  maxTokens: number;
+  refillRate: number; // tokens per second
+}
+
+class TokenBucketLimiter {
+  private buckets: Map<string, TokenBucket> = new Map();
+  private config: TokenBucketConfig;
+
+  constructor(config: TokenBucketConfig) {
+    this.config = config;
+  }
+
+  consume(key: string): { allowed: boolean; remaining: number; retryAfter: number } {
+    const now = Date.now();
+    let bucket = this.buckets.get(key);
+
+    if (!bucket) {
+      bucket = { tokens: this.config.maxTokens, lastRefill: now };
+      this.buckets.set(key, bucket);
+    }
+
+    // Refill tokens based on elapsed time
+    const elapsed = (now - bucket.lastRefill) / 1000;
+    bucket.tokens = Math.min(
+      this.config.maxTokens,
+      bucket.tokens + elapsed * this.config.refillRate
+    );
+    bucket.lastRefill = now;
+
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      return { allowed: true, remaining: Math.floor(bucket.tokens), retryAfter: 0 };
+    }
+
+    const retryAfter = Math.ceil((1 - bucket.tokens) / this.config.refillRate);
+    return { allowed: false, remaining: 0, retryAfter };
+  }
+}
+```
+
+The beauty of token bucket is burst tolerance. A bucket with 100 max tokens allows a burst of 100 rapid requests, then throttles to the refill rate. This matches real user behavior — page loads trigger many simultaneous requests, then activity drops.
+
+## Step 2: The Sliding Window Algorithm
+
+The sliding window counter offers smoother rate limiting with less burstiness. Instead of tokens, it counts requests within a rolling time window. It approximates the true sliding window using two fixed windows and weighted interpolation.
+
+```typescript
+// src/algorithms/sliding-window.ts
+interface WindowCounter {
+  currentCount: number;
+  previousCount: number;
+  currentStart: number;
+}
+
+interface SlidingWindowConfig {
+  windowMs: number;
+  maxRequests: number;
+}
+
+class SlidingWindowLimiter {
+  private counters: Map<string, WindowCounter> = new Map();
+  private config: SlidingWindowConfig;
+
+  constructor(config: SlidingWindowConfig) {
+    this.config = config;
+  }
+
+  consume(key: string): { allowed: boolean; remaining: number; resetAt: number } {
+    const now = Date.now();
+    const windowStart = now - (now % this.config.windowMs);
+    let counter = this.counters.get(key);
+
+    if (!counter || now - counter.currentStart >= this.config.windowMs * 2) {
+      counter = { currentCount: 0, previousCount: 0, currentStart: windowStart };
+      this.counters.set(key, counter);
+    }
+
+    // Rotate windows if current window has passed
+    if (windowStart > counter.currentStart) {
+      counter.previousCount = counter.currentCount;
+      counter.currentCount = 0;
+      counter.currentStart = windowStart;
+    }
+
+    // Weighted count: full current window + proportional previous window
+    const elapsedInWindow = now - windowStart;
+    const previousWeight = 1 - elapsedInWindow / this.config.windowMs;
+    const estimatedCount =
+      counter.currentCount + Math.floor(counter.previousCount * previousWeight);
+
+    if (estimatedCount >= this.config.maxRequests) {
+      const resetAt = windowStart + this.config.windowMs;
+      return { allowed: false, remaining: 0, resetAt };
+    }
+
+    counter.currentCount += 1;
+    const remaining = this.config.maxRequests - estimatedCount - 1;
+    return { allowed: true, remaining, resetAt: windowStart + this.config.windowMs };
+  }
+}
+```
+
+The weighted interpolation is the key insight. At the start of a new window, previous requests still count at nearly full weight. As time progresses through the window, the previous window's influence fades linearly. This eliminates the boundary spike problem of fixed windows.
+
+## Step 3: Unified Limiter Interface
+
+Abstract both algorithms behind a common interface so middleware can use either one without knowing the implementation details.
+
+```typescript
+// src/limiter.ts
+type Algorithm = "token-bucket" | "sliding-window";
+
+interface LimitResult {
+  allowed: boolean;
+  remaining: number;
+  limit: number;
+  resetAt: number;
+  retryAfter: number;
+}
+
+interface RateLimitConfig {
+  algorithm: Algorithm;
+  limit: number;
+  windowMs: number;
+  keyGenerator?: (req: Request) => string;
+}
+
+class RateLimiter {
+  private tokenBucket?: TokenBucketLimiter;
+  private slidingWindow?: SlidingWindowLimiter;
+  private config: RateLimitConfig;
+
+  constructor(config: RateLimitConfig) {
+    this.config = config;
+    if (config.algorithm === "token-bucket") {
+      this.tokenBucket = new TokenBucketLimiter({
+        maxTokens: config.limit,
+        refillRate: config.limit / (config.windowMs / 1000),
+      });
+    } else {
+      this.slidingWindow = new SlidingWindowLimiter({
+        windowMs: config.windowMs,
+        maxRequests: config.limit,
+      });
+    }
+  }
+
+  check(key: string): LimitResult {
+    if (this.tokenBucket) {
+      const result = this.tokenBucket.consume(key);
+      return {
+        allowed: result.allowed,
+        remaining: result.remaining,
+        limit: this.config.limit,
+        resetAt: Date.now() + this.config.windowMs,
+        retryAfter: result.retryAfter,
+      };
+    }
+    const result = this.slidingWindow!.consume(key);
+    return {
+      allowed: result.allowed,
+      remaining: result.remaining,
+      limit: this.config.limit,
+      resetAt: result.resetAt,
+      retryAfter: result.allowed ? 0 : Math.ceil((result.resetAt - Date.now()) / 1000),
+    };
+  }
+}
+```
+
+## Step 4: Express Middleware
+
+Transform the limiter into Express middleware. The middleware extracts a key from each request (default: IP address), checks the limit, sets response headers, and either passes through or returns 429 Too Many Requests.
+
+```typescript
+// src/middleware.ts
+import { Request, Response, NextFunction } from "express";
+
+function rateLimitMiddleware(config: RateLimitConfig) {
+  const limiter = new RateLimiter(config);
+  const getKey =
+    config.keyGenerator ??
+    ((req: Request) => {
+      return req.ip ?? req.socket.remoteAddress ?? "unknown";
+    });
+
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const key = getKey(req);
+    const result = limiter.check(key);
+
+    // Always set rate limit headers (draft IETF standard)
+    res.setHeader("RateLimit-Limit", result.limit);
+    res.setHeader("RateLimit-Remaining", result.remaining);
+    res.setHeader("RateLimit-Reset", Math.ceil(result.resetAt / 1000));
+
+    if (!result.allowed) {
+      res.setHeader("Retry-After", result.retryAfter);
+      res.status(429).json({
+        error: "Too Many Requests",
+        message: `Rate limit exceeded. Try again in ${result.retryAfter} seconds.`,
+        retryAfter: result.retryAfter,
+      });
+      return;
+    }
+
+    next();
+  };
+}
+```
+
+The `RateLimit-*` headers follow the IETF draft standard for HTTP rate limiting. Well-behaved clients read these headers to throttle themselves before hitting the limit.
+
+## Step 5: Per-Route Configuration
+
+Different endpoints have different sensitivity. Login attempts need aggressive limits (5 per minute). Public reads can be generous (1000 per minute). Configure limits per route using a declarative map.
+
+```typescript
+// src/config.ts
+const routeLimits: Record<string, RateLimitConfig> = {
+  "POST /api/auth/login": {
+    algorithm: "sliding-window",
+    limit: 5,
+    windowMs: 60_000,
+  },
+  "POST /api/auth/register": {
+    algorithm: "sliding-window",
+    limit: 3,
+    windowMs: 300_000,
+  },
+  "GET /api/*": {
+    algorithm: "token-bucket",
+    limit: 100,
+    windowMs: 60_000,
+  },
+  "*": {
+    algorithm: "token-bucket",
+    limit: 60,
+    windowMs: 60_000,
+  },
+};
+
+function matchRoute(method: string, path: string): RateLimitConfig {
+  const exact = routeLimits[`${method} ${path}`];
+  if (exact) return exact;
+
+  for (const [pattern, config] of Object.entries(routeLimits)) {
+    const [patternMethod, patternPath] = pattern.split(" ");
+    if (patternMethod === method && patternPath?.endsWith("*")) {
+      const prefix = patternPath.slice(0, -1);
+      if (path.startsWith(prefix)) return config;
+    }
+  }
+
+  return routeLimits["*"];
+}
+```
+
+## Step 6: Memory Management and Cleanup
+
+Without cleanup, the in-memory store grows unbounded as new clients appear. Add a periodic sweep that removes entries that have not been accessed recently.
+
+```typescript
+// src/store/cleanup.ts
+class CleanableStore<T extends { lastAccess: number }> {
+  private store: Map<string, T> = new Map();
+  private cleanupTimer: NodeJS.Timeout;
+
+  constructor(
+    private ttlMs: number,
+    cleanupIntervalMs: number = 60_000
+  ) {
+    this.cleanupTimer = setInterval(() => this.cleanup(), cleanupIntervalMs);
+  }
+
+  get(key: string): T | undefined {
+    const entry = this.store.get(key);
+    if (entry) entry.lastAccess = Date.now();
+    return entry;
+  }
+
+  set(key: string, value: T): void {
+    value.lastAccess = Date.now();
+    this.store.set(key, value);
+  }
+
+  private cleanup(): void {
+    const cutoff = Date.now() - this.ttlMs;
+    let removed = 0;
+    for (const [key, entry] of this.store) {
+      if (entry.lastAccess < cutoff) {
+        this.store.delete(key);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      console.log(
+        `Rate limiter cleanup: removed ${removed} stale entries, ${this.store.size} remaining`
+      );
+    }
+  }
+
+  destroy(): void {
+    clearInterval(this.cleanupTimer);
+  }
+}
+```
+
+Set the TTL to at least 2x your longest window. For a 5-minute window, a 10-minute TTL ensures entries expire naturally while giving cleanup a safe margin.
+
+## Step 7: Testing Rate Limit Behavior
+
+Rate limiters need deterministic tests. Inject a clock function so tests can control time without real delays.
+
+```typescript
+// src/__tests__/token-bucket.test.ts
+import { describe, it, expect } from "vitest";
+
+describe("TokenBucketLimiter", () => {
+  it("allows requests up to the token limit", () => {
+    const limiter = new TokenBucketLimiter({ maxTokens: 5, refillRate: 1 });
+
+    for (let i = 0; i < 5; i++) {
+      const result = limiter.consume("user-1");
+      expect(result.allowed).toBe(true);
+    }
+
+    const blocked = limiter.consume("user-1");
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfter).toBeGreaterThan(0);
+  });
+
+  it("isolates limits per key", () => {
+    const limiter = new TokenBucketLimiter({ maxTokens: 2, refillRate: 1 });
+
+    limiter.consume("user-a");
+    limiter.consume("user-a");
+    const blockedA = limiter.consume("user-a");
+    const allowedB = limiter.consume("user-b");
+
+    expect(blockedA.allowed).toBe(false);
+    expect(allowedB.allowed).toBe(true);
+  });
+
+  it("refills tokens over time", async () => {
+    const limiter = new TokenBucketLimiter({ maxTokens: 2, refillRate: 10 });
+
+    limiter.consume("user-1");
+    limiter.consume("user-1");
+    expect(limiter.consume("user-1").allowed).toBe(false);
+
+    // Wait for refill (100ms = 1 token at 10/sec)
+    await new Promise((r) => setTimeout(r, 150));
+    expect(limiter.consume("user-1").allowed).toBe(true);
+  });
+});
+```
+
+## Step 8: Integration and Load Testing
+
+Wire everything together and verify the system holds up under simulated load. Use a simple script that fires concurrent requests and validates the rate limit response.
+
+```typescript
+// test/load-test.ts
+async function loadTest(url: string, totalRequests: number, concurrency: number): Promise<void> {
+  let allowed = 0;
+  let rejected = 0;
+  const startTime = Date.now();
+
+  const semaphore = new Array(concurrency).fill(null);
+
+  async function worker(): Promise<void> {
+    while (allowed + rejected < totalRequests) {
+      try {
+        const res = await fetch(url);
+        if (res.status === 200) allowed++;
+        else if (res.status === 429) rejected++;
+
+        const remaining = res.headers.get("RateLimit-Remaining");
+        if (rejected === 1) {
+          console.log(
+            `First rejection at request ${allowed + rejected}, remaining header: ${remaining}`
+          );
+        }
+      } catch {
+        // Connection error under load is expected
+      }
+    }
+  }
+
+  await Promise.all(semaphore.map(() => worker()));
+
+  const elapsed = Date.now() - startTime;
+  console.log(`\nLoad Test Results:`);
+  console.log(`  Total: ${totalRequests} requests in ${elapsed}ms`);
+  console.log(`  Allowed: ${allowed}`);
+  console.log(`  Rejected: ${rejected}`);
+  console.log(`  Rate: ${Math.round((totalRequests / elapsed) * 1000)} req/sec`);
+}
+
+loadTest("http://localhost:3000/api/data", 500, 20);
+```
+
+Run this against your server and verify that: the number of allowed requests matches your configured limit, rejected requests get 429 status codes with proper headers, and the server remains responsive throughout — no memory leaks, no CPU spikes, no dropped connections.
+
+For production deployment, consider Redis as a backing store for distributed rate limiting across multiple server instances. The algorithms remain identical — only the storage layer changes from a Map to Redis GET/SET with TTL.

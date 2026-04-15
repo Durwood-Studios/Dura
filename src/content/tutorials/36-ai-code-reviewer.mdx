@@ -1,0 +1,586 @@
+---
+title: "Build an AI Code Reviewer"
+description: "Parse git diffs, send them to an LLM with structured context, and generate inline review comments with severity classification."
+slug: "ai-code-reviewer"
+difficulty: "advanced"
+estimatedMinutes: 210
+steps: 10
+tags: ["ai", "code-review", "git", "llm", "automation"]
+---
+
+## Overview
+
+Code review is one of the highest-leverage activities in software engineering — and one of the most time-consuming. An AI code reviewer does not replace human judgment, but it catches the mechanical issues (bugs, security flaws, style violations) so human reviewers can focus on architecture, design, and intent.
+
+In this tutorial, you will build a complete AI-powered code review tool. You will parse git diffs into structured data, enrich them with file context, send them to an LLM with carefully crafted prompts, parse the model's response into inline comments with severity levels, and generate a summary report. The tool works as a CLI that integrates into any git workflow.
+
+**What you will build:**
+
+- A git diff parser that extracts structured change data
+- A context enricher that provides surrounding code for each change
+- An LLM prompt system with structured output parsing
+- Severity classification (critical, warning, suggestion, praise)
+- A summary report generator
+- A CLI interface for local and CI usage
+
+## Step 1: Git Diff Parser
+
+Raw git diffs are text blobs. Parse them into structured objects that represent each file's changes with line numbers, hunks, and change types.
+
+```typescript
+// src/parser/diff.ts
+interface DiffHunk {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  lines: DiffLine[];
+}
+
+interface DiffLine {
+  type: "add" | "remove" | "context";
+  content: string;
+  oldLineNumber: number | null;
+  newLineNumber: number | null;
+}
+
+interface FileDiff {
+  path: string;
+  oldPath: string | null;
+  status: "added" | "modified" | "deleted" | "renamed";
+  hunks: DiffHunk[];
+  additions: number;
+  deletions: number;
+}
+
+function parseDiff(rawDiff: string): FileDiff[] {
+  const files: FileDiff[] = [];
+  const fileChunks = rawDiff.split(/^diff --git/m).filter(Boolean);
+
+  for (const chunk of fileChunks) {
+    const lines = chunk.split("\n");
+    const pathMatch = lines[0].match(/b\/(.+)$/);
+    if (!pathMatch) continue;
+
+    const path = pathMatch[1];
+    const status = chunk.includes("new file")
+      ? "added"
+      : chunk.includes("deleted file")
+        ? "deleted"
+        : chunk.includes("rename from")
+          ? "renamed"
+          : "modified";
+
+    const hunks = parseHunks(lines);
+    const additions = hunks.reduce(
+      (sum, h) => sum + h.lines.filter((l) => l.type === "add").length,
+      0
+    );
+    const deletions = hunks.reduce(
+      (sum, h) => sum + h.lines.filter((l) => l.type === "remove").length,
+      0
+    );
+
+    files.push({ path, oldPath: null, status, hunks, additions, deletions });
+  }
+
+  return files;
+}
+
+function parseHunks(lines: string[]): DiffHunk[] {
+  const hunks: DiffHunk[] = [];
+  let currentHunk: DiffHunk | null = null;
+  let oldLine = 0;
+  let newLine = 0;
+
+  for (const line of lines) {
+    const hunkMatch = line.match(/^@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+    if (hunkMatch) {
+      currentHunk = {
+        oldStart: parseInt(hunkMatch[1]),
+        oldCount: parseInt(hunkMatch[2] || "1"),
+        newStart: parseInt(hunkMatch[3]),
+        newCount: parseInt(hunkMatch[4] || "1"),
+        lines: [],
+      };
+      hunks.push(currentHunk);
+      oldLine = currentHunk.oldStart;
+      newLine = currentHunk.newStart;
+      continue;
+    }
+
+    if (!currentHunk) continue;
+
+    if (line.startsWith("+")) {
+      currentHunk.lines.push({
+        type: "add",
+        content: line.slice(1),
+        oldLineNumber: null,
+        newLineNumber: newLine++,
+      });
+    } else if (line.startsWith("-")) {
+      currentHunk.lines.push({
+        type: "remove",
+        content: line.slice(1),
+        oldLineNumber: oldLine++,
+        newLineNumber: null,
+      });
+    } else if (line.startsWith(" ")) {
+      currentHunk.lines.push({
+        type: "context",
+        content: line.slice(1),
+        oldLineNumber: oldLine++,
+        newLineNumber: newLine++,
+      });
+    }
+  }
+
+  return hunks;
+}
+```
+
+## Step 2: Context Enrichment
+
+The LLM needs more than just the changed lines — it needs the surrounding code to understand what the changes mean. Read the full file and extract context windows around each hunk.
+
+```typescript
+// src/context/enricher.ts
+import { readFileSync, existsSync } from "fs";
+
+interface EnrichedHunk {
+  hunk: DiffHunk;
+  beforeContext: string[];
+  afterContext: string[];
+  fullFileAvailable: boolean;
+}
+
+function enrichDiff(fileDiff: FileDiff, contextLines: number = 20): EnrichedHunk[] {
+  const fileExists = existsSync(fileDiff.path);
+  const fileLines = fileExists ? readFileSync(fileDiff.path, "utf-8").split("\n") : [];
+
+  return fileDiff.hunks.map((hunk) => {
+    const startLine = Math.max(0, hunk.newStart - contextLines - 1);
+    const endLine = Math.min(fileLines.length, hunk.newStart + hunk.newCount + contextLines);
+
+    return {
+      hunk,
+      beforeContext: fileLines.slice(startLine, hunk.newStart - 1),
+      afterContext: fileLines.slice(hunk.newStart + hunk.newCount - 1, endLine),
+      fullFileAvailable: fileExists,
+    };
+  });
+}
+```
+
+## Step 3: Language Detection and Rule Loading
+
+Different languages have different review concerns. TypeScript reviews should flag `any` types; Python reviews should check type hints; SQL should flag injection risks. Detect the language and load appropriate review rules.
+
+```typescript
+// src/rules/language.ts
+interface ReviewRules {
+  language: string;
+  concerns: string[];
+  antiPatterns: string[];
+}
+
+const rulesets: Record<string, ReviewRules> = {
+  typescript: {
+    language: "TypeScript",
+    concerns: [
+      "Check for `any` types — suggest `unknown` with type guards instead",
+      "Verify async functions have error handling (try/catch or .catch())",
+      "Flag missing return type annotations on exported functions",
+      "Check for potential null/undefined access without optional chaining",
+    ],
+    antiPatterns: [
+      "@ts-ignore without explanation",
+      "Type assertions (as X) that could be replaced with type guards",
+      "console.log left in production code",
+    ],
+  },
+  python: {
+    language: "Python",
+    concerns: [
+      "Check for missing type hints on function parameters and returns",
+      "Verify exception handling is specific (not bare except:)",
+      "Flag mutable default arguments",
+    ],
+    antiPatterns: [
+      "import * (wildcard imports)",
+      "Bare except clauses",
+      "Global variable mutation",
+    ],
+  },
+};
+
+function detectLanguage(filePath: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+  const extMap: Record<string, string> = {
+    ts: "typescript",
+    tsx: "typescript",
+    js: "javascript",
+    jsx: "javascript",
+    py: "python",
+    rs: "rust",
+    go: "go",
+    sql: "sql",
+  };
+  return extMap[ext] ?? "general";
+}
+```
+
+## Step 4: Prompt Engineering
+
+The prompt is the most critical piece. Structure it so the LLM produces consistent, parseable output with clear severity levels.
+
+```typescript
+// src/llm/prompt.ts
+function buildReviewPrompt(
+  fileDiff: FileDiff,
+  enrichedHunks: EnrichedHunk[],
+  rules: ReviewRules
+): string {
+  const changedCode = enrichedHunks
+    .map((eh) => {
+      const lines = eh.hunk.lines
+        .map((l) => {
+          const prefix = l.type === "add" ? "+" : l.type === "remove" ? "-" : " ";
+          return `${prefix} ${l.content}`;
+        })
+        .join("\n");
+      return `### Lines ${eh.hunk.newStart}-${eh.hunk.newStart + eh.hunk.newCount}\n\`\`\`\n${lines}\n\`\`\``;
+    })
+    .join("\n\n");
+
+  return `You are a senior software engineer reviewing a code change.
+Review the following ${rules.language} code diff for the file \`${fileDiff.path}\`.
+
+## Language-Specific Concerns
+${rules.concerns.map((c) => `- ${c}`).join("\n")}
+
+## Anti-Patterns to Flag
+${rules.antiPatterns.map((a) => `- ${a}`).join("\n")}
+
+## Code Changes
+${changedCode}
+
+## Instructions
+Provide your review as a JSON array of comments. Each comment must have:
+- "line": the line number in the new file (integer)
+- "severity": one of "critical", "warning", "suggestion", "praise"
+- "message": a concise explanation (1-2 sentences)
+- "suggestion": optional code fix (string or null)
+
+Respond ONLY with the JSON array. No markdown, no explanation outside the array.
+
+Severity guide:
+- critical: bugs, security vulnerabilities, data loss risks
+- warning: performance issues, error handling gaps, code smells
+- suggestion: style improvements, readability, better patterns
+- praise: well-written code worth acknowledging`;
+}
+```
+
+## Step 5: LLM Client with Retry Logic
+
+Call the LLM API with retry logic, timeout handling, and response validation. The client must handle rate limits gracefully since large PRs may require many API calls.
+
+```typescript
+// src/llm/client.ts
+interface ReviewComment {
+  line: number;
+  severity: "critical" | "warning" | "suggestion" | "praise";
+  message: string;
+  suggestion: string | null;
+}
+
+async function callLLM(
+  prompt: string,
+  apiKey: string,
+  maxRetries: number = 3
+): Promise<ReviewComment[]> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 4096,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (response.status === 429) {
+        const retryAfter = parseInt(response.headers.get("retry-after") ?? "5");
+        await sleep(retryAfter * 1000);
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new Error(`API returned ${response.status}: ${await response.text()}`);
+      }
+
+      const data = await response.json();
+      const text = data.content[0].text;
+      return parseReviewComments(text);
+    } catch (error) {
+      lastError = error as Error;
+      if (attempt < maxRetries - 1) {
+        await sleep(Math.pow(2, attempt) * 1000);
+      }
+    }
+  }
+
+  throw lastError ?? new Error("LLM call failed after retries");
+}
+
+function parseReviewComments(text: string): ReviewComment[] {
+  // Extract JSON array from response, handling potential markdown wrapping
+  const jsonMatch = text.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) return [];
+
+  const parsed = JSON.parse(jsonMatch[0]);
+  return parsed.filter((c: unknown): c is ReviewComment => {
+    if (typeof c !== "object" || c === null) return false;
+    const obj = c as Record<string, unknown>;
+    return (
+      typeof obj.line === "number" &&
+      typeof obj.severity === "string" &&
+      typeof obj.message === "string"
+    );
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+```
+
+## Step 6: Review Orchestrator
+
+Coordinate the full review pipeline: parse the diff, enrich each file, send to the LLM, and collect all comments.
+
+```typescript
+// src/review/orchestrator.ts
+interface ReviewResult {
+  file: string;
+  comments: ReviewComment[];
+}
+
+async function reviewDiff(rawDiff: string, apiKey: string): Promise<ReviewResult[]> {
+  const files = parseDiff(rawDiff);
+  const results: ReviewResult[] = [];
+
+  // Process files sequentially to respect rate limits
+  for (const fileDiff of files) {
+    if (fileDiff.status === "deleted") continue;
+    if (isIgnoredFile(fileDiff.path)) continue;
+
+    const language = detectLanguage(fileDiff.path);
+    const rules = rulesets[language] ?? rulesets["general"];
+    const enrichedHunks = enrichDiff(fileDiff);
+    const prompt = buildReviewPrompt(fileDiff, enrichedHunks, rules);
+
+    try {
+      const comments = await callLLM(prompt, apiKey);
+      if (comments.length > 0) {
+        results.push({ file: fileDiff.path, comments });
+      }
+    } catch (error) {
+      console.error(`Failed to review ${fileDiff.path}:`, error);
+    }
+  }
+
+  return results;
+}
+
+function isIgnoredFile(path: string): boolean {
+  const ignored = [".lock", ".min.js", ".min.css", ".map", ".snap"];
+  return ignored.some((ext) => path.endsWith(ext));
+}
+```
+
+## Step 7: Severity Classification and Scoring
+
+Aggregate comments into a review score. Critical issues block the review, warnings accumulate, and suggestions are informational.
+
+```typescript
+// src/review/scoring.ts
+interface ReviewScore {
+  total: number;
+  critical: number;
+  warnings: number;
+  suggestions: number;
+  praise: number;
+  passed: boolean;
+  summary: string;
+}
+
+function scoreReview(results: ReviewResult[]): ReviewScore {
+  const counts = { critical: 0, warning: 0, suggestion: 0, praise: 0 };
+
+  for (const result of results) {
+    for (const comment of result.comments) {
+      counts[comment.severity]++;
+    }
+  }
+
+  const total = counts.critical + counts.warning + counts.suggestion;
+  const passed = counts.critical === 0;
+
+  let summary: string;
+  if (counts.critical > 0) {
+    summary = `Review BLOCKED: ${counts.critical} critical issue(s) found.`;
+  } else if (counts.warning > 0) {
+    summary = `Review passed with ${counts.warning} warning(s). Please address before merging.`;
+  } else if (counts.suggestion > 0) {
+    summary = `Clean review with ${counts.suggestion} minor suggestion(s).`;
+  } else {
+    summary = "Excellent code — no issues found.";
+  }
+
+  return {
+    total,
+    critical: counts.critical,
+    warnings: counts.warning,
+    suggestions: counts.suggestion,
+    praise: counts.praise,
+    passed,
+    summary,
+  };
+}
+```
+
+## Step 8: Report Generation
+
+Format the review into a readable Markdown report suitable for PR comments or terminal output.
+
+```typescript
+// src/report/markdown.ts
+const severityEmoji: Record<string, string> = {
+  critical: "[CRITICAL]",
+  warning: "[WARNING]",
+  suggestion: "[SUGGESTION]",
+  praise: "[PRAISE]",
+};
+
+function generateReport(results: ReviewResult[], score: ReviewScore): string {
+  const lines: string[] = [
+    `# AI Code Review`,
+    "",
+    `**${score.summary}**`,
+    "",
+    `| Severity | Count |`,
+    `|----------|-------|`,
+    `| Critical | ${score.critical} |`,
+    `| Warning | ${score.warnings} |`,
+    `| Suggestion | ${score.suggestions} |`,
+    `| Praise | ${score.praise} |`,
+    "",
+  ];
+
+  for (const result of results) {
+    lines.push(`## ${result.file}`);
+    lines.push("");
+    for (const comment of result.comments) {
+      lines.push(
+        `- **Line ${comment.line}** ${severityEmoji[comment.severity]} ${comment.message}`
+      );
+      if (comment.suggestion) {
+        lines.push(`  \`\`\`suggestion`);
+        lines.push(`  ${comment.suggestion}`);
+        lines.push(`  \`\`\``);
+      }
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+```
+
+## Step 9: CLI Interface
+
+Wrap the tool in a CLI that reads diffs from stdin or directly from git. Support flags for controlling behavior.
+
+```typescript
+// src/cli.ts
+import { execSync } from "child_process";
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    console.error("Error: ANTHROPIC_API_KEY environment variable is required");
+    process.exit(1);
+  }
+
+  let rawDiff: string;
+
+  if (args.includes("--staged")) {
+    rawDiff = execSync("git diff --cached", { encoding: "utf-8" });
+  } else if (args.includes("--branch")) {
+    const base = args[args.indexOf("--branch") + 1] ?? "main";
+    rawDiff = execSync(`git diff ${base}...HEAD`, { encoding: "utf-8" });
+  } else {
+    rawDiff = execSync("git diff", { encoding: "utf-8" });
+  }
+
+  if (!rawDiff.trim()) {
+    console.log("No changes to review.");
+    return;
+  }
+
+  console.log("Reviewing changes...\n");
+  const results = await reviewDiff(rawDiff, apiKey);
+  const score = scoreReview(results);
+  const report = generateReport(results, score);
+
+  console.log(report);
+  process.exit(score.passed ? 0 : 1);
+}
+
+main().catch((error) => {
+  console.error("Review failed:", error);
+  process.exit(1);
+});
+```
+
+## Step 10: CI Integration and Git Hooks
+
+Deploy the reviewer as a pre-push git hook or a CI pipeline step. The exit code (0 for pass, 1 for critical issues) integrates naturally with CI systems.
+
+```yaml
+# .github/workflows/ai-review.yml
+name: AI Code Review
+on: [pull_request]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: |
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/diff.txt
+          npx ts-node src/cli.ts --branch origin/${{ github.base_ref }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+For the git hook, add to `.git/hooks/pre-push` so the review runs automatically before every push. Set a file-size threshold to skip the LLM call on trivially small changes (under 5 lines) and keep API costs predictable. The combination of automated CI reviews and optional local hooks gives teams fast feedback without blocking workflow.

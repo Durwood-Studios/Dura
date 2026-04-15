@@ -1,0 +1,563 @@
+---
+title: "Build a Cron Job Scheduler"
+description: "Parse cron expressions, schedule job execution, handle failures with retry logic, and build a dead letter queue with an admin UI."
+slug: "cron-scheduler"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["backend", "cron", "scheduling", "node", "typescript"]
+---
+
+## Overview
+
+Cron jobs are the backbone of backend automation — sending reminder emails, cleaning up stale data, generating reports, syncing external APIs. Yet most developers use cron as a black box: they paste an expression from a generator site and hope it fires correctly. In this tutorial, you will build a cron scheduler from scratch, understanding every layer from expression parsing to failure recovery.
+
+You will implement a cron expression parser that converts `"*/5 * * * *"` into concrete next-run timestamps, a job executor with timeout and retry logic, a dead letter queue for persistently failing jobs, and an admin UI for monitoring and managing scheduled tasks.
+
+**What you will build:**
+
+- A cron expression parser supporting standard 5-field syntax
+- A scheduler that triggers jobs at the correct times
+- Retry logic with exponential backoff
+- A dead letter queue for failed jobs
+- An admin dashboard for monitoring and manual control
+
+## Step 1: Cron Expression Parser
+
+A standard cron expression has five fields: minute, hour, day-of-month, month, day-of-week. Each field can be a number, range, step, list, or wildcard. Parse each field into a set of valid values.
+
+```typescript
+// src/cron/parser.ts
+interface CronSchedule {
+  minutes: Set<number>;
+  hours: Set<number>;
+  daysOfMonth: Set<number>;
+  months: Set<number>;
+  daysOfWeek: Set<number>;
+}
+
+function parseCronExpression(expression: string): CronSchedule {
+  const parts = expression.trim().split(/\s+/);
+  if (parts.length !== 5) {
+    throw new Error(`Invalid cron expression: expected 5 fields, got ${parts.length}`);
+  }
+
+  return {
+    minutes: parseField(parts[0], 0, 59),
+    hours: parseField(parts[1], 0, 23),
+    daysOfMonth: parseField(parts[2], 1, 31),
+    months: parseField(parts[3], 1, 12),
+    daysOfWeek: parseField(parts[4], 0, 6),
+  };
+}
+
+function parseField(field: string, min: number, max: number): Set<number> {
+  const values = new Set<number>();
+
+  for (const part of field.split(",")) {
+    if (part === "*") {
+      for (let i = min; i <= max; i++) values.add(i);
+    } else if (part.includes("/")) {
+      const [range, stepStr] = part.split("/");
+      const step = parseInt(stepStr);
+      const start = range === "*" ? min : parseInt(range);
+      for (let i = start; i <= max; i += step) values.add(i);
+    } else if (part.includes("-")) {
+      const [startStr, endStr] = part.split("-");
+      const start = parseInt(startStr);
+      const end = parseInt(endStr);
+      for (let i = start; i <= end; i++) values.add(i);
+    } else {
+      const num = parseInt(part);
+      if (num >= min && num <= max) values.add(num);
+    }
+  }
+
+  return values;
+}
+```
+
+## Step 2: Next Run Calculator
+
+Given a cron schedule and a starting time, calculate when the job should next fire. This is the core scheduling logic — iterate forward through time until all five fields match.
+
+```typescript
+// src/cron/next-run.ts
+function getNextRun(schedule: CronSchedule, after: Date = new Date()): Date {
+  const next = new Date(after);
+  next.setSeconds(0, 0);
+  next.setMinutes(next.getMinutes() + 1); // Always at least 1 minute in the future
+
+  // Search up to 4 years ahead to handle edge cases like Feb 29
+  const maxDate = new Date(after);
+  maxDate.setFullYear(maxDate.getFullYear() + 4);
+
+  while (next < maxDate) {
+    if (!schedule.months.has(next.getMonth() + 1)) {
+      next.setMonth(next.getMonth() + 1, 1);
+      next.setHours(0, 0, 0, 0);
+      continue;
+    }
+
+    if (!schedule.daysOfMonth.has(next.getDate()) || !schedule.daysOfWeek.has(next.getDay())) {
+      next.setDate(next.getDate() + 1);
+      next.setHours(0, 0, 0, 0);
+      continue;
+    }
+
+    if (!schedule.hours.has(next.getHours())) {
+      next.setHours(next.getHours() + 1, 0, 0, 0);
+      continue;
+    }
+
+    if (!schedule.minutes.has(next.getMinutes())) {
+      next.setMinutes(next.getMinutes() + 1, 0, 0);
+      continue;
+    }
+
+    return next;
+  }
+
+  throw new Error("Could not find next run within 4 years");
+}
+```
+
+The iteration approach is simple and correct. Production schedulers like `node-cron` use the same strategy — there is no closed-form solution for arbitrary cron expressions.
+
+## Step 3: Job Definition and Registry
+
+Define what a job looks like and build a registry to manage them. Each job has a name, cron expression, handler function, and configuration for retries and timeouts.
+
+```typescript
+// src/jobs/registry.ts
+interface JobConfig {
+  name: string;
+  expression: string;
+  handler: () => Promise<void>;
+  timeoutMs: number;
+  maxRetries: number;
+  retryDelayMs: number;
+  enabled: boolean;
+}
+
+interface JobState {
+  config: JobConfig;
+  schedule: CronSchedule;
+  nextRun: Date;
+  lastRun: Date | null;
+  lastResult: "success" | "failure" | null;
+  runCount: number;
+  failCount: number;
+  consecutiveFailures: number;
+}
+
+class JobRegistry {
+  private jobs: Map<string, JobState> = new Map();
+
+  register(config: JobConfig): void {
+    if (this.jobs.has(config.name)) {
+      throw new Error(`Job "${config.name}" is already registered`);
+    }
+
+    const schedule = parseCronExpression(config.expression);
+    const nextRun = getNextRun(schedule);
+
+    this.jobs.set(config.name, {
+      config,
+      schedule,
+      nextRun,
+      lastRun: null,
+      lastResult: null,
+      runCount: 0,
+      failCount: 0,
+      consecutiveFailures: 0,
+    });
+  }
+
+  getAll(): JobState[] {
+    return Array.from(this.jobs.values());
+  }
+
+  get(name: string): JobState | undefined {
+    return this.jobs.get(name);
+  }
+
+  updateAfterRun(name: string, success: boolean): void {
+    const job = this.jobs.get(name);
+    if (!job) return;
+
+    job.lastRun = new Date();
+    job.lastResult = success ? "success" : "failure";
+    job.runCount++;
+    if (success) {
+      job.consecutiveFailures = 0;
+    } else {
+      job.failCount++;
+      job.consecutiveFailures++;
+    }
+    job.nextRun = getNextRun(job.schedule);
+  }
+}
+```
+
+## Step 4: Job Executor with Timeout
+
+Execute jobs with a timeout wrapper. If a job hangs, the timeout kills it and marks it as failed — preventing one stuck job from blocking the entire scheduler.
+
+```typescript
+// src/jobs/executor.ts
+interface ExecutionResult {
+  jobName: string;
+  success: boolean;
+  durationMs: number;
+  error: string | null;
+  attempt: number;
+}
+
+async function executeWithTimeout(handler: () => Promise<void>, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Job timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    handler()
+      .then(() => {
+        clearTimeout(timer);
+        resolve();
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+async function executeJob(job: JobState): Promise<ExecutionResult> {
+  const { config } = job;
+  let lastError: string | null = null;
+
+  for (let attempt = 1; attempt <= config.maxRetries + 1; attempt++) {
+    const startTime = Date.now();
+
+    try {
+      await executeWithTimeout(config.handler, config.timeoutMs);
+      return {
+        jobName: config.name,
+        success: true,
+        durationMs: Date.now() - startTime,
+        error: null,
+        attempt,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      console.error(`Job "${config.name}" failed (attempt ${attempt}): ${lastError}`);
+
+      if (attempt <= config.maxRetries) {
+        const delay = config.retryDelayMs * Math.pow(2, attempt - 1);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+
+  return {
+    jobName: config.name,
+    success: false,
+    durationMs: 0,
+    error: lastError,
+    attempt: config.maxRetries + 1,
+  };
+}
+```
+
+## Step 5: Dead Letter Queue
+
+When a job exhausts its retries, move it to a dead letter queue. DLQ entries persist so operators can investigate failures and replay jobs after fixing the root cause.
+
+```typescript
+// src/jobs/dead-letter.ts
+interface DeadLetterEntry {
+  jobName: string;
+  failedAt: Date;
+  error: string;
+  attempts: number;
+  payload: Record<string, unknown>;
+  resolved: boolean;
+}
+
+class DeadLetterQueue {
+  private entries: DeadLetterEntry[] = [];
+  private maxSize = 1000;
+
+  add(entry: Omit<DeadLetterEntry, "resolved">): void {
+    this.entries.push({ ...entry, resolved: false });
+
+    // Evict oldest resolved entries if over capacity
+    if (this.entries.length > this.maxSize) {
+      const resolvedIdx = this.entries.findIndex((e) => e.resolved);
+      if (resolvedIdx >= 0) {
+        this.entries.splice(resolvedIdx, 1);
+      } else {
+        this.entries.shift();
+      }
+    }
+  }
+
+  getUnresolved(): DeadLetterEntry[] {
+    return this.entries.filter((e) => !e.resolved);
+  }
+
+  resolve(index: number): void {
+    if (this.entries[index]) {
+      this.entries[index].resolved = true;
+    }
+  }
+
+  getStats(): { total: number; unresolved: number; oldestUnresolved: Date | null } {
+    const unresolved = this.getUnresolved();
+    return {
+      total: this.entries.length,
+      unresolved: unresolved.length,
+      oldestUnresolved: unresolved[0]?.failedAt ?? null,
+    };
+  }
+}
+```
+
+## Step 6: Scheduler Loop
+
+The scheduler is the central loop that checks which jobs are due and executes them. It runs on a one-second tick interval.
+
+```typescript
+// src/scheduler.ts
+class Scheduler {
+  private registry: JobRegistry;
+  private dlq: DeadLetterQueue;
+  private timer: NodeJS.Timeout | null = null;
+  private running = false;
+  private executionLog: ExecutionResult[] = [];
+
+  constructor(registry: JobRegistry, dlq: DeadLetterQueue) {
+    this.registry = registry;
+    this.dlq = dlq;
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    console.log(`Scheduler started at ${new Date().toISOString()}`);
+    this.tick();
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    console.log("Scheduler stopped");
+  }
+
+  private tick(): void {
+    if (!this.running) return;
+
+    const now = new Date();
+    const dueJobs = this.registry
+      .getAll()
+      .filter((job) => job.config.enabled && job.nextRun <= now);
+
+    for (const job of dueJobs) {
+      this.runJob(job).catch((error) => {
+        console.error(`Unexpected error running ${job.config.name}:`, error);
+      });
+    }
+
+    // Align to next second boundary
+    const msUntilNextSecond = 1000 - (Date.now() % 1000);
+    this.timer = setTimeout(() => this.tick(), msUntilNextSecond);
+  }
+
+  private async runJob(job: JobState): Promise<void> {
+    const result = await executeJob(job);
+    this.executionLog.push(result);
+    this.registry.updateAfterRun(job.config.name, result.success);
+
+    if (!result.success) {
+      this.dlq.add({
+        jobName: job.config.name,
+        failedAt: new Date(),
+        error: result.error ?? "Unknown error",
+        attempts: result.attempt,
+        payload: {},
+      });
+    }
+
+    // Keep only last 1000 log entries
+    if (this.executionLog.length > 1000) {
+      this.executionLog = this.executionLog.slice(-500);
+    }
+  }
+
+  getLog(): ExecutionResult[] {
+    return this.executionLog;
+  }
+}
+```
+
+## Step 7: Concurrency Control
+
+Prevent the same job from running twice simultaneously. If a job takes longer than its interval, the next tick should skip it rather than spawning a second instance.
+
+```typescript
+class ConcurrencyGuard {
+  private running: Set<string> = new Set();
+
+  acquire(jobName: string): boolean {
+    if (this.running.has(jobName)) return false;
+    this.running.add(jobName);
+    return true;
+  }
+
+  release(jobName: string): void {
+    this.running.delete(jobName);
+  }
+
+  isRunning(jobName: string): boolean {
+    return this.running.has(jobName);
+  }
+}
+```
+
+Integrate this into the `runJob` method: call `guard.acquire()` before execution and `guard.release()` in a finally block. Log a warning when a job is skipped so operators know the job is running longer than expected.
+
+## Step 8: REST API for Management
+
+Expose an API so the admin UI can list jobs, view logs, toggle jobs, trigger manual runs, and manage the DLQ.
+
+```typescript
+// src/api/routes.ts
+app.get("/api/jobs", (_req, res) => {
+  const jobs = registry.getAll().map((job) => ({
+    name: job.config.name,
+    expression: job.config.expression,
+    enabled: job.config.enabled,
+    nextRun: job.nextRun.toISOString(),
+    lastRun: job.lastRun?.toISOString() ?? null,
+    lastResult: job.lastResult,
+    runCount: job.runCount,
+    failCount: job.failCount,
+  }));
+  res.json(jobs);
+});
+
+app.post("/api/jobs/:name/trigger", async (req, res) => {
+  const job = registry.get(req.params.name);
+  if (!job) return res.status(404).json({ error: "Job not found" });
+
+  const result = await executeJob(job);
+  registry.updateAfterRun(job.config.name, result.success);
+  res.json(result);
+});
+
+app.patch("/api/jobs/:name", (req, res) => {
+  const job = registry.get(req.params.name);
+  if (!job) return res.status(404).json({ error: "Job not found" });
+
+  if (typeof req.body.enabled === "boolean") {
+    job.config.enabled = req.body.enabled;
+  }
+  res.json({ name: job.config.name, enabled: job.config.enabled });
+});
+
+app.get("/api/dlq", (_req, res) => {
+  res.json({
+    entries: dlq.getUnresolved(),
+    stats: dlq.getStats(),
+  });
+});
+```
+
+## Step 9: Admin Dashboard
+
+Build a simple HTML dashboard that shows job status, execution history, and DLQ entries. Poll the API every 5 seconds for updates.
+
+```html
+<div class="dashboard">
+  <h1>Cron Scheduler</h1>
+  <section id="jobs">
+    <h2>Scheduled Jobs</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Schedule</th>
+          <th>Next Run</th>
+          <th>Last Result</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="job-rows"></tbody>
+    </table>
+  </section>
+  <section id="dlq-section">
+    <h2>Dead Letter Queue <span id="dlq-count" class="badge"></span></h2>
+    <div id="dlq-entries"></div>
+  </section>
+</div>
+```
+
+```typescript
+async function refreshDashboard(): Promise<void> {
+  const [jobs, dlq] = await Promise.all([
+    fetch("/api/jobs").then((r) => r.json()),
+    fetch("/api/dlq").then((r) => r.json()),
+  ]);
+
+  const tbody = document.getElementById("job-rows")!;
+  tbody.innerHTML = jobs
+    .map(
+      (job: Record<string, unknown>) => `
+    <tr class="${job.lastResult === "failure" ? "row-error" : ""}">
+      <td>${job.name}</td>
+      <td><code>${job.expression}</code></td>
+      <td>${new Date(job.nextRun as string).toLocaleTimeString()}</td>
+      <td>${job.lastResult ?? "—"}</td>
+      <td>
+        <button onclick="triggerJob('${job.name}')">Run Now</button>
+        <button onclick="toggleJob('${job.name}', ${!job.enabled})">
+          ${job.enabled ? "Disable" : "Enable"}
+        </button>
+      </td>
+    </tr>
+  `
+    )
+    .join("");
+
+  document.getElementById("dlq-count")!.textContent = String(dlq.stats.unresolved);
+}
+
+setInterval(refreshDashboard, 5000);
+refreshDashboard();
+```
+
+## Step 10: Production Considerations
+
+Before deploying, address the concerns that separate a toy scheduler from a production system.
+
+**Persistence.** The in-memory registry and DLQ lose state on restart. Serialize job state and DLQ to a JSON file or SQLite database on every change. On startup, reload state and recalculate next-run times for any jobs that were missed while the process was down.
+
+**Missed job handling.** If the scheduler was down when a job was due, decide whether to run it immediately on startup (catch-up) or skip to the next scheduled time. Add a `missedRunPolicy` field to `JobConfig`: `"run-once"` fires the job once on recovery, `"skip"` moves to the next scheduled time.
+
+```typescript
+function handleMissedRuns(registry: JobRegistry): void {
+  const now = new Date();
+  for (const job of registry.getAll()) {
+    if (job.lastRun && job.nextRun < now) {
+      if (job.config.missedRunPolicy === "run-once") {
+        console.log(`Running missed job: ${job.config.name}`);
+        executeJob(job); // Fire-and-forget catch-up
+      }
+      // Recalculate next run from now
+      job.nextRun = getNextRun(job.schedule);
+    }
+  }
+}
+```
+
+**Observability.** Emit structured logs for every job execution with timing, success/failure, and retry count. Add a `/api/health` endpoint that reports scheduler uptime, total jobs registered, DLQ depth, and the next job due time. Set up alerts when DLQ depth exceeds a threshold — unresolved failures accumulating silently is the most dangerous failure mode.

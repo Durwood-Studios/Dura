@@ -1,0 +1,604 @@
+---
+title: "Build a Job Application Tracker"
+description: "Create a CRUD application with kanban-style status columns, notes, drag-and-drop, and offline-first IndexedDB persistence."
+slug: "job-tracker"
+difficulty: "beginner"
+estimatedMinutes: 180
+steps: 10
+tags: ["react", "crud", "indexeddb", "career", "beginner"]
+---
+
+## Overview
+
+You're going to build a job application tracker — a kanban-style board where you can add job applications, move them between status columns (Applied, Phone Screen, On-Site, Offer, Rejected), attach notes, and persist everything offline using IndexedDB.
+
+This tutorial covers the full lifecycle of a CRUD application: creating records, reading and filtering them, updating status via drag-and-drop, deleting with confirmation, and persisting to a local database that survives browser restarts. No backend, no accounts, no API — just a useful tool that works entirely in your browser.
+
+You'll build this with React, TypeScript, and the `idb` library for IndexedDB. The drag-and-drop uses the native HTML5 Drag and Drop API — no libraries needed.
+
+## Step 1: Project Setup
+
+```bash
+npx create-next-app@latest job-tracker --typescript --tailwind --app --src-dir
+cd job-tracker
+npm install idb
+```
+
+```bash
+mkdir -p src/lib src/components
+```
+
+## Step 2: Data Model and Database
+
+Define the application schema and set up IndexedDB.
+
+```typescript
+// src/lib/db.ts
+import { openDB, DBSchema, IDBPDatabase } from "idb";
+
+export interface JobApplication {
+  id: string;
+  company: string;
+  role: string;
+  url: string;
+  status: JobStatus;
+  salary: string;
+  notes: string;
+  appliedDate: string;
+  updatedAt: string;
+}
+
+export type JobStatus = "applied" | "phone" | "onsite" | "offer" | "rejected";
+
+export const STATUS_CONFIG: Record<JobStatus, { label: string; color: string }> = {
+  applied: { label: "Applied", color: "#6366f1" },
+  phone: { label: "Phone Screen", color: "#06b6d4" },
+  onsite: { label: "On-Site", color: "#f59e0b" },
+  offer: { label: "Offer", color: "#10b981" },
+  rejected: { label: "Rejected", color: "#ef4444" },
+};
+
+interface JobTrackerDB extends DBSchema {
+  applications: {
+    key: string;
+    value: JobApplication;
+    indexes: {
+      "by-status": JobStatus;
+      "by-date": string;
+    };
+  };
+}
+
+let dbPromise: Promise<IDBPDatabase<JobTrackerDB>> | null = null;
+
+function getDB(): Promise<IDBPDatabase<JobTrackerDB>> {
+  if (!dbPromise) {
+    dbPromise = openDB<JobTrackerDB>("job-tracker", 1, {
+      upgrade(db) {
+        const store = db.createObjectStore("applications", { keyPath: "id" });
+        store.createIndex("by-status", "status");
+        store.createIndex("by-date", "appliedDate");
+      },
+    });
+  }
+  return dbPromise;
+}
+
+export async function getAllApplications(): Promise<JobApplication[]> {
+  const db = await getDB();
+  return db.getAll("applications");
+}
+
+export async function addApplication(
+  app: Omit<JobApplication, "id" | "updatedAt">
+): Promise<JobApplication> {
+  const db = await getDB();
+  const record: JobApplication = {
+    ...app,
+    id: crypto.randomUUID(),
+    updatedAt: new Date().toISOString(),
+  };
+  await db.put("applications", record);
+  return record;
+}
+
+export async function updateApplication(
+  id: string,
+  updates: Partial<JobApplication>
+): Promise<JobApplication> {
+  const db = await getDB();
+  const existing = await db.get("applications", id);
+  if (!existing) throw new Error(`Application ${id} not found`);
+  const updated: JobApplication = {
+    ...existing,
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  };
+  await db.put("applications", updated);
+  return updated;
+}
+
+export async function deleteApplication(id: string): Promise<void> {
+  const db = await getDB();
+  await db.delete("applications", id);
+}
+```
+
+IndexedDB is a transactional, key-value database built into every browser. Unlike localStorage (which stores only strings and has a 5MB limit), IndexedDB handles structured data, supports indexes for efficient queries, and can store hundreds of megabytes. The `idb` library wraps the callback-heavy native API with promises.
+
+## Step 3: Application State Hook
+
+```typescript
+// src/lib/useApplications.ts
+import { useState, useEffect, useCallback } from "react";
+import {
+  JobApplication,
+  JobStatus,
+  getAllApplications,
+  addApplication,
+  updateApplication,
+  deleteApplication,
+} from "./db";
+
+export function useApplications() {
+  const [applications, setApplications] = useState<JobApplication[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  const load = useCallback(async (): Promise<void> => {
+    try {
+      const apps = await getAllApplications();
+      setApplications(apps.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+    } catch (error) {
+      console.error("Failed to load applications:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const add = useCallback(async (data: Omit<JobApplication, "id" | "updatedAt">): Promise<void> => {
+    try {
+      const newApp = await addApplication(data);
+      setApplications((prev) => [newApp, ...prev]);
+    } catch (error) {
+      console.error("Failed to add application:", error);
+    }
+  }, []);
+
+  const update = useCallback(
+    async (id: string, updates: Partial<JobApplication>): Promise<void> => {
+      try {
+        const updated = await updateApplication(id, updates);
+        setApplications((prev) => prev.map((app) => (app.id === id ? updated : app)));
+      } catch (error) {
+        console.error("Failed to update application:", error);
+      }
+    },
+    []
+  );
+
+  const remove = useCallback(async (id: string): Promise<void> => {
+    try {
+      await deleteApplication(id);
+      setApplications((prev) => prev.filter((app) => app.id !== id));
+    } catch (error) {
+      console.error("Failed to delete application:", error);
+    }
+  }, []);
+
+  const byStatus = useCallback(
+    (status: JobStatus): JobApplication[] => {
+      return applications.filter((app) => app.status === status);
+    },
+    [applications]
+  );
+
+  return { applications, isLoading, add, update, remove, byStatus };
+}
+```
+
+## Step 4: Add Application Form
+
+```tsx
+// src/components/AddApplicationForm.tsx
+"use client";
+
+import { useState, FormEvent } from "react";
+import { JobApplication, JobStatus } from "@/lib/db";
+
+interface AddApplicationFormProps {
+  onSubmit: (data: Omit<JobApplication, "id" | "updatedAt">) => Promise<void>;
+  onClose: () => void;
+}
+
+export function AddApplicationForm({ onSubmit, onClose }: AddApplicationFormProps) {
+  const [company, setCompany] = useState("");
+  const [role, setRole] = useState("");
+  const [url, setUrl] = useState("");
+  const [salary, setSalary] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    if (!company.trim() || !role.trim()) return;
+
+    setIsSubmitting(true);
+    try {
+      await onSubmit({
+        company: company.trim(),
+        role: role.trim(),
+        url: url.trim(),
+        salary: salary.trim(),
+        status: "applied" as JobStatus,
+        notes: "",
+        appliedDate: new Date().toISOString().split("T")[0],
+      });
+      onClose();
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-6"
+      >
+        <h2 className="mb-4 text-xl font-semibold">Add Application</h2>
+        <div className="space-y-3">
+          <input
+            type="text"
+            placeholder="Company name *"
+            value={company}
+            onChange={(e) => setCompany(e.target.value)}
+            required
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+          />
+          <input
+            type="text"
+            placeholder="Role / Title *"
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            required
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+          />
+          <input
+            type="url"
+            placeholder="Job posting URL"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+          />
+          <input
+            type="text"
+            placeholder="Salary range"
+            value={salary}
+            onChange={(e) => setSalary(e.target.value)}
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+          />
+        </div>
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-zinc-700 px-4 py-2 text-zinc-400 hover:bg-zinc-800"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="rounded-lg bg-indigo-500 px-4 py-2 font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+          >
+            {isSubmitting ? "Adding..." : "Add Application"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+```
+
+## Step 5: Application Card
+
+```tsx
+// src/components/ApplicationCard.tsx
+"use client";
+
+import { JobApplication, STATUS_CONFIG } from "@/lib/db";
+import { DragEvent, useState } from "react";
+
+interface ApplicationCardProps {
+  application: JobApplication;
+  onUpdate: (id: string, updates: Partial<JobApplication>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}
+
+export function ApplicationCard({ application, onUpdate, onDelete }: ApplicationCardProps) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [notes, setNotes] = useState(application.notes);
+
+  const handleDragStart = (e: DragEvent): void => {
+    e.dataTransfer.setData("application/id", application.id);
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleNotesBlur = async (): Promise<void> => {
+    if (notes !== application.notes) {
+      await onUpdate(application.id, { notes });
+    }
+  };
+
+  const handleDelete = async (): Promise<void> => {
+    if (window.confirm(`Delete application for ${application.role} at ${application.company}?`)) {
+      await onDelete(application.id);
+    }
+  };
+
+  const daysAgo = Math.floor((Date.now() - new Date(application.appliedDate).getTime()) / 86400000);
+
+  return (
+    <article
+      draggable
+      onDragStart={handleDragStart}
+      onClick={() => setIsExpanded(!isExpanded)}
+      className="cursor-grab rounded-lg border border-zinc-800 bg-zinc-900 p-3 transition-colors hover:border-zinc-700 active:cursor-grabbing"
+    >
+      <h3 className="font-medium text-white">{application.company}</h3>
+      <p className="text-sm text-zinc-400">{application.role}</p>
+      <div className="mt-2 flex items-center gap-2 text-xs text-zinc-500">
+        {application.salary && <span>{application.salary}</span>}
+        <span>{daysAgo === 0 ? "Today" : `${daysAgo}d ago`}</span>
+      </div>
+
+      {isExpanded && (
+        <div className="mt-3 space-y-2" onClick={(e) => e.stopPropagation()}>
+          {application.url && (
+            <a
+              href={application.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block text-sm text-indigo-400 hover:underline"
+            >
+              View posting
+            </a>
+          )}
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            onBlur={handleNotesBlur}
+            placeholder="Add notes..."
+            rows={3}
+            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-300 placeholder:text-zinc-600 focus:border-indigo-500 focus:outline-none"
+          />
+          <button onClick={handleDelete} className="text-xs text-red-400 hover:underline">
+            Delete application
+          </button>
+        </div>
+      )}
+    </article>
+  );
+}
+```
+
+The `draggable` attribute enables HTML5 drag and drop. `setData` stores the application ID in the drag event, which the drop target reads to identify which card was dropped.
+
+## Step 6: Status Column with Drop Zone
+
+```tsx
+// src/components/StatusColumn.tsx
+"use client";
+
+import { DragEvent, useState } from "react";
+import { JobApplication, JobStatus, STATUS_CONFIG } from "@/lib/db";
+import { ApplicationCard } from "./ApplicationCard";
+
+interface StatusColumnProps {
+  status: JobStatus;
+  applications: JobApplication[];
+  onUpdate: (id: string, updates: Partial<JobApplication>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}
+
+export function StatusColumn({ status, applications, onUpdate, onDelete }: StatusColumnProps) {
+  const [isDragOver, setIsDragOver] = useState(false);
+  const config = STATUS_CONFIG[status];
+
+  const handleDragOver = (e: DragEvent): void => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (): void => {
+    setIsDragOver(false);
+  };
+
+  const handleDrop = async (e: DragEvent): Promise<void> => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const id = e.dataTransfer.getData("application/id");
+    if (id) {
+      await onUpdate(id, { status });
+    }
+  };
+
+  return (
+    <div
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`flex min-h-[200px] w-64 flex-shrink-0 flex-col rounded-xl border p-3 transition-colors ${
+        isDragOver ? "border-indigo-500 bg-indigo-500/5" : "border-zinc-800 bg-zinc-950"
+      }`}
+    >
+      <div className="mb-3 flex items-center gap-2">
+        <div className="h-3 w-3 rounded-full" style={{ backgroundColor: config.color }} />
+        <h2 className="text-sm font-semibold text-zinc-300">{config.label}</h2>
+        <span className="ml-auto text-xs text-zinc-500">{applications.length}</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {applications.map((app) => (
+          <ApplicationCard key={app.id} application={app} onUpdate={onUpdate} onDelete={onDelete} />
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+## Step 7: Board Layout
+
+```tsx
+// src/components/Board.tsx
+"use client";
+
+import { useState } from "react";
+import { JobStatus, STATUS_CONFIG } from "@/lib/db";
+import { useApplications } from "@/lib/useApplications";
+import { StatusColumn } from "./StatusColumn";
+import { AddApplicationForm } from "./AddApplicationForm";
+
+const STATUSES = Object.keys(STATUS_CONFIG) as JobStatus[];
+
+export function Board() {
+  const { isLoading, add, update, remove, byStatus } = useApplications();
+  const [showForm, setShowForm] = useState(false);
+
+  if (isLoading) {
+    return <div className="flex h-64 items-center justify-center text-zinc-500">Loading...</div>;
+  }
+
+  return (
+    <div>
+      <div className="mb-6 flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Job Tracker</h1>
+        <button
+          onClick={() => setShowForm(true)}
+          className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-400"
+        >
+          + Add Application
+        </button>
+      </div>
+      <div className="flex gap-4 overflow-x-auto pb-4">
+        {STATUSES.map((status) => (
+          <StatusColumn
+            key={status}
+            status={status}
+            applications={byStatus(status)}
+            onUpdate={update}
+            onDelete={remove}
+          />
+        ))}
+      </div>
+      {showForm && <AddApplicationForm onSubmit={add} onClose={() => setShowForm(false)} />}
+    </div>
+  );
+}
+```
+
+## Step 8: Main Page
+
+```tsx
+// src/app/page.tsx
+import { Board } from "@/components/Board";
+
+export default function HomePage() {
+  return (
+    <main className="min-h-screen bg-zinc-950 px-4 py-8 text-white">
+      <div className="mx-auto max-w-7xl">
+        <Board />
+      </div>
+    </main>
+  );
+}
+```
+
+## Step 9: Search and Filter
+
+Add search functionality to find applications across all columns.
+
+```tsx
+// Add to Board.tsx
+const [searchQuery, setSearchQuery] = useState("");
+
+const filteredByStatus = useCallback(
+  (status: JobStatus): JobApplication[] => {
+    const apps = byStatus(status);
+    if (!searchQuery.trim()) return apps;
+    const query = searchQuery.toLowerCase();
+    return apps.filter(
+      (app) =>
+        app.company.toLowerCase().includes(query) ||
+        app.role.toLowerCase().includes(query) ||
+        app.notes.toLowerCase().includes(query)
+    );
+  },
+  [byStatus, searchQuery]
+);
+
+// In the JSX, add a search input above the columns:
+<input
+  type="search"
+  placeholder="Search companies, roles, or notes..."
+  value={searchQuery}
+  onChange={(e) => setSearchQuery(e.target.value)}
+  className="w-full max-w-sm rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+/>;
+```
+
+## Step 10: Data Export and Statistics
+
+Add the ability to export your data as JSON (for backup) and show basic statistics.
+
+```typescript
+// src/lib/export.ts
+import { getAllApplications, JobApplication } from "./db";
+
+export async function exportToJSON(): Promise<void> {
+  const applications = await getAllApplications();
+  const data = JSON.stringify(applications, null, 2);
+  const blob = new Blob([data], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `job-tracker-${new Date().toISOString().split("T")[0]}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function computeStats(applications: JobApplication[]): {
+  total: number;
+  responseRate: number;
+  offerRate: number;
+  avgDaysToResponse: number;
+} {
+  const total = applications.length;
+  const responded = applications.filter((a) => a.status !== "applied").length;
+  const offers = applications.filter((a) => a.status === "offer").length;
+
+  const responseTimes = applications
+    .filter((a) => a.status !== "applied")
+    .map((a) => {
+      const applied = new Date(a.appliedDate).getTime();
+      const updated = new Date(a.updatedAt).getTime();
+      return (updated - applied) / 86400000;
+    });
+
+  const avgDays =
+    responseTimes.length > 0 ? responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length : 0;
+
+  return {
+    total,
+    responseRate: total > 0 ? responded / total : 0,
+    offerRate: total > 0 ? offers / total : 0,
+    avgDaysToResponse: Math.round(avgDays),
+  };
+}
+```
+
+Display stats at the top of the board. Seeing your response rate and offer conversion in real numbers keeps you grounded during a job search. The export function creates a downloadable JSON file — your data, your backup, no server needed. Because everything lives in IndexedDB, this app works offline from the moment you first load it. Close your laptop, open it on a plane, and your entire job search history is right there.
