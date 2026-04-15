@@ -47,6 +47,16 @@ const HOWTO_FILES = [
   "28-monitoring.mdx",
   "29-code-review.mdx",
   "30-api-design.mdx",
+  "19-testing.mdx",
+  "20-database-schema.mdx",
+  "21-docker.mdx",
+  "22-security.mdx",
+  "23-performance.mdx",
+  "31-system-design.mdx",
+  "32-mcp-server.mdx",
+  "33-ai-evaluation.mdx",
+  "34-adr.mdx",
+  "35-postmortem.mdx",
 ];
 
 async function getGuide(

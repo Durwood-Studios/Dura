@@ -119,6 +119,42 @@ const TUTORIALS = [
     difficulty: "advanced",
     minutes: 210,
   },
+  {
+    slug: "auth-system",
+    title: "Build an Authentication System from Scratch",
+    description: "Email/password auth with JWT, bcrypt, protected routes, and session management.",
+    difficulty: "intermediate",
+    minutes: 180,
+  },
+  {
+    slug: "docker-deploy",
+    title: "Build and Deploy a Dockerized Application",
+    description: "Containerize Next.js + PostgreSQL with Docker Compose and deploy to the cloud.",
+    difficulty: "intermediate",
+    minutes: 180,
+  },
+  {
+    slug: "test-suite",
+    title: "Build a Test Suite for an Untested Codebase",
+    description: "Unit tests, integration tests, E2E, mocking, and CI integration.",
+    difficulty: "intermediate",
+    minutes: 180,
+  },
+  {
+    slug: "url-shortener",
+    title: "Design and Implement a URL Shortener at Scale",
+    description:
+      "System design + implementation: hashing, redirects, analytics, and rate limiting.",
+    difficulty: "advanced",
+    minutes: 240,
+  },
+  {
+    slug: "tiny-compiler",
+    title: "Build a Compiler for a Tiny Language",
+    description: "Lexer, parser, AST, and interpreter for an expression language in TypeScript.",
+    difficulty: "advanced",
+    minutes: 240,
+  },
 ] as const;
 
 const DIFFICULTY_COLORS: Record<string, string> = {

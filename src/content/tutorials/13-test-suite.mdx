@@ -1,0 +1,631 @@
+---
+title: "Build a Test Suite for an Untested Codebase"
+description: "Write unit, integration, and E2E tests for an untested Node.js API — covering the testing pyramid, mocking, and CI integration."
+slug: "test-suite"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["testing", "jest", "tdd", "integration", "e2e"]
+---
+
+## Overview
+
+You've inherited an API with zero tests. It works — probably. In this tutorial, you'll methodically add a complete test suite to an existing Node.js/Express API: unit tests for business logic, integration tests for API endpoints, and an E2E test for the critical user flow. You'll learn how to prioritize what to test, mock external dependencies, and wire it all into CI.
+
+**What you'll learn:**
+
+- The testing pyramid and how to distribute test effort
+- Writing unit tests with Jest
+- Mocking databases, external APIs, and modules
+- Integration testing Express routes with Supertest
+- E2E testing with a real database
+- Setting up a CI pipeline to run tests on every push
+
+## Step 1: The Untested Codebase
+
+Here's the API we're testing — a task management service. Create the project:
+
+```bash
+mkdir test-suite && cd test-suite
+npm init -y
+npm install express better-sqlite3
+npm install -D typescript @types/express @types/better-sqlite3 jest ts-jest @types/jest supertest @types/supertest tsx
+```
+
+Create `src/db.ts`:
+
+```typescript
+import Database from "better-sqlite3";
+
+const db = new Database(process.env.DB_PATH || "tasks.db");
+db.pragma("journal_mode = WAL");
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    status TEXT DEFAULT 'todo' CHECK(status IN ('todo', 'in_progress', 'done')),
+    priority INTEGER DEFAULT 0 CHECK(priority BETWEEN 0 AND 3),
+    created_at TEXT DEFAULT (datetime('now'))
+  )
+`);
+
+export default db;
+```
+
+Create `src/tasks.ts` — the business logic layer:
+
+```typescript
+import db from "./db";
+
+interface Task {
+  id: number;
+  title: string;
+  status: "todo" | "in_progress" | "done";
+  priority: number;
+  created_at: string;
+}
+
+export function createTask(title: string, priority: number = 0): Task {
+  if (!title || title.trim().length === 0) {
+    throw new Error("Title is required");
+  }
+  if (priority < 0 || priority > 3) {
+    throw new Error("Priority must be between 0 and 3");
+  }
+
+  const result = db
+    .prepare("INSERT INTO tasks (title, priority) VALUES (?, ?)")
+    .run(title.trim(), priority);
+
+  return db.prepare("SELECT * FROM tasks WHERE id = ?").get(result.lastInsertRowid) as Task;
+}
+
+export function listTasks(status?: string): Task[] {
+  if (status) {
+    return db
+      .prepare("SELECT * FROM tasks WHERE status = ? ORDER BY priority DESC")
+      .all(status) as Task[];
+  }
+  return db.prepare("SELECT * FROM tasks ORDER BY priority DESC").all() as Task[];
+}
+
+export function updateStatus(id: number, status: string): Task {
+  const validStatuses = ["todo", "in_progress", "done"];
+  if (!validStatuses.includes(status)) {
+    throw new Error(`Invalid status. Must be one of: ${validStatuses.join(", ")}`);
+  }
+
+  const result = db.prepare("UPDATE tasks SET status = ? WHERE id = ?").run(status, id);
+
+  if (result.changes === 0) {
+    throw new Error("Task not found");
+  }
+
+  return db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Task;
+}
+
+export function getTaskStats(): { total: number; byStatus: Record<string, number> } {
+  const all = listTasks();
+  const byStatus: Record<string, number> = {};
+
+  for (const task of all) {
+    byStatus[task.status] = (byStatus[task.status] || 0) + 1;
+  }
+
+  return { total: all.length, byStatus };
+}
+```
+
+Create `src/app.ts` (Express app, separated from server for testing):
+
+```typescript
+import express from "express";
+import { createTask, listTasks, updateStatus, getTaskStats } from "./tasks";
+
+const app = express();
+app.use(express.json());
+
+app.get("/tasks", (req, res) => {
+  try {
+    const status = req.query.status as string | undefined;
+    const tasks = listTasks(status);
+    res.json(tasks);
+  } catch (error) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/tasks", (req, res) => {
+  try {
+    const { title, priority } = req.body;
+    const task = createTask(title, priority);
+    res.status(201).json(task);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    res.status(400).json({ error: message });
+  }
+});
+
+app.patch("/tasks/:id/status", (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { status } = req.body;
+    const task = updateStatus(id, status);
+    res.json(task);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    const statusCode = message.includes("not found") ? 404 : 400;
+    res.status(statusCode).json({ error: message });
+  }
+});
+
+app.get("/stats", (_req, res) => {
+  try {
+    const stats = getTaskStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+export default app;
+```
+
+## Step 2: Jest Configuration
+
+Create `jest.config.ts`:
+
+```typescript
+import type { Config } from "jest";
+
+const config: Config = {
+  preset: "ts-jest",
+  testEnvironment: "node",
+  roots: ["<rootDir>/src", "<rootDir>/tests"],
+  testMatch: ["**/*.test.ts"],
+  moduleNameMapper: {
+    "^@/(.*)$": "<rootDir>/src/$1",
+  },
+  setupFilesAfterSetup: ["<rootDir>/tests/setup.ts"],
+  collectCoverageFrom: ["src/**/*.ts", "!src/index.ts", "!src/db.ts"],
+  coverageThresholds: {
+    global: {
+      branches: 80,
+      functions: 80,
+      lines: 80,
+      statements: 80,
+    },
+  },
+};
+
+export default config;
+```
+
+Create `tests/setup.ts`:
+
+```typescript
+import Database from "better-sqlite3";
+
+// Use in-memory database for tests
+process.env.DB_PATH = ":memory:";
+
+afterEach(() => {
+  // Clean up between tests
+  try {
+    const db = require("../src/db").default;
+    db.exec("DELETE FROM tasks");
+  } catch {
+    // DB may not be initialized in all test files
+  }
+});
+```
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  }
+}
+```
+
+## Step 3: Unit Testing Business Logic
+
+Create `tests/unit/tasks.test.ts`:
+
+```typescript
+import { createTask, listTasks, updateStatus, getTaskStats } from "../../src/tasks";
+
+describe("createTask", () => {
+  it("creates a task with default priority", () => {
+    const task = createTask("Write tests");
+    expect(task).toMatchObject({
+      title: "Write tests",
+      status: "todo",
+      priority: 0,
+    });
+    expect(task.id).toBeDefined();
+    expect(task.created_at).toBeDefined();
+  });
+
+  it("creates a task with specified priority", () => {
+    const task = createTask("Urgent fix", 3);
+    expect(task.priority).toBe(3);
+  });
+
+  it("trims whitespace from title", () => {
+    const task = createTask("  padded title  ");
+    expect(task.title).toBe("padded title");
+  });
+
+  it("throws on empty title", () => {
+    expect(() => createTask("")).toThrow("Title is required");
+    expect(() => createTask("   ")).toThrow("Title is required");
+  });
+
+  it("throws on invalid priority", () => {
+    expect(() => createTask("Task", -1)).toThrow("Priority must be between 0 and 3");
+    expect(() => createTask("Task", 4)).toThrow("Priority must be between 0 and 3");
+  });
+});
+
+describe("listTasks", () => {
+  it("returns empty array when no tasks exist", () => {
+    expect(listTasks()).toEqual([]);
+  });
+
+  it("returns tasks ordered by priority descending", () => {
+    createTask("Low", 0);
+    createTask("High", 3);
+    createTask("Medium", 1);
+
+    const tasks = listTasks();
+    expect(tasks[0].priority).toBe(3);
+    expect(tasks[1].priority).toBe(1);
+    expect(tasks[2].priority).toBe(0);
+  });
+
+  it("filters by status", () => {
+    createTask("Task 1");
+    const task2 = createTask("Task 2");
+    updateStatus(task2.id, "done");
+
+    const doneTasks = listTasks("done");
+    expect(doneTasks).toHaveLength(1);
+    expect(doneTasks[0].title).toBe("Task 2");
+  });
+});
+
+describe("updateStatus", () => {
+  it("updates task status", () => {
+    const task = createTask("Test task");
+    const updated = updateStatus(task.id, "in_progress");
+    expect(updated.status).toBe("in_progress");
+  });
+
+  it("throws on invalid status", () => {
+    const task = createTask("Test task");
+    expect(() => updateStatus(task.id, "invalid")).toThrow("Invalid status");
+  });
+
+  it("throws when task not found", () => {
+    expect(() => updateStatus(99999, "done")).toThrow("Task not found");
+  });
+});
+
+describe("getTaskStats", () => {
+  it("returns zero stats when empty", () => {
+    const stats = getTaskStats();
+    expect(stats.total).toBe(0);
+    expect(stats.byStatus).toEqual({});
+  });
+
+  it("groups tasks by status", () => {
+    createTask("A");
+    createTask("B");
+    const c = createTask("C");
+    updateStatus(c.id, "done");
+
+    const stats = getTaskStats();
+    expect(stats.total).toBe(3);
+    expect(stats.byStatus.todo).toBe(2);
+    expect(stats.byStatus.done).toBe(1);
+  });
+});
+```
+
+Unit tests target pure business logic. They're fast, isolated, and pinpoint exactly which function broke. Aim for these to be 70% of your test suite.
+
+## Step 4: Integration Testing API Routes
+
+Create `tests/integration/api.test.ts`:
+
+```typescript
+import request from "supertest";
+import app from "../../src/app";
+
+describe("POST /tasks", () => {
+  it("creates a task and returns 201", async () => {
+    const res = await request(app)
+      .post("/tasks")
+      .send({ title: "Integration test task", priority: 2 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.title).toBe("Integration test task");
+    expect(res.body.priority).toBe(2);
+    expect(res.body.id).toBeDefined();
+  });
+
+  it("returns 400 for missing title", async () => {
+    const res = await request(app).post("/tasks").send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("Title is required");
+  });
+
+  it("returns 400 for invalid priority", async () => {
+    const res = await request(app).post("/tasks").send({ title: "Bad priority", priority: 5 });
+
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /tasks", () => {
+  it("returns all tasks", async () => {
+    await request(app).post("/tasks").send({ title: "Task 1" });
+    await request(app).post("/tasks").send({ title: "Task 2" });
+
+    const res = await request(app).get("/tasks");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+  });
+
+  it("filters by status query param", async () => {
+    await request(app).post("/tasks").send({ title: "Todo task" });
+
+    const res = await request(app).get("/tasks?status=done");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(0);
+  });
+});
+
+describe("PATCH /tasks/:id/status", () => {
+  it("updates status and returns the task", async () => {
+    const created = await request(app).post("/tasks").send({ title: "Status test" });
+
+    const res = await request(app)
+      .patch(`/tasks/${created.body.id}/status`)
+      .send({ status: "in_progress" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("in_progress");
+  });
+
+  it("returns 404 for nonexistent task", async () => {
+    const res = await request(app).patch("/tasks/99999/status").send({ status: "done" });
+
+    expect(res.status).toBe(404);
+  });
+});
+```
+
+Integration tests verify the full request-response cycle — routing, middleware, serialization, and error handling. Supertest spins up the Express app in-process without a real HTTP server, so they're fast.
+
+## Step 5: Mocking External Dependencies
+
+When your code calls external services, mock them. Create `tests/unit/mocking-example.test.ts`:
+
+```typescript
+// Example: testing a function that calls an external notification service
+import { jest } from "@jest/globals";
+
+// Mock the module before importing
+jest.mock("../../src/notifications", () => ({
+  sendEmail: jest.fn().mockResolvedValue({ sent: true }),
+  sendSlack: jest.fn().mockResolvedValue({ ok: true }),
+}));
+
+import { sendEmail, sendSlack } from "../../src/notifications";
+
+describe("notification mocking", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("verifies the mock was called with correct args", async () => {
+    await sendEmail("user@test.com", "Task completed");
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledWith("user@test.com", "Task completed");
+  });
+
+  it("can override return values per test", async () => {
+    (sendEmail as jest.Mock).mockRejectedValueOnce(new Error("SMTP down"));
+
+    await expect(sendEmail("user@test.com", "fail")).rejects.toThrow("SMTP down");
+  });
+});
+```
+
+**Mocking rules of thumb:**
+
+- Mock at module boundaries (database, HTTP, file system)
+- Never mock the code you're testing
+- Prefer dependency injection over module mocking when possible
+- If a test needs more than 3 mocks, the code has too many dependencies — refactor
+
+## Step 6: Testing Edge Cases
+
+Create `tests/unit/edge-cases.test.ts`:
+
+```typescript
+import { createTask, listTasks } from "../../src/tasks";
+
+describe("edge cases", () => {
+  it("handles Unicode titles", () => {
+    const task = createTask("日本語のタスク 🎯");
+    expect(task.title).toBe("日本語のタスク 🎯");
+  });
+
+  it("handles very long titles", () => {
+    const longTitle = "a".repeat(10000);
+    const task = createTask(longTitle);
+    expect(task.title).toBe(longTitle);
+  });
+
+  it("handles special characters in titles", () => {
+    const task = createTask("Task with 'quotes' and \"double quotes\"");
+    expect(task.title).toContain("quotes");
+  });
+
+  it("handles concurrent-like rapid creation", () => {
+    const tasks = Array.from({ length: 100 }, (_, i) => createTask(`Bulk task ${i}`, i % 4));
+
+    expect(tasks).toHaveLength(100);
+    const allTasks = listTasks();
+    expect(allTasks).toHaveLength(100);
+  });
+
+  it("handles boundary priority values", () => {
+    expect(createTask("Zero", 0).priority).toBe(0);
+    expect(createTask("Three", 3).priority).toBe(3);
+    expect(() => createTask("Negative", -1)).toThrow();
+    expect(() => createTask("Four", 4)).toThrow();
+  });
+});
+```
+
+## Step 7: Code Coverage
+
+Run coverage and analyze the report:
+
+```bash
+npx jest --coverage
+```
+
+The output shows four metrics per file:
+
+- **Statements**: individual executable lines covered
+- **Branches**: if/else paths taken (the most important metric)
+- **Functions**: functions called at least once
+- **Lines**: physical lines executed
+
+80% is a good minimum threshold. 100% is a vanity metric — chasing it leads to brittle tests that assert implementation details.
+
+Focus coverage effort on:
+
+1. Business logic with branching (validation, state transitions)
+2. Error handling paths (what happens when the DB is down?)
+3. Boundary conditions (empty arrays, max values, null inputs)
+
+## Step 8: E2E Test
+
+Create `tests/e2e/workflow.test.ts` — tests the complete user flow:
+
+```typescript
+import request from "supertest";
+import app from "../../src/app";
+
+describe("Task management workflow", () => {
+  it("supports the full task lifecycle", async () => {
+    // Create tasks
+    const task1 = await request(app).post("/tasks").send({ title: "Design API", priority: 2 });
+    const task2 = await request(app).post("/tasks").send({ title: "Write tests", priority: 3 });
+
+    expect(task1.status).toBe(201);
+    expect(task2.status).toBe(201);
+
+    // List all — should be ordered by priority
+    const allTasks = await request(app).get("/tasks");
+    expect(allTasks.body[0].title).toBe("Write tests"); // priority 3
+    expect(allTasks.body[1].title).toBe("Design API"); // priority 2
+
+    // Move task to in_progress
+    await request(app).patch(`/tasks/${task2.body.id}/status`).send({ status: "in_progress" });
+
+    // Check stats
+    const stats = await request(app).get("/stats");
+    expect(stats.body.total).toBe(2);
+    expect(stats.body.byStatus.todo).toBe(1);
+    expect(stats.body.byStatus.in_progress).toBe(1);
+
+    // Complete the task
+    await request(app).patch(`/tasks/${task2.body.id}/status`).send({ status: "done" });
+
+    // Filter by done
+    const doneTasks = await request(app).get("/tasks?status=done");
+    expect(doneTasks.body).toHaveLength(1);
+    expect(doneTasks.body[0].title).toBe("Write tests");
+  });
+});
+```
+
+E2E tests are expensive but high-value. They catch integration issues that unit tests miss — broken serialization, incorrect HTTP status codes, missing middleware. Keep them focused on critical user flows, not exhaustive permutations.
+
+## Step 9: CI Integration
+
+Create `.github/workflows/test.yml`:
+
+```yaml
+name: Test Suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - run: npm test -- --coverage --ci
+
+      - name: Check coverage thresholds
+        run: npm test -- --coverage --coverageReporters=text-summary
+```
+
+The `--ci` flag makes Jest fail on snapshot mismatches rather than updating them — critical for CI. Coverage thresholds in `jest.config.ts` will fail the build if coverage drops below 80%.
+
+## Step 10: Testing Strategy Summary
+
+The testing pyramid applied to this codebase:
+
+```
+          /  E2E  \          ~10% of tests
+         /----------\
+        / Integration \      ~20% of tests
+       /----------------\
+      /    Unit Tests     \  ~70% of tests
+     /____________________\
+```
+
+**When adding tests to an untested codebase, prioritize:**
+
+1. Business logic with the most branching (validation functions, state machines)
+2. Code that has broken before (check git blame for bug fix commits)
+3. Integration points (API routes, database queries)
+4. Edge cases your users will hit (empty states, large inputs, concurrent access)
+
+**What NOT to test:**
+
+- Third-party library internals (trust that `express.json()` works)
+- Simple getters/setters with no logic
+- Framework boilerplate (Next.js page exports, config files)
+- Implementation details (internal variable names, private methods)
+
+Run `npm test -- --coverage` to verify your suite passes, then commit the entire test infrastructure. Your codebase just went from "probably works" to "provably works."

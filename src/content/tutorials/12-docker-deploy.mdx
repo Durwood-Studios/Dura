@@ -1,0 +1,443 @@
+---
+title: "Build and Deploy a Dockerized Application"
+description: "Containerize a Next.js app with PostgreSQL using Docker and Docker Compose, then deploy to a free cloud platform."
+slug: "docker-deploy"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["docker", "deployment", "compose", "postgres", "nextjs"]
+---
+
+## Overview
+
+Docker eliminates "works on my machine" problems by packaging your application and its dependencies into a portable container. In this tutorial, you'll take a Next.js application with a PostgreSQL database, containerize both services, orchestrate them with Docker Compose, and deploy the stack to Railway.
+
+**What you'll learn:**
+
+- Docker fundamentals: images, containers, volumes, networks
+- Writing optimized Dockerfiles with multi-stage builds
+- Docker Compose for multi-service orchestration
+- Environment variable management across containers
+- Database persistence with volumes
+- Production deployment on Railway's free tier
+
+Prerequisites: Docker Desktop installed, a free Railway account, and basic familiarity with Next.js.
+
+## Step 1: The Application
+
+We'll work with a minimal Next.js app that connects to PostgreSQL. Create the project:
+
+```bash
+npx create-next-app@latest docker-app --typescript --tailwind --app --no-src-dir
+cd docker-app
+npm install pg @types/pg
+```
+
+Create `lib/db.ts`:
+
+```typescript
+import { Pool, QueryResult } from "pg";
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/app",
+});
+
+export async function query(text: string, params?: unknown[]): Promise<QueryResult> {
+  const client = await pool.connect();
+  try {
+    return await client.query(text, params);
+  } finally {
+    client.release();
+  }
+}
+
+export async function initSchema(): Promise<void> {
+  await query(`
+    CREATE TABLE IF NOT EXISTS notes (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      content TEXT DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+}
+```
+
+Create `app/api/notes/route.ts`:
+
+```typescript
+import { NextResponse } from "next/server";
+import { query, initSchema } from "@/lib/db";
+
+export async function GET(): Promise<NextResponse> {
+  try {
+    await initSchema();
+    const result = await query("SELECT * FROM notes ORDER BY created_at DESC");
+    return NextResponse.json(result.rows);
+  } catch (error) {
+    console.error("Database error:", error);
+    return NextResponse.json({ error: "Database error" }, { status: 500 });
+  }
+}
+
+export async function POST(request: Request): Promise<NextResponse> {
+  try {
+    await initSchema();
+    const { title, content } = await request.json();
+    const result = await query("INSERT INTO notes (title, content) VALUES ($1, $2) RETURNING *", [
+      title,
+      content,
+    ]);
+    return NextResponse.json(result.rows[0], { status: 201 });
+  } catch (error) {
+    console.error("Database error:", error);
+    return NextResponse.json({ error: "Database error" }, { status: 500 });
+  }
+}
+```
+
+## Step 2: Writing the Dockerfile
+
+Create `Dockerfile` in the project root:
+
+```dockerfile
+# Stage 1: Install dependencies
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --only=production
+
+# Stage 2: Build the application
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+# Stage 3: Production runtime
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+CMD ["node", "server.js"]
+```
+
+This multi-stage build is critical for production images. The final stage contains only the runtime and built output — no devDependencies, no source code, no build tools. A typical Next.js image drops from ~1.5GB to ~150MB.
+
+Enable standalone output in `next.config.ts`:
+
+```typescript
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  output: "standalone",
+};
+
+export default nextConfig;
+```
+
+## Step 3: Docker Ignore
+
+Create `.dockerignore`:
+
+```
+node_modules
+.next
+.git
+.gitignore
+*.md
+docker-compose*.yml
+.env*.local
+```
+
+This prevents copying unnecessary files into the build context. Without it, `COPY . .` sends your entire `node_modules` directory to the Docker daemon — wasting time and potentially leaking secrets.
+
+## Step 4: Docker Compose
+
+Create `docker-compose.yml`:
+
+```yaml
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+```
+
+Key details: the `app` service references the database as `db` (the service name), not `localhost`. Docker Compose creates a network where services resolve each other by name. The `depends_on` with `condition: service_healthy` ensures the database is actually accepting connections before the app starts — not just that the container is running.
+
+## Step 5: Build and Run Locally
+
+```bash
+# Build and start both services
+docker compose up --build
+
+# In another terminal, test it
+curl http://localhost:3000/api/notes
+curl -X POST http://localhost:3000/api/notes \
+  -H "Content-Type: application/json" \
+  -d '{"title":"First note","content":"From Docker!"}'
+```
+
+Useful Docker commands during development:
+
+```bash
+# View logs
+docker compose logs -f app
+
+# Rebuild just the app (after code changes)
+docker compose up --build app
+
+# Stop everything
+docker compose down
+
+# Stop and destroy volumes (resets database)
+docker compose down -v
+
+# Shell into a running container
+docker compose exec app sh
+
+# Check image sizes
+docker images | grep docker-app
+```
+
+## Step 6: Environment Variables
+
+Create `docker-compose.override.yml` for local development overrides:
+
+```yaml
+services:
+  app:
+    build:
+      target: builder
+    command: npm run dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/app
+      NODE_ENV: development
+```
+
+This mounts your source code into the container, so changes trigger Next.js hot reload without rebuilding the image. The anonymous volumes for `node_modules` and `.next` prevent your host copies from overriding the container's versions.
+
+For production, use an `.env.production` file (never committed):
+
+```bash
+DATABASE_URL=postgres://user:password@host:5432/dbname
+```
+
+Reference it in `docker-compose.prod.yml`:
+
+```yaml
+services:
+  app:
+    env_file:
+      - .env.production
+```
+
+## Step 7: Optimizing the Docker Image
+
+Check your image size:
+
+```bash
+docker images docker-app-app
+```
+
+Further optimizations:
+
+```dockerfile
+# Add to the runner stage to reduce image size
+RUN apk add --no-cache dumb-init
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "server.js"]
+```
+
+`dumb-init` handles signal forwarding correctly — without it, `SIGTERM` from Docker won't gracefully shut down your Node.js process, leading to dropped connections during deploys.
+
+Add a `.dockerignore` entry for test files:
+
+```
+**/*.test.ts
+**/*.spec.ts
+__tests__
+coverage
+```
+
+## Step 8: Database Migrations
+
+For production, you need proper migrations instead of `initSchema()`. Create `scripts/migrate.ts`:
+
+```typescript
+import { Pool } from "pg";
+import fs from "fs";
+import path from "path";
+
+async function migrate(): Promise<void> {
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+  });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS migrations (
+        id SERIAL PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        applied_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    const migrationsDir = path.join(__dirname, "../migrations");
+    const files = fs.readdirSync(migrationsDir).sort();
+
+    for (const file of files) {
+      const applied = await client.query("SELECT id FROM migrations WHERE name = $1", [file]);
+
+      if (applied.rows.length === 0) {
+        const sql = fs.readFileSync(path.join(migrationsDir, file), "utf-8");
+        await client.query("BEGIN");
+        await client.query(sql);
+        await client.query("INSERT INTO migrations (name) VALUES ($1)", [file]);
+        await client.query("COMMIT");
+        console.log(`Applied: ${file}`);
+      }
+    }
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
+migrate().catch(console.error);
+```
+
+Create `migrations/001_create_notes.sql`:
+
+```sql
+CREATE TABLE IF NOT EXISTS notes (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  content TEXT DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+## Step 9: Deploy to Railway
+
+Railway provides a free tier that supports Docker deployments with PostgreSQL.
+
+```bash
+# Install Railway CLI
+npm install -g @railway/cli
+
+# Login and initialize
+railway login
+railway init
+
+# Add a PostgreSQL database
+railway add --plugin postgresql
+
+# Set the DATABASE_URL to reference the Railway-provided variable
+railway variables set DATABASE_URL='${{Postgres.DATABASE_URL}}'
+
+# Deploy
+railway up
+```
+
+Railway automatically detects your Dockerfile and builds the image. The PostgreSQL plugin provisions a managed database with automatic backups.
+
+Alternatively, create a `railway.json` for explicit configuration:
+
+```json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "healthcheckPath": "/api/notes",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 3
+  }
+}
+```
+
+## Step 10: Production Checklist
+
+Before declaring your deployment production-ready, verify each item:
+
+```bash
+# Check the image runs correctly with production env
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+
+# Verify the health check works
+curl -f http://localhost:3000/api/notes || echo "Health check failed"
+
+# Check container resource usage
+docker stats --no-stream
+
+# Verify no secrets in the image
+docker history docker-app-app --no-trunc | grep -i secret
+```
+
+**Production hardening checklist:**
+
+- Use specific image tags (`node:20.11-alpine` not `node:20-alpine`)
+- Set memory limits in Docker Compose (`deploy.resources.limits.memory`)
+- Configure log rotation (`logging.options.max-size`)
+- Add a health check endpoint in your app
+- Use Docker secrets or a vault for sensitive environment variables
+- Enable `read_only: true` on the app container's root filesystem
+- Run database migrations as a separate one-off command, not at app startup
+- Set up a CI pipeline to build and push images on merge to main
+
+You now have a containerized application stack that runs identically on your laptop, in CI, and in production. The Dockerfile, Compose file, and deployment config are the three artifacts that fully describe your infrastructure.

@@ -1,0 +1,1078 @@
+---
+title: "Build a Compiler for a Tiny Language"
+description: "Implement a lexer, parser, AST, and interpreter for a small expression language in TypeScript — then extend it with variables, functions, and control flow."
+slug: "tiny-compiler"
+difficulty: "advanced"
+estimatedMinutes: 240
+steps: 12
+tags: ["compiler", "parser", "ast", "interpreter", "typescript"]
+---
+
+## Overview
+
+Compilers and interpreters are not magic — they're just programs that read text and do something structured with it. In this tutorial, you'll build a complete interpreter for a small language called **Tiny** in TypeScript. You'll implement every stage: lexing (raw text → tokens), parsing (tokens → AST), and evaluation (AST → result). Then you'll extend Tiny with variables, functions, and if/else control flow.
+
+**What you'll learn:**
+
+- How lexers tokenize raw source text
+- Recursive descent parsing and operator precedence
+- Abstract Syntax Tree (AST) design and node types
+- Tree-walking interpretation
+- Scope chains and environment management
+- Extending a language with new features
+
+The language we'll build supports arithmetic, comparisons, variables, functions, and conditionals:
+
+```
+let x = 10
+let double = fn(n) { n * 2 }
+if (double(x) > 15) { "big" } else { "small" }
+```
+
+## Step 1: Project Setup
+
+```bash
+mkdir tiny-lang && cd tiny-lang
+npm init -y
+npm install -D typescript @types/node tsx
+```
+
+Create `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "esModuleInterop": true
+  },
+  "include": ["src"]
+}
+```
+
+## Step 2: Token Types
+
+Create `src/tokens.ts`. Every meaningful piece of source code maps to a token type:
+
+```typescript
+export enum TokenType {
+  // Literals
+  Number = "Number",
+  String = "String",
+  Identifier = "Identifier",
+
+  // Operators
+  Plus = "Plus",
+  Minus = "Minus",
+  Star = "Star",
+  Slash = "Slash",
+  Percent = "Percent",
+
+  // Comparison
+  Equal = "Equal",
+  NotEqual = "NotEqual",
+  LessThan = "LessThan",
+  GreaterThan = "GreaterThan",
+  LessEqual = "LessEqual",
+  GreaterEqual = "GreaterEqual",
+
+  // Assignment
+  Assign = "Assign",
+
+  // Delimiters
+  LeftParen = "LeftParen",
+  RightParen = "RightParen",
+  LeftBrace = "LeftBrace",
+  RightBrace = "RightBrace",
+  Comma = "Comma",
+
+  // Keywords
+  Let = "Let",
+  Fn = "Fn",
+  If = "If",
+  Else = "Else",
+  True = "True",
+  False = "False",
+
+  // Control
+  EOF = "EOF",
+}
+
+export interface Token {
+  type: TokenType;
+  value: string;
+  line: number;
+  column: number;
+}
+```
+
+## Step 3: The Lexer
+
+Create `src/lexer.ts`. The lexer scans raw source text character by character and produces a stream of tokens:
+
+```typescript
+import { Token, TokenType } from "./tokens";
+
+const KEYWORDS: Record<string, TokenType> = {
+  let: TokenType.Let,
+  fn: TokenType.Fn,
+  if: TokenType.If,
+  else: TokenType.Else,
+  true: TokenType.True,
+  false: TokenType.False,
+};
+
+export class Lexer {
+  private source: string;
+  private pos: number = 0;
+  private line: number = 1;
+  private column: number = 1;
+
+  constructor(source: string) {
+    this.source = source;
+  }
+
+  tokenize(): Token[] {
+    const tokens: Token[] = [];
+
+    while (this.pos < this.source.length) {
+      this.skipWhitespace();
+      if (this.pos >= this.source.length) break;
+
+      const token = this.nextToken();
+      if (token) tokens.push(token);
+    }
+
+    tokens.push(this.makeToken(TokenType.EOF, ""));
+    return tokens;
+  }
+
+  private nextToken(): Token | null {
+    const ch = this.source[this.pos];
+
+    // Skip comments
+    if (ch === "/" && this.peek() === "/") {
+      while (this.pos < this.source.length && this.source[this.pos] !== "\n") {
+        this.advance();
+      }
+      return null;
+    }
+
+    // Numbers
+    if (this.isDigit(ch)) return this.readNumber();
+
+    // Strings
+    if (ch === '"') return this.readString();
+
+    // Identifiers and keywords
+    if (this.isAlpha(ch)) return this.readIdentifier();
+
+    // Two-character operators
+    if (ch === "=" && this.peek() === "=") return this.twoChar(TokenType.Equal);
+    if (ch === "!" && this.peek() === "=") return this.twoChar(TokenType.NotEqual);
+    if (ch === "<" && this.peek() === "=") return this.twoChar(TokenType.LessEqual);
+    if (ch === ">" && this.peek() === "=") return this.twoChar(TokenType.GreaterEqual);
+
+    // Single-character tokens
+    const singleChars: Record<string, TokenType> = {
+      "+": TokenType.Plus,
+      "-": TokenType.Minus,
+      "*": TokenType.Star,
+      "/": TokenType.Slash,
+      "%": TokenType.Percent,
+      "=": TokenType.Assign,
+      "<": TokenType.LessThan,
+      ">": TokenType.GreaterThan,
+      "(": TokenType.LeftParen,
+      ")": TokenType.RightParen,
+      "{": TokenType.LeftBrace,
+      "}": TokenType.RightBrace,
+      ",": TokenType.Comma,
+    };
+
+    const tokenType = singleChars[ch];
+    if (tokenType) {
+      const token = this.makeToken(tokenType, ch);
+      this.advance();
+      return token;
+    }
+
+    throw new Error(`Unexpected character '${ch}' at line ${this.line}, column ${this.column}`);
+  }
+
+  private readNumber(): Token {
+    const start = this.pos;
+    while (this.pos < this.source.length && this.isDigit(this.source[this.pos])) {
+      this.advance();
+    }
+    // Decimal support
+    if (this.source[this.pos] === "." && this.isDigit(this.peek())) {
+      this.advance(); // consume the dot
+      while (this.pos < this.source.length && this.isDigit(this.source[this.pos])) {
+        this.advance();
+      }
+    }
+    const value = this.source.slice(start, this.pos);
+    return { type: TokenType.Number, value, line: this.line, column: this.column - value.length };
+  }
+
+  private readString(): Token {
+    this.advance(); // skip opening quote
+    const start = this.pos;
+    while (this.pos < this.source.length && this.source[this.pos] !== '"') {
+      if (this.source[this.pos] === "\n") this.line++;
+      this.advance();
+    }
+    if (this.pos >= this.source.length) {
+      throw new Error(`Unterminated string at line ${this.line}`);
+    }
+    const value = this.source.slice(start, this.pos);
+    this.advance(); // skip closing quote
+    return {
+      type: TokenType.String,
+      value,
+      line: this.line,
+      column: this.column - value.length - 2,
+    };
+  }
+
+  private readIdentifier(): Token {
+    const start = this.pos;
+    while (this.pos < this.source.length && this.isAlphaNumeric(this.source[this.pos])) {
+      this.advance();
+    }
+    const value = this.source.slice(start, this.pos);
+    const type = KEYWORDS[value] || TokenType.Identifier;
+    return { type, value, line: this.line, column: this.column - value.length };
+  }
+
+  private twoChar(type: TokenType): Token {
+    const value = this.source.slice(this.pos, this.pos + 2);
+    const token = this.makeToken(type, value);
+    this.advance();
+    this.advance();
+    return token;
+  }
+
+  private makeToken(type: TokenType, value: string): Token {
+    return { type, value, line: this.line, column: this.column };
+  }
+
+  private advance(): void {
+    if (this.source[this.pos] === "\n") {
+      this.line++;
+      this.column = 1;
+    } else {
+      this.column++;
+    }
+    this.pos++;
+  }
+
+  private peek(): string {
+    return this.pos + 1 < this.source.length ? this.source[this.pos + 1] : "";
+  }
+
+  private skipWhitespace(): void {
+    while (this.pos < this.source.length && /\s/.test(this.source[this.pos])) {
+      this.advance();
+    }
+  }
+
+  private isDigit(ch: string): boolean {
+    return ch >= "0" && ch <= "9";
+  }
+
+  private isAlpha(ch: string): boolean {
+    return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch === "_";
+  }
+
+  private isAlphaNumeric(ch: string): boolean {
+    return this.isAlpha(ch) || this.isDigit(ch);
+  }
+}
+```
+
+## Step 4: AST Node Types
+
+Create `src/ast.ts`. The AST represents the structure of the program as a tree:
+
+```typescript
+export type ASTNode =
+  | NumberLiteral
+  | StringLiteral
+  | BooleanLiteral
+  | Identifier
+  | BinaryExpr
+  | UnaryExpr
+  | LetDeclaration
+  | Assignment
+  | FunctionLiteral
+  | CallExpr
+  | IfExpr
+  | Block;
+
+export interface NumberLiteral {
+  kind: "NumberLiteral";
+  value: number;
+}
+
+export interface StringLiteral {
+  kind: "StringLiteral";
+  value: string;
+}
+
+export interface BooleanLiteral {
+  kind: "BooleanLiteral";
+  value: boolean;
+}
+
+export interface Identifier {
+  kind: "Identifier";
+  name: string;
+}
+
+export interface BinaryExpr {
+  kind: "BinaryExpr";
+  operator: string;
+  left: ASTNode;
+  right: ASTNode;
+}
+
+export interface UnaryExpr {
+  kind: "UnaryExpr";
+  operator: string;
+  operand: ASTNode;
+}
+
+export interface LetDeclaration {
+  kind: "LetDeclaration";
+  name: string;
+  value: ASTNode;
+}
+
+export interface Assignment {
+  kind: "Assignment";
+  name: string;
+  value: ASTNode;
+}
+
+export interface FunctionLiteral {
+  kind: "FunctionLiteral";
+  params: string[];
+  body: ASTNode;
+}
+
+export interface CallExpr {
+  kind: "CallExpr";
+  callee: ASTNode;
+  args: ASTNode[];
+}
+
+export interface IfExpr {
+  kind: "IfExpr";
+  condition: ASTNode;
+  consequence: ASTNode;
+  alternative: ASTNode | null;
+}
+
+export interface Block {
+  kind: "Block";
+  statements: ASTNode[];
+}
+```
+
+Each node type carries exactly the data needed to evaluate it. `BinaryExpr` has an operator and two children. `FunctionLiteral` has parameter names and a body. This is the key insight of compilers: source text is messy and ambiguous, but an AST is precise and structured.
+
+## Step 5: The Parser
+
+Create `src/parser.ts`. This recursive descent parser converts tokens into an AST, handling operator precedence correctly:
+
+```typescript
+import { Token, TokenType } from "./tokens";
+import { ASTNode } from "./ast";
+
+export class Parser {
+  private tokens: Token[];
+  private pos: number = 0;
+
+  constructor(tokens: Token[]) {
+    this.tokens = tokens;
+  }
+
+  parse(): ASTNode {
+    const statements: ASTNode[] = [];
+
+    while (!this.isAtEnd()) {
+      statements.push(this.parseStatement());
+    }
+
+    if (statements.length === 1) return statements[0];
+    return { kind: "Block", statements };
+  }
+
+  private parseStatement(): ASTNode {
+    if (this.check(TokenType.Let)) return this.parseLetDeclaration();
+    return this.parseExpression();
+  }
+
+  private parseLetDeclaration(): ASTNode {
+    this.expect(TokenType.Let);
+    const name = this.expect(TokenType.Identifier).value;
+    this.expect(TokenType.Assign);
+    const value = this.parseExpression();
+    return { kind: "LetDeclaration", name, value };
+  }
+
+  private parseExpression(): ASTNode {
+    return this.parseComparison();
+  }
+
+  private parseComparison(): ASTNode {
+    let left = this.parseAddition();
+
+    while (
+      this.check(TokenType.Equal) ||
+      this.check(TokenType.NotEqual) ||
+      this.check(TokenType.LessThan) ||
+      this.check(TokenType.GreaterThan) ||
+      this.check(TokenType.LessEqual) ||
+      this.check(TokenType.GreaterEqual)
+    ) {
+      const operator = this.advance().value;
+      const right = this.parseAddition();
+      left = { kind: "BinaryExpr", operator, left, right };
+    }
+
+    return left;
+  }
+
+  private parseAddition(): ASTNode {
+    let left = this.parseMultiplication();
+
+    while (this.check(TokenType.Plus) || this.check(TokenType.Minus)) {
+      const operator = this.advance().value;
+      const right = this.parseMultiplication();
+      left = { kind: "BinaryExpr", operator, left, right };
+    }
+
+    return left;
+  }
+
+  private parseMultiplication(): ASTNode {
+    let left = this.parseUnary();
+
+    while (
+      this.check(TokenType.Star) ||
+      this.check(TokenType.Slash) ||
+      this.check(TokenType.Percent)
+    ) {
+      const operator = this.advance().value;
+      const right = this.parseUnary();
+      left = { kind: "BinaryExpr", operator, left, right };
+    }
+
+    return left;
+  }
+
+  private parseUnary(): ASTNode {
+    if (this.check(TokenType.Minus)) {
+      this.advance();
+      const operand = this.parseUnary();
+      return { kind: "UnaryExpr", operator: "-", operand };
+    }
+
+    return this.parseCall();
+  }
+
+  private parseCall(): ASTNode {
+    let expr = this.parsePrimary();
+
+    while (this.check(TokenType.LeftParen)) {
+      this.advance(); // consume (
+      const args: ASTNode[] = [];
+
+      if (!this.check(TokenType.RightParen)) {
+        args.push(this.parseExpression());
+        while (this.check(TokenType.Comma)) {
+          this.advance();
+          args.push(this.parseExpression());
+        }
+      }
+
+      this.expect(TokenType.RightParen);
+      expr = { kind: "CallExpr", callee: expr, args };
+    }
+
+    return expr;
+  }
+
+  private parsePrimary(): ASTNode {
+    const token = this.current();
+
+    // Number literal
+    if (this.check(TokenType.Number)) {
+      this.advance();
+      return { kind: "NumberLiteral", value: parseFloat(token.value) };
+    }
+
+    // String literal
+    if (this.check(TokenType.String)) {
+      this.advance();
+      return { kind: "StringLiteral", value: token.value };
+    }
+
+    // Boolean literals
+    if (this.check(TokenType.True)) {
+      this.advance();
+      return { kind: "BooleanLiteral", value: true };
+    }
+    if (this.check(TokenType.False)) {
+      this.advance();
+      return { kind: "BooleanLiteral", value: false };
+    }
+
+    // Function literal
+    if (this.check(TokenType.Fn)) {
+      return this.parseFunctionLiteral();
+    }
+
+    // If expression
+    if (this.check(TokenType.If)) {
+      return this.parseIfExpression();
+    }
+
+    // Grouped expression
+    if (this.check(TokenType.LeftParen)) {
+      this.advance();
+      const expr = this.parseExpression();
+      this.expect(TokenType.RightParen);
+      return expr;
+    }
+
+    // Block
+    if (this.check(TokenType.LeftBrace)) {
+      return this.parseBlock();
+    }
+
+    // Identifier
+    if (this.check(TokenType.Identifier)) {
+      this.advance();
+      return { kind: "Identifier", name: token.value };
+    }
+
+    throw new Error(
+      `Unexpected token '${token.value}' (${token.type}) at line ${token.line}, column ${token.column}`
+    );
+  }
+
+  private parseFunctionLiteral(): ASTNode {
+    this.expect(TokenType.Fn);
+    this.expect(TokenType.LeftParen);
+
+    const params: string[] = [];
+    if (!this.check(TokenType.RightParen)) {
+      params.push(this.expect(TokenType.Identifier).value);
+      while (this.check(TokenType.Comma)) {
+        this.advance();
+        params.push(this.expect(TokenType.Identifier).value);
+      }
+    }
+
+    this.expect(TokenType.RightParen);
+    const body = this.parseBlock();
+
+    return { kind: "FunctionLiteral", params, body };
+  }
+
+  private parseIfExpression(): ASTNode {
+    this.expect(TokenType.If);
+    this.expect(TokenType.LeftParen);
+    const condition = this.parseExpression();
+    this.expect(TokenType.RightParen);
+    const consequence = this.parseBlock();
+
+    let alternative: ASTNode | null = null;
+    if (this.check(TokenType.Else)) {
+      this.advance();
+      if (this.check(TokenType.If)) {
+        alternative = this.parseIfExpression();
+      } else {
+        alternative = this.parseBlock();
+      }
+    }
+
+    return { kind: "IfExpr", condition, consequence, alternative };
+  }
+
+  private parseBlock(): ASTNode {
+    this.expect(TokenType.LeftBrace);
+    const statements: ASTNode[] = [];
+
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      statements.push(this.parseStatement());
+    }
+
+    this.expect(TokenType.RightBrace);
+
+    if (statements.length === 1) return statements[0];
+    return { kind: "Block", statements };
+  }
+
+  // Helper methods
+  private current(): Token {
+    return this.tokens[this.pos];
+  }
+
+  private check(type: TokenType): boolean {
+    return !this.isAtEnd() && this.current().type === type;
+  }
+
+  private advance(): Token {
+    const token = this.current();
+    this.pos++;
+    return token;
+  }
+
+  private expect(type: TokenType): Token {
+    if (!this.check(type)) {
+      const token = this.current();
+      throw new Error(
+        `Expected ${type} but got ${token.type} ('${token.value}') at line ${token.line}, column ${token.column}`
+      );
+    }
+    return this.advance();
+  }
+
+  private isAtEnd(): boolean {
+    return this.current().type === TokenType.EOF;
+  }
+}
+```
+
+Operator precedence is encoded in the call hierarchy: `parseComparison` calls `parseAddition`, which calls `parseMultiplication`. Lower-precedence operators are parsed at higher levels, so `2 + 3 * 4` correctly produces `2 + (3 * 4)`.
+
+## Step 6: The Environment
+
+Create `src/environment.ts`. The environment tracks variable bindings with lexical scoping:
+
+```typescript
+export type TinyValue = number | string | boolean | TinyFunction | null;
+
+export interface TinyFunction {
+  kind: "function";
+  params: string[];
+  body: unknown; // ASTNode — avoids circular import
+  closure: Environment;
+}
+
+export class Environment {
+  private values: Map<string, TinyValue> = new Map();
+  private parent: Environment | null;
+
+  constructor(parent: Environment | null = null) {
+    this.parent = parent;
+  }
+
+  define(name: string, value: TinyValue): void {
+    this.values.set(name, value);
+  }
+
+  get(name: string): TinyValue {
+    if (this.values.has(name)) {
+      return this.values.get(name)!;
+    }
+    if (this.parent) {
+      return this.parent.get(name);
+    }
+    throw new Error(`Undefined variable: ${name}`);
+  }
+
+  set(name: string, value: TinyValue): void {
+    if (this.values.has(name)) {
+      this.values.set(name, value);
+      return;
+    }
+    if (this.parent) {
+      this.parent.set(name, value);
+      return;
+    }
+    throw new Error(`Undefined variable: ${name}`);
+  }
+}
+```
+
+The scope chain works by parent pointers. When looking up a variable, we check the current scope first, then walk up to parent scopes. Functions capture their defining environment (closure), enabling lexical scoping.
+
+## Step 7: The Interpreter
+
+Create `src/interpreter.ts`:
+
+```typescript
+import { ASTNode } from "./ast";
+import { Environment, TinyValue, TinyFunction } from "./environment";
+
+export class Interpreter {
+  private globals: Environment;
+
+  constructor() {
+    this.globals = new Environment();
+
+    // Built-in functions
+    this.globals.define("print", {
+      kind: "function",
+      params: ["value"],
+      body: null,
+      closure: this.globals,
+    });
+  }
+
+  run(node: ASTNode): TinyValue {
+    return this.evaluate(node, this.globals);
+  }
+
+  private evaluate(node: ASTNode, env: Environment): TinyValue {
+    switch (node.kind) {
+      case "NumberLiteral":
+        return node.value;
+
+      case "StringLiteral":
+        return node.value;
+
+      case "BooleanLiteral":
+        return node.value;
+
+      case "Identifier":
+        return env.get(node.name);
+
+      case "BinaryExpr":
+        return this.evalBinary(node.operator, node.left, node.right, env);
+
+      case "UnaryExpr":
+        return this.evalUnary(node.operator, node.operand, env);
+
+      case "LetDeclaration": {
+        const value = this.evaluate(node.value, env);
+        env.define(node.name, value);
+        return value;
+      }
+
+      case "Assignment": {
+        const value = this.evaluate(node.value, env);
+        env.set(node.name, value);
+        return value;
+      }
+
+      case "FunctionLiteral":
+        return {
+          kind: "function",
+          params: node.params,
+          body: node.body,
+          closure: env,
+        };
+
+      case "CallExpr":
+        return this.evalCall(node.callee, node.args, env);
+
+      case "IfExpr": {
+        const condition = this.evaluate(node.condition, env);
+        if (this.isTruthy(condition)) {
+          return this.evaluate(node.consequence, env);
+        } else if (node.alternative) {
+          return this.evaluate(node.alternative, env);
+        }
+        return null;
+      }
+
+      case "Block": {
+        let result: TinyValue = null;
+        const blockEnv = new Environment(env);
+        for (const stmt of node.statements) {
+          result = this.evaluate(stmt, blockEnv);
+        }
+        return result;
+      }
+
+      default:
+        throw new Error(`Unknown AST node kind: ${(node as ASTNode).kind}`);
+    }
+  }
+
+  private evalBinary(
+    op: string,
+    leftNode: ASTNode,
+    rightNode: ASTNode,
+    env: Environment
+  ): TinyValue {
+    const left = this.evaluate(leftNode, env);
+    const right = this.evaluate(rightNode, env);
+
+    // Arithmetic (numbers only)
+    if (typeof left === "number" && typeof right === "number") {
+      switch (op) {
+        case "+":
+          return left + right;
+        case "-":
+          return left - right;
+        case "*":
+          return left * right;
+        case "/":
+          if (right === 0) throw new Error("Division by zero");
+          return left / right;
+        case "%":
+          return left % right;
+        case "<":
+          return left < right;
+        case ">":
+          return left > right;
+        case "<=":
+          return left <= right;
+        case ">=":
+          return left >= right;
+        case "==":
+          return left === right;
+        case "!=":
+          return left !== right;
+      }
+    }
+
+    // String concatenation
+    if (op === "+" && (typeof left === "string" || typeof right === "string")) {
+      return String(left) + String(right);
+    }
+
+    // Equality for all types
+    if (op === "==") return left === right;
+    if (op === "!=") return left !== right;
+
+    throw new Error(`Cannot apply operator '${op}' to ${typeof left} and ${typeof right}`);
+  }
+
+  private evalUnary(op: string, operandNode: ASTNode, env: Environment): TinyValue {
+    const operand = this.evaluate(operandNode, env);
+
+    if (op === "-") {
+      if (typeof operand !== "number") {
+        throw new Error(`Cannot negate ${typeof operand}`);
+      }
+      return -operand;
+    }
+
+    throw new Error(`Unknown unary operator: ${op}`);
+  }
+
+  private evalCall(calleeNode: ASTNode, argNodes: ASTNode[], env: Environment): TinyValue {
+    const callee = this.evaluate(calleeNode, env);
+
+    if (!callee || typeof callee !== "object" || callee.kind !== "function") {
+      throw new Error("Attempted to call a non-function");
+    }
+
+    const fn = callee as TinyFunction;
+    const args = argNodes.map((arg) => this.evaluate(arg, env));
+
+    // Built-in: print
+    if (fn.body === null && calleeNode.kind === "Identifier" && calleeNode.name === "print") {
+      console.log(...args.map(String));
+      return null;
+    }
+
+    if (fn.params.length !== args.length) {
+      throw new Error(`Expected ${fn.params.length} arguments but got ${args.length}`);
+    }
+
+    // Create a new environment extending the closure (lexical scope)
+    const callEnv = new Environment(fn.closure);
+    for (let i = 0; i < fn.params.length; i++) {
+      callEnv.define(fn.params[i], args[i]);
+    }
+
+    return this.evaluate(fn.body as ASTNode, callEnv);
+  }
+
+  private isTruthy(value: TinyValue): boolean {
+    if (value === null) return false;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    if (typeof value === "string") return value.length > 0;
+    return true;
+  }
+}
+```
+
+## Step 8: Wiring It Together
+
+Create `src/tiny.ts`:
+
+```typescript
+import { Lexer } from "./lexer";
+import { Parser } from "./parser";
+import { Interpreter } from "./interpreter";
+
+export function execute(source: string): unknown {
+  const lexer = new Lexer(source);
+  const tokens = lexer.tokenize();
+
+  const parser = new Parser(tokens);
+  const ast = parser.parse();
+
+  const interpreter = new Interpreter();
+  return interpreter.run(ast);
+}
+```
+
+Create `src/index.ts` as a REPL:
+
+```typescript
+import * as readline from "readline";
+import { execute } from "./tiny";
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  prompt: "tiny> ",
+});
+
+console.log("Tiny Language REPL (Ctrl+C to exit)");
+rl.prompt();
+
+rl.on("line", (line: string) => {
+  const input = line.trim();
+  if (!input) {
+    rl.prompt();
+    return;
+  }
+
+  try {
+    const result = execute(input);
+    if (result !== null && result !== undefined) {
+      console.log(result);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Error: ${message}`);
+  }
+
+  rl.prompt();
+});
+```
+
+Run it:
+
+```bash
+npx tsx src/index.ts
+```
+
+## Step 9: Test the Language
+
+```
+tiny> 2 + 3 * 4
+14
+tiny> (2 + 3) * 4
+20
+tiny> let x = 10
+10
+tiny> x * 2 + 1
+21
+tiny> let add = fn(a, b) { a + b }
+tiny> add(3, 4)
+7
+tiny> if (x > 5) { "big" } else { "small" }
+big
+```
+
+## Step 10: Add Higher-Order Functions
+
+The function implementation already supports closures, which means higher-order functions work automatically:
+
+```
+tiny> let makeAdder = fn(n) { fn(x) { x + n } }
+tiny> let add5 = makeAdder(5)
+tiny> add5(10)
+15
+```
+
+This works because `fn(x) { x + n }` captures the environment where `n` is defined (the closure of `makeAdder`'s call). When `add5(10)` executes, it looks up `n` in the captured closure and finds `5`.
+
+## Step 11: Add More Built-ins
+
+Extend the interpreter constructor in `src/interpreter.ts` with useful built-in functions:
+
+```typescript
+constructor() {
+  this.globals = new Environment();
+
+  // Register built-in functions as special entries
+  this.globals.define("print", this.makeBuiltin("print"));
+  this.globals.define("type", this.makeBuiltin("type"));
+  this.globals.define("len", this.makeBuiltin("len"));
+  this.globals.define("str", this.makeBuiltin("str"));
+  this.globals.define("num", this.makeBuiltin("num"));
+}
+
+private makeBuiltin(name: string): TinyFunction {
+  return {
+    kind: "function",
+    params: ["__arg"],
+    body: { kind: "Builtin", name } as unknown as ASTNode,
+    closure: this.globals,
+  };
+}
+```
+
+Then handle built-ins in `evalCall`:
+
+```typescript
+// In evalCall, before the arity check:
+if (fn.body && (fn.body as unknown as { kind: string }).kind === "Builtin") {
+  const builtinName = (fn.body as unknown as { name: string }).name;
+  return this.evalBuiltin(builtinName, args);
+}
+```
+
+```typescript
+private evalBuiltin(name: string, args: TinyValue[]): TinyValue {
+  switch (name) {
+    case "print":
+      console.log(...args.map(String));
+      return null;
+    case "type":
+      if (args[0] === null) return "null";
+      if (typeof args[0] === "object") return "function";
+      return typeof args[0];
+    case "len":
+      if (typeof args[0] === "string") return args[0].length;
+      throw new Error("len() requires a string argument");
+    case "str":
+      return String(args[0]);
+    case "num": {
+      const n = Number(args[0]);
+      if (isNaN(n)) throw new Error(`Cannot convert '${args[0]}' to number`);
+      return n;
+    }
+    default:
+      throw new Error(`Unknown built-in: ${name}`);
+  }
+}
+```
+
+## Step 12: What Comes Next
+
+You've built a working interpreter with:
+
+- **Lexer**: raw text → tokens (handles numbers, strings, operators, keywords)
+- **Parser**: tokens → AST (recursive descent with operator precedence)
+- **Interpreter**: AST → values (tree-walking evaluation with closures)
+
+To extend Tiny further, consider:
+
+- **Arrays and objects**: add `[1, 2, 3]` syntax and `{key: value}` literals
+- **Loops**: add `while (condition) { body }` — requires adding a `WhileExpr` AST node
+- **Error handling**: add `try/catch` with a `TinyError` value type
+- **Code generation**: instead of interpreting the AST, emit JavaScript or WebAssembly
+- **Optimization**: add constant folding (evaluate `2 + 3` at compile time) and dead code elimination
+
+The concepts scale directly. Every real language — JavaScript, Python, Rust — has these same stages. The lexer, parser, and evaluator you built are the foundation that V8, CPython, and rustc all share. The difference is complexity of the language grammar and sophistication of the optimization passes, not the fundamental architecture.

@@ -1,0 +1,242 @@
+---
+title: "How to Evaluate AI Output at Scale"
+description: "Build automated evaluation pipelines for LLM responses using metrics, human evaluation frameworks, and regression testing."
+slug: "ai-evaluation"
+difficulty: "advanced"
+estimatedMinutes: 25
+steps: 5
+tags: ["ai", "evaluation", "testing", "ragas"]
+---
+
+You cannot improve what you cannot measure. When your AI application generates thousands of responses per day, manual review does not scale. You need automated evaluation that catches regressions, measures quality across dimensions, and gives you confidence that a prompt change actually improved things.
+
+## Step 1: Define What "Good" Means
+
+Before choosing metrics, define quality dimensions for your specific use case. A customer support bot and a code generation tool have completely different definitions of "good."
+
+Common dimensions:
+
+- **Correctness** — Is the answer factually accurate? Does the code compile?
+- **Relevance** — Does the response address the actual question?
+- **Completeness** — Does it cover all parts of the query?
+- **Faithfulness** — Is it grounded in the provided context, or does it hallucinate?
+- **Harmlessness** — Does it avoid generating toxic, biased, or dangerous content?
+- **Format compliance** — Does it follow the required structure (JSON, markdown, specific schema)?
+
+Pick 2-4 dimensions that matter most for your application. Evaluating everything equally means optimizing nothing effectively.
+
+Create a rubric for each dimension:
+
+```
+Faithfulness scoring:
+5 — Every claim is directly supported by the source documents
+4 — All major claims supported, minor unsupported details
+3 — Most claims supported, one significant unsupported claim
+2 — Multiple unsupported claims mixed with supported ones
+1 — Response contradicts or ignores source documents
+```
+
+This rubric is not just for humans. You will use it to calibrate automated evaluators and as the system prompt for LLM-as-judge evaluations.
+
+## Step 2: Build an Evaluation Dataset
+
+An evaluation dataset (eval set) is a collection of inputs paired with expected outputs or quality criteria. This is the foundation of all evaluation — without it, you are guessing.
+
+```typescript
+interface EvalCase {
+  id: string;
+  input: string;
+  context?: string[]; // Retrieved documents, if RAG
+  expectedOutput?: string; // Gold-standard answer, if available
+  criteria: {
+    mustContain?: string[]; // Key facts that must appear
+    mustNotContain?: string[]; // Hallucination traps
+    format?: string; // Expected output format
+  };
+  difficulty: "easy" | "medium" | "hard";
+  category: string;
+}
+
+const evalSet: EvalCase[] = [
+  {
+    id: "auth-001",
+    input: "How do I implement OAuth2 with PKCE?",
+    criteria: {
+      mustContain: ["code_verifier", "code_challenge", "authorization_code"],
+      mustNotContain: ["implicit grant"],
+      format: "step-by-step",
+    },
+    difficulty: "medium",
+    category: "authentication",
+  },
+];
+```
+
+Start with 50-100 cases covering your most important scenarios. Include edge cases: ambiguous queries, adversarial inputs, out-of-scope questions, multilingual inputs. Weight the dataset toward the distribution of real traffic — if 60% of queries are about authentication, 60% of your eval set should be too.
+
+Update the eval set continuously. Every time a user reports a bad response, add it as a new eval case with the correct expected behavior.
+
+## Step 3: Implement Automated Metrics
+
+Automated metrics run in seconds and catch regressions before deployment. Layer multiple approaches:
+
+**Deterministic checks** — The simplest and most reliable. Does the output contain required information? Does it match the expected format?
+
+```typescript
+function evaluateDeterministic(
+  output: string,
+  criteria: EvalCase["criteria"]
+): { score: number; failures: string[] } {
+  const failures: string[] = [];
+
+  if (criteria.mustContain) {
+    for (const term of criteria.mustContain) {
+      if (!output.toLowerCase().includes(term.toLowerCase())) {
+        failures.push(`Missing required term: "${term}"`);
+      }
+    }
+  }
+
+  if (criteria.mustNotContain) {
+    for (const term of criteria.mustNotContain) {
+      if (output.toLowerCase().includes(term.toLowerCase())) {
+        failures.push(`Contains prohibited term: "${term}"`);
+      }
+    }
+  }
+
+  if (criteria.format === "json") {
+    try {
+      JSON.parse(output);
+    } catch {
+      failures.push("Output is not valid JSON");
+    }
+  }
+
+  const totalChecks =
+    (criteria.mustContain?.length ?? 0) +
+    (criteria.mustNotContain?.length ?? 0) +
+    (criteria.format ? 1 : 0);
+
+  return {
+    score: totalChecks > 0 ? (totalChecks - failures.length) / totalChecks : 1,
+    failures,
+  };
+}
+```
+
+**LLM-as-judge** — Use a language model to evaluate another language model's output. This captures nuances that deterministic checks miss: coherence, tone, explanation quality.
+
+```typescript
+async function llmJudge(
+  input: string,
+  output: string,
+  rubric: string
+): Promise<{ score: number; reasoning: string }> {
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 500,
+    messages: [
+      {
+        role: "user",
+        content: `Evaluate this AI response on a 1-5 scale.
+
+Question: ${input}
+Response: ${output}
+
+Rubric:
+${rubric}
+
+Return JSON: {"score": <1-5>, "reasoning": "<one sentence>"}`,
+      },
+    ],
+  });
+
+  return JSON.parse(response.content[0].text);
+}
+```
+
+Use a stronger model as judge than the model being evaluated. Always include the rubric in the prompt — without it, the judge applies its own unstated criteria.
+
+**RAGAS framework** — For retrieval-augmented generation, RAGAS provides specialized metrics:
+
+- **Context Precision** — Are the retrieved documents relevant to the question?
+- **Context Recall** — Do the retrieved documents cover all aspects of the expected answer?
+- **Faithfulness** — Is every claim in the answer traceable to the retrieved context?
+- **Answer Relevance** — Does the answer address the question directly?
+
+These four metrics isolate whether a bad response is caused by bad retrieval (context metrics) or bad generation (faithfulness/relevance metrics).
+
+## Step 4: Run A/B Tests on Prompt Changes
+
+A prompt change that improves one category often degrades another. A/B testing across the full eval set catches these regressions.
+
+```typescript
+interface EvalResult {
+  caseId: string;
+  variant: "control" | "treatment";
+  scores: {
+    correctness: number;
+    faithfulness: number;
+    relevance: number;
+  };
+  latencyMs: number;
+  tokenCount: number;
+}
+
+async function runABTest(
+  evalSet: EvalCase[],
+  controlPrompt: string,
+  treatmentPrompt: string
+): Promise<{ control: EvalResult[]; treatment: EvalResult[] }> {
+  const results = { control: [] as EvalResult[], treatment: [] as EvalResult[] };
+
+  for (const evalCase of evalSet) {
+    const [controlOutput, treatmentOutput] = await Promise.all([
+      generateResponse(controlPrompt, evalCase.input),
+      generateResponse(treatmentPrompt, evalCase.input),
+    ]);
+
+    results.control.push(await evaluate(evalCase, controlOutput, "control"));
+    results.treatment.push(await evaluate(evalCase, treatmentOutput, "treatment"));
+  }
+
+  return results;
+}
+```
+
+Compare aggregate scores across the full dataset, not individual cases. LLM output is stochastic — a single case may score differently on repeated runs. Look for statistically significant differences across categories. A prompt that improves average faithfulness by 0.3 points but drops correctness by 0.5 points is a net regression.
+
+## Step 5: Build a Regression Testing Pipeline
+
+Integrate evaluation into your CI/CD pipeline so prompt changes go through the same rigor as code changes.
+
+```yaml
+# .github/workflows/eval.yml
+name: Prompt Evaluation
+on:
+  pull_request:
+    paths:
+      - "prompts/**"
+      - "src/ai/**"
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run eval -- --baseline=main --candidate=HEAD
+      - run: npm run eval:report -- --threshold=0.95
+```
+
+The pipeline should:
+
+1. Run the full eval set against both the current production prompt and the proposed change
+2. Compare scores across every dimension and category
+3. Flag regressions that exceed a threshold (e.g., any category dropping more than 5%)
+4. Generate a summary report as a PR comment
+
+Store every evaluation run. Over time, you build a historical record of how quality has changed with each prompt version. When a user reports degraded quality, you can compare the current prompt's scores against the version they were using.
+
+The goal is not a perfect score on every metric. The goal is measurable, repeatable quality that improves over time and never regresses without someone making a deliberate decision that the tradeoff is worth it.

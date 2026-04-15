@@ -1,0 +1,459 @@
+---
+title: "Build an Authentication System from Scratch"
+description: "Implement email/password auth with JWT tokens, bcrypt hashing, protected routes, and session management — understanding every layer."
+slug: "auth-system"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["auth", "jwt", "bcrypt", "security", "node"]
+---
+
+## Overview
+
+Most developers use auth libraries without understanding what happens underneath. In this tutorial, you'll build a complete authentication system from scratch — email/password registration, login, JWT access and refresh tokens, bcrypt password hashing, protected route middleware, and session management.
+
+**What you'll learn:**
+
+- How password hashing works (bcrypt salting and rounds)
+- JWT structure, signing, and verification
+- Access token vs refresh token patterns
+- Middleware-based route protection
+- Secure cookie handling and session invalidation
+- Common auth vulnerabilities and how to prevent them
+
+We'll use Express, bcrypt, jsonwebtoken, and a SQLite database (via better-sqlite3) to keep the focus on auth logic rather than infrastructure.
+
+## Step 1: Project Setup
+
+```bash
+mkdir auth-system && cd auth-system
+npm init -y
+npm install express bcrypt jsonwebtoken better-sqlite3 cookie-parser
+npm install -D typescript @types/express @types/bcrypt @types/jsonwebtoken @types/better-sqlite3 @types/cookie-parser tsx
+```
+
+Create `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+```
+
+Create your entry point at `src/index.ts`:
+
+```typescript
+import express from "express";
+import cookieParser from "cookie-parser";
+import { initDb } from "./db";
+import { authRouter } from "./routes/auth";
+import { protectedRouter } from "./routes/protected";
+
+const app = express();
+app.use(express.json());
+app.use(cookieParser());
+
+initDb();
+
+app.use("/auth", authRouter);
+app.use("/api", protectedRouter);
+
+app.listen(3000, () => {
+  console.log("Server running on http://localhost:3000");
+});
+```
+
+## Step 2: Database Schema
+
+Create `src/db.ts`. We store users with hashed passwords and a separate table for refresh tokens so we can revoke sessions.
+
+```typescript
+import Database from "better-sqlite3";
+
+let db: Database.Database;
+
+export function getDb(): Database.Database {
+  if (!db) {
+    db = new Database("auth.db");
+    db.pragma("journal_mode = WAL");
+  }
+  return db;
+}
+
+export function initDb(): void {
+  const conn = getDb();
+
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS refresh_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      token_hash TEXT UNIQUE NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+}
+```
+
+The key design decisions: passwords are never stored in plain text, refresh tokens are hashed in the database (so a database leak doesn't compromise active sessions), and tokens can be individually revoked.
+
+## Step 3: Password Hashing with Bcrypt
+
+Create `src/auth/password.ts`:
+
+```typescript
+import bcrypt from "bcrypt";
+
+const SALT_ROUNDS = 12;
+
+export async function hashPassword(plaintext: string): Promise<string> {
+  return bcrypt.hash(plaintext, SALT_ROUNDS);
+}
+
+export async function verifyPassword(plaintext: string, hash: string): Promise<boolean> {
+  return bcrypt.compare(plaintext, hash);
+}
+```
+
+Bcrypt is specifically designed for password hashing. Unlike SHA-256, it's intentionally slow — each hash takes ~250ms at 12 rounds. This makes brute-force attacks impractical. The salt is embedded in the hash output, so you never need to store it separately.
+
+Why 12 rounds? It's the current recommended minimum. Each additional round doubles the computation time. At 12 rounds, hashing takes roughly 250ms — fast enough for login, slow enough to deter attackers.
+
+## Step 4: JWT Token Generation
+
+Create `src/auth/tokens.ts`:
+
+```typescript
+import jwt from "jsonwebtoken";
+import crypto from "crypto";
+import bcrypt from "bcrypt";
+import { getDb } from "../db";
+
+const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "dev-access-secret";
+const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "dev-refresh-secret";
+
+interface TokenPayload {
+  userId: number;
+  email: string;
+}
+
+export function generateAccessToken(payload: TokenPayload): string {
+  return jwt.sign(payload, ACCESS_SECRET, { expiresIn: "15m" });
+}
+
+export function generateRefreshToken(payload: TokenPayload): string {
+  return jwt.sign(payload, REFRESH_SECRET, { expiresIn: "7d" });
+}
+
+export function verifyAccessToken(token: string): TokenPayload {
+  return jwt.verify(token, ACCESS_SECRET) as TokenPayload;
+}
+
+export function verifyRefreshToken(token: string): TokenPayload {
+  return jwt.verify(token, REFRESH_SECRET) as TokenPayload;
+}
+
+export async function storeRefreshToken(userId: number, token: string): Promise<void> {
+  const tokenHash = await bcrypt.hash(token, 10);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  getDb()
+    .prepare("INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)")
+    .run(userId, tokenHash, expiresAt);
+}
+
+export async function revokeUserTokens(userId: number): Promise<void> {
+  getDb().prepare("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?").run(userId);
+}
+```
+
+Two tokens serve different purposes. The access token is short-lived (15 minutes) and sent with every API request. The refresh token is long-lived (7 days), stored in an HTTP-only cookie, and used only to get new access tokens. This limits the damage window if an access token is stolen.
+
+## Step 5: User Registration
+
+Create `src/routes/auth.ts`:
+
+```typescript
+import { Router, Request, Response } from "express";
+import { getDb } from "../db";
+import { hashPassword, verifyPassword } from "../auth/password";
+import {
+  generateAccessToken,
+  generateRefreshToken,
+  storeRefreshToken,
+  verifyRefreshToken,
+  revokeUserTokens,
+} from "../auth/tokens";
+
+export const authRouter = Router();
+
+authRouter.post("/register", async (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      res.status(400).json({ error: "Email and password are required" });
+      return;
+    }
+
+    if (password.length < 8) {
+      res.status(400).json({ error: "Password must be at least 8 characters" });
+      return;
+    }
+
+    const existing = getDb().prepare("SELECT id FROM users WHERE email = ?").get(email);
+
+    if (existing) {
+      // Don't reveal whether the email exists — timing-safe response
+      res.status(409).json({ error: "Registration failed" });
+      return;
+    }
+
+    const passwordHash = await hashPassword(password);
+
+    const result = getDb()
+      .prepare("INSERT INTO users (email, password_hash) VALUES (?, ?)")
+      .run(email, passwordHash);
+
+    const userId = result.lastInsertRowid as number;
+    const accessToken = generateAccessToken({ userId, email });
+    const refreshToken = generateRefreshToken({ userId, email });
+
+    await storeRefreshToken(userId, refreshToken);
+
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: "/auth/refresh",
+    });
+
+    res.status(201).json({ accessToken, userId });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+```
+
+Notice the refresh token cookie configuration: `httpOnly` prevents JavaScript access (XSS protection), `secure` ensures HTTPS-only in production, `sameSite: strict` prevents CSRF, and `path` restricts where the cookie is sent.
+
+## Step 6: Login Endpoint
+
+Add the login route to `src/routes/auth.ts`:
+
+```typescript
+authRouter.post("/login", async (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      res.status(400).json({ error: "Email and password are required" });
+      return;
+    }
+
+    const user = getDb()
+      .prepare("SELECT id, email, password_hash FROM users WHERE email = ?")
+      .get(email) as { id: number; email: string; password_hash: string } | undefined;
+
+    if (!user) {
+      // Hash a dummy password to prevent timing attacks
+      await hashPassword("dummy-password-for-timing");
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
+
+    const isValid = await verifyPassword(password, user.password_hash);
+
+    if (!isValid) {
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
+
+    const accessToken = generateAccessToken({
+      userId: user.id,
+      email: user.email,
+    });
+    const refreshToken = generateRefreshToken({
+      userId: user.id,
+      email: user.email,
+    });
+
+    await storeRefreshToken(user.id, refreshToken);
+
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: "/auth/refresh",
+    });
+
+    res.json({ accessToken, userId: user.id });
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+```
+
+The timing attack defense is critical. When a user doesn't exist, we still hash a dummy password so the response time is identical to a failed password check. Without this, an attacker can enumerate valid emails by measuring response times.
+
+## Step 7: Token Refresh Endpoint
+
+```typescript
+authRouter.post("/refresh", async (req: Request, res: Response) => {
+  try {
+    const { refreshToken } = req.cookies;
+
+    if (!refreshToken) {
+      res.status(401).json({ error: "No refresh token" });
+      return;
+    }
+
+    const payload = verifyRefreshToken(refreshToken);
+    const accessToken = generateAccessToken({
+      userId: payload.userId,
+      email: payload.email,
+    });
+
+    res.json({ accessToken });
+  } catch (error) {
+    res.status(401).json({ error: "Invalid refresh token" });
+  }
+});
+```
+
+## Step 8: Auth Middleware
+
+Create `src/middleware/authenticate.ts`:
+
+```typescript
+import { Request, Response, NextFunction } from "express";
+import { verifyAccessToken } from "../auth/tokens";
+
+export interface AuthenticatedRequest extends Request {
+  user?: {
+    userId: number;
+    email: string;
+  };
+}
+
+export function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    res.status(401).json({ error: "Missing or malformed authorization header" });
+    return;
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const payload = verifyAccessToken(token);
+    req.user = { userId: payload.userId, email: payload.email };
+    next();
+  } catch (error) {
+    res.status(401).json({ error: "Invalid or expired token" });
+  }
+}
+```
+
+## Step 9: Protected Routes
+
+Create `src/routes/protected.ts`:
+
+```typescript
+import { Router, Response } from "express";
+import { authenticate, AuthenticatedRequest } from "../middleware/authenticate";
+
+export const protectedRouter = Router();
+protectedRouter.use(authenticate);
+
+protectedRouter.get("/profile", (req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    userId: req.user?.userId,
+    email: req.user?.email,
+    message: "You are authenticated",
+  });
+});
+```
+
+Every route on `protectedRouter` runs through the `authenticate` middleware first. The middleware extracts the JWT from the Authorization header, verifies it, and attaches the user payload to the request object.
+
+## Step 10: Logout and Security Hardening
+
+Add logout to `src/routes/auth.ts`:
+
+```typescript
+authRouter.post("/logout", async (req: Request, res: Response) => {
+  try {
+    const { refreshToken } = req.cookies;
+
+    if (refreshToken) {
+      try {
+        const payload = verifyRefreshToken(refreshToken);
+        await revokeUserTokens(payload.userId);
+      } catch {
+        // Token already invalid — still clear the cookie
+      }
+    }
+
+    res.clearCookie("refreshToken", { path: "/auth/refresh" });
+    res.json({ message: "Logged out" });
+  } catch (error) {
+    console.error("Logout error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+```
+
+Test the full flow:
+
+```bash
+# Register
+curl -X POST http://localhost:3000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"securepassword123"}'
+
+# Login
+curl -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"securepassword123"}'
+
+# Access protected route (use the accessToken from login response)
+curl http://localhost:3000/api/profile \
+  -H "Authorization: Bearer <your-access-token>"
+```
+
+**Security checklist before deploying:**
+
+- Replace hardcoded secrets with environment variables
+- Add rate limiting to `/auth/login` and `/auth/register` (express-rate-limit)
+- Add input sanitization with a validation library
+- Enable HTTPS in production
+- Add CORS configuration
+- Set security headers (helmet middleware)
+- Add account lockout after N failed login attempts
+- Log authentication events for audit trails
+
+You now understand every layer of an auth system — from raw passwords to hashed storage, from token generation to middleware verification. When you use a library like NextAuth or Passport, you'll know exactly what it's doing under the hood.

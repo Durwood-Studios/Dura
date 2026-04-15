@@ -1,0 +1,225 @@
+---
+title: "How to Containerize Any Application with Docker"
+description: "Build production-ready Docker images with multi-stage builds, Compose for local development, and a clear mental model for containers."
+slug: "docker"
+difficulty: "intermediate"
+estimatedMinutes: 25
+steps: 6
+tags: ["docker", "containers", "dockerfile", "compose"]
+---
+
+Docker solves "it works on my machine" by packaging your application with its exact dependencies, runtime, and configuration into a portable image. This guide takes you from understanding the mental model to building production-ready containers.
+
+## Step 1: Build the Mental Model
+
+Forget the metaphors about shipping containers. Think of Docker in terms of three concepts:
+
+**Image** — A read-only snapshot of a filesystem. It contains your code, your runtime (Node, Python, Go binary), your dependencies, and your OS libraries. Think of it as a class definition.
+
+**Container** — A running instance of an image. It has its own isolated process space, network, and filesystem layer. Think of it as an object instantiated from the class.
+
+**Dockerfile** — The recipe that builds an image. Each instruction creates a layer. Layers are cached — change line 8 and only lines 8+ rebuild.
+
+```
+Dockerfile → (docker build) → Image → (docker run) → Container
+```
+
+Images are immutable. You never modify a running container's files and "save" them. You change the Dockerfile and rebuild. This immutability is the whole point — every deployment runs the exact same artifact.
+
+## Step 2: Write a Dockerfile
+
+A Dockerfile has a predictable structure: start from a base, copy files, install dependencies, define the startup command.
+
+```dockerfile
+# Start from an official runtime image
+FROM node:20-slim
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy dependency manifests first (for layer caching)
+COPY package.json package-lock.json ./
+
+# Install dependencies
+RUN npm ci --production
+
+# Copy application code
+COPY . .
+
+# Expose the port the app listens on
+EXPOSE 3000
+
+# Define the command to start the app
+CMD ["node", "server.js"]
+```
+
+The order matters for caching. `package.json` changes less often than your source code. By copying it first and running `npm ci`, Docker caches that layer. Subsequent builds that only change source code skip the install step entirely.
+
+Build and run it:
+
+```bash
+docker build -t my-app .
+docker run -p 3000:3000 my-app
+```
+
+The `-p 3000:3000` flag maps port 3000 on your machine to port 3000 in the container. Without it, the container's network is isolated and unreachable.
+
+## Step 3: Use Multi-Stage Builds
+
+A single-stage build includes everything: build tools, dev dependencies, source files. Your production image ends up at 1GB+ when the actual application is 50MB. Multi-stage builds fix this.
+
+```dockerfile
+# Stage 1: Build
+FROM node:20-slim AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Stage 2: Production
+FROM node:20-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+# Copy only what we need from the build stage
+COPY --from=builder /app/package.json /app/package-lock.json ./
+RUN npm ci --production
+COPY --from=builder /app/dist ./dist
+
+EXPOSE 3000
+CMD ["node", "dist/server.js"]
+```
+
+The `builder` stage has TypeScript, dev dependencies, and your full source. The `runner` stage only has the compiled output and production dependencies. The builder stage is discarded — it never ships.
+
+For compiled languages like Go, multi-stage is even more dramatic:
+
+```dockerfile
+FROM golang:1.22 AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o server .
+
+FROM scratch
+COPY --from=builder /app/server /server
+EXPOSE 8080
+CMD ["/server"]
+```
+
+The final image is literally just a binary. No OS, no shell, no package manager. A 10MB image instead of 800MB.
+
+## Step 4: Write a .dockerignore
+
+Without a `.dockerignore`, Docker copies everything in your build context into the image — including `node_modules`, `.git`, `.env` files, and build artifacts. This is slow, wasteful, and a security risk.
+
+```
+# .dockerignore
+node_modules
+.git
+.gitignore
+.env*
+.next
+dist
+coverage
+*.md
+Dockerfile
+docker-compose.yml
+.DS_Store
+```
+
+Think of `.dockerignore` as `.gitignore` for your Docker build context. The `COPY . .` instruction respects it. Smaller build context means faster builds and smaller images.
+
+## Step 5: Use Docker Compose for Local Development
+
+Running `docker run` with twelve flags gets old fast. Docker Compose defines your entire local environment in a YAML file.
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgres://user:pass@db:5432/myapp
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: myapp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+```
+
+Key details:
+
+- **volumes: `.:/app`** — Mounts your local code into the container. File changes reflect immediately without rebuilding. The `/app/node_modules` override prevents your host `node_modules` from clobbering the container's.
+- **depends_on with healthcheck** — The app waits for Postgres to actually accept connections, not just for the container to start.
+- **named volume `pgdata`** — Database data persists across `docker compose down` and `docker compose up`. Without it, you lose your data every restart.
+
+Start everything with one command:
+
+```bash
+docker compose up
+```
+
+Tear it down (keeping volumes):
+
+```bash
+docker compose down
+```
+
+Tear it down and destroy volumes:
+
+```bash
+docker compose down -v
+```
+
+## Step 6: Follow Production Best Practices
+
+These practices prevent the most common Docker problems in production.
+
+**Pin image versions.** `FROM node:20.12.2-slim`, not `FROM node:latest`. Latest changes without warning. Your build should be reproducible six months from now.
+
+**Run as non-root.** By default, containers run as root. If an attacker escapes the application, they have root access.
+
+```dockerfile
+RUN addgroup --system appgroup && adduser --system appuser --ingroup appgroup
+USER appuser
+```
+
+**Use HEALTHCHECK.** Orchestrators like Kubernetes use health checks to restart unhealthy containers.
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+```
+
+**Keep images small.** Use `-slim` or `-alpine` base images. Remove caches after installing packages: `RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*`.
+
+**One process per container.** Do not run your app and a background worker and a cron job in the same container. Each gets its own container, its own scaling, its own logs.
+
+**Never store state in a container.** Containers are ephemeral. Files written inside a container disappear when it stops. Use volumes for persistent data, external services for databases, and environment variables for configuration.
+
+These are not suggestions — they are the practices that prevent 3 AM pages. Follow them from the start and containers become the most reliable part of your stack.

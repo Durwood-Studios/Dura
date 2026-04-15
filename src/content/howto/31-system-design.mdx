@@ -1,0 +1,156 @@
+---
+title: "How to Think About System Design"
+description: "A structured approach to system design problems using estimation, requirements gathering, component identification, and tradeoff analysis."
+slug: "system-design"
+difficulty: "advanced"
+estimatedMinutes: 30
+steps: 6
+tags: ["system-design", "architecture", "scaling", "interviews"]
+---
+
+System design is not about memorizing architectures. It is about breaking ambiguous problems into concrete components and making defensible tradeoffs. Whether you are designing a real system or answering an interview question, the process is the same.
+
+## Step 1: Clarify Requirements
+
+Every system design problem starts ambiguous on purpose. "Design Twitter" is not a specification — it is an invitation to ask questions. The first five minutes should be all questions.
+
+**Functional requirements** — What the system does:
+
+- Can users post tweets? What is the character limit?
+- Is there a timeline? Whose tweets appear — people you follow, or algorithmic?
+- Do we need search? Real-time or eventual?
+- Do we need direct messages? Media uploads? Notifications?
+
+**Non-functional requirements** — How the system behaves:
+
+- How many users? Daily active users vs. registered users?
+- What is the read-to-write ratio? (Twitter is ~1000:1 reads to writes)
+- What latency is acceptable? (Timeline load under 200ms?)
+- What availability target? (99.9% = 8.7 hours downtime per year)
+- What consistency model? (Is it OK if a tweet takes 5 seconds to appear in followers' timelines?)
+
+Narrow the scope. You cannot design all of Twitter in 45 minutes. Pick the core features: posting tweets, the home timeline, and following users. State this explicitly: "I'll focus on these three features. I'll mention extensibility for search and notifications but won't design them fully."
+
+## Step 2: Do Back-of-Envelope Estimation
+
+Estimation grounds your design in reality. Without numbers, you cannot make capacity decisions.
+
+**Start with users and work outward:**
+
+```
+DAU: 200 million
+Tweets per user per day: 0.5 (most users read, few write)
+Total tweets per day: 100 million
+Tweets per second: ~1,200 (100M / 86,400)
+
+Average tweet size: 300 bytes (text + metadata)
+Storage per day: 100M × 300B = 30 GB
+Storage per year: ~11 TB
+
+Timeline reads per user per day: 10
+Total reads per day: 2 billion
+Reads per second: ~23,000
+```
+
+These numbers tell you what matters:
+
+- Reads dominate writes 20:1. Optimize for reads.
+- 23K reads per second is high but achievable with caching and fan-out.
+- 11 TB per year is modest — storage is not the bottleneck.
+
+Do not spend ten minutes on exact math. Round aggressively. The point is order-of-magnitude awareness: are we handling 1K, 10K, or 100K requests per second? Each order of magnitude changes the architecture.
+
+## Step 3: Define the High-Level Architecture
+
+Draw the major components and how data flows between them. Start with the simplest architecture that works, then evolve it.
+
+```
+Client → Load Balancer → API Servers → Cache → Database
+
+                                    → Message Queue → Fan-out Workers
+                                    → Object Storage (media)
+                                    → Search Index
+```
+
+For the Twitter example:
+
+- **API servers** handle tweet creation, timeline reads, and follow/unfollow.
+- **Database** stores users, tweets, and the follow graph.
+- **Cache layer** (Redis) stores precomputed timelines for fast reads.
+- **Fan-out service** pushes new tweets to followers' cached timelines.
+- **Object storage** (S3) holds images and videos.
+- **CDN** serves media and static assets close to users.
+
+At this stage, keep it simple. Every box should have a clear responsibility. If you cannot explain what a component does in one sentence, split it or remove it.
+
+## Step 4: Design the Data Model
+
+The data model drives everything. Get this wrong and every query is a workaround.
+
+```sql
+-- Users
+users (id, username, display_name, created_at)
+
+-- Tweets
+tweets (id, author_id, content, media_url, created_at)
+  -- Partitioned by created_at for time-range queries
+
+-- Follow graph
+follows (follower_id, followee_id, created_at)
+  -- Index on both follower_id and followee_id
+
+-- Precomputed timelines (in Redis, not SQL)
+timeline:{user_id} → sorted set of tweet_ids, scored by timestamp
+```
+
+Now address the key design question: **fan-out on write vs. fan-out on read.**
+
+**Fan-out on write:** When a user tweets, immediately push the tweet ID to every follower's timeline cache. Reads are fast — just fetch the precomputed list. But a user with 10 million followers means 10 million cache writes per tweet.
+
+**Fan-out on read:** When a user loads their timeline, query the tweets of everyone they follow and merge them. Writes are fast — just store the tweet. But each timeline load queries hundreds of follow relationships and merges results.
+
+The practical answer is a hybrid. Fan-out on write for normal users (under 10K followers). Fan-out on read for celebrity accounts. This is what Twitter actually does.
+
+## Step 5: Address Bottlenecks and Failure Modes
+
+Now stress-test your design. Where does it break?
+
+**Database bottleneck:** A single database cannot handle 23K reads per second. Solutions:
+
+- Read replicas for horizontal read scaling
+- Sharding the tweets table by user ID or time range
+- Cache the hot path (timelines) in Redis so most reads never hit the database
+
+**Cache failure:** If Redis goes down, every timeline read hits the database, which cannot handle the load. Solutions:
+
+- Redis cluster with replication (at least 3 nodes)
+- Cache-aside pattern: on miss, fetch from DB and repopulate the cache
+- Circuit breaker: if the database is overloaded, serve stale cached data rather than failing
+
+**Celebrity tweet storm:** A user with 50 million followers tweets. Fan-out on write would create 50 million cache operations. Solutions:
+
+- Hybrid fan-out (skip fan-out for accounts above a follower threshold)
+- Queue the fan-out and process it asynchronously over minutes rather than seconds
+- Followers of celebrities fetch those tweets at read time
+
+**Data center failure:** An entire region goes offline. Solutions:
+
+- Multi-region deployment with data replication
+- DNS failover to redirect traffic to healthy regions
+- Accept that cross-region replication has lag — define the consistency model accordingly
+
+## Step 6: Articulate Tradeoffs
+
+Every design decision involves tradeoffs. The mark of a senior engineer is not avoiding tradeoffs — it is being explicit about them.
+
+**Consistency vs. availability** — The CAP theorem says during a network partition, you must choose. For a timeline, eventual consistency is acceptable (a tweet appearing 5 seconds late is fine). For a banking transaction, strong consistency is required.
+
+**Latency vs. throughput** — Batching writes improves throughput but increases latency for individual operations. For tweet ingestion, batch writes to the database and fan-out in batches to followers.
+
+**Cost vs. performance** — You can cache everything in memory for microsecond reads, but RAM is 100x more expensive than SSD. Cache the hot 10% of data (recent tweets, active user timelines) and let the cold 90% live on disk.
+
+**Simplicity vs. scalability** — A monolith is simpler to develop, deploy, and debug. Microservices scale independently but add network overhead, deployment complexity, and distributed system failure modes. Start with a monolith. Extract services when a specific component needs independent scaling.
+
+Present tradeoffs as: "I chose X over Y because Z." Never as: "We could do X or Y." Decision with rationale demonstrates engineering judgment. A menu of options demonstrates indecision.
+
+The most important skill in system design is knowing when to stop adding complexity. A system that handles 10x your current load with three components is better than one that handles 1000x with fifteen. Design for the next order of magnitude, not for theoretical infinity.

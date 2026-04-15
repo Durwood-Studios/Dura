@@ -1,0 +1,663 @@
+---
+title: "Design and Implement a URL Shortener at Scale"
+description: "System design meets implementation — build a URL shortener with hash generation, collision handling, analytics, rate limiting, and caching."
+slug: "url-shortener"
+difficulty: "advanced"
+estimatedMinutes: 240
+steps: 12
+tags: ["system-design", "database", "api", "caching", "deployment"]
+---
+
+## Overview
+
+A URL shortener seems simple — map short codes to long URLs. But designing one that handles millions of redirects reveals real system design challenges: hash collisions, hot key caching, analytics at scale, rate limiting, and database optimization.
+
+In this tutorial, you'll design the system on paper first, then build the complete implementation: a Node.js API with PostgreSQL, short code generation with collision handling, a redirect service, click analytics, rate limiting, and caching concepts. You'll deploy the finished product.
+
+**What you'll learn:**
+
+- System design methodology (requirements, estimation, architecture)
+- Base62 encoding and hash-based short code generation
+- Collision detection and resolution strategies
+- PostgreSQL schema design with indexes for read-heavy workloads
+- In-memory caching patterns (with Redis concepts)
+- Rate limiting with the sliding window algorithm
+- Click analytics and asynchronous event processing
+- Horizontal scaling considerations
+
+## Step 1: System Design — Requirements
+
+Before writing code, define what you're building.
+
+**Functional requirements:**
+
+- Shorten a URL → return a short code (e.g., `https://sho.rt/abc123`)
+- Redirect short code → original URL (HTTP 301/302)
+- Track click analytics (timestamp, referrer, country)
+- Optional: custom short codes, expiration dates
+
+**Non-functional requirements:**
+
+- Reads heavily outweigh writes (100:1 ratio)
+- Redirect latency < 50ms at p99
+- Short codes should be as short as possible (6-8 characters)
+- System should handle 10,000 redirects/second
+
+**Back-of-envelope estimation:**
+
+- 6-character Base62 code = 62^6 = ~56 billion unique codes
+- At 1M new URLs/day, that's 150+ years before exhaustion
+- Storage per URL: ~500 bytes → 1M URLs = 500MB/day → manageable
+
+## Step 2: Project Setup
+
+```bash
+mkdir url-shortener && cd url-shortener
+npm init -y
+npm install express pg nanoid dotenv
+npm install -D typescript @types/express @types/pg tsx @types/node
+```
+
+Create `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "esModuleInterop": true
+  },
+  "include": ["src"]
+}
+```
+
+## Step 3: Database Schema
+
+Create `src/db.ts`:
+
+```typescript
+import { Pool, QueryResult } from "pg";
+
+const pool = new Pool({
+  connectionString:
+    process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/shortener",
+  max: 20,
+  idleTimeoutMillis: 30000,
+});
+
+export async function query(text: string, params?: unknown[]): Promise<QueryResult> {
+  return pool.query(text, params);
+}
+
+export async function initSchema(): Promise<void> {
+  await query(`
+    CREATE TABLE IF NOT EXISTS urls (
+      id BIGSERIAL PRIMARY KEY,
+      short_code VARCHAR(12) UNIQUE NOT NULL,
+      original_url TEXT NOT NULL,
+      custom_code BOOLEAN DEFAULT FALSE,
+      expires_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      click_count BIGINT DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_urls_short_code ON urls (short_code);
+    CREATE INDEX IF NOT EXISTS idx_urls_expires ON urls (expires_at) WHERE expires_at IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS clicks (
+      id BIGSERIAL PRIMARY KEY,
+      url_id BIGINT NOT NULL REFERENCES urls(id),
+      clicked_at TIMESTAMPTZ DEFAULT NOW(),
+      referrer TEXT,
+      user_agent TEXT,
+      ip_hash VARCHAR(64)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_clicks_url_id ON clicks (url_id);
+    CREATE INDEX IF NOT EXISTS idx_clicks_time ON clicks (clicked_at);
+  `);
+}
+```
+
+Schema decisions: `short_code` has a unique index for O(log n) lookups during redirect. The `clicks` table is append-only, optimized for writes. We store `ip_hash` (hashed IP) instead of raw IPs for privacy. `click_count` on the `urls` table is a denormalized counter — avoids COUNT(\*) on millions of rows.
+
+## Step 4: Short Code Generation
+
+Create `src/shortcode.ts`:
+
+```typescript
+import { customAlphabet } from "nanoid";
+import { query } from "./db";
+
+const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const CODE_LENGTH = 7;
+
+const generate = customAlphabet(ALPHABET, CODE_LENGTH);
+
+export async function generateUniqueCode(maxAttempts: number = 5): Promise<string> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const code = generate();
+    const existing = await query("SELECT id FROM urls WHERE short_code = $1", [code]);
+
+    if (existing.rows.length === 0) {
+      return code;
+    }
+    // Collision — try again
+    console.warn(`Short code collision on attempt ${attempt + 1}: ${code}`);
+  }
+
+  throw new Error("Failed to generate unique short code after max attempts");
+}
+
+export function isValidCustomCode(code: string): boolean {
+  if (code.length < 3 || code.length > 12) return false;
+  return /^[a-zA-Z0-9_-]+$/.test(code);
+}
+
+export async function isCodeAvailable(code: string): Promise<boolean> {
+  const result = await query("SELECT id FROM urls WHERE short_code = $1", [code]);
+  return result.rows.length === 0;
+}
+```
+
+Why not use auto-incrementing IDs encoded in Base62? That reveals creation order and total URL count — a business intelligence leak. Random codes are unpredictable. At 7 characters with Base62, collision probability stays under 0.001% until you have billions of URLs (birthday paradox: ~3.5 billion URLs for a 50% collision chance with 62^7 space).
+
+## Step 5: URL Service
+
+Create `src/service.ts`:
+
+```typescript
+import { query } from "./db";
+import { generateUniqueCode, isValidCustomCode, isCodeAvailable } from "./shortcode";
+import crypto from "crypto";
+
+interface ShortenResult {
+  shortCode: string;
+  originalUrl: string;
+  expiresAt: string | null;
+}
+
+interface ClickData {
+  referrer: string | null;
+  userAgent: string | null;
+  ip: string | null;
+}
+
+export async function shortenUrl(
+  originalUrl: string,
+  customCode?: string,
+  expiresInHours?: number
+): Promise<ShortenResult> {
+  try {
+    new URL(originalUrl);
+  } catch {
+    throw new Error("Invalid URL format");
+  }
+
+  let shortCode: string;
+  let isCustom = false;
+
+  if (customCode) {
+    if (!isValidCustomCode(customCode)) {
+      throw new Error(
+        "Custom code must be 3-12 characters, alphanumeric with hyphens and underscores"
+      );
+    }
+    if (!(await isCodeAvailable(customCode))) {
+      throw new Error("Custom code is already taken");
+    }
+    shortCode = customCode;
+    isCustom = true;
+  } else {
+    shortCode = await generateUniqueCode();
+  }
+
+  const expiresAt = expiresInHours
+    ? new Date(Date.now() + expiresInHours * 60 * 60 * 1000).toISOString()
+    : null;
+
+  await query(
+    `INSERT INTO urls (short_code, original_url, custom_code, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [shortCode, originalUrl, isCustom, expiresAt]
+  );
+
+  return { shortCode, originalUrl, expiresAt };
+}
+
+export async function resolveUrl(shortCode: string): Promise<string | null> {
+  const result = await query(
+    `SELECT id, original_url, expires_at FROM urls WHERE short_code = $1`,
+    [shortCode]
+  );
+
+  if (result.rows.length === 0) return null;
+
+  const row = result.rows[0];
+
+  if (row.expires_at && new Date(row.expires_at) < new Date()) {
+    return null; // Expired
+  }
+
+  // Increment click count asynchronously — don't block the redirect
+  query("UPDATE urls SET click_count = click_count + 1 WHERE id = $1", [row.id]).catch(
+    console.error
+  );
+
+  return row.original_url;
+}
+
+export async function recordClick(shortCode: string, clickData: ClickData): Promise<void> {
+  const urlResult = await query("SELECT id FROM urls WHERE short_code = $1", [shortCode]);
+
+  if (urlResult.rows.length === 0) return;
+
+  const ipHash = clickData.ip
+    ? crypto.createHash("sha256").update(clickData.ip).digest("hex")
+    : null;
+
+  await query(
+    `INSERT INTO clicks (url_id, referrer, user_agent, ip_hash)
+     VALUES ($1, $2, $3, $4)`,
+    [urlResult.rows[0].id, clickData.referrer, clickData.userAgent, ipHash]
+  );
+}
+
+export async function getAnalytics(shortCode: string): Promise<{
+  totalClicks: number;
+  clicksByDay: Array<{ date: string; count: number }>;
+  topReferrers: Array<{ referrer: string; count: number }>;
+}> {
+  const urlResult = await query("SELECT id, click_count FROM urls WHERE short_code = $1", [
+    shortCode,
+  ]);
+
+  if (urlResult.rows.length === 0) {
+    throw new Error("URL not found");
+  }
+
+  const urlId = urlResult.rows[0].id;
+
+  const clicksByDay = await query(
+    `SELECT DATE(clicked_at) as date, COUNT(*)::int as count
+     FROM clicks WHERE url_id = $1
+     GROUP BY DATE(clicked_at)
+     ORDER BY date DESC
+     LIMIT 30`,
+    [urlId]
+  );
+
+  const topReferrers = await query(
+    `SELECT COALESCE(referrer, 'direct') as referrer, COUNT(*)::int as count
+     FROM clicks WHERE url_id = $1
+     GROUP BY referrer
+     ORDER BY count DESC
+     LIMIT 10`,
+    [urlId]
+  );
+
+  return {
+    totalClicks: urlResult.rows[0].click_count,
+    clicksByDay: clicksByDay.rows,
+    topReferrers: topReferrers.rows,
+  };
+}
+```
+
+## Step 6: In-Memory Cache
+
+Create `src/cache.ts`:
+
+```typescript
+interface CacheEntry {
+  value: string;
+  expiresAt: number;
+}
+
+export class LRUCache {
+  private cache: Map<string, CacheEntry>;
+  private readonly maxSize: number;
+  private readonly ttlMs: number;
+
+  constructor(maxSize: number = 10000, ttlSeconds: number = 300) {
+    this.cache = new Map();
+    this.maxSize = maxSize;
+    this.ttlMs = ttlSeconds * 1000;
+  }
+
+  get(key: string): string | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+
+    if (Date.now() > entry.expiresAt) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    // Move to end (most recently used) by re-inserting
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+    return entry.value;
+  }
+
+  set(key: string, value: string): void {
+    // Delete first to update insertion order
+    this.cache.delete(key);
+
+    if (this.cache.size >= this.maxSize) {
+      // Evict the least recently used (first entry)
+      const firstKey = this.cache.keys().next().value;
+      if (firstKey !== undefined) {
+        this.cache.delete(firstKey);
+      }
+    }
+
+    this.cache.set(key, {
+      value,
+      expiresAt: Date.now() + this.ttlMs,
+    });
+  }
+
+  invalidate(key: string): void {
+    this.cache.delete(key);
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
+}
+
+export const urlCache = new LRUCache(50000, 600);
+```
+
+This in-memory LRU cache uses JavaScript's `Map` ordered insertion property. In production, you'd use Redis for shared caching across multiple instances. The pattern is identical — check cache first, fall back to database, populate cache on miss.
+
+## Step 7: Rate Limiting
+
+Create `src/ratelimit.ts`:
+
+```typescript
+import { Request, Response, NextFunction } from "express";
+
+interface WindowEntry {
+  count: number;
+  windowStart: number;
+}
+
+const windows = new Map<string, WindowEntry>();
+const WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_REQUESTS_CREATE = 10;
+const MAX_REQUESTS_REDIRECT = 1000;
+
+function getClientIp(req: Request): string {
+  return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+}
+
+function checkRateLimit(key: string, maxRequests: number): boolean {
+  const now = Date.now();
+  const entry = windows.get(key);
+
+  if (!entry || now - entry.windowStart > WINDOW_MS) {
+    windows.set(key, { count: 1, windowStart: now });
+    return true;
+  }
+
+  if (entry.count >= maxRequests) {
+    return false;
+  }
+
+  entry.count++;
+  return true;
+}
+
+export function rateLimitCreate(req: Request, res: Response, next: NextFunction): void {
+  const ip = getClientIp(req);
+  if (!checkRateLimit(`create:${ip}`, MAX_REQUESTS_CREATE)) {
+    res.status(429).json({
+      error: "Rate limit exceeded. Maximum 10 URLs per minute.",
+    });
+    return;
+  }
+  next();
+}
+
+export function rateLimitRedirect(req: Request, res: Response, next: NextFunction): void {
+  const ip = getClientIp(req);
+  if (!checkRateLimit(`redirect:${ip}`, MAX_REQUESTS_REDIRECT)) {
+    res.status(429).json({ error: "Too many requests" });
+    return;
+  }
+  next();
+}
+
+// Clean up old entries every 5 minutes
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [key, entry] of windows) {
+      if (now - entry.windowStart > WINDOW_MS * 2) {
+        windows.delete(key);
+      }
+    }
+  },
+  5 * 60 * 1000
+);
+```
+
+This is a fixed-window rate limiter — simple and effective for single-instance deployments. The sliding window algorithm is more precise (prevents burst-at-boundary attacks) but requires sorted sets, which is where Redis excels. For production multi-instance setups, move rate limiting to Redis or your API gateway.
+
+## Step 8: API Routes
+
+Create `src/app.ts`:
+
+```typescript
+import express, { Request, Response } from "express";
+import { shortenUrl, resolveUrl, recordClick, getAnalytics } from "./service";
+import { urlCache } from "./cache";
+import { rateLimitCreate, rateLimitRedirect } from "./ratelimit";
+
+const app = express();
+app.use(express.json());
+
+const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
+
+// Create short URL
+app.post("/api/shorten", rateLimitCreate, async (req: Request, res: Response) => {
+  try {
+    const { url, customCode, expiresInHours } = req.body;
+
+    if (!url) {
+      res.status(400).json({ error: "URL is required" });
+      return;
+    }
+
+    const result = await shortenUrl(url, customCode, expiresInHours);
+
+    res.status(201).json({
+      shortUrl: `${BASE_URL}/${result.shortCode}`,
+      shortCode: result.shortCode,
+      originalUrl: result.originalUrl,
+      expiresAt: result.expiresAt,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal error";
+    const status = message.includes("Invalid") || message.includes("already taken") ? 400 : 500;
+    res.status(status).json({ error: message });
+  }
+});
+
+// Redirect
+app.get("/:code", rateLimitRedirect, async (req: Request, res: Response) => {
+  try {
+    const { code } = req.params;
+
+    // Check cache first
+    const cached = urlCache.get(code);
+    if (cached) {
+      // Record click asynchronously
+      recordClick(code, {
+        referrer: req.headers.referer || null,
+        userAgent: req.headers["user-agent"] || null,
+        ip: req.ip || null,
+      }).catch(console.error);
+
+      res.redirect(301, cached);
+      return;
+    }
+
+    const originalUrl = await resolveUrl(code);
+
+    if (!originalUrl) {
+      res.status(404).json({ error: "Short URL not found or expired" });
+      return;
+    }
+
+    // Populate cache
+    urlCache.set(code, originalUrl);
+
+    // Record click asynchronously
+    recordClick(code, {
+      referrer: req.headers.referer || null,
+      userAgent: req.headers["user-agent"] || null,
+      ip: req.ip || null,
+    }).catch(console.error);
+
+    res.redirect(301, originalUrl);
+  } catch (error) {
+    console.error("Redirect error:", error);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// Analytics
+app.get("/api/analytics/:code", async (req: Request, res: Response) => {
+  try {
+    const analytics = await getAnalytics(req.params.code);
+    res.json(analytics);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal error";
+    res.status(message.includes("not found") ? 404 : 500).json({ error: message });
+  }
+});
+
+export default app;
+```
+
+The redirect uses HTTP 301 (permanent redirect). This tells browsers to cache the redirect locally, reducing load on your server. The tradeoff: if you ever need to change where a short code points, browsers with cached 301s won't re-check. Use 302 (temporary) if you need mutability.
+
+## Step 9: Server Entry Point
+
+Create `src/index.ts`:
+
+```typescript
+import app from "./app";
+import { initSchema } from "./db";
+
+const PORT = process.env.PORT || 3000;
+
+async function main(): Promise<void> {
+  try {
+    await initSchema();
+    console.log("Database schema initialized");
+
+    app.listen(PORT, () => {
+      console.log(`URL shortener running on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+}
+
+main();
+```
+
+## Step 10: Testing the System
+
+```bash
+# Start PostgreSQL (Docker)
+docker run -d --name shortener-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=shortener -p 5432:5432 postgres:16-alpine
+
+# Start the server
+npx tsx src/index.ts
+
+# Shorten a URL
+curl -X POST http://localhost:3000/api/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://github.com/vercel/next.js"}'
+
+# Shorten with custom code
+curl -X POST http://localhost:3000/api/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com","customCode":"my-link","expiresInHours":24}'
+
+# Test redirect (follow redirects)
+curl -L http://localhost:3000/abc1234
+
+# Check analytics
+curl http://localhost:3000/api/analytics/abc1234
+```
+
+## Step 11: Scaling Considerations
+
+When this single-server design hits its limits, here's how to scale each component:
+
+**Database reads (the bottleneck for redirects):**
+
+- Add read replicas — route redirects to replicas, writes to primary
+- Partition the `clicks` table by month (it grows fastest)
+- Archive old click data to cold storage
+
+**Caching:**
+
+- Replace in-memory LRU with Redis for shared cache across instances
+- Cache hit rate > 95% for popular URLs (Zipf distribution)
+- Use cache-aside pattern: check cache → miss → read DB → populate cache
+
+**Short code generation at scale:**
+
+- Pre-generate batches of codes and assign ranges to each app instance
+- Eliminates the collision-check database round trip
+- Each instance owns a non-overlapping range
+
+**Rate limiting:**
+
+- Move to Redis with sorted sets for sliding window
+- Or use a dedicated rate limiter (API gateway, Cloudflare)
+
+## Step 12: Deploy
+
+Create a `Dockerfile`:
+
+```dockerfile
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npx tsc
+
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY --from=builder /app/dist ./dist
+ENV NODE_ENV=production
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+Deploy to Railway with a PostgreSQL add-on:
+
+```bash
+railway login
+railway init
+railway add --plugin postgresql
+railway up
+```
+
+You've built a URL shortener that handles the core system design challenges: ID generation, collision handling, read-heavy optimization, analytics collection, and rate limiting. The architecture translates directly to system design interviews — you can whiteboard it because you've implemented every component.

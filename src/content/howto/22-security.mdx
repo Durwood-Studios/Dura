@@ -1,0 +1,194 @@
+---
+title: "How to Secure a Web Application"
+description: "Apply the OWASP Top 10 in practice with concrete defenses against XSS, CSRF, injection, and broken authentication."
+slug: "security"
+difficulty: "intermediate"
+estimatedMinutes: 30
+steps: 7
+tags: ["security", "owasp", "xss", "csrf", "auth"]
+---
+
+Security is not a feature you add later. Every vulnerability described here has been exploited in production against real companies, real users, and real data. The defenses are well-known and straightforward — the hard part is applying them consistently.
+
+## Step 1: Prevent Cross-Site Scripting (XSS)
+
+XSS happens when an attacker injects executable script into your page. If a user's comment contains `<script>document.cookie</script>` and you render it as HTML, that script runs in every visitor's browser.
+
+**Defense: Escape output by default.**
+
+Modern frameworks like React escape JSX output automatically. This is safe:
+
+```tsx
+// React escapes this — the script tag renders as text
+<p>{userComment}</p>
+```
+
+This is not safe:
+
+```tsx
+// dangerouslySetInnerHTML bypasses escaping
+<div dangerouslySetInnerHTML={{ __html: userComment }} />
+```
+
+Never use `dangerouslySetInnerHTML` with user-supplied content. If you must render rich text, use a sanitization library like DOMPurify:
+
+```typescript
+import DOMPurify from "dompurify";
+
+const sanitized = DOMPurify.sanitize(userHtml, {
+  ALLOWED_TAGS: ["b", "i", "em", "strong", "a", "p"],
+  ALLOWED_ATTR: ["href"],
+});
+```
+
+**Defense: Set Content Security Policy headers.**
+
+CSP tells the browser which sources of script, style, and media are allowed. If an attacker injects a script tag, the browser blocks it because it does not match the policy.
+
+```typescript
+// next.config.ts
+const cspHeader = `
+  default-src 'self';
+  script-src 'self' 'nonce-{NONCE}';
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' data: https:;
+  connect-src 'self' https://api.example.com;
+  frame-ancestors 'none';
+`;
+```
+
+Start with a strict policy and loosen it only when necessary. `script-src 'unsafe-inline'` defeats the purpose of CSP entirely.
+
+## Step 2: Prevent Cross-Site Request Forgery (CSRF)
+
+CSRF tricks a logged-in user into making requests they did not intend. An attacker's page contains a hidden form that submits to your API using the victim's cookies.
+
+**Defense: Use SameSite cookies.**
+
+```typescript
+// Set cookies with SameSite=Lax or Strict
+res.setHeader("Set-Cookie", [`session=${token}; HttpOnly; Secure; SameSite=Lax; Path=/`]);
+```
+
+`SameSite=Lax` prevents cookies from being sent on cross-origin POST requests, which blocks most CSRF attacks. `Strict` is safer but breaks legitimate flows like clicking a link from an email.
+
+**Defense: CSRF tokens for state-changing actions.**
+
+For any form that modifies data, include a unique token that the attacker cannot predict:
+
+```typescript
+// Server generates a token tied to the session
+const csrfToken = crypto.randomUUID();
+
+// Client includes it in the request
+<input type="hidden" name="csrf_token" value={csrfToken} />
+```
+
+## Step 3: Prevent SQL Injection
+
+SQL injection happens when user input becomes part of a SQL query. If a login form sends the username directly into `SELECT * FROM users WHERE name = '${username}'`, an attacker can type `' OR '1'='1` and bypass authentication.
+
+**Defense: Use parameterized queries. Always.**
+
+```typescript
+// BAD: String concatenation
+const result = await db.query(`SELECT * FROM users WHERE email = '${email}'`);
+
+// GOOD: Parameterized query
+const result = await db.query("SELECT * FROM users WHERE email = $1", [email]);
+```
+
+ORMs and query builders like Supabase's client handle parameterization automatically. The danger comes from writing raw SQL and interpolating variables. If you ever see string concatenation in a SQL query, it is a vulnerability.
+
+## Step 4: Implement Authentication Correctly
+
+Authentication is where most security breaches start. Do not build your own auth system from scratch unless you deeply understand the cryptography involved.
+
+**Password storage:** Never store plaintext passwords. Use bcrypt or Argon2 with a cost factor high enough that hashing takes ~250ms.
+
+```typescript
+import bcrypt from "bcrypt";
+
+const SALT_ROUNDS = 12;
+const hash = await bcrypt.hash(password, SALT_ROUNDS);
+const isValid = await bcrypt.compare(inputPassword, storedHash);
+```
+
+**Session management:**
+
+- Generate session tokens with `crypto.randomBytes(32)` — never predictable values
+- Store sessions server-side (database or Redis), not in JWTs for long-lived sessions
+- Set `HttpOnly` (no JavaScript access), `Secure` (HTTPS only), and `SameSite` on all auth cookies
+- Implement session expiration and rotation after login
+
+**Rate limiting:** Protect login endpoints from brute-force attacks. After 5 failed attempts, introduce progressive delays or temporary lockouts.
+
+## Step 5: Configure CORS Properly
+
+Cross-Origin Resource Sharing controls which domains can make requests to your API. A misconfigured CORS policy is an open door.
+
+```typescript
+// BAD: Allows any origin
+res.setHeader("Access-Control-Allow-Origin", "*");
+
+// GOOD: Allowlist specific origins
+const allowedOrigins = ["https://myapp.com", "https://staging.myapp.com"];
+const origin = req.headers.origin;
+
+if (origin && allowedOrigins.includes(origin)) {
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+}
+```
+
+`Access-Control-Allow-Origin: *` with `Access-Control-Allow-Credentials: true` is an instant vulnerability — any website can make authenticated requests to your API. The browser enforces CORS, but only if you configure it correctly.
+
+## Step 6: Scan Your Dependencies
+
+Your application is 10% your code and 90% third-party packages. A vulnerability in any dependency is a vulnerability in your application.
+
+```bash
+# Check for known vulnerabilities
+npm audit
+
+# Fix what can be auto-fixed
+npm audit fix
+
+# Use a dedicated tool for continuous monitoring
+npx snyk test
+```
+
+Automate dependency scanning in CI. Tools like Dependabot, Snyk, or Socket.dev create pull requests when vulnerabilities are disclosed. Set a policy: critical vulnerabilities are patched within 24 hours, high within a week.
+
+Lock your dependency versions with `package-lock.json` (npm) or `pnpm-lock.yaml`. Without a lockfile, `npm install` on the CI server might pull a different (compromised) version than what you tested locally.
+
+## Step 7: Apply Security Headers
+
+HTTP headers are your last line of defense. Set them on every response.
+
+```typescript
+const securityHeaders = {
+  // Prevent MIME-type sniffing
+  "X-Content-Type-Options": "nosniff",
+
+  // Prevent clickjacking
+  "X-Frame-Options": "DENY",
+
+  // Control referrer information
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+
+  // Opt into browser security features
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+
+  // Force HTTPS
+  "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+};
+```
+
+**X-Content-Type-Options: nosniff** — Prevents the browser from interpreting a `.txt` file as JavaScript.
+
+**X-Frame-Options: DENY** — Prevents your site from being embedded in an iframe on another domain, blocking clickjacking attacks.
+
+**Strict-Transport-Security** — Tells the browser to only connect via HTTPS for the next two years. After the first visit, even typing `http://` will be upgraded to `https://` automatically.
+
+Security is not a checklist you complete once. It is a practice. Every new feature, every new dependency, every new endpoint introduces potential attack surface. Audit regularly, automate what you can, and assume that any input from outside your application is hostile until proven otherwise.

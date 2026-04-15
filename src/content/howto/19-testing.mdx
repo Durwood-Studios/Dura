@@ -1,0 +1,205 @@
+---
+title: "How to Write Tests That Actually Catch Bugs"
+description: "Move beyond trivial assertions to tests that protect against real regressions using TDD, mocking, and the testing pyramid."
+slug: "testing"
+difficulty: "intermediate"
+estimatedMinutes: 30
+steps: 7
+tags: ["testing", "jest", "tdd", "unit-test"]
+---
+
+Most tutorials teach you to test `add(2, 2)` and call it a day. Real bugs live in the seams between components, in edge cases nobody thought about, and in assumptions that were true last Tuesday. This guide teaches you to write tests that catch those bugs before your users do.
+
+## Step 1: Understand the Testing Pyramid
+
+The testing pyramid has three layers, and most teams get the ratio wrong.
+
+**Unit tests** (70%) — Test a single function or module in isolation. Fast, cheap, run in milliseconds. They answer: "Does this piece work correctly on its own?"
+
+**Integration tests** (20%) — Test how pieces work together. A function that calls a database, a component that fetches from an API. They answer: "Do these pieces connect correctly?"
+
+**End-to-end tests** (10%) — Test complete user flows through the real system. Slow, expensive, brittle. They answer: "Can a user actually do the thing?"
+
+The mistake is inverting the pyramid — writing mostly E2E tests because they "feel" more realistic. E2E tests are slow, flaky, and tell you something broke without telling you where. Start from the bottom up.
+
+## Step 2: Learn the TDD Cycle
+
+Test-Driven Development is three steps on repeat:
+
+1. **Red** — Write a failing test that describes the behavior you want.
+2. **Green** — Write the minimum code to make the test pass. Ugly is fine.
+3. **Refactor** — Clean up the code while the tests keep you safe.
+
+```typescript
+// RED: Write the test first
+describe("slugify", () => {
+  it("converts spaces to hyphens and lowercases", () => {
+    expect(slugify("Hello World")).toBe("hello-world");
+  });
+
+  it("strips non-alphanumeric characters", () => {
+    expect(slugify("What's Up?")).toBe("whats-up");
+  });
+
+  it("collapses consecutive hyphens", () => {
+    expect(slugify("too   many   spaces")).toBe("too-many-spaces");
+  });
+});
+
+// GREEN: Minimum code to pass
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
+}
+```
+
+Notice the third test — consecutive hyphens. That edge case would absolutely become a bug in production URLs. TDD forced us to think about it upfront.
+
+## Step 3: Know What to Test (and What Not To)
+
+**Test behavior, not implementation.** If you refactor a function's internals and your tests break even though the output is identical, those tests are testing the wrong thing.
+
+**Do test:**
+
+- Business logic and calculations
+- Edge cases: empty input, null, undefined, boundary values
+- Error handling: does it throw? Does it return a useful message?
+- State transitions: loading → success, loading → error
+
+**Do not test:**
+
+- Third-party library internals (trust their tests)
+- Trivial getters/setters with no logic
+- Private implementation details
+- CSS or visual layout (use visual regression tools for that)
+
+```typescript
+// BAD: Testing implementation details
+it("calls setState with the new value", () => {
+  const spy = jest.spyOn(component, "setState");
+  component.updateName("Alice");
+  expect(spy).toHaveBeenCalledWith({ name: "Alice" });
+});
+
+// GOOD: Testing behavior
+it("displays the updated name after changing it", () => {
+  component.updateName("Alice");
+  expect(component.getDisplayName()).toBe("Alice");
+});
+```
+
+## Step 4: Mock External Dependencies, Not Your Own Code
+
+Mocking is powerful and dangerous. Mock too much and your tests prove nothing. Mock too little and they become slow and flaky.
+
+**Mock these:** HTTP requests, databases, file systems, timers, third-party APIs.
+
+**Don't mock these:** Your own utility functions, your own business logic, pure functions.
+
+```typescript
+// Mock the external dependency, test your logic
+const mockFetch = jest.fn();
+global.fetch = mockFetch;
+
+describe("fetchUserProfile", () => {
+  it("returns formatted user data on success", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: 1, first_name: "Ada", last_name: "Lovelace" }),
+    });
+
+    const profile = await fetchUserProfile(1);
+    expect(profile).toEqual({
+      id: 1,
+      fullName: "Ada Lovelace",
+    });
+  });
+
+  it("throws a descriptive error on 404", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
+
+    await expect(fetchUserProfile(999)).rejects.toThrow("User 999 not found");
+  });
+});
+```
+
+The second test is the one that catches bugs. Most developers test the happy path and ship. The 404 case, the network timeout, the malformed response — those are where production bugs hide.
+
+## Step 5: Write Integration Tests for the Seams
+
+Unit tests verify pieces. Integration tests verify connections. The most common bugs live at the boundary between two systems.
+
+```typescript
+describe("POST /api/lessons", () => {
+  it("creates a lesson and returns it with an id", async () => {
+    const response = await request(app)
+      .post("/api/lessons")
+      .send({ title: "Variables", content: "Let vs const..." })
+      .expect(201);
+
+    expect(response.body).toMatchObject({
+      id: expect.any(Number),
+      title: "Variables",
+    });
+
+    // Verify it actually persisted
+    const stored = await db.lessons.findById(response.body.id);
+    expect(stored).not.toBeNull();
+  });
+
+  it("rejects lessons with empty titles", async () => {
+    const response = await request(app)
+      .post("/api/lessons")
+      .send({ title: "", content: "Some content" })
+      .expect(400);
+
+    expect(response.body.error).toContain("title");
+  });
+});
+```
+
+These tests caught a real category of bug: the API accepting invalid data because validation only ran on the frontend. Integration tests prove the full stack enforces your rules.
+
+## Step 6: Use Test Fixtures and Factories
+
+Hardcoded test data becomes a maintenance nightmare. Build factories that generate valid test objects with sensible defaults.
+
+```typescript
+function createUser(overrides: Partial<User> = {}): User {
+  return {
+    id: Math.floor(Math.random() * 10000),
+    email: `user-${Date.now()}@test.com`,
+    name: "Test User",
+    role: "student",
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+// Now tests are readable and focused
+it("grants admin access to admin users", () => {
+  const admin = createUser({ role: "admin" });
+  expect(canAccessDashboard(admin)).toBe(true);
+});
+
+it("denies admin access to students", () => {
+  const student = createUser({ role: "student" });
+  expect(canAccessDashboard(student)).toBe(false);
+});
+```
+
+The `overrides` pattern lets each test specify only what matters for that scenario. Everything else gets a valid default.
+
+## Step 7: Make Tests Part of Your Workflow
+
+Tests only catch bugs if they run. Integrate them into your daily workflow:
+
+- **Pre-commit hooks** — Run affected tests before every commit. Catch regressions immediately.
+- **CI pipeline** — Run the full suite on every pull request. No green CI, no merge.
+- **Coverage as a guide, not a goal** — 80% coverage with meaningful tests beats 100% coverage with trivial ones. Use coverage reports to find untested logic, not to hit a number.
+- **Test naming convention** — Name tests as sentences: "it rejects expired tokens" not "it test3". Future you will thank present you when a test fails at 2 AM.
+
+When a bug reaches production, your first move is to write a test that reproduces it. Fix the bug second. Now that class of bug can never sneak past again. Over time, your test suite becomes a living document of every mistake your codebase has survived.

@@ -37,6 +37,11 @@ const TUTORIAL_FILES = [
   "16-data-dashboard.mdx",
   "17-ai-agent.mdx",
   "18-mcp-server-tutorial.mdx",
+  "11-auth-system.mdx",
+  "12-docker-deploy.mdx",
+  "13-test-suite.mdx",
+  "19-url-shortener.mdx",
+  "20-tiny-compiler.mdx",
 ];
 
 async function getTutorial(
