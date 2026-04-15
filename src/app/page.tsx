@@ -1,17 +1,19 @@
 import type { Metadata } from "next";
+import dynamic from "next/dynamic";
 import { Nav } from "@/components/splash/Nav";
-import { Hero } from "@/components/splash/Hero";
+import { Footer } from "@/components/splash/Footer";
+
+const Hero = dynamic(() => import("@/components/splash/Hero").then((m) => m.Hero));
+const PhaseGrid = dynamic(() => import("@/components/splash/PhaseGrid").then((m) => m.PhaseGrid));
+const Features = dynamic(() => import("@/components/splash/Features").then((m) => m.Features));
+const Standards = dynamic(() => import("@/components/splash/Standards").then((m) => m.Standards));
+const CTA = dynamic(() => import("@/components/splash/CTA").then((m) => m.CTA));
 
 export const metadata: Metadata = {
   title: "DURA — Zero to CTO, Free Forever",
   description:
     "An open-source learning management system that takes you from absolute beginner to CTO-ready. 10 phases, 400+ lessons, offline-first.",
 };
-import { PhaseGrid } from "@/components/splash/PhaseGrid";
-import { Features } from "@/components/splash/Features";
-import { Standards } from "@/components/splash/Standards";
-import { CTA } from "@/components/splash/CTA";
-import { Footer } from "@/components/splash/Footer";
 
 export default function Home(): React.ReactElement {
   return (
