@@ -184,6 +184,7 @@ export function MasteryGate({
         targetId: moduleId,
         score: scored.score,
       });
+      void track("phase_unlocked", { phaseId: phaseId ?? "", moduleId });
       void awardXPWithToast("mastery-gate", XP_AWARDS.moduleComplete, moduleId);
     }
   };

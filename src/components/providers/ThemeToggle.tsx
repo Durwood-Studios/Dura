@@ -2,6 +2,7 @@
 
 import { Sun, Moon, Monitor } from "lucide-react";
 import { usePreferencesStore } from "@/stores/preferences";
+import { track } from "@/lib/analytics";
 import type { Theme } from "@/types/preferences";
 import { cn } from "@/lib/utils";
 
@@ -30,7 +31,10 @@ export function ThemeToggle(): React.ReactElement {
             role="radio"
             aria-checked={active}
             aria-label={label}
-            onClick={() => void update({ theme: value })}
+            onClick={() => {
+              void update({ theme: value });
+              void track("theme_changed", { to: value });
+            }}
             className={cn(
               "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition",
               active

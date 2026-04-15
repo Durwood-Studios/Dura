@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { putLessonProgress, getLessonProgress } from "@/lib/db/progress";
+import { track } from "@/lib/analytics";
 import type { LessonProgress } from "@/types/curriculum";
 
 interface ProgressState {
@@ -51,6 +52,7 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
       startedAt: Date.now(),
     });
     if (!existing) await putLessonProgress(next);
+    void track("lesson_started", { lessonId, phaseId, moduleId });
   },
 
   setScroll: (percent) => {
