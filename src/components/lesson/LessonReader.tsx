@@ -3,6 +3,7 @@ import * as runtime from "react/jsx-runtime";
 import { mdxComponents } from "@/components/lesson/MDXComponents";
 import { ScrollTracker } from "@/components/lesson/ScrollTracker";
 import { CompletionGate } from "@/components/lesson/CompletionGate";
+import { BiteMode } from "@/components/lesson/BiteMode";
 import { formatMinutes } from "@/lib/utils";
 import { ShareButton } from "@/components/seo/ShareButton";
 import type { LoadedLesson } from "@/lib/content";
@@ -60,9 +61,11 @@ export async function LessonReader({
         </div>
       </header>
 
-      <div className="lesson-prose">
-        <MDXContent components={mdxComponents} />
-      </div>
+      <BiteMode>
+        <div className="lesson-prose">
+          <MDXContent components={mdxComponents} />
+        </div>
+      </BiteMode>
 
       <CompletionGate
         estimatedMinutes={meta.estimatedMinutes}
