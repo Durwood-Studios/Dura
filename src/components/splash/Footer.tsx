@@ -8,7 +8,7 @@ export function Footer(): React.ReactElement {
           <div>Durwood Studios LLC · Built by Dustin Snellings</div>
           <div className="text-xs text-[#A3A3A3]">Open source · AGPLv3 · Built for everyone</div>
         </div>
-        <nav className="flex gap-6">
+        <nav className="flex flex-wrap gap-6">
           <Link
             href="https://github.com/Durwood-Studios/Dura"
             className="transition-colors hover:text-[#10B981]"
@@ -20,6 +20,12 @@ export function Footer(): React.ReactElement {
           </Link>
           <Link href="/open-source" className="transition-colors hover:text-[#10B981]">
             Open Source
+          </Link>
+          <Link href="/privacy" className="transition-colors hover:text-[#10B981]">
+            Privacy Policy
+          </Link>
+          <Link href="/terms" className="transition-colors hover:text-[#10B981]">
+            Terms of Service
           </Link>
         </nav>
       </div>
