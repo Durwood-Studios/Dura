@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Download, Trash2, AlertTriangle, Shield } from "lucide-react";
+import { Download, Trash2, AlertTriangle, Shield, Accessibility, Keyboard } from "lucide-react";
 import { usePreferencesStore } from "@/stores/preferences";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
 import { clearAllData, exportAllData } from "@/lib/clearAllData";
@@ -18,9 +18,20 @@ const FONT_SIZES: { value: FontSize; label: string }[] = [
 ];
 
 const STUDY_MODES: { value: StudyMode; label: string; hint: string }[] = [
-  { value: "standard", label: "Standard", hint: "Normal reading layout" },
-  { value: "focus", label: "Focus", hint: "Hide nav, full-width content" },
+  { value: "standard", label: "Standard", hint: "Full lesson layout" },
+  { value: "bite", label: "Bite-sized", hint: "Lessons split into short segments" },
+  { value: "focus", label: "Focus", hint: "Hide nav, distraction-free" },
+  { value: "review", label: "Review", hint: "Flashcard sessions only" },
   { value: "sprint", label: "Sprint", hint: "Pomodoro timer in top bar" },
+  { value: "challenge", label: "Challenge", hint: "Timed quiz mode" },
+];
+
+const SHORTCUTS = [
+  { keys: "Ctrl + K", action: "Command palette" },
+  { keys: "Ctrl + Shift + F", action: "Toggle focus mode" },
+  { keys: "Space", action: "Flip flashcard" },
+  { keys: "← →", action: "Navigate bite-sized segments" },
+  { keys: "1-4", action: "Rate flashcard (Again/Hard/Good/Easy)" },
 ];
 
 export function SettingsClient(): React.ReactElement {
@@ -28,7 +39,7 @@ export function SettingsClient(): React.ReactElement {
   const update = usePreferencesStore((s) => s.update);
   const [confirmingClear, setConfirmingClear] = useState(false);
 
-  const handleExport = async () => {
+  const handleExport = async (): Promise<void> => {
     const json = await exportAllData();
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -39,7 +50,7 @@ export function SettingsClient(): React.ReactElement {
     URL.revokeObjectURL(url);
   };
 
-  const handleClear = async () => {
+  const handleClear = async (): Promise<void> => {
     await clearAllData();
     setConfirmingClear(false);
     window.location.href = "/";
@@ -47,7 +58,7 @@ export function SettingsClient(): React.ReactElement {
 
   return (
     <div className="flex flex-col gap-8">
-      {/* Appearance */}
+      {/* ── Appearance ──────────────────────────────────────────────── */}
       <Section title="Appearance">
         <SettingRow label="Theme" hint="Light, dark, or follow your system">
           <ThemeToggle />
@@ -62,7 +73,7 @@ export function SettingsClient(): React.ReactElement {
                 className={cn(
                   "rounded-md px-2.5 py-1.5 text-xs font-medium transition",
                   prefs.fontSize === f.value
-                    ? "bg-emerald-50 text-emerald-700"
+                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
                     : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
                 )}
               >
@@ -71,15 +82,25 @@ export function SettingsClient(): React.ReactElement {
             ))}
           </div>
         </SettingRow>
-        <SettingRow label="Reduced motion" hint="Disable animations beyond the OS setting">
+      </Section>
+
+      {/* ── Accessibility ──────────────────────────────────────────── */}
+      <Section title="Accessibility" icon={<Accessibility className="h-4 w-4 text-emerald-500" />}>
+        <SettingRow label="Reduced motion" hint="Disable animations site-wide">
           <Toggle value={prefs.reducedMotion} onChange={(v) => void update({ reducedMotion: v })} />
+        </SettingRow>
+        <SettingRow label="High contrast" hint="Increase text contrast and border visibility">
+          <Toggle value={prefs.highContrast} onChange={(v) => void update({ highContrast: v })} />
+        </SettingRow>
+        <SettingRow label="Dyslexia-friendly font" hint="Switch to OpenDyslexic for body text">
+          <Toggle value={prefs.dyslexiaFont} onChange={(v) => void update({ dyslexiaFont: v })} />
         </SettingRow>
       </Section>
 
-      {/* Learning */}
+      {/* ── Learning ───────────────────────────────────────────────── */}
       <Section title="Learning">
-        <SettingRow label="Default study mode" hint="Set once, apply everywhere">
-          <div className="flex flex-col gap-1">
+        <SettingRow label="Default study mode" hint="Choose how lessons are presented">
+          <div className="flex flex-col gap-1.5">
             {STUDY_MODES.map((m) => (
               <button
                 key={m.value}
@@ -89,9 +110,9 @@ export function SettingsClient(): React.ReactElement {
                   void track("study_mode_changed", { to: m.value });
                 }}
                 className={cn(
-                  "flex items-center gap-2 rounded-lg border px-3 py-1.5 text-left text-xs transition",
+                  "flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition",
                   prefs.studyMode === m.value
-                    ? "border-emerald-400 bg-emerald-50 text-emerald-900"
+                    ? "border-emerald-400 bg-emerald-50 text-emerald-900 dark:border-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300"
                     : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
                 )}
               >
@@ -114,7 +135,7 @@ export function SettingsClient(): React.ReactElement {
                 void update({ dailyGoalMinutes: val });
               }
             }}
-            className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-sm"
+            className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-sm text-[var(--color-text-primary)]"
           />
         </SettingRow>
         <SettingRow label="Strict gating" hint="Require mastery gates to advance between modules">
@@ -122,7 +143,7 @@ export function SettingsClient(): React.ReactElement {
         </SettingRow>
       </Section>
 
-      {/* Notifications */}
+      {/* ── Notifications ──────────────────────────────────────────── */}
       <Section title="Notifications">
         <SettingRow label="Sound effects" hint="Completion chimes and timer pings">
           <Toggle value={prefs.soundEnabled} onChange={(v) => void update({ soundEnabled: v })} />
@@ -132,7 +153,24 @@ export function SettingsClient(): React.ReactElement {
         </p>
       </Section>
 
-      {/* Data */}
+      {/* ── Keyboard shortcuts ─────────────────────────────────────── */}
+      <Section
+        title="Keyboard shortcuts"
+        icon={<Keyboard className="h-4 w-4 text-[var(--color-text-muted)]" />}
+      >
+        <div className="grid gap-2">
+          {SHORTCUTS.map((s) => (
+            <div key={s.keys} className="flex items-center justify-between text-xs">
+              <span className="text-[var(--color-text-secondary)]">{s.action}</span>
+              <kbd className="rounded border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-2 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
+                {s.keys}
+              </kbd>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* ── Data ───────────────────────────────────────────────────── */}
       <Section title="Data">
         <p className="text-xs text-[var(--color-text-secondary)]">
           Your data is stored locally on this device. Nothing is sent to any server.
@@ -149,7 +187,7 @@ export function SettingsClient(): React.ReactElement {
           <button
             type="button"
             onClick={() => setConfirmingClear(true)}
-            className="inline-flex items-center gap-2 rounded-lg border border-rose-300 bg-rose-50 px-4 py-2 text-xs font-medium text-rose-700 transition hover:bg-rose-100"
+            className="inline-flex items-center gap-2 rounded-lg border border-rose-300 bg-rose-50 px-4 py-2 text-xs font-medium text-rose-700 transition hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-400 dark:hover:bg-rose-950/50"
           >
             <Trash2 className="h-3.5 w-3.5" />
             Clear all data
@@ -157,17 +195,23 @@ export function SettingsClient(): React.ReactElement {
         </div>
       </Section>
 
-      {/* Privacy */}
+      {/* ── Privacy ────────────────────────────────────────────────── */}
       <Section title="Privacy">
         <div className="flex items-start gap-3">
           <Shield className="mt-0.5 h-4 w-4 text-emerald-500" />
           <div className="text-xs text-[var(--color-text-secondary)]">
             <p>All your data is stored locally on this device. No cookies. No tracking.</p>
             <p className="mt-2 flex gap-3">
-              <Link href="/privacy" className="text-emerald-600 hover:underline">
+              <Link
+                href="/privacy"
+                className="text-emerald-600 hover:underline dark:text-emerald-400"
+              >
                 Privacy Policy
               </Link>
-              <Link href="/terms" className="text-emerald-600 hover:underline">
+              <Link
+                href="/terms"
+                className="text-emerald-600 hover:underline dark:text-emerald-400"
+              >
                 Terms of Service
               </Link>
             </p>
@@ -182,7 +226,7 @@ export function SettingsClient(): React.ReactElement {
         </button>
       </Section>
 
-      {/* About */}
+      {/* ── About ──────────────────────────────────────────────────── */}
       <Section title="About">
         <div className="text-xs text-[var(--color-text-secondary)]">
           <p className="font-semibold text-[var(--color-text-primary)]">DURA · v0.1.0</p>
@@ -190,27 +234,39 @@ export function SettingsClient(): React.ReactElement {
           <p className="mt-2 flex gap-3">
             <Link
               href="https://github.com/Durwood-Studios/Dura"
-              className="text-emerald-600 hover:underline"
+              className="text-emerald-600 hover:underline dark:text-emerald-400"
               target="_blank"
               rel="noopener noreferrer"
             >
               GitHub
             </Link>
-            <Link href="/open-source" className="text-emerald-600 hover:underline">
+            <Link
+              href="/open-source"
+              className="text-emerald-600 hover:underline dark:text-emerald-400"
+            >
               Open source
             </Link>
           </p>
         </div>
       </Section>
 
+      {/* ── Confirm clear modal ────────────────────────────────────── */}
       {confirmingClear && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6">
-          <div className="max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 text-center shadow-xl">
+          <div
+            role="alertdialog"
+            aria-labelledby="clear-title"
+            aria-describedby="clear-desc"
+            className="max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 text-center shadow-xl"
+          >
             <AlertTriangle className="mx-auto h-8 w-8 text-rose-500" aria-hidden />
-            <h3 className="mt-2 text-lg font-semibold text-[var(--color-text-primary)]">
+            <h3
+              id="clear-title"
+              className="mt-2 text-lg font-semibold text-[var(--color-text-primary)]"
+            >
               Clear all data?
             </h3>
-            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            <p id="clear-desc" className="mt-1 text-sm text-[var(--color-text-secondary)]">
               This permanently deletes your progress, flashcards, goals, certificates, and
               preferences on this device. There is no undo.
             </p>
@@ -240,15 +296,20 @@ export function SettingsClient(): React.ReactElement {
 function Section({
   title,
   children,
+  icon,
 }: {
   title: string;
   children: React.ReactNode;
+  icon?: React.ReactNode;
 }): React.ReactElement {
   return (
-    <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
-      <h2 className="mb-4 text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
-        {title}
-      </h2>
+    <section className="dura-card p-6">
+      <div className="mb-4 flex items-center gap-2">
+        {icon}
+        <h2 className="text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+          {title}
+        </h2>
+      </div>
       <div className="flex flex-col gap-4">{children}</div>
     </section>
   );
@@ -296,7 +357,7 @@ function Toggle({
     >
       <span
         className={cn(
-          "absolute top-0.5 h-5 w-5 rounded-full bg-[var(--color-bg-surface)] shadow transition",
+          "absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition dark:bg-[var(--color-bg-surface)]",
           value ? "left-5" : "left-0.5"
         )}
       />

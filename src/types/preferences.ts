@@ -11,6 +11,8 @@ export interface Preferences {
   studyMode: StudyMode;
   fontSize: FontSize;
   reducedMotion: boolean;
+  highContrast: boolean;
+  dyslexiaFont: boolean;
   soundEnabled: boolean;
   dailyGoalMinutes: number;
   strictGating: boolean;
@@ -24,6 +26,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   studyMode: "standard",
   fontSize: "md",
   reducedMotion: false,
+  highContrast: false,
+  dyslexiaFont: false,
   soundEnabled: true,
   dailyGoalMinutes: 20,
   strictGating: false,
