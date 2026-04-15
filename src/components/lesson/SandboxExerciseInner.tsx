@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import {
   SandpackProvider,
   SandpackLayout,
   SandpackCodeEditor,
   SandpackConsole,
   useSandpack,
+  useSandpackConsole,
 } from "@codesandbox/sandpack-react";
 import { Play, RotateCcw, Eye, Check, X } from "lucide-react";
 import { track } from "@/lib/analytics";
@@ -50,6 +51,15 @@ const SANDPACK_THEME = {
   },
 } as const;
 
+/** Extract printable text from a console log data entry. */
+function extractLogText(data: Array<string | Record<string, string>> | undefined): string {
+  if (!data) return "";
+  return data
+    .map((d) => (typeof d === "string" ? d : JSON.stringify(d)))
+    .join(" ")
+    .trim();
+}
+
 function SandboxControls({
   initialCode,
   solution,
@@ -62,34 +72,89 @@ function SandboxControls({
   language: SandboxExerciseInnerProps["language"];
 }): React.ReactElement {
   const { sandpack } = useSandpack();
+  const { logs, reset: resetLogs } = useSandpackConsole({
+    resetOnPreviewRestart: true,
+    maxMessageCount: 200,
+    showSyntaxError: true,
+  });
   const [hasAttempted, setHasAttempted] = useState(false);
   const [verdict, setVerdict] = useState<"idle" | "pass" | "fail">("idle");
+  const [verdictMessage, setVerdictMessage] = useState("");
+  const pendingCheck = useRef(false);
+
+  // Check verdict when logs update after a run
+  useEffect(() => {
+    if (!pendingCheck.current || logs.length === 0) return;
+
+    // Wait a tick for all console output to flush
+    const timer = setTimeout(() => {
+      if (!pendingCheck.current) return;
+      pendingCheck.current = false;
+
+      // Collect all console.log output lines
+      const output = logs
+        .filter((l) => l.method === "log" || l.method === "info")
+        .map((l) => extractLogText(l.data))
+        .filter(Boolean);
+
+      const hasErrors = logs.some((l) => l.method === "error");
+
+      if (testCases.length === 0) {
+        // No expected output — pass if no errors, show neutral message
+        if (hasErrors) {
+          setVerdict("fail");
+          setVerdictMessage("Check the errors above");
+        } else {
+          setVerdict("pass");
+          setVerdictMessage("Code ran successfully");
+        }
+      } else {
+        // Compare output against expected test cases
+        const allPassed = testCases.every((expected) => {
+          const trimmed = expected.trim();
+          return output.some((line) => line.trim() === trimmed || line.includes(trimmed));
+        });
+
+        if (allPassed) {
+          setVerdict("pass");
+          setVerdictMessage("Correct!");
+        } else {
+          setVerdict("fail");
+          const got = output.length > 0 ? output.join(", ") : "(no output)";
+          setVerdictMessage(`Expected "${testCases[0]}" — got ${got}`);
+        }
+      }
+
+      void track("sandbox_executed", {
+        language,
+        success: verdict === "pass",
+      });
+    }, 800);
+
+    return () => clearTimeout(timer);
+  }, [logs, testCases, language, verdict]);
 
   const run = useCallback(() => {
     setHasAttempted(true);
     setVerdict("idle");
+    setVerdictMessage("");
+    resetLogs();
+    pendingCheck.current = true;
     sandpack.runSandpack();
-    // Best-effort verdict: check the iframe console messages on next tick.
-    setTimeout(() => {
-      const messages = sandpack.clients[Object.keys(sandpack.clients)[0]]
-        ? // sandpack doesn't expose console output through a stable API; we
-          // optimistically mark pass and let the console panel show output.
-          "ok"
-        : "ok";
-      const passed = messages === "ok" && testCases.length > 0;
-      setVerdict(passed ? "pass" : "fail");
-      void track("sandbox_executed", { language, success: passed });
-    }, 400);
-  }, [sandpack, testCases.length, language]);
+  }, [sandpack, resetLogs]);
 
   const reset = () => {
     sandpack.updateFile("/index.js", initialCode);
     setVerdict("idle");
+    setVerdictMessage("");
+    resetLogs();
   };
 
   const showSolution = () => {
     sandpack.updateFile("/index.js", solution);
     setVerdict("idle");
+    setVerdictMessage("");
+    resetLogs();
   };
 
   return (
@@ -128,7 +193,7 @@ function SandboxControls({
           )}
         >
           {verdict === "pass" ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
-          {verdict === "pass" ? "Looks good" : "Check the output"}
+          {verdictMessage}
         </span>
       )}
     </div>
