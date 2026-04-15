@@ -58,3 +58,42 @@ The sync engine (`src/lib/supabase/sync.ts`) handles bidirectional sync between 
   - Analytics/XP: append-only with server-side deduplication
 
 The app works fully offline. Supabase sync is optional — it adds cross-device backup for users who create an account.
+
+## Additional Migrations (Free Tier Features)
+
+Run these after the core migrations above:
+
+- `009-storage.sql` — Avatar and certificate file storage buckets
+- `010-realtime.sql` — Presence tracking and activity feed table with auto-triggers
+- `011-vectors.sql` — pgvector extension for semantic search across all content
+- `012-auth-metadata.sql` — Instant preferences sync via auth user metadata
+
+## Free Tier Limits & Graceful Degradation
+
+DURA is designed to run permanently on the Supabase free tier. The guard module (`src/lib/supabase/guard.ts`) provides:
+
+**Circuit Breaker:** After N consecutive failures per feature, stop calling that feature for a cooldown period. The app continues working from IndexedDB.
+
+| Feature        | Max Failures | Cooldown |
+| -------------- | ------------ | -------- |
+| Auth           | 3            | 60s      |
+| Database       | 5            | 30s      |
+| Storage        | 3            | 120s     |
+| Realtime       | 3            | 300s     |
+| Edge Functions | 3            | 60s      |
+| Search         | 5            | 60s      |
+
+**Free Tier Limits (2026):**
+
+| Resource       | Limit          | DURA Usage                            |
+| -------------- | -------------- | ------------------------------------- |
+| Database       | 500MB          | ~50MB at 10K users                    |
+| Auth           | 50K MAU        | Unlikely to hit                       |
+| Storage        | 1GB files      | Avatars + certs ~200MB at 10K users   |
+| Realtime       | 200 concurrent | Fine for early growth                 |
+| Edge Functions | 500K/month     | Streak reminders ~30K/month at 1K DAU |
+| API            | 500 req/s      | Unlikely to hit                       |
+
+**Upgrading:** When growth demands it, the guard module has hooks for cost tier awareness. The `FREE_TIER_LIMITS` constants in `guard.ts` can be updated to match Pro/Team tier limits. No code changes needed — just update the numbers.
+
+**Rule:** If Supabase is down, rate-limited, or the free tier is exhausted, the user experience does not degrade. Every Supabase feature has an IDB fallback. The app is local-first.
