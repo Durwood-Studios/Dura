@@ -17,6 +17,7 @@ import {
   Lightbulb,
   Wrench,
   Compass,
+  Signpost,
   Zap,
   Flame,
 } from "lucide-react";
@@ -35,6 +36,7 @@ const NAV_GROUPS = [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
       { href: "/assess", label: "Assess", icon: Compass },
       { href: "/paths", label: "Paths", icon: BookOpen },
+      { href: "/tracks", label: "Career Tracks", icon: Signpost },
       { href: "/review", label: "Review", icon: Repeat },
     ],
   },
