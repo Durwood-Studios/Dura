@@ -149,22 +149,13 @@ export function PhaseGrid(): React.ReactElement {
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-50px" }}
               transition={{ duration: 0.5, delay: i * 0.05, ease: "easeOut" }}
-              className="group relative overflow-hidden rounded-xl border border-[#E5E5E5] bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-200 hover:scale-[1.01] hover:shadow-[0_4px_12px_rgba(0,0,0,0.08)] dark:border-white/8 dark:bg-white/[0.03] dark:shadow-none dark:hover:shadow-[0_4px_12px_rgba(0,0,0,0.3)]"
+              className="group relative overflow-hidden rounded-xl border border-[#E5E5E5] bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-shadow duration-200 hover:shadow-[0_4px_12px_rgba(0,0,0,0.08)] dark:border-white/8 dark:bg-white/[0.03] dark:shadow-none dark:hover:shadow-[0_4px_12px_rgba(0,0,0,0.3)]"
             >
-              {/* Thicker gradient color bar */}
+              {/* Color bar */}
               <div
                 aria-hidden
-                className="absolute inset-x-0 top-0 h-1.5"
-                style={{
-                  background: `linear-gradient(90deg, ${phase.color}, ${phase.color}88 70%, transparent)`,
-                }}
-              />
-
-              {/* Radial glow on hover */}
-              <div
-                aria-hidden
-                className="pointer-events-none absolute -top-20 left-1/2 h-40 w-40 -translate-x-1/2 rounded-full opacity-0 blur-3xl transition-opacity duration-300 group-hover:opacity-100 motion-reduce:transition-none"
-                style={{ background: `${phase.color}25` }}
+                className="absolute inset-x-0 top-0 h-1"
+                style={{ background: phase.color }}
               />
 
               <div className="flex items-center gap-3">

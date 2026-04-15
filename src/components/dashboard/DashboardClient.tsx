@@ -222,7 +222,7 @@ export function DashboardClient(): React.ReactElement {
         {/* Continue Learning */}
         <Link
           href={continueHref}
-          className="dura-card group relative overflow-hidden p-6 no-underline transition-transform hover:scale-[1.01]"
+          className="dura-card group relative overflow-hidden p-6 no-underline transition-shadow"
         >
           {/* Background gradient accent */}
           <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/8 via-transparent to-emerald-500/3 opacity-60 transition-opacity group-hover:opacity-100" />
@@ -249,7 +249,7 @@ export function DashboardClient(): React.ReactElement {
         <Link
           href="/review"
           className={cn(
-            "dura-card group relative overflow-hidden p-6 no-underline transition-transform hover:scale-[1.01]",
+            "dura-card group relative overflow-hidden p-6 no-underline transition-shadow",
             data.dueCardCount > 0 && "dura-glow-emerald"
           )}
         >
