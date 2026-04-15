@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Award, Check, Copy } from "lucide-react";
+import { Award, Check, Copy, Download } from "lucide-react";
 import { ShareButton } from "@/components/seo/ShareButton";
 import { copyToClipboard } from "@/lib/share";
 import { SITE_URL } from "@/lib/og";
@@ -29,7 +29,10 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
   const phaseColor = phase?.color ?? "#10b981";
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-lg">
+    <article
+      id="certificate-printable"
+      className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-lg"
+    >
       <header
         className="px-8 py-8 text-center"
         style={{
@@ -110,12 +113,25 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
           {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
           <span className="font-mono">{shortHash}…</span>
         </button>
-        <ShareButton
-          url={url}
-          title={`${certificate.phaseTitle} — Verified on DURA`}
-          text="I just verified my mastery on DURA."
-        />
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-surface)]"
+          >
+            <Download className="h-3 w-3" />
+            Download PDF
+          </button>
+          <ShareButton
+            url={url}
+            title={`${certificate.phaseTitle} — Verified on DURA`}
+            text="I just verified my mastery on DURA."
+          />
+        </div>
       </footer>
+      <p className="mt-2 text-center text-[10px] text-[var(--color-text-muted)] print:hidden">
+        Choose &ldquo;Save as PDF&rdquo; in the print dialog
+      </p>
     </article>
   );
 }
