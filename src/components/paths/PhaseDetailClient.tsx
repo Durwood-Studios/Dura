@@ -45,9 +45,12 @@ export function PhaseDetailClient({ phase }: PhaseDetailClientProps): React.Reac
 
   return (
     <>
-      <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
+      <header className="mb-10 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
+          <p
+            className="font-mono text-xs font-semibold tracking-widest uppercase"
+            style={{ color: phase.color }}
+          >
             Phase {phase.id}
           </p>
           <h1 className="mt-1 text-3xl font-semibold text-[var(--color-text-primary)]">
@@ -58,7 +61,7 @@ export function PhaseDetailClient({ phase }: PhaseDetailClientProps): React.Reac
         {summary.certificate && (
           <Link
             href={`/verify/${summary.certificate.hash}`}
-            className="inline-flex items-center gap-2 rounded-lg border border-emerald-300 bg-[var(--color-bg-accent)] px-3 py-2 text-xs font-medium text-emerald-700 transition hover:bg-emerald-100"
+            className="dura-glow-emerald inline-flex items-center gap-2 rounded-lg border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-xs font-medium text-emerald-600 transition hover:bg-emerald-500/15 dark:text-emerald-400"
           >
             <Award className="h-4 w-4" />
             Verified · {Math.round(summary.certificate.score * 100)}%
@@ -66,21 +69,35 @@ export function PhaseDetailClient({ phase }: PhaseDetailClientProps): React.Reac
         )}
       </header>
 
-      <div className="mb-8 grid grid-cols-3 gap-3 text-center">
-        <Stat label="Lessons" value={`${summary.completedLessons}/${summary.totalLessons}`} />
-        <Stat label="Modules passed" value={`${summary.modulesPassed}/${phase.modules.length}`} />
-        <Stat label="Hours" value={`${phase.estimatedHours}`} />
+      {/* Stats row */}
+      <div className="mb-10 grid grid-cols-3 gap-4 text-center">
+        <StatCard
+          label="Lessons"
+          value={`${summary.completedLessons}/${summary.totalLessons}`}
+          phaseColor={phase.color}
+        />
+        <StatCard
+          label="Modules passed"
+          value={`${summary.modulesPassed}/${phase.modules.length}`}
+          phaseColor={phase.color}
+        />
+        <StatCard label="Hours" value={`${phase.estimatedHours}`} phaseColor={phase.color} />
       </div>
 
-      <ul className="flex flex-col gap-3">
-        {phase.modules.map((module) => (
+      <div className="dura-divider mb-8" />
+
+      {/* Module list */}
+      <ul className="flex flex-col gap-4">
+        {phase.modules.map((module, index) => (
           <li key={module.id}>
-            <ModuleRow phaseId={phase.id} module={module} />
+            <ModuleRow phaseId={phase.id} module={module} phaseColor={phase.color} index={index} />
           </li>
         ))}
       </ul>
 
-      <div className="mt-10">
+      <div className="dura-divider mt-10 mb-8" />
+
+      <div>
         <h2 className="mb-2 text-xl font-semibold text-[var(--color-text-primary)]">
           Phase Verification
         </h2>
@@ -93,11 +110,26 @@ export function PhaseDetailClient({ phase }: PhaseDetailClientProps): React.Reac
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }): React.ReactElement {
+function StatCard({
+  label,
+  value,
+  phaseColor,
+}: {
+  label: string;
+  value: string;
+  phaseColor: string;
+}): React.ReactElement {
   return (
-    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-3">
-      <p className="font-mono text-[10px] text-[var(--color-text-muted)] uppercase">{label}</p>
-      <p className="mt-1 text-xl font-semibold text-[var(--color-text-primary)]">{value}</p>
+    <div className="dura-card p-4">
+      {/* Accent strip at top */}
+      <div
+        className="mx-auto mb-3 h-0.5 w-12 rounded-full opacity-60"
+        style={{ background: phaseColor }}
+      />
+      <p className="font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+        {label}
+      </p>
+      <p className="dura-stat-gradient mt-1 text-2xl font-bold">{value}</p>
     </div>
   );
 }
@@ -105,9 +137,11 @@ function Stat({ label, value }: { label: string; value: string }): React.ReactEl
 interface ModuleRowProps {
   phaseId: string;
   module: import("@/types/curriculum").Module;
+  phaseColor: string;
+  index: number;
 }
 
-function ModuleRow({ phaseId, module }: ModuleRowProps): React.ReactElement {
+function ModuleRow({ phaseId, module, phaseColor, index }: ModuleRowProps): React.ReactElement {
   const [summary, setSummary] = useState<{
     completedLessons: number;
     masteryStatus: "not-attempted" | "passed" | "failed" | "cooldown";
@@ -137,32 +171,67 @@ function ModuleRow({ phaseId, module }: ModuleRowProps): React.ReactElement {
   return (
     <Link
       href={`/paths/${phaseId}/${module.id}`}
-      className="group flex flex-col gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 shadow-sm transition hover:shadow-md"
+      className="dura-card group flex items-stretch overflow-hidden"
     >
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex-1">
-          <p className="font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
-            {module.id}
-          </p>
-          <h3 className="mt-1 font-semibold text-[var(--color-text-primary)]">{module.title}</h3>
-          <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">{module.description}</p>
-        </div>
-        <MasteryIcon status={status} />
-        <ArrowRight className="h-4 w-4 text-[var(--color-text-muted)] group-hover:text-emerald-600" />
-      </div>
-      <div className="flex items-center gap-3">
-        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--color-bg-subtle)]">
+      {/* Phase-colored left border accent */}
+      <div className="w-1 shrink-0 rounded-l-2xl" style={{ background: phaseColor }} />
+
+      <div className="flex flex-1 flex-col gap-3 p-5">
+        <div className="flex items-center gap-4">
+          {/* Module number circle */}
           <div
-            className={cn(
-              "h-full transition-all duration-300",
-              status === "passed" ? "bg-emerald-500" : "bg-[var(--color-text-muted)]"
-            )}
-            style={{ width: `${percent}%` }}
-          />
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold"
+            style={{
+              background: `${phaseColor}20`,
+              color: phaseColor,
+            }}
+          >
+            {index + 1}
+          </div>
+
+          <div className="flex-1">
+            <p className="font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+              {module.id}
+            </p>
+            <h3 className="mt-0.5 font-semibold text-[var(--color-text-primary)]">
+              {module.title}
+            </h3>
+            <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
+              {module.description}
+            </p>
+          </div>
+
+          <MasteryIcon status={status} />
+          <ArrowRight className="h-4 w-4 text-[var(--color-text-muted)] transition-transform group-hover:translate-x-0.5 group-hover:text-emerald-500" />
         </div>
-        <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
-          {completed}/{module.lessonCount}
-        </span>
+
+        {/* Stat row */}
+        <div className="flex items-center gap-4 text-[10px] text-[var(--color-text-muted)]">
+          <span className="font-mono">
+            {module.lessonCount} lesson{module.lessonCount === 1 ? "" : "s"}
+          </span>
+          <span className="text-[var(--color-border)]">|</span>
+          <span className="font-mono">~{module.estimatedHours}h</span>
+        </div>
+
+        {/* Progress bar */}
+        <div className="flex items-center gap-3">
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--color-bg-subtle)]">
+            <div
+              className={cn(
+                "h-full rounded-full transition-all duration-500",
+                status === "passed" ? "dura-progress" : ""
+              )}
+              style={{
+                width: `${percent}%`,
+                background: status !== "passed" ? `${phaseColor}80` : undefined,
+              }}
+            />
+          </div>
+          <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
+            {completed}/{module.lessonCount}
+          </span>
+        </div>
       </div>
     </Link>
   );

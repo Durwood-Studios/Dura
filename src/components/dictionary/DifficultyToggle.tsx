@@ -19,7 +19,7 @@ export function DifficultyToggle({ value, onChange }: DifficultyToggleProps): Re
     <div
       role="radiogroup"
       aria-label="Difficulty"
-      className="inline-flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-1"
+      className="dura-glass inline-flex items-center gap-1 rounded-2xl p-1"
     >
       {OPTIONS.map((o) => {
         const active = value === o.value;
@@ -31,10 +31,10 @@ export function DifficultyToggle({ value, onChange }: DifficultyToggleProps): Re
             aria-checked={active}
             onClick={() => onChange(o.value)}
             className={cn(
-              "rounded-md px-3 py-1.5 text-xs font-medium transition",
+              "rounded-xl px-4 py-2 text-xs font-medium transition",
               active
-                ? "bg-emerald-50 text-emerald-700"
-                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                ? "dura-glow-emerald bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)] hover:text-[var(--color-text-primary)]"
             )}
           >
             {o.label}

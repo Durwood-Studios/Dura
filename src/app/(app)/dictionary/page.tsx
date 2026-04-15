@@ -14,9 +14,10 @@ export default function DictionaryPage(): React.ReactElement {
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-8">
-      <h1 className="mb-1 text-3xl font-semibold">Dictionary</h1>
+      <h1 className="mb-1 text-3xl font-semibold text-[var(--color-text-primary)]">Dictionary</h1>
       <p className="mb-6 text-[var(--color-text-secondary)]">
-        {DICTIONARY.length} verified terms. Three tiers each: beginner, intermediate, advanced.
+        <span className="dura-stat-gradient font-bold">{DICTIONARY.length}</span> verified terms.
+        Three tiers each: beginner, intermediate, advanced.
       </p>
       <DictionaryClient
         initialTerms={initialTerms}

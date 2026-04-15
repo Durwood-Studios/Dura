@@ -8,6 +8,20 @@ import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 import type { DictionaryDifficulty, DictionaryTerm } from "@/types/dictionary";
 
+/** Phase colors for filter chips. */
+const PHASE_CHIP_COLORS: Record<string, string> = {
+  "0": "#6ee7b7",
+  "1": "#93c5fd",
+  "2": "#c4b5fd",
+  "3": "#fda4af",
+  "4": "#fdba74",
+  "5": "#f0abfc",
+  "6": "#67e8f9",
+  "7": "#fcd34d",
+  "8": "#a3e635",
+  "9": "#f472b6",
+};
+
 interface DictionaryClientProps {
   /** Initial batch of terms (first 50, server-rendered). */
   initialTerms: DictionaryTerm[];
@@ -102,49 +116,59 @@ export function DictionaryClient({
       <SearchBar value={query} onChange={setQuery} placeholder={`Search ${totalCount} terms…`} />
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        {/* Phase filter chips */}
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setPhaseId(undefined)}
             className={cn(
-              "rounded-full border px-3 py-1 text-xs font-medium transition",
+              "rounded-full px-3.5 py-1.5 text-xs font-medium transition",
               phaseId === undefined
-                ? "border-emerald-400 bg-emerald-50 text-emerald-700"
-                : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                ? "dura-glow-emerald bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
             )}
           >
             All phases
           </button>
-          {PHASE_IDS.map((id) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setPhaseId(id)}
-              className={cn(
-                "rounded-full border px-3 py-1 text-xs font-medium transition",
-                phaseId === id
-                  ? "border-emerald-400 bg-emerald-50 text-emerald-700"
-                  : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
-              )}
-            >
-              Phase {id}
-            </button>
-          ))}
+          {PHASE_IDS.map((id) => {
+            const color = PHASE_CHIP_COLORS[id];
+            const isActive = phaseId === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setPhaseId(id)}
+                className={cn(
+                  "rounded-full px-3.5 py-1.5 text-xs font-medium transition",
+                  isActive
+                    ? "font-semibold text-white dark:text-[var(--color-bg-primary)]"
+                    : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                )}
+                style={
+                  isActive ? { background: color, boxShadow: `0 0 12px ${color}40` } : undefined
+                }
+              >
+                Phase {id}
+              </button>
+            );
+          })}
         </div>
         <DifficultyToggle value={difficulty} onChange={setDifficulty} />
       </div>
 
       {categories.length > 1 && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] text-[var(--color-text-muted)] uppercase">Category</span>
+          <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
+            Category
+          </span>
           <button
             type="button"
             onClick={() => setCategory(undefined)}
             className={cn(
-              "rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition",
+              "rounded-full px-3 py-1 text-[11px] font-medium transition",
               category === undefined
-                ? "border-emerald-400 bg-emerald-50 text-emerald-700"
-                : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
             )}
           >
             all
@@ -155,10 +179,10 @@ export function DictionaryClient({
               type="button"
               onClick={() => setCategory(c)}
               className={cn(
-                "rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition",
+                "rounded-full px-3 py-1 text-[11px] font-medium transition",
                 category === c
-                  ? "border-emerald-400 bg-emerald-50 text-emerald-700"
-                  : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                  ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                  : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
               )}
             >
               {c}
@@ -170,12 +194,12 @@ export function DictionaryClient({
       {loading && <p className="text-center text-sm text-[var(--color-text-muted)]">Loading…</p>}
 
       {!loading && results.length === 0 ? (
-        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-12 text-center">
+        <div className="dura-card p-12 text-center">
           <p className="text-[var(--color-text-secondary)]">No terms match your search.</p>
           <button
             type="button"
             onClick={resetFilters}
-            className="mt-3 rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+            className="mt-3 rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-subtle)]"
           >
             Reset filters
           </button>
@@ -190,8 +214,10 @@ export function DictionaryClient({
         </ul>
       )}
 
-      <p className="text-center text-[10px] text-[var(--color-text-muted)]">
-        Showing {results.length} of {totalCount} terms
+      {/* Term count */}
+      <p className="text-center text-xs text-[var(--color-text-muted)]">
+        Showing <span className="dura-stat-gradient font-semibold">{results.length}</span> of{" "}
+        <span className="dura-stat-gradient font-semibold">{totalCount}</span> terms
       </p>
     </div>
   );

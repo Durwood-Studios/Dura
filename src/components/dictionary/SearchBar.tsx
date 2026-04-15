@@ -25,7 +25,7 @@ export function SearchBar({ value, onChange, placeholder }: SearchBarProps): Rea
   return (
     <div className="relative">
       <Search
-        className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-[var(--color-text-muted)]"
+        className="pointer-events-none absolute top-1/2 left-4 h-5 w-5 -translate-y-1/2 text-emerald-500/70"
         aria-hidden
       />
       <input
@@ -33,7 +33,7 @@ export function SearchBar({ value, onChange, placeholder }: SearchBarProps): Rea
         value={local}
         onChange={(e) => setLocal(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-9 py-2.5 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:border-emerald-400 focus:outline-none"
+        className="dura-glass w-full rounded-2xl px-12 py-4 text-base text-[var(--color-text-primary)] shadow-sm placeholder:text-[var(--color-text-muted)] focus:ring-2 focus:ring-emerald-500/30 focus:outline-none dark:shadow-none"
       />
       {local && (
         <button
@@ -43,7 +43,7 @@ export function SearchBar({ value, onChange, placeholder }: SearchBarProps): Rea
             onChange("");
           }}
           aria-label="Clear search"
-          className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-subtle)]"
+          className="absolute top-1/2 right-3 -translate-y-1/2 rounded-lg p-1.5 text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-subtle)] hover:text-[var(--color-text-secondary)]"
         >
           <X className="h-4 w-4" />
         </button>
