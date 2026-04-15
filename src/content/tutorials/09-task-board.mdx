@@ -1,0 +1,568 @@
+---
+title: "Build a Full-Stack Task Board"
+description: "Create a Kanban-style task board with Next.js, drag-and-drop columns, API routes, and PostgreSQL persistence."
+slug: "task-board"
+difficulty: "intermediate"
+estimatedMinutes: 240
+steps: 12
+tags: ["nextjs", "postgresql", "drag-and-drop", "api-routes", "full-stack"]
+---
+
+## Overview
+
+You'll build a full-stack Kanban task board from scratch using Next.js. Tasks live in columns (To Do, In Progress, Done), and users can drag them between columns. The backend uses Next.js API routes with a PostgreSQL database. This tutorial covers database schema design, REST API construction, optimistic UI updates, and HTML Drag and Drop API.
+
+**What you'll learn:**
+
+- Next.js App Router with Server and Client Components
+- PostgreSQL schema design and queries
+- RESTful API route handlers
+- HTML5 Drag and Drop API (no library)
+- Optimistic updates for responsive UI
+- Database migrations and seeding
+
+## Step 1: Project Setup
+
+```bash
+npx create-next-app@latest task-board --typescript --tailwind --app --src-dir
+cd task-board
+npm install pg
+npm install -D @types/pg
+```
+
+Create a `.env.local` file:
+
+```
+DATABASE_URL=postgresql://user:password@localhost:5432/taskboard
+```
+
+Set up the PostgreSQL database:
+
+```bash
+createdb taskboard
+```
+
+## Step 2: Database Schema
+
+Create a migration file to define the schema. Two tables: `columns` for board columns and `tasks` for individual cards.
+
+```sql
+-- migrations/001_initial.sql
+CREATE TABLE columns (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title VARCHAR(100) NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title VARCHAR(255) NOT NULL,
+  description TEXT DEFAULT '',
+  column_id UUID NOT NULL REFERENCES columns(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL DEFAULT 0,
+  priority VARCHAR(20) DEFAULT 'medium',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_tasks_column ON tasks(column_id, position);
+
+-- Seed default columns
+INSERT INTO columns (title, position) VALUES
+  ('To Do', 0),
+  ('In Progress', 1),
+  ('Done', 2);
+```
+
+Run the migration:
+
+```bash
+psql taskboard < migrations/001_initial.sql
+```
+
+## Step 3: Database Client
+
+Create a typed database wrapper:
+
+```ts
+// src/lib/db.ts
+import { Pool, QueryResultRow } from "pg";
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+export async function query<T extends QueryResultRow>(
+  text: string,
+  params?: unknown[]
+): Promise<T[]> {
+  try {
+    const result = await pool.query<T>(text, params);
+    return result.rows;
+  } catch (err) {
+    console.error("Database query error:", err);
+    throw err;
+  }
+}
+
+export interface Column {
+  id: string;
+  title: string;
+  position: number;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string;
+  column_id: string;
+  position: number;
+  priority: "low" | "medium" | "high";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BoardData {
+  columns: Column[];
+  tasks: Task[];
+}
+```
+
+## Step 4: API Routes — Read
+
+Fetch the entire board state in a single query:
+
+```ts
+// src/app/api/board/route.ts
+import { NextResponse } from "next/server";
+import { query, Column, Task } from "@/lib/db";
+
+export async function GET() {
+  try {
+    const columns = await query<Column>("SELECT * FROM columns ORDER BY position");
+    const tasks = await query<Task>("SELECT * FROM tasks ORDER BY position");
+    return NextResponse.json({ columns, tasks });
+  } catch (err) {
+    console.error("Failed to fetch board:", err);
+    return NextResponse.json({ error: "Failed to fetch board" }, { status: 500 });
+  }
+}
+```
+
+## Step 5: API Routes — Create, Update, Delete Tasks
+
+```ts
+// src/app/api/tasks/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { query, Task } from "@/lib/db";
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { title, description, column_id, priority } = body;
+
+    if (!title || !column_id) {
+      return NextResponse.json({ error: "Title and column required" }, { status: 400 });
+    }
+
+    // Get the next position in this column
+    const [maxPos] = await query<{ max: number | null }>(
+      "SELECT MAX(position) as max FROM tasks WHERE column_id = $1",
+      [column_id]
+    );
+    const position = (maxPos?.max ?? -1) + 1;
+
+    const [task] = await query<Task>(
+      `INSERT INTO tasks (title, description, column_id, position, priority)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [title, description || "", column_id, position, priority || "medium"]
+    );
+
+    return NextResponse.json(task, { status: 201 });
+  } catch (err) {
+    console.error("Failed to create task:", err);
+    return NextResponse.json({ error: "Failed to create task" }, { status: 500 });
+  }
+}
+```
+
+```ts
+// src/app/api/tasks/[id]/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { query, Task } from "@/lib/db";
+
+export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    const body = await req.json();
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+
+    for (const key of ["title", "description", "column_id", "position", "priority"]) {
+      if (body[key] !== undefined) {
+        fields.push(`${key} = $${idx}`);
+        values.push(body[key]);
+        idx++;
+      }
+    }
+
+    if (fields.length === 0) {
+      return NextResponse.json({ error: "No fields to update" }, { status: 400 });
+    }
+
+    fields.push(`updated_at = NOW()`);
+    values.push(id);
+
+    const [task] = await query<Task>(
+      `UPDATE tasks SET ${fields.join(", ")} WHERE id = $${idx} RETURNING *`,
+      values
+    );
+
+    if (!task) {
+      return NextResponse.json({ error: "Task not found" }, { status: 404 });
+    }
+
+    return NextResponse.json(task);
+  } catch (err) {
+    console.error("Failed to update task:", err);
+    return NextResponse.json({ error: "Failed to update task" }, { status: 500 });
+  }
+}
+
+export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    await query("DELETE FROM tasks WHERE id = $1", [id]);
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("Failed to delete task:", err);
+    return NextResponse.json({ error: "Failed to delete task" }, { status: 500 });
+  }
+}
+```
+
+## Step 6: Move Task API
+
+Moving a task between columns requires updating the task's `column_id` and reordering positions in both the source and destination columns:
+
+```ts
+// src/app/api/tasks/[id]/move/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { query, Task } from "@/lib/db";
+
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    const { column_id, position } = await req.json();
+
+    // Shift tasks down in the destination column to make room
+    await query(
+      "UPDATE tasks SET position = position + 1 WHERE column_id = $1 AND position >= $2",
+      [column_id, position]
+    );
+
+    // Move the task
+    const [task] = await query<Task>(
+      `UPDATE tasks SET column_id = $1, position = $2, updated_at = NOW()
+       WHERE id = $3 RETURNING *`,
+      [column_id, position, id]
+    );
+
+    if (!task) {
+      return NextResponse.json({ error: "Task not found" }, { status: 404 });
+    }
+
+    return NextResponse.json(task);
+  } catch (err) {
+    console.error("Failed to move task:", err);
+    return NextResponse.json({ error: "Failed to move task" }, { status: 500 });
+  }
+}
+```
+
+## Step 7: Board Data Hook
+
+Client-side hook that fetches board data and provides mutation functions:
+
+```ts
+// src/hooks/useBoard.ts
+"use client";
+import { useState, useEffect, useCallback } from "react";
+import { BoardData, Task, Column } from "@/lib/db";
+
+export function useBoard() {
+  const [columns, setColumns] = useState<Column[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch("/api/board");
+      const data: BoardData = await res.json();
+      setColumns(data.columns);
+      setTasks(data.tasks);
+    } catch (err) {
+      console.error("Failed to fetch board:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const addTask = async (data: { title: string; column_id: string; priority?: string }) => {
+    const res = await fetch("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (res.ok) await refresh();
+  };
+
+  const moveTask = async (taskId: string, columnId: string, position: number) => {
+    // Optimistic update
+    setTasks((prev) =>
+      prev.map((t) => (t.id === taskId ? { ...t, column_id: columnId, position } : t))
+    );
+
+    try {
+      await fetch(`/api/tasks/${taskId}/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ column_id: columnId, position }),
+      });
+      await refresh();
+    } catch (err) {
+      console.error("Move failed, reverting:", err);
+      await refresh();
+    }
+  };
+
+  const deleteTask = async (taskId: string) => {
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+    await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
+  };
+
+  return { columns, tasks, loading, addTask, moveTask, deleteTask, refresh };
+}
+```
+
+## Step 8: TaskCard Component
+
+Each card displays the task title, priority badge, and handles drag events:
+
+```tsx
+// src/components/TaskCard.tsx
+"use client";
+import { Task } from "@/lib/db";
+import { DragEvent } from "react";
+
+interface TaskCardProps {
+  task: Task;
+  onDelete: (id: string) => void;
+}
+
+const priorityColors: Record<string, string> = {
+  low: "bg-blue-500/20 text-blue-400",
+  medium: "bg-yellow-500/20 text-yellow-400",
+  high: "bg-red-500/20 text-red-400",
+};
+
+export function TaskCard({ task, onDelete }: TaskCardProps) {
+  function handleDragStart(e: DragEvent) {
+    e.dataTransfer.setData("text/plain", task.id);
+    e.dataTransfer.effectAllowed = "move";
+  }
+
+  return (
+    <div
+      draggable
+      onDragStart={handleDragStart}
+      className="cursor-grab rounded-lg border border-white/10 bg-white/[0.03] p-3 transition-colors hover:bg-white/[0.06] active:cursor-grabbing"
+    >
+      <div className="mb-1 flex items-center justify-between">
+        <span className={`rounded px-2 py-0.5 text-xs ${priorityColors[task.priority]}`}>
+          {task.priority}
+        </span>
+        <button
+          onClick={() => onDelete(task.id)}
+          className="text-sm text-white/30 hover:text-red-400"
+        >
+          ×
+        </button>
+      </div>
+      <h3 className="text-sm font-medium text-white/90">{task.title}</h3>
+      {task.description && (
+        <p className="mt-1 line-clamp-2 text-xs text-white/40">{task.description}</p>
+      )}
+    </div>
+  );
+}
+```
+
+## Step 9: BoardColumn Component with Drop Zone
+
+Each column is a drop target. The `dragover` and `drop` events handle reordering:
+
+```tsx
+// src/components/BoardColumn.tsx
+"use client";
+import { useState, DragEvent } from "react";
+import { Column, Task } from "@/lib/db";
+import { TaskCard } from "./TaskCard";
+
+interface BoardColumnProps {
+  column: Column;
+  tasks: Task[];
+  onDrop: (taskId: string, columnId: string, position: number) => void;
+  onAddTask: (title: string, columnId: string) => void;
+  onDeleteTask: (id: string) => void;
+}
+
+export function BoardColumn({ column, tasks, onDrop, onAddTask, onDeleteTask }: BoardColumnProps) {
+  const [isOver, setIsOver] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setIsOver(true);
+  }
+
+  function handleDragLeave() {
+    setIsOver(false);
+  }
+
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    setIsOver(false);
+    const taskId = e.dataTransfer.getData("text/plain");
+    if (taskId) {
+      onDrop(taskId, column.id, tasks.length);
+    }
+  }
+
+  function handleAddTask(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newTitle.trim()) return;
+    onAddTask(newTitle.trim(), column.id);
+    setNewTitle("");
+  }
+
+  return (
+    <div
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`flex w-80 shrink-0 flex-col rounded-xl border p-3 transition-colors ${isOver ? "border-emerald-500/50 bg-emerald-500/5" : "border-white/10 bg-white/[0.02]"}`}
+    >
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="font-semibold text-white/80">{column.title}</h2>
+        <span className="rounded bg-white/5 px-2 py-0.5 text-xs text-white/30">{tasks.length}</span>
+      </div>
+
+      <div className="flex min-h-[100px] flex-1 flex-col gap-2">
+        {tasks
+          .sort((a, b) => a.position - b.position)
+          .map((task) => (
+            <TaskCard key={task.id} task={task} onDelete={onDeleteTask} />
+          ))}
+      </div>
+
+      <form onSubmit={handleAddTask} className="mt-3">
+        <input
+          type="text"
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+          placeholder="Add a task..."
+          className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/30"
+        />
+      </form>
+    </div>
+  );
+}
+```
+
+## Step 10: Board Layout
+
+The main board page renders columns horizontally with horizontal scrolling:
+
+```tsx
+// src/components/Board.tsx
+"use client";
+import { useBoard } from "@/hooks/useBoard";
+import { BoardColumn } from "./BoardColumn";
+
+export function Board() {
+  const { columns, tasks, loading, addTask, moveTask, deleteTask } = useBoard();
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center text-white/50">Loading...</div>
+    );
+  }
+
+  return (
+    <div className="flex h-screen flex-col bg-[#08080d]">
+      <header className="border-b border-white/10 px-6 py-4">
+        <h1 className="text-xl font-bold text-white">Task Board</h1>
+      </header>
+      <div className="flex-1 overflow-x-auto p-6">
+        <div className="flex h-full gap-4">
+          {columns.map((col) => (
+            <BoardColumn
+              key={col.id}
+              column={col}
+              tasks={tasks.filter((t) => t.column_id === col.id)}
+              onDrop={moveTask}
+              onAddTask={(title, colId) => addTask({ title, column_id: colId })}
+              onDeleteTask={deleteTask}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+## Step 11: Page Component
+
+```tsx
+// src/app/page.tsx
+import { Board } from "@/components/Board";
+
+export default function Home() {
+  return <Board />;
+}
+```
+
+## Step 12: Polish and Edge Cases
+
+Add a loading skeleton for columns while data fetches:
+
+```tsx
+function ColumnSkeleton() {
+  return (
+    <div className="w-80 shrink-0 rounded-xl border border-white/10 bg-white/[0.02] p-3">
+      <div className="mb-3 h-6 w-24 animate-pulse rounded bg-white/5" />
+      {[1, 2, 3].map((i) => (
+        <div key={i} className="mb-2 h-20 animate-pulse rounded-lg bg-white/5" />
+      ))}
+    </div>
+  );
+}
+```
+
+Handle the empty state when a column has no tasks — the drop zone still needs to be large enough to accept drops. The `min-h-[100px]` class on the task list container ensures this.
+
+For production, add these improvements:
+
+- **Debounced saves**: Batch position updates when dragging multiple times quickly
+- **Conflict resolution**: Use `updated_at` timestamps to detect stale writes
+- **WebSocket updates**: Push changes to other browser tabs in real time
+- **Task editing modal**: Click a card to open a detail view with rich description editing
+
+Run the development server with `npm run dev` and ensure PostgreSQL is running locally. The board persists all changes to the database — refresh the page and your tasks remain exactly where you left them.

@@ -1,0 +1,184 @@
+---
+title: "How to Prompt Engineer for Real Applications"
+description: "Practical techniques for system prompts, few-shot examples, chain-of-thought reasoning, structured output, and evaluation in production."
+slug: "prompt-engineering"
+difficulty: "intermediate"
+estimatedMinutes: 25
+steps: 6
+tags: ["ai", "prompt-engineering", "llm", "system-design", "evaluation"]
+---
+
+## Step 1: Write System Prompts That Constrain Behavior
+
+A system prompt is your contract with the model. Vague prompts produce vague output. Production system prompts should define identity, constraints, output format, and edge case behavior.
+
+**Bad system prompt:**
+
+```
+You are a helpful coding assistant.
+```
+
+**Good system prompt:**
+
+```
+You are a TypeScript code reviewer for a Next.js 15 application.
+
+RULES:
+- Only review the code provided. Do not suggest unrelated changes.
+- Flag: any types, missing error handling, unused imports, accessibility issues.
+- For each issue, provide: file path, line reference, severity (error/warning/info), and a fix.
+- If the code has no issues, respond with exactly: "No issues found."
+- Never invent issues to appear thorough.
+
+OUTPUT FORMAT:
+Return a JSON array of issues. Each issue has: path, line, severity, message, fix.
+If no issues exist, return an empty array: []
+```
+
+The good prompt eliminates ambiguity. The model knows what to do, what not to do, and exactly how to format the response.
+
+## Step 2: Use Few-Shot Examples to Calibrate
+
+Few-shot prompting means showing the model examples of input-output pairs before giving it the real input. This works because it demonstrates your expectations concretely.
+
+```
+Given a user question about JavaScript, classify it into one of these categories:
+syntax, runtime-error, design-pattern, tooling, conceptual
+
+Example 1:
+Q: "Why does 0.1 + 0.2 !== 0.3?"
+A: conceptual
+
+Example 2:
+Q: "How do I set up ESLint with TypeScript?"
+A: tooling
+
+Example 3:
+Q: "Cannot read properties of undefined (reading 'map')"
+A: runtime-error
+
+Now classify:
+Q: "When should I use useMemo vs useCallback?"
+```
+
+**Tips for few-shot examples:**
+
+- Include 2-5 examples. More than 5 rarely helps and wastes tokens.
+- Cover edge cases in your examples — the tricky ones, not just the obvious ones.
+- Make sure examples are consistent with each other. Contradictory examples confuse the model.
+- Put the most similar example last — recency bias is real.
+
+## Step 3: Apply Chain-of-Thought for Complex Reasoning
+
+When a task requires multiple reasoning steps, tell the model to think through it before answering. This dramatically improves accuracy on math, logic, and multi-step analysis.
+
+```
+Analyze this database query for performance issues.
+Think through each part of the query step by step:
+1. What tables are being accessed?
+2. What joins are being performed?
+3. Are there missing indexes based on the WHERE and JOIN conditions?
+4. What is the estimated row scan count?
+5. Based on your analysis, what specific changes would improve performance?
+
+Query:
+SELECT u.name, COUNT(o.id) as order_count
+FROM users u
+LEFT JOIN orders o ON u.id = o.user_id
+WHERE o.created_at > '2024-01-01'
+GROUP BY u.name
+ORDER BY order_count DESC;
+```
+
+Chain-of-thought works because it forces the model to decompose problems rather than jumping to conclusions. In production, you can ask for reasoning in a separate field and only show the final answer to users:
+
+```json
+{
+  "reasoning": "The LEFT JOIN is negated by the WHERE clause on orders...",
+  "answer": "Change LEFT JOIN to INNER JOIN and add index on orders(user_id, created_at)"
+}
+```
+
+## Step 4: Demand Structured Output
+
+Unstructured text is hard to parse programmatically. For any LLM call in your application, define the output schema explicitly.
+
+```
+Extract product information from the following review.
+
+Return a JSON object with exactly these fields:
+- product_name: string
+- sentiment: "positive" | "negative" | "mixed"
+- key_issues: string[] (empty array if none)
+- rating_mentioned: number | null
+- would_recommend: boolean | null
+
+If a field cannot be determined from the text, use null (for nullable fields) or
+reasonable defaults. Never add fields not in this schema.
+
+Review: "The MX Keys keyboard is fantastic for coding. The key travel is perfect
+and the backlighting adjusts automatically. My only gripe is the price — $120
+feels steep. 4 out of 5 stars. Would still recommend it to any developer."
+```
+
+Many API providers support JSON mode or structured outputs natively. Use those features instead of hoping the model returns valid JSON. Always validate the response against your schema before using it.
+
+## Step 5: Build Evaluation into Your Workflow
+
+Prompt engineering without evaluation is guessing. You need to measure whether your prompts actually work.
+
+**Build an eval set:**
+
+1. Collect 20-50 real examples with known correct answers
+2. Run your prompt against all of them
+3. Score the results (exact match, semantic similarity, or human judgment)
+4. Track scores over time as you modify prompts
+
+```python
+# Simple evaluation framework
+eval_cases = [
+    {"input": "Why does my forEach not work with async?", "expected": "runtime-error"},
+    {"input": "Best folder structure for React?", "expected": "design-pattern"},
+    # ... 48 more cases
+]
+
+results = []
+for case in eval_cases:
+    output = run_prompt(case["input"])
+    results.append({
+        "input": case["input"],
+        "expected": case["expected"],
+        "actual": output,
+        "correct": output == case["expected"]
+    })
+
+accuracy = sum(1 for r in results if r["correct"]) / len(results)
+print(f"Accuracy: {accuracy:.1%}")
+```
+
+**Evaluation metrics to track:**
+
+- **Accuracy** — Does the output match the expected answer?
+- **Format compliance** — Is the output valid JSON/the right schema?
+- **Latency** — How long does the call take?
+- **Cost** — How many tokens are consumed per call?
+
+## Step 6: Iterate with a Prompt Changelog
+
+Treat prompts like code. Version them. Track what changed and why.
+
+```markdown
+## Prompt: code-reviewer v3 — 2025-01-15
+
+- Added rule: "Never invent issues to appear thorough"
+- Reason: v2 was generating phantom "potential null reference" warnings on 12% of clean code
+- Eval accuracy: 78% → 91%
+
+## Prompt: code-reviewer v2 — 2025-01-10
+
+- Added severity levels (error/warning/info)
+- Added few-shot example for accessibility issues
+- Eval accuracy: 65% → 78%
+```
+
+Store prompts in version control alongside your application code. When you change a prompt, run your eval suite before deploying. A prompt regression can break your application just as thoroughly as a code regression — and is harder to notice without automated evaluation.

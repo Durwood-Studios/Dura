@@ -1,0 +1,397 @@
+---
+title: "Build a GitHub Actions CI/CD Pipeline"
+description: "Create a production-grade CI/CD pipeline with GitHub Actions that lints, typechecks, tests, builds, and deploys a Next.js app to Vercel on merge."
+slug: "ci-cd-pipeline"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["ci-cd", "github-actions", "devops", "vercel", "automation", "testing"]
+---
+
+## Overview
+
+Every serious project needs automated quality gates. In this tutorial, you'll build a GitHub Actions CI/CD pipeline that enforces code quality on every pull request and automatically deploys to Vercel when code merges to `main`. By the end, you'll have branch protection rules, parallel CI jobs for lint/typecheck/test/build, deployment previews on PRs, and production deploys on merge.
+
+You'll learn how GitHub Actions workflows are structured, how to optimize CI run times with caching and parallelism, and how to configure branch protection so broken code never reaches production.
+
+**What you'll build:**
+
+- A multi-job CI workflow that runs lint, typecheck, test, and build in parallel
+- A deployment workflow that triggers on merge to `main`
+- Branch protection rules with required status checks
+- Caching strategies for `node_modules` and Next.js build artifacts
+- Slack/Discord notifications on deployment success or failure
+
+**Prerequisites:** A Next.js project with TypeScript, ESLint configured, a Vercel account, and a GitHub repository.
+
+## Step 1: Project Structure and Scripts
+
+Before writing any workflow files, make sure your `package.json` has the scripts your CI will call. Every command your pipeline runs should be executable locally first.
+
+```json
+{
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "format:check": "prettier --check ."
+  }
+}
+```
+
+The key detail: `--max-warnings 0` on lint means warnings fail CI. This prevents warning debt from accumulating. Install vitest if you haven't:
+
+```bash
+npm install -D vitest @vitejs/plugin-react
+```
+
+Create a minimal `vitest.config.ts`:
+
+```typescript
+import { defineConfig } from "vitest/config";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.{ts,tsx}"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary"],
+      thresholds: {
+        statements: 80,
+        branches: 80,
+        functions: 80,
+        lines: 80,
+      },
+    },
+  },
+});
+```
+
+## Step 2: The CI Workflow
+
+Create `.github/workflows/ci.yml`. This workflow runs on every push and pull request, executing four jobs in parallel:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run format:check
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - run: npm run test:coverage
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Cache Next.js build
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: nextjs-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**/*') }}
+          restore-keys: |
+            nextjs-${{ hashFiles('package-lock.json') }}-
+
+      - run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+```
+
+The `concurrency` block is critical — it cancels in-progress runs when you push again, saving minutes on your CI budget. Each job runs independently because they don't depend on each other.
+
+## Step 3: Caching Strategy
+
+The workflow above uses two caching layers. The `setup-node` action caches `~/.npm` (the download cache), and we explicitly cache `.next/cache` for incremental builds.
+
+For monorepos or larger projects, you can share `node_modules` across jobs using a dedicated install job:
+
+```yaml
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+      - run: npm ci
+      - uses: actions/cache/save@v4
+        with:
+          path: node_modules
+          key: modules-${{ hashFiles('package-lock.json') }}
+
+  lint:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: modules-${{ hashFiles('package-lock.json') }}
+      - run: npm run lint
+```
+
+This trades the overhead of cache upload/download against `npm ci` time. For projects with many dependencies, the cache approach wins.
+
+## Step 4: The Deploy Workflow
+
+Create `.github/workflows/deploy.yml` for production deployments. This uses the Vercel CLI directly instead of Vercel's GitHub integration, giving you full control:
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: []
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Pull Vercel Environment
+        run: npx vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build
+        run: npx vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy
+        id: deploy
+        run: |
+          URL=$(npx vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+```
+
+You need three secrets in your repository settings: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`. Get the token from Vercel's dashboard under Settings > Tokens. The org and project IDs come from `.vercel/project.json` after running `vercel link` locally.
+
+## Step 5: Preview Deployments on PRs
+
+Add preview deploys so reviewers can test changes before merging:
+
+```yaml
+name: Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  preview:
+    name: Deploy Preview
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Pull Vercel Environment
+        run: npx vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build
+        run: npx vercel build --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy Preview
+        id: deploy
+        run: |
+          URL=$(npx vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### 🚀 Preview Deployed\n\n${process.env.DEPLOY_URL}`
+            })
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+```
+
+## Step 6: Branch Protection Rules
+
+Go to your repository Settings > Branches > Add rule. Configure for `main`:
+
+1. **Require a pull request before merging** — no direct pushes to main
+2. **Require status checks to pass** — select `Lint`, `Type Check`, `Test`, and `Build`
+3. **Require branches to be up to date** — prevents merge conflicts from breaking main
+4. **Require conversation resolution** — all review comments must be resolved
+
+You can also configure these via the GitHub CLI:
+
+```bash
+gh api repos/{owner}/{repo}/branches/main/protection -X PUT \
+  -f "required_status_checks[strict]=true" \
+  -f "required_status_checks[contexts][]=Lint" \
+  -f "required_status_checks[contexts][]=Type Check" \
+  -f "required_status_checks[contexts][]=Test" \
+  -f "required_status_checks[contexts][]=Build" \
+  -f "enforce_admins=true" \
+  -f "required_pull_request_reviews[required_approving_review_count]=1"
+```
+
+## Step 7: Notifications
+
+Add a notification step at the end of your deploy workflow. Here's Discord via webhook:
+
+```yaml
+- name: Notify Discord
+  if: always()
+  run: |
+    STATUS="${{ job.status }}"
+    COLOR=$([[ "$STATUS" == "success" ]] && echo "3066993" || echo "15158332")
+
+    curl -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"embeds\": [{
+          \"title\": \"Deployment $STATUS\",
+          \"description\": \"Commit: \`${{ github.sha }}\`\nBy: ${{ github.actor }}\",
+          \"color\": $COLOR,
+          \"url\": \"${{ steps.deploy.outputs.url }}\"
+        }]
+      }"
+```
+
+For Slack, use the `slackapi/slack-github-action@v1.26` action with an incoming webhook URL.
+
+## Step 8: Optimizations and Monitoring
+
+**Matrix builds** for testing across Node versions:
+
+```yaml
+test:
+  strategy:
+    matrix:
+      node-version: [18, 20, 22]
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+```
+
+**Workflow run time budgets** — add timeouts so stuck jobs don't burn minutes:
+
+```yaml
+jobs:
+  lint:
+    timeout-minutes: 5
+  test:
+    timeout-minutes: 10
+  build:
+    timeout-minutes: 10
+```
+
+**Path filters** to skip CI when only docs change:
+
+```yaml
+on:
+  pull_request:
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - ".vscode/**"
+```
+
+**Monitoring:** GitHub provides workflow run metrics in the Actions tab. Track your p50 and p95 run times. If CI takes more than 5 minutes, investigate. Common culprits: no caching, sequential jobs that could be parallel, tests that hit real APIs.
+
+Your pipeline is now production-grade. Every PR gets lint, typecheck, test, and build gates. Every merge to main triggers an automatic deploy. Broken code cannot reach production. This is the foundation every professional project needs.

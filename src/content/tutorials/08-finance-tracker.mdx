@@ -1,0 +1,581 @@
+---
+title: "Build a Personal Finance Tracker"
+description: "Create a React application that tracks income and expenses with categories, charts, and IndexedDB persistence."
+slug: "finance-tracker"
+difficulty: "beginner"
+estimatedMinutes: 180
+steps: 10
+tags: ["react", "indexeddb", "charts", "finance", "state-management"]
+---
+
+## Overview
+
+You'll build a personal finance tracker with React that stores all data locally using IndexedDB. Users can log income and expenses, categorize transactions, view spending breakdowns with charts, and filter by date range. Everything runs offline — no server required.
+
+**What you'll learn:**
+
+- React with TypeScript fundamentals
+- IndexedDB for structured client-side storage
+- SVG-based charts without a charting library
+- Date filtering and data aggregation
+- Custom hooks for data access patterns
+
+## Step 1: Project Setup
+
+Scaffold a new React project with Vite:
+
+```bash
+npm create vite@latest finance-tracker -- --template react-ts
+cd finance-tracker
+npm install idb
+npm run dev
+```
+
+The `idb` library wraps IndexedDB's callback-based API with promises. Define the database schema:
+
+```ts
+// src/db.ts
+import { openDB, DBSchema } from "idb";
+
+interface FinanceDB extends DBSchema {
+  transactions: {
+    key: string;
+    value: Transaction;
+    indexes: { "by-date": string; "by-category": string };
+  };
+}
+
+export interface Transaction {
+  id: string;
+  type: "income" | "expense";
+  amount: number;
+  category: string;
+  description: string;
+  date: string; // ISO date string YYYY-MM-DD
+  createdAt: number;
+}
+
+export async function getDB() {
+  return openDB<FinanceDB>("finance-tracker", 1, {
+    upgrade(db) {
+      const store = db.createObjectStore("transactions", { keyPath: "id" });
+      store.createIndex("by-date", "date");
+      store.createIndex("by-category", "category");
+    },
+  });
+}
+```
+
+## Step 2: Data Access Hook
+
+Create a custom hook that encapsulates all database operations:
+
+```ts
+// src/hooks/useTransactions.ts
+import { useState, useEffect, useCallback } from "react";
+import { getDB, Transaction } from "../db";
+
+export function useTransactions() {
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    try {
+      const db = await getDB();
+      const all = await db.getAll("transactions");
+      setTransactions(all.sort((a, b) => b.createdAt - a.createdAt));
+    } catch (err) {
+      console.error("Failed to load transactions:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const add = async (data: Omit<Transaction, "id" | "createdAt">) => {
+    try {
+      const db = await getDB();
+      const tx: Transaction = {
+        ...data,
+        id: crypto.randomUUID(),
+        createdAt: Date.now(),
+      };
+      await db.add("transactions", tx);
+      await refresh();
+    } catch (err) {
+      console.error("Failed to add transaction:", err);
+    }
+  };
+
+  const remove = async (id: string) => {
+    try {
+      const db = await getDB();
+      await db.delete("transactions", id);
+      await refresh();
+    } catch (err) {
+      console.error("Failed to delete transaction:", err);
+    }
+  };
+
+  return { transactions, loading, add, remove, refresh };
+}
+```
+
+## Step 3: Transaction Form Component
+
+Build the form for adding new transactions:
+
+```tsx
+// src/components/TransactionForm.tsx
+import { useState, FormEvent } from "react";
+import { Transaction } from "../db";
+
+const EXPENSE_CATEGORIES = [
+  "Food",
+  "Housing",
+  "Transport",
+  "Utilities",
+  "Entertainment",
+  "Health",
+  "Shopping",
+  "Other",
+];
+const INCOME_CATEGORIES = ["Salary", "Freelance", "Investment", "Gift", "Other"];
+
+interface TransactionFormProps {
+  onSubmit: (data: Omit<Transaction, "id" | "createdAt">) => Promise<void>;
+}
+
+export function TransactionForm({ onSubmit }: TransactionFormProps) {
+  const [type, setType] = useState<"income" | "expense">("expense");
+  const [amount, setAmount] = useState("");
+  const [category, setCategory] = useState("Food");
+  const [description, setDescription] = useState("");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+
+  const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    const parsedAmount = parseFloat(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) return;
+
+    await onSubmit({ type, amount: parsedAmount, category, description, date });
+    setAmount("");
+    setDescription("");
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="transaction-form">
+      <div className="form-row">
+        <button
+          type="button"
+          className={type === "expense" ? "active expense" : ""}
+          onClick={() => {
+            setType("expense");
+            setCategory("Food");
+          }}
+        >
+          Expense
+        </button>
+        <button
+          type="button"
+          className={type === "income" ? "active income" : ""}
+          onClick={() => {
+            setType("income");
+            setCategory("Salary");
+          }}
+        >
+          Income
+        </button>
+      </div>
+      <input
+        type="number"
+        step="0.01"
+        min="0"
+        placeholder="Amount"
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+        required
+      />
+      <select value={category} onChange={(e) => setCategory(e.target.value)}>
+        {categories.map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+      </select>
+      <input
+        type="text"
+        placeholder="Description (optional)"
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+      />
+      <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+      <button type="submit">Add {type}</button>
+    </form>
+  );
+}
+```
+
+## Step 4: Transaction List
+
+Display transactions in a scrollable list with delete functionality:
+
+```tsx
+// src/components/TransactionList.tsx
+import { Transaction } from "../db";
+
+interface TransactionListProps {
+  transactions: Transaction[];
+  onDelete: (id: string) => Promise<void>;
+}
+
+export function TransactionList({ transactions, onDelete }: TransactionListProps) {
+  const formatCurrency = (n: number) =>
+    new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
+
+  return (
+    <ul className="transaction-list">
+      {transactions.map((tx) => (
+        <li key={tx.id} className={`transaction ${tx.type}`}>
+          <div className="tx-info">
+            <span className="tx-category">{tx.category}</span>
+            <span className="tx-desc">{tx.description || "—"}</span>
+            <span className="tx-date">{tx.date}</span>
+          </div>
+          <div className="tx-right">
+            <span className="tx-amount">
+              {tx.type === "income" ? "+" : "−"}
+              {formatCurrency(tx.amount)}
+            </span>
+            <button onClick={() => onDelete(tx.id)} className="tx-delete">
+              ×
+            </button>
+          </div>
+        </li>
+      ))}
+      {transactions.length === 0 && <li className="empty">No transactions yet</li>}
+    </ul>
+  );
+}
+```
+
+## Step 5: Summary Dashboard
+
+Aggregate totals for income, expenses, and balance:
+
+```tsx
+// src/components/Summary.tsx
+import { Transaction } from "../db";
+
+interface SummaryProps {
+  transactions: Transaction[];
+}
+
+export function Summary({ transactions }: SummaryProps) {
+  const income = transactions
+    .filter((t) => t.type === "income")
+    .reduce((sum, t) => sum + t.amount, 0);
+  const expenses = transactions
+    .filter((t) => t.type === "expense")
+    .reduce((sum, t) => sum + t.amount, 0);
+  const balance = income - expenses;
+
+  const fmt = (n: number) =>
+    new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
+
+  return (
+    <div className="summary">
+      <div className="summary-card">
+        <span className="label">Balance</span>
+        <span className={`value ${balance >= 0 ? "positive" : "negative"}`}>{fmt(balance)}</span>
+      </div>
+      <div className="summary-card income">
+        <span className="label">Income</span>
+        <span className="value">{fmt(income)}</span>
+      </div>
+      <div className="summary-card expense">
+        <span className="label">Expenses</span>
+        <span className="value">{fmt(expenses)}</span>
+      </div>
+    </div>
+  );
+}
+```
+
+## Step 6: Donut Chart for Category Breakdown
+
+Build a pure SVG donut chart — no charting library needed:
+
+```tsx
+// src/components/CategoryChart.tsx
+import { Transaction } from "../db";
+
+const COLORS = [
+  "#10b981",
+  "#06b6d4",
+  "#8b5cf6",
+  "#f59e0b",
+  "#ef4444",
+  "#ec4899",
+  "#14b8a6",
+  "#f97316",
+];
+
+interface CategoryChartProps {
+  transactions: Transaction[];
+}
+
+export function CategoryChart({ transactions }: CategoryChartProps) {
+  const expenses = transactions.filter((t) => t.type === "expense");
+  const total = expenses.reduce((s, t) => s + t.amount, 0);
+  if (total === 0) return <p className="empty-chart">No expense data</p>;
+
+  const grouped = new Map<string, number>();
+  expenses.forEach((t) => {
+    grouped.set(t.category, (grouped.get(t.category) || 0) + t.amount);
+  });
+
+  const categories = [...grouped.entries()].sort((a, b) => b[1] - a[1]);
+  const radius = 80;
+  const cx = 100;
+  const cy = 100;
+  let cumulative = 0;
+
+  const arcs = categories.map(([cat, amount], i) => {
+    const pct = amount / total;
+    const startAngle = cumulative * 2 * Math.PI;
+    cumulative += pct;
+    const endAngle = cumulative * 2 * Math.PI;
+
+    const x1 = cx + radius * Math.cos(startAngle);
+    const y1 = cy + radius * Math.sin(startAngle);
+    const x2 = cx + radius * Math.cos(endAngle);
+    const y2 = cy + radius * Math.sin(endAngle);
+    const largeArc = pct > 0.5 ? 1 : 0;
+
+    return (
+      <path
+        key={cat}
+        d={`M ${cx} ${cy} L ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2} Z`}
+        fill={COLORS[i % COLORS.length]}
+      />
+    );
+  });
+
+  return (
+    <div className="chart-container">
+      <svg viewBox="0 0 200 200" width="200" height="200">
+        {arcs}
+        <circle cx={cx} cy={cy} r="45" fill="#0a0a0f" />
+      </svg>
+      <ul className="legend">
+        {categories.map(([cat, amount], i) => (
+          <li key={cat}>
+            <span className="dot" style={{ background: COLORS[i % COLORS.length] }} />
+            {cat}: ${amount.toFixed(2)} ({((amount / total) * 100).toFixed(1)}%)
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+## Step 7: Date Range Filter
+
+Add month/year filtering to scope the dashboard view:
+
+```tsx
+// src/components/DateFilter.tsx
+interface DateFilterProps {
+  startDate: string;
+  endDate: string;
+  onChange: (start: string, end: string) => void;
+}
+
+export function DateFilter({ startDate, endDate, onChange }: DateFilterProps) {
+  const setThisMonth = () => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
+    onChange(start, end);
+  };
+
+  const setLastMonth = () => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 10);
+    const end = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().slice(0, 10);
+    onChange(start, end);
+  };
+
+  return (
+    <div className="date-filter">
+      <input type="date" value={startDate} onChange={(e) => onChange(e.target.value, endDate)} />
+      <span>to</span>
+      <input type="date" value={endDate} onChange={(e) => onChange(startDate, e.target.value)} />
+      <button onClick={setThisMonth}>This Month</button>
+      <button onClick={setLastMonth}>Last Month</button>
+    </div>
+  );
+}
+```
+
+## Step 8: Bar Chart for Monthly Trends
+
+Display a horizontal bar chart showing income vs expenses by month:
+
+```tsx
+// src/components/MonthlyChart.tsx
+import { Transaction } from "../db";
+
+interface MonthlyChartProps {
+  transactions: Transaction[];
+}
+
+export function MonthlyChart({ transactions }: MonthlyChartProps) {
+  const months = new Map<string, { income: number; expense: number }>();
+
+  transactions.forEach((t) => {
+    const key = t.date.slice(0, 7); // YYYY-MM
+    const entry = months.get(key) || { income: 0, expense: 0 };
+    entry[t.type] += t.amount;
+    months.set(key, entry);
+  });
+
+  const sorted = [...months.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const maxVal = Math.max(...sorted.flatMap(([, v]) => [v.income, v.expense]), 1);
+
+  return (
+    <div className="monthly-chart">
+      <h3>Monthly Breakdown</h3>
+      {sorted.map(([month, data]) => (
+        <div key={month} className="month-row">
+          <span className="month-label">{month}</span>
+          <div className="bars">
+            <div className="bar income-bar" style={{ width: `${(data.income / maxVal) * 100}%` }}>
+              ${data.income.toFixed(0)}
+            </div>
+            <div className="bar expense-bar" style={{ width: `${(data.expense / maxVal) * 100}%` }}>
+              ${data.expense.toFixed(0)}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+## Step 9: App Shell and Layout
+
+Wire everything together in the main App component:
+
+```tsx
+// src/App.tsx
+import { useState } from "react";
+import { useTransactions } from "./hooks/useTransactions";
+import { TransactionForm } from "./components/TransactionForm";
+import { TransactionList } from "./components/TransactionList";
+import { Summary } from "./components/Summary";
+import { CategoryChart } from "./components/CategoryChart";
+import { MonthlyChart } from "./components/MonthlyChart";
+import { DateFilter } from "./components/DateFilter";
+
+export default function App() {
+  const { transactions, loading, add, remove } = useTransactions();
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10);
+  });
+  const [endDate, setEndDate] = useState(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().slice(0, 10);
+  });
+
+  const filtered = transactions.filter((t) => t.date >= startDate && t.date <= endDate);
+
+  if (loading) return <div className="loading">Loading...</div>;
+
+  return (
+    <div className="app">
+      <header>
+        <h1>Finance Tracker</h1>
+      </header>
+      <div className="layout">
+        <aside>
+          <TransactionForm onSubmit={add} />
+        </aside>
+        <main>
+          <DateFilter
+            startDate={startDate}
+            endDate={endDate}
+            onChange={(s, e) => {
+              setStartDate(s);
+              setEndDate(e);
+            }}
+          />
+          <Summary transactions={filtered} />
+          <div className="charts">
+            <CategoryChart transactions={filtered} />
+            <MonthlyChart transactions={transactions} />
+          </div>
+          <TransactionList transactions={filtered} onDelete={remove} />
+        </main>
+      </div>
+    </div>
+  );
+}
+```
+
+## Step 10: Export and Data Portability
+
+Add CSV export so users own their data:
+
+```tsx
+// src/utils/export.ts
+import { Transaction } from "../db";
+
+export function exportToCSV(transactions: Transaction[]): void {
+  const header = "Date,Type,Category,Amount,Description\n";
+  const rows = transactions
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(
+      (t) => `${t.date},${t.type},${t.category},${t.amount},"${t.description.replace(/"/g, '""')}"`
+    )
+    .join("\n");
+
+  const blob = new Blob([header + rows], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `finance-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+```
+
+Add a CSV import parser that handles the same format:
+
+```tsx
+export function parseCSV(text: string): Omit<Transaction, "id" | "createdAt">[] {
+  const lines = text.trim().split("\n").slice(1); // skip header
+  return lines.map((line) => {
+    const [date, type, category, amount, ...descParts] = line.split(",");
+    const description = descParts.join(",").replace(/^"|"$/g, "").replace(/""/g, '"');
+    return {
+      date,
+      type: type as "income" | "expense",
+      category,
+      amount: parseFloat(amount),
+      description,
+    };
+  });
+}
+```
+
+Wire the export button into your header and use a file input for import. All data stays in IndexedDB on the user's device. The CSV export ensures they can always take their financial data to another tool if they choose.

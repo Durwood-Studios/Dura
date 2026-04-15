@@ -32,6 +32,21 @@ const HOWTO_FILES = [
   "08-reading-docs.mdx",
   "09-open-source.mdx",
   "10-portfolio.mdx",
+  "11-css-responsive.mdx",
+  "12-terminal-advanced.mdx",
+  "13-accessibility.mdx",
+  "14-typescript-thinking.mdx",
+  "15-sql-first-queries.mdx",
+  "16-devtools.mdx",
+  "17-json.mdx",
+  "18-commit-messages.mdx",
+  "24-react-state.mdx",
+  "25-ci-cd.mdx",
+  "26-prompt-engineering.mdx",
+  "27-error-handling.mdx",
+  "28-monitoring.mdx",
+  "29-code-review.mdx",
+  "30-api-design.mdx",
 ];
 
 async function getGuide(

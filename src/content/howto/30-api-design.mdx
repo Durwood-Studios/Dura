@@ -1,0 +1,258 @@
+---
+title: "How to Design a REST API That Developers Love"
+description: "Practical patterns for URL design, HTTP methods, status codes, pagination, error responses, and versioning in REST APIs."
+slug: "api-design"
+difficulty: "intermediate"
+estimatedMinutes: 25
+steps: 6
+tags: ["api", "rest", "http", "backend", "design"]
+---
+
+## Step 1: Design URLs Around Resources, Not Actions
+
+REST URLs represent things (nouns), not actions (verbs). The HTTP method provides the action.
+
+**Bad:**
+
+```
+POST /api/createUser
+GET  /api/getUserById?id=123
+POST /api/deleteLesson
+POST /api/updateProgress
+```
+
+**Good:**
+
+```
+POST   /api/users           → Create a user
+GET    /api/users/123       → Get a user
+DELETE /api/lessons/456     → Delete a lesson
+PATCH  /api/progress/789    → Update progress
+```
+
+**URL design rules:**
+
+- Use plural nouns: `/users`, `/lessons`, `/phases`
+- Use path parameters for identifiers: `/users/123`
+- Use query parameters for filtering and sorting: `/lessons?phase=3&sort=title`
+- Nest resources for clear relationships: `/users/123/progress`
+- Keep nesting shallow — two levels maximum. `/users/123/courses/456/lessons/789/progress` is too deep. Use `/progress?userId=123&lessonId=789` instead.
+- Use kebab-case for multi-word paths: `/learning-paths`, not `/learningPaths`
+
+## Step 2: Use HTTP Methods Correctly
+
+Each HTTP method has a specific meaning. Using them correctly makes your API predictable.
+
+| Method | Purpose                     | Idempotent | Request Body |
+| ------ | --------------------------- | ---------- | ------------ |
+| GET    | Read a resource             | Yes        | No           |
+| POST   | Create a resource           | No         | Yes          |
+| PUT    | Replace a resource entirely | Yes        | Yes          |
+| PATCH  | Update specific fields      | Yes\*      | Yes          |
+| DELETE | Remove a resource           | Yes        | No           |
+
+**GET** must never modify data. It should be safe to call any number of times with no side effects.
+
+**POST** creates something new. Each call creates a new resource.
+
+**PUT vs PATCH** — PUT replaces the entire resource (you send all fields). PATCH updates only the fields you send:
+
+```typescript
+// PUT /api/users/123 — replaces the entire user
+// Must send all fields, missing fields become null/default
+{ "name": "Alice", "email": "alice@example.com", "role": "admin" }
+
+// PATCH /api/users/123 — updates only what's sent
+// Only changes the role, name and email stay the same
+{ "role": "admin" }
+```
+
+In practice, most APIs use PATCH for updates because clients rarely want to send every field.
+
+## Step 3: Return the Right Status Codes
+
+Status codes tell the client what happened without parsing the response body. Use them precisely.
+
+**Success codes:**
+
+```
+200 OK          → GET, PATCH, DELETE succeeded
+201 Created     → POST succeeded, new resource created
+204 No Content  → DELETE succeeded, nothing to return
+```
+
+**Client error codes:**
+
+```
+400 Bad Request     → Malformed request, validation failed
+401 Unauthorized    → No auth credentials provided
+403 Forbidden       → Authenticated but not allowed
+404 Not Found       → Resource doesn't exist
+409 Conflict        → Resource already exists (duplicate)
+422 Unprocessable   → Valid syntax but semantic errors
+429 Too Many Reqs   → Rate limit exceeded
+```
+
+**Server error codes:**
+
+```
+500 Internal Error  → Something broke on our end
+503 Unavailable     → Service is temporarily down
+```
+
+A common mistake: returning 200 with `{ "success": false }` in the body. Use the status code for the status. Return 400 or 422 for failures.
+
+```typescript
+// Good: status code matches the situation
+if (!user) {
+  return NextResponse.json({ error: "User not found" }, { status: 404 });
+}
+
+return NextResponse.json(user, { status: 200 });
+```
+
+## Step 4: Design Error Responses Consistently
+
+Every error response should have the same shape. This lets clients write one error handler instead of guessing.
+
+```typescript
+interface ApiError {
+  error: {
+    code: string;
+    message: string;
+    details?: Record<string, string[]>;
+  };
+}
+```
+
+**Validation errors** should identify which fields failed and why:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request validation failed",
+    "details": {
+      "email": ["Must be a valid email address"],
+      "name": ["Required", "Must be at least 2 characters"]
+    }
+  }
+}
+```
+
+**Helper function for consistent errors:**
+
+```typescript
+function apiError(
+  code: string,
+  message: string,
+  status: number,
+  details?: Record<string, string[]>
+): NextResponse<ApiError> {
+  return NextResponse.json({ error: { code, message, ...(details && { details }) } }, { status });
+}
+
+// Usage
+return apiError("NOT_FOUND", "Lesson not found", 404);
+return apiError("VALIDATION_ERROR", "Invalid input", 422, {
+  title: ["Required"],
+});
+```
+
+## Step 5: Implement Pagination for List Endpoints
+
+Any endpoint that returns a list will eventually return too many items. Paginate from the start.
+
+**Cursor-based pagination** (recommended for most cases):
+
+```typescript
+// GET /api/lessons?limit=20&cursor=abc123
+
+interface PaginatedResponse<T> {
+  data: T[];
+  pagination: {
+    nextCursor: string | null;
+    hasMore: boolean;
+  };
+}
+
+export async function GET(request: Request): Promise<NextResponse> {
+  const { searchParams } = new URL(request.url);
+  const limit = Math.min(Number(searchParams.get("limit") ?? 20), 100);
+  const cursor = searchParams.get("cursor");
+
+  const lessons = await db
+    .from("lessons")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit + 1) // Fetch one extra to check if there are more
+    ...(cursor ? .gt("id", cursor) : identity);
+
+  const hasMore = lessons.length > limit;
+  const data = lessons.slice(0, limit);
+
+  return NextResponse.json({
+    data,
+    pagination: {
+      nextCursor: hasMore ? data[data.length - 1].id : null,
+      hasMore,
+    },
+  });
+}
+```
+
+**Why cursor over offset?** Offset pagination (`?page=5&limit=20`) breaks when items are inserted or deleted — you skip or duplicate results. Cursor pagination is stable because it references a specific item.
+
+Always cap the `limit` parameter. Without a cap, a client can request `?limit=1000000` and take down your database.
+
+## Step 6: Version Your API and Document It
+
+APIs change. Versioning gives you a path to evolve without breaking existing clients.
+
+**URL versioning** (simplest, most explicit):
+
+```
+/api/v1/users
+/api/v2/users
+```
+
+**When to bump the version:**
+
+- Removing a field from a response (breaking)
+- Changing a field's type (breaking)
+- Changing the meaning of a status code (breaking)
+- Adding an optional field (not breaking, no version bump needed)
+- Adding a new endpoint (not breaking)
+
+For internal APIs (your own frontend consuming your own backend), you often don't need formal versioning — you control both sides. But for public APIs, version from day one.
+
+**Documentation essentials:**
+
+Every endpoint needs:
+
+- URL and method
+- Request parameters (path, query, body) with types and whether they're required
+- Response shape with example
+- Error responses with examples
+- Authentication requirements
+
+```typescript
+/**
+ * GET /api/v1/lessons
+ *
+ * Returns a paginated list of lessons.
+ *
+ * Query params:
+ *   - limit (number, optional, default 20, max 100)
+ *   - cursor (string, optional)
+ *   - phase (number, optional, filter by phase)
+ *
+ * Response: PaginatedResponse<Lesson>
+ *
+ * Errors:
+ *   - 400: Invalid query parameters
+ *   - 401: Missing authentication
+ */
+```
+
+The best API documentation includes runnable examples. If a developer can copy a `curl` command from your docs and see a response, they'll integrate in minutes instead of hours.

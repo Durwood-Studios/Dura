@@ -27,6 +27,16 @@ const TUTORIAL_FILES = [
   "03-react-dashboard.mdx",
   "04-rag-chatbot.mdx",
   "05-portfolio-site.mdx",
+  "06-algorithm-visualizer.mdx",
+  "07-markdown-notes.mdx",
+  "08-finance-tracker.mdx",
+  "09-task-board.mdx",
+  "10-chat-app.mdx",
+  "14-ci-cd-pipeline.mdx",
+  "15-accessible-components.mdx",
+  "16-data-dashboard.mdx",
+  "17-ai-agent.mdx",
+  "18-mcp-server-tutorial.mdx",
 ];
 
 async function getTutorial(

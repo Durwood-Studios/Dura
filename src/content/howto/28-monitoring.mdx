@@ -1,0 +1,219 @@
+---
+title: "How to Set Up Monitoring for Your App"
+description: "Implement metrics, structured logging, tracing, and alerting so you know when things break before your users tell you."
+slug: "monitoring"
+difficulty: "intermediate"
+estimatedMinutes: 25
+steps: 6
+tags: ["monitoring", "logging", "observability", "devops", "alerting"]
+---
+
+## Step 1: Understand the Three Pillars of Observability
+
+Monitoring answers "is the system working?" Observability answers "why isn't it working?" You need three types of telemetry:
+
+1. **Metrics** — Numerical measurements over time. CPU usage, request count, error rate, response time. Cheap to collect, easy to alert on, but low detail.
+2. **Logs** — Discrete events with context. "User X requested /api/lessons and got a 500 at 14:32:07." Rich detail, but expensive at scale and hard to correlate.
+3. **Traces** — The journey of a single request through your system. Shows which service called which, how long each step took, and where it failed.
+
+You don't need all three on day one. Start with structured logging and basic metrics. Add tracing when you have multiple services or complex request flows.
+
+## Step 2: Implement Structured Logging
+
+Unstructured logs (`console.log("user login failed")`) are nearly useless at scale. You can't filter, search, or aggregate them. Structured logs are JSON objects with consistent fields.
+
+```typescript
+interface LogEntry {
+  level: "debug" | "info" | "warn" | "error";
+  message: string;
+  timestamp: string;
+  service: string;
+  traceId?: string;
+  userId?: string;
+  [key: string]: unknown;
+}
+
+function createLogger(service: string) {
+  function log(level: LogEntry["level"], message: string, context?: Record<string, unknown>): void {
+    const entry: LogEntry = {
+      level,
+      message,
+      timestamp: new Date().toISOString(),
+      service,
+      ...context,
+    };
+    // In production, send to your logging service
+    // In development, pretty-print to console
+    if (process.env.NODE_ENV === "production") {
+      process.stdout.write(JSON.stringify(entry) + "\n");
+    } else {
+      console[level](message, context);
+    }
+  }
+
+  return {
+    debug: (msg: string, ctx?: Record<string, unknown>) => log("debug", msg, ctx),
+    info: (msg: string, ctx?: Record<string, unknown>) => log("info", msg, ctx),
+    warn: (msg: string, ctx?: Record<string, unknown>) => log("warn", msg, ctx),
+    error: (msg: string, ctx?: Record<string, unknown>) => log("error", msg, ctx),
+  };
+}
+
+const logger = createLogger("api");
+
+// Usage
+logger.info("Lesson completed", {
+  userId: "user-123",
+  lessonId: "lesson-45",
+  durationMs: 1250,
+  phaseId: 3,
+});
+```
+
+**Structured logging rules:**
+
+- Always include a timestamp, log level, and service name
+- Use consistent field names across your codebase
+- Never log sensitive data (passwords, tokens, personal information)
+- Log at the right level: `debug` for development, `info` for normal operations, `warn` for recoverable issues, `error` for failures
+
+## Step 3: Track the Metrics That Matter
+
+You don't need hundreds of metrics. Start with these four (the "golden signals"):
+
+1. **Latency** — How long requests take (p50, p95, p99)
+2. **Traffic** — How many requests per second
+3. **Errors** — What percentage of requests fail
+4. **Saturation** — How close your resources are to capacity
+
+For a web application, track these at minimum:
+
+```typescript
+// Middleware to track request metrics
+const requestMetrics = {
+  total: 0,
+  errors: 0,
+  latencyBuckets: new Map<string, number[]>(),
+};
+
+function trackRequest(path: string, statusCode: number, durationMs: number): void {
+  requestMetrics.total++;
+  if (statusCode >= 500) {
+    requestMetrics.errors++;
+  }
+
+  const bucket = requestMetrics.latencyBuckets.get(path) ?? [];
+  bucket.push(durationMs);
+  requestMetrics.latencyBuckets.set(path, bucket);
+}
+
+// Expose metrics endpoint
+function getMetricsSummary(): Record<string, unknown> {
+  const errorRate = requestMetrics.total > 0 ? requestMetrics.errors / requestMetrics.total : 0;
+
+  return {
+    totalRequests: requestMetrics.total,
+    errorRate: Math.round(errorRate * 10000) / 100,
+    topEndpoints: Array.from(requestMetrics.latencyBuckets.entries())
+      .map(([path, durations]) => ({
+        path,
+        count: durations.length,
+        p50: percentile(durations, 50),
+        p95: percentile(durations, 95),
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10),
+  };
+}
+```
+
+In production, use a proper metrics library or service (Prometheus, Datadog, Vercel Analytics) rather than rolling your own. The pattern above illustrates what to track.
+
+## Step 4: Add Health Checks
+
+A health check endpoint tells you (and your load balancer) whether the application is functioning. It should verify critical dependencies.
+
+```typescript
+// app/api/health/route.ts
+import { NextResponse } from "next/server";
+
+interface HealthStatus {
+  status: "healthy" | "degraded" | "unhealthy";
+  checks: Record<string, { status: string; latencyMs: number }>;
+  timestamp: string;
+}
+
+export async function GET(): Promise<NextResponse<HealthStatus>> {
+  const checks: HealthStatus["checks"] = {};
+
+  // Check database connectivity
+  const dbStart = performance.now();
+  try {
+    // Replace with your actual DB check
+    await fetch(process.env.NEXT_PUBLIC_SUPABASE_URL + "/rest/v1/", {
+      headers: { apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "" },
+    });
+    checks.database = { status: "ok", latencyMs: Math.round(performance.now() - dbStart) };
+  } catch {
+    checks.database = { status: "error", latencyMs: Math.round(performance.now() - dbStart) };
+  }
+
+  const isHealthy = Object.values(checks).every((c) => c.status === "ok");
+
+  return NextResponse.json(
+    {
+      status: isHealthy ? "healthy" : "degraded",
+      checks,
+      timestamp: new Date().toISOString(),
+    },
+    { status: isHealthy ? 200 : 503 }
+  );
+}
+```
+
+Hit this endpoint from your monitoring service every 30-60 seconds. If it returns 503, investigate.
+
+## Step 5: Set Up Alerting That Doesn't Cry Wolf
+
+Bad alerting is worse than no alerting. If every alert is a false alarm, you'll ignore the real ones.
+
+**Alert on symptoms, not causes.** Don't alert on "CPU is at 80%." Alert on "error rate exceeded 5% for 5 minutes" or "p95 latency exceeded 2 seconds for 10 minutes."
+
+**Alert tiers:**
+
+| Severity | Condition           | Response                 | Example                            |
+| -------- | ------------------- | ------------------------ | ---------------------------------- |
+| Critical | Service is down     | Page on-call immediately | Health check failing for 3 minutes |
+| Warning  | Service is degraded | Investigate within hours | Error rate above 2% for 15 minutes |
+| Info     | Anomaly detected    | Review next business day | Traffic 50% above normal           |
+
+**Rules for good alerts:**
+
+- Every alert must be actionable. If you can't do anything about it, it's not an alert — it's noise.
+- Include context in the alert: what broke, when it started, a link to the dashboard.
+- Set appropriate thresholds. If it fires daily and you ignore it daily, raise the threshold.
+- Use alert windows (sustained conditions, not single spikes). "Error rate > 5% for 5 minutes" not "any single 500."
+
+## Step 6: Build a Debugging Workflow
+
+When something breaks, you need a systematic approach:
+
+1. **Check the dashboard** — Is this a spike or a sustained issue? When did it start?
+2. **Read the logs** — Filter by the time window and error level. Look for the first error in the sequence.
+3. **Follow the trace** — If you have tracing, find the failing request and walk through each step.
+4. **Check recent deployments** — Did this start after a deploy? Check `git log` for the timeframe.
+5. **Reproduce locally** — Can you trigger the same error with the same inputs?
+
+Create a runbook for your most common incidents. A runbook is a step-by-step guide for diagnosing and fixing a specific type of failure. When you're paged at 2 AM, you don't want to think — you want to follow a checklist.
+
+```markdown
+## Runbook: High Error Rate on /api/lessons
+
+1. Check Vercel function logs for the error message
+2. If "connection refused" → Check Supabase status page
+3. If "timeout" → Check if a slow query was recently deployed
+4. If "validation error" → Check if the client is sending malformed data
+5. If none of the above → Escalate to #engineering with the trace ID
+```
+
+Monitoring is not a feature you ship once. It evolves with your application. Start simple, add instrumentation when you get bitten by something you couldn't diagnose, and delete alerts that never fire.

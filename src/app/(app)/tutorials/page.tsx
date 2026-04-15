@@ -45,6 +45,80 @@ const TUTORIALS = [
     difficulty: "intermediate",
     minutes: 50,
   },
+  {
+    slug: "algorithm-visualizer",
+    title: "Build an Algorithm Visualizer",
+    description: "Web app animating sorting algorithms with speed control and array size input.",
+    difficulty: "beginner",
+    minutes: 180,
+  },
+  {
+    slug: "markdown-notes",
+    title: "Build a Markdown Note-Taking App",
+    description: "Browser-based notes with Markdown rendering, localStorage, search, and tags.",
+    difficulty: "beginner",
+    minutes: 150,
+  },
+  {
+    slug: "finance-tracker",
+    title: "Build a Personal Finance Tracker",
+    description: "React app tracking income and expenses with categories, charts, and IndexedDB.",
+    difficulty: "beginner",
+    minutes: 180,
+  },
+  {
+    slug: "task-board",
+    title: "Build a Full-Stack Task Board",
+    description: "Kanban board with Next.js, drag-and-drop, API routes, and PostgreSQL.",
+    difficulty: "intermediate",
+    minutes: 240,
+  },
+  {
+    slug: "chat-app",
+    title: "Build a Real-Time Chat Application",
+    description:
+      "WebSocket chat with message history, presence indicators, and typing notifications.",
+    difficulty: "intermediate",
+    minutes: 210,
+  },
+  {
+    slug: "ci-cd-pipeline",
+    title: "Build a GitHub Actions CI/CD Pipeline",
+    description: "Lint, typecheck, test, build, deploy to Vercel — with branch protection.",
+    difficulty: "intermediate",
+    minutes: 150,
+  },
+  {
+    slug: "accessible-components",
+    title: "Build an Accessible Component Library",
+    description:
+      "5 React components with keyboard nav, ARIA, focus trapping, and screen reader support.",
+    difficulty: "intermediate",
+    minutes: 210,
+  },
+  {
+    slug: "data-dashboard",
+    title: "Build a Data Dashboard with SQL and Charts",
+    description:
+      "PostgreSQL queries with joins, aggregations, and interactive chart visualization.",
+    difficulty: "intermediate",
+    minutes: 180,
+  },
+  {
+    slug: "ai-agent",
+    title: "Build an AI Agent with Tool Use",
+    description:
+      "AI agent that searches, reads files, and executes code with planning and error recovery.",
+    difficulty: "advanced",
+    minutes: 240,
+  },
+  {
+    slug: "mcp-server-tutorial",
+    title: "Build an MCP Server for a Real Data Source",
+    description: "Model Context Protocol server exposing PostgreSQL to AI assistants.",
+    difficulty: "advanced",
+    minutes: 210,
+  },
 ] as const;
 
 const DIFFICULTY_COLORS: Record<string, string> = {

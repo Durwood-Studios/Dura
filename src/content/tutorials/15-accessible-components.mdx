@@ -1,0 +1,635 @@
+---
+title: "Build an Accessible Component Library"
+description: "Create five production-quality React components with full keyboard navigation, ARIA attributes, focus trapping, and screen reader support."
+slug: "accessible-components"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["accessibility", "react", "a11y", "components", "aria", "keyboard-navigation"]
+---
+
+## Overview
+
+Accessibility isn't a feature — it's a requirement. In this tutorial, you'll build five React components from scratch that work for everyone: keyboard-only users, screen reader users, and mouse users alike. Each component follows WAI-ARIA patterns exactly, because close enough isn't good enough when someone depends on your UI to function.
+
+**What you'll build:**
+
+- **Button** — polymorphic, loading states, proper disabled behavior
+- **Modal** — focus trapping, escape to close, scroll lock, portal rendering
+- **Dropdown Menu** — arrow key navigation, typeahead, roving tabindex
+- **Tabs** — automatic and manual activation modes, proper panel association
+- **Toast** — live regions, auto-dismiss, pause on hover, stacking
+
+**Prerequisites:** React 18+, TypeScript, basic understanding of HTML semantics and ARIA roles.
+
+## Step 1: Foundation — Utility Hooks
+
+Before building components, create two hooks you'll reuse across all of them.
+
+```typescript
+// hooks/use-keyboard.ts
+import { useCallback, type KeyboardEvent } from "react";
+
+type KeyHandler = (event: KeyboardEvent) => void;
+type KeyMap = Record<string, KeyHandler>;
+
+export function useKeyboard(keyMap: KeyMap): (event: KeyboardEvent) => void {
+  return useCallback(
+    (event: KeyboardEvent) => {
+      const handler = keyMap[event.key];
+      if (handler) {
+        handler(event);
+      }
+    },
+    [keyMap]
+  );
+}
+```
+
+```typescript
+// hooks/use-id.ts
+import { useId as useReactId } from "react";
+
+export function useStableId(prefix: string): string {
+  const id = useReactId();
+  return `${prefix}-${id}`;
+}
+```
+
+And a focus management utility:
+
+```typescript
+// utils/focus.ts
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "textarea:not([disabled])",
+  "select:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(", ");
+
+export function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+}
+
+export function trapFocus(container: HTMLElement, event: KeyboardEvent): void {
+  const focusable = getFocusableElements(container);
+  if (focusable.length === 0) return;
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+
+  if (event.key === "Tab") {
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+}
+```
+
+## Step 2: Button Component
+
+A button seems trivial, but most implementations get disabled state wrong. A disabled button should not be focusable via click but should remain in the tab order for screen reader discovery. We use `aria-disabled` instead of the HTML `disabled` attribute:
+
+```tsx
+import { forwardRef, type ButtonHTMLAttributes, type ElementType } from "react";
+
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  as?: ElementType;
+  isLoading?: boolean;
+  variant?: "primary" | "secondary" | "ghost";
+}
+
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  {
+    as: Component = "button",
+    isLoading,
+    disabled,
+    variant = "primary",
+    children,
+    onClick,
+    ...props
+  },
+  ref
+) {
+  const isDisabled = disabled || isLoading;
+
+  function handleClick(event: React.MouseEvent<HTMLButtonElement>): void {
+    if (isDisabled) {
+      event.preventDefault();
+      return;
+    }
+    onClick?.(event);
+  }
+
+  return (
+    <Component
+      ref={ref}
+      role={Component !== "button" ? "button" : undefined}
+      tabIndex={Component !== "button" ? 0 : undefined}
+      aria-disabled={isDisabled || undefined}
+      aria-busy={isLoading || undefined}
+      onClick={handleClick}
+      data-variant={variant}
+      {...props}
+    >
+      {isLoading ? (
+        <>
+          <span className="sr-only">Loading</span>
+          <span aria-hidden="true" className="animate-spin">
+            ⟳
+          </span>
+        </>
+      ) : (
+        children
+      )}
+    </Component>
+  );
+});
+```
+
+When `as` is set to `"a"` or a custom component, we add `role="button"` and `tabIndex={0}` so it behaves like a button to assistive technology.
+
+## Step 3: Modal Component
+
+The modal is where accessibility gets real. Focus must be trapped inside. Escape must close it. The background must be inert. Scroll must be locked.
+
+```tsx
+import { useEffect, useRef, useCallback, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { trapFocus } from "../utils/focus";
+
+interface ModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+}
+
+export function Modal({ isOpen, onClose, title, children }: ModalProps): ReactNode {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      previousFocus.current = document.activeElement as HTMLElement;
+      dialogRef.current?.focus();
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+      previousFocus.current?.focus();
+    }
+
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [isOpen]);
+
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (dialogRef.current) {
+        trapFocus(dialogRef.current, event.nativeEvent);
+      }
+    },
+    [onClose]
+  );
+
+  function handleBackdropClick(event: React.MouseEvent): void {
+    if (event.target === event.currentTarget) {
+      onClose();
+    }
+  }
+
+  if (!isOpen) return null;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={handleBackdropClick}
+      aria-hidden="true"
+    >
+      <dialog
+        ref={dialogRef}
+        open
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+        className="relative w-full max-w-lg rounded-2xl bg-[var(--bg-primary)] p-6"
+      >
+        <header className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">{title}</h2>
+          <button onClick={onClose} aria-label="Close dialog" className="p-2">
+            ✕
+          </button>
+        </header>
+        <div>{children}</div>
+      </dialog>
+    </div>,
+    document.body
+  );
+}
+```
+
+## Step 4: Making the Background Inert
+
+When the modal is open, everything behind it should be unreachable. Use the `inert` attribute:
+
+```typescript
+useEffect(() => {
+  if (!isOpen) return;
+
+  const root = document.getElementById("__next");
+  if (root) {
+    root.setAttribute("inert", "");
+    root.setAttribute("aria-hidden", "true");
+  }
+
+  return () => {
+    if (root) {
+      root.removeAttribute("inert");
+      root.removeAttribute("aria-hidden");
+    }
+  };
+}, [isOpen]);
+```
+
+The `inert` attribute prevents all interaction — focus, click, selection — with the content behind the modal. This is now supported in all modern browsers.
+
+## Step 5: Dropdown Menu
+
+The dropdown follows the WAI-ARIA menu pattern. Arrow keys move between items. Home/End jump to first/last. Typeahead searches by character. Escape closes.
+
+```tsx
+import { useState, useRef, useCallback, type ReactNode } from "react";
+import { getFocusableElements } from "../utils/focus";
+
+interface MenuItem {
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean;
+}
+
+interface DropdownProps {
+  trigger: ReactNode;
+  items: MenuItem[];
+}
+
+export function Dropdown({ trigger, items }: DropdownProps): ReactNode {
+  const [isOpen, setIsOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const menuRef = useRef<HTMLUListElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const open = useCallback(() => {
+    setIsOpen(true);
+    setActiveIndex(0);
+  }, []);
+
+  const close = useCallback(() => {
+    setIsOpen(false);
+    setActiveIndex(-1);
+    triggerRef.current?.focus();
+  }, []);
+
+  function handleTriggerKeyDown(event: React.KeyboardEvent): void {
+    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  }
+
+  function handleMenuKeyDown(event: React.KeyboardEvent): void {
+    const enabledIndices = items
+      .map((item, i) => (!item.disabled ? i : -1))
+      .filter((i) => i !== -1);
+
+    switch (event.key) {
+      case "ArrowDown": {
+        event.preventDefault();
+        const currentPos = enabledIndices.indexOf(activeIndex);
+        const next = enabledIndices[(currentPos + 1) % enabledIndices.length];
+        setActiveIndex(next);
+        break;
+      }
+      case "ArrowUp": {
+        event.preventDefault();
+        const currentPos = enabledIndices.indexOf(activeIndex);
+        const prev =
+          enabledIndices[(currentPos - 1 + enabledIndices.length) % enabledIndices.length];
+        setActiveIndex(prev);
+        break;
+      }
+      case "Home":
+        event.preventDefault();
+        setActiveIndex(enabledIndices[0]);
+        break;
+      case "End":
+        event.preventDefault();
+        setActiveIndex(enabledIndices[enabledIndices.length - 1]);
+        break;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        if (activeIndex >= 0 && !items[activeIndex].disabled) {
+          items[activeIndex].onSelect();
+          close();
+        }
+        break;
+      case "Escape":
+        close();
+        break;
+    }
+  }
+
+  return (
+    <div className="relative inline-block">
+      <button
+        ref={triggerRef}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={() => (isOpen ? close() : open())}
+        onKeyDown={handleTriggerKeyDown}
+      >
+        {trigger}
+      </button>
+      {isOpen && (
+        <ul
+          ref={menuRef}
+          role="menu"
+          onKeyDown={handleMenuKeyDown}
+          className="absolute mt-1 min-w-48 rounded-lg border bg-[var(--bg-primary)] py-1"
+        >
+          {items.map((item, index) => (
+            <li
+              key={item.label}
+              role="menuitem"
+              tabIndex={index === activeIndex ? 0 : -1}
+              aria-disabled={item.disabled || undefined}
+              onClick={() => {
+                if (!item.disabled) {
+                  item.onSelect();
+                  close();
+                }
+              }}
+              ref={(el) => {
+                if (index === activeIndex) el?.focus();
+              }}
+              className="cursor-pointer px-3 py-2 hover:bg-[var(--bg-surface-hover)]"
+            >
+              {item.label}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+## Step 6: Tabs Component
+
+Tabs use roving tabindex — only the active tab is in the tab order. Arrow keys switch between tabs. The tab panels are associated via `aria-controls` and `aria-labelledby`.
+
+```tsx
+import { useState, useRef, type ReactNode } from "react";
+
+interface Tab {
+  id: string;
+  label: string;
+  content: ReactNode;
+}
+
+interface TabsProps {
+  tabs: Tab[];
+  defaultTab?: string;
+  activationMode?: "automatic" | "manual";
+}
+
+export function Tabs({ tabs, defaultTab, activationMode = "automatic" }: TabsProps): ReactNode {
+  const [activeTab, setActiveTab] = useState(defaultTab ?? tabs[0]?.id ?? "");
+  const tabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+
+  function focusTab(id: string): void {
+    tabRefs.current.get(id)?.focus();
+    if (activationMode === "automatic") {
+      setActiveTab(id);
+    }
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent): void {
+    const currentIndex = tabs.findIndex((t) => t.id === activeTab);
+
+    switch (event.key) {
+      case "ArrowRight": {
+        event.preventDefault();
+        const next = tabs[(currentIndex + 1) % tabs.length];
+        focusTab(next.id);
+        break;
+      }
+      case "ArrowLeft": {
+        event.preventDefault();
+        const prev = tabs[(currentIndex - 1 + tabs.length) % tabs.length];
+        focusTab(prev.id);
+        break;
+      }
+      case "Home":
+        event.preventDefault();
+        focusTab(tabs[0].id);
+        break;
+      case "End":
+        event.preventDefault();
+        focusTab(tabs[tabs.length - 1].id);
+        break;
+      case "Enter":
+      case " ":
+        if (activationMode === "manual") {
+          event.preventDefault();
+          const focused = document.activeElement;
+          const focusedId = tabs.find((t) => tabRefs.current.get(t.id) === focused)?.id;
+          if (focusedId) setActiveTab(focusedId);
+        }
+        break;
+    }
+  }
+
+  return (
+    <div>
+      <div role="tablist" aria-label="Tabs" onKeyDown={handleKeyDown} className="flex border-b">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            ref={(el) => {
+              if (el) tabRefs.current.set(tab.id, el);
+            }}
+            role="tab"
+            id={`tab-${tab.id}`}
+            aria-selected={activeTab === tab.id}
+            aria-controls={`panel-${tab.id}`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            onClick={() => setActiveTab(tab.id)}
+            className="px-4 py-2"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {tabs.map((tab) => (
+        <div
+          key={tab.id}
+          role="tabpanel"
+          id={`panel-${tab.id}`}
+          aria-labelledby={`tab-${tab.id}`}
+          hidden={activeTab !== tab.id}
+          tabIndex={0}
+          className="p-4"
+        >
+          {tab.content}
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+## Step 7: Toast Notifications
+
+Toasts use `aria-live` regions so screen readers announce them without stealing focus. The key insight: the live region container must exist in the DOM _before_ the toast message is inserted.
+
+```tsx
+import { useState, useCallback, useRef, useEffect, type ReactNode } from "react";
+
+interface Toast {
+  id: string;
+  message: string;
+  type: "info" | "success" | "error";
+  duration?: number;
+}
+
+export function useToast(): {
+  toasts: Toast[];
+  addToast: (toast: Omit<Toast, "id">) => void;
+  removeToast: (id: string) => void;
+} {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const addToast = useCallback((toast: Omit<Toast, "id">) => {
+    const id = crypto.randomUUID();
+    setToasts((prev) => [...prev, { ...toast, id }]);
+
+    const duration = toast.duration ?? 5000;
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, duration);
+  }, []);
+
+  const removeToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  return { toasts, addToast, removeToast };
+}
+
+export function ToastContainer({
+  toasts,
+  removeToast,
+}: {
+  toasts: Toast[];
+  removeToast: (id: string) => void;
+}): ReactNode {
+  return (
+    <div
+      aria-live="polite"
+      aria-atomic="false"
+      role="status"
+      className="fixed right-4 bottom-4 z-50 flex flex-col gap-2"
+    >
+      {toasts.map((toast) => (
+        <ToastItem key={toast.id} toast={toast} onDismiss={() => removeToast(toast.id)} />
+      ))}
+    </div>
+  );
+}
+
+function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }): ReactNode {
+  const [isPaused, setIsPaused] = useState(false);
+
+  return (
+    <div
+      role="alert"
+      onMouseEnter={() => setIsPaused(true)}
+      onMouseLeave={() => setIsPaused(false)}
+      className="flex items-center gap-3 rounded-lg border bg-[var(--bg-primary)] px-4 py-3 shadow-lg"
+    >
+      <span>{toast.message}</span>
+      <button onClick={onDismiss} aria-label={`Dismiss: ${toast.message}`} className="ml-auto p-1">
+        ✕
+      </button>
+    </div>
+  );
+}
+```
+
+## Step 8: Focus Visible Styles
+
+Browsers show focus rings on click for buttons, which annoys mouse users. Use `:focus-visible` to only show focus rings on keyboard navigation:
+
+```css
+/* In your globals.css */
+*:focus-visible {
+  outline: 2px solid var(--accent-emerald);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+```
+
+## Step 9: Screen Reader Testing
+
+Install the axe-core browser extension and run it on every component. Automate it in tests:
+
+```typescript
+import { render } from "@testing-library/react";
+import { axe, toHaveNoViolations } from "jest-axe";
+
+expect.extend(toHaveNoViolations);
+
+test("Modal has no accessibility violations", async () => {
+  const { container } = render(
+    <Modal isOpen={true} onClose={() => {}} title="Test Modal">
+      <p>Content</p>
+    </Modal>
+  );
+  const results = await axe(container);
+  expect(results).toHaveNoViolations();
+});
+```
+
+Run axe on every component in every state: open, closed, loading, disabled, error.
+
+## Step 10: Keyboard Navigation Testing Checklist
+
+For each component, verify these interactions manually:
+
+| Component | Tab                 | Escape       | Arrows              | Enter/Space             | Home/End        |
+| --------- | ------------------- | ------------ | ------------------- | ----------------------- | --------------- |
+| Button    | Focuses button      | —            | —                   | Activates               | —               |
+| Modal     | Cycles within modal | Closes modal | —                   | —                       | —               |
+| Dropdown  | Focuses trigger     | Closes menu  | Moves between items | Selects item            | First/last item |
+| Tabs      | Focuses active tab  | —            | Switches tabs       | Activates (manual mode) | First/last tab  |
+| Toast     | Focuses dismiss     | —            | —                   | Dismisses               | —               |
+
+Build a Storybook or test page that renders every component in every state. Tab through the entire page. If you get trapped, something is broken. If you can't reach something, something is broken. Accessibility is binary — it either works or it doesn't.

@@ -1,0 +1,238 @@
+---
+title: "How to Handle Errors Without Swallowing Them"
+description: "Patterns for error boundaries, try/catch, custom error classes, and structured logging that make debugging possible."
+slug: "error-handling"
+difficulty: "intermediate"
+estimatedMinutes: 20
+steps: 5
+tags: ["error-handling", "debugging", "typescript", "react", "logging"]
+---
+
+## Step 1: Stop Swallowing Errors
+
+The most common error handling mistake is catching an error and doing nothing with it. This turns a visible problem into an invisible one — the worst kind of bug.
+
+```typescript
+// TERRIBLE — the error vanishes into the void
+try {
+  await saveUserProgress(data);
+} catch (e) {
+  // TODO: handle this later
+}
+
+// BAD — you know it failed but not why
+try {
+  await saveUserProgress(data);
+} catch (e) {
+  console.log("something went wrong");
+}
+
+// GOOD — the error is preserved with context
+try {
+  await saveUserProgress(data);
+} catch (error) {
+  console.error("Failed to save user progress:", {
+    userId: data.userId,
+    lessonId: data.lessonId,
+    error: error instanceof Error ? error.message : String(error),
+  });
+  throw error; // Re-throw if the caller needs to know
+}
+```
+
+The rule is simple: every `catch` block must either **recover** from the error (retry, fallback, graceful degradation) or **propagate** it (re-throw, return an error result). Silencing it is never acceptable.
+
+## Step 2: Create Custom Error Classes
+
+Generic `Error` objects force you to parse error messages to understand what happened. Custom errors let you use `instanceof` checks and carry structured data.
+
+```typescript
+class AppError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string,
+    public readonly statusCode: number = 500,
+    public readonly context?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = "AppError";
+  }
+}
+
+class NotFoundError extends AppError {
+  constructor(resource: string, id: string) {
+    super(`${resource} not found: ${id}`, "NOT_FOUND", 404, {
+      resource,
+      id,
+    });
+    this.name = "NotFoundError";
+  }
+}
+
+class ValidationError extends AppError {
+  constructor(
+    message: string,
+    public readonly fields: Record<string, string>
+  ) {
+    super(message, "VALIDATION_ERROR", 400, { fields });
+    this.name = "ValidationError";
+  }
+}
+```
+
+Now your error handling becomes precise:
+
+```typescript
+try {
+  const lesson = await getLesson(lessonId);
+} catch (error) {
+  if (error instanceof NotFoundError) {
+    return NextResponse.json({ error: error.message }, { status: 404 });
+  }
+  if (error instanceof ValidationError) {
+    return NextResponse.json({ error: error.message, fields: error.fields }, { status: 400 });
+  }
+  // Unknown error — log it and return generic 500
+  console.error("Unexpected error in getLesson:", error);
+  return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+}
+```
+
+## Step 3: Use Error Boundaries in React
+
+React error boundaries catch rendering errors that would otherwise crash your entire application. Without them, a single broken component takes down the whole page.
+
+```tsx
+"use client";
+
+import { Component, type ErrorInfo, type ReactNode } from "react";
+
+interface ErrorBoundaryProps {
+  children: ReactNode;
+  fallback: ReactNode;
+  onError?: (error: Error, errorInfo: ErrorInfo) => void;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
+    console.error("ErrorBoundary caught:", error, errorInfo);
+    this.props.onError?.(error, errorInfo);
+  }
+
+  render(): ReactNode {
+    if (this.state.hasError) {
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
+```
+
+Wrap error boundaries around independent sections of your UI. If the sidebar breaks, the main content should still work:
+
+```tsx
+<ErrorBoundary fallback={<SidebarFallback />}>
+  <Sidebar />
+</ErrorBoundary>
+<ErrorBoundary fallback={<ContentFallback />}>
+  <MainContent />
+</ErrorBoundary>
+```
+
+In Next.js, you can also use `error.tsx` files for route-level error handling. They act as error boundaries scoped to a route segment.
+
+## Step 4: Handle Async Errors Consistently
+
+Async errors are the most commonly swallowed. Every async function needs a strategy.
+
+**Pattern 1: Result types instead of exceptions**
+
+```typescript
+type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
+
+async function fetchLesson(id: string): Promise<Result<Lesson>> {
+  try {
+    const response = await fetch(`/api/lessons/${id}`);
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: new AppError(`HTTP ${response.status}`, "FETCH_ERROR", response.status),
+      };
+    }
+    const data = (await response.json()) as Lesson;
+    return { ok: true, value: data };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+}
+
+// Caller is forced to handle both cases
+const result = await fetchLesson("lesson-1");
+if (!result.ok) {
+  showErrorToast(result.error.message);
+  return;
+}
+const lesson = result.value;
+```
+
+**Pattern 2: Centralized async error handler**
+
+```typescript
+async function withErrorHandling<T>(operation: () => Promise<T>, context: string): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    console.error(`Error in ${context}:`, error);
+    throw error;
+  }
+}
+
+const user = await withErrorHandling(() => fetchUser(userId), `fetchUser(${userId})`);
+```
+
+## Step 5: Give Users Helpful Error Messages
+
+The error your code throws and the error your user sees should be different things. Internal errors contain stack traces, database details, and implementation specifics. User-facing errors should be clear, actionable, and safe.
+
+```typescript
+function getUserErrorMessage(error: unknown): string {
+  if (error instanceof NotFoundError) {
+    return "We couldn't find what you're looking for. It may have been moved or deleted.";
+  }
+  if (error instanceof ValidationError) {
+    return "Some of the information provided isn't quite right. Please check the highlighted fields.";
+  }
+  if (error instanceof AppError && error.code === "NETWORK_ERROR") {
+    return "We're having trouble connecting. Check your internet connection and try again.";
+  }
+  // Never expose internal error details to users
+  return "Something unexpected happened. Please try again, or contact support if the problem continues.";
+}
+```
+
+**Rules for user-facing errors:**
+
+- Never show stack traces, SQL queries, or file paths
+- Tell users what happened in plain language
+- Tell users what they can do about it (retry, check input, contact support)
+- Provide a way to report the error (include a correlation ID if you have one)
+- Log the full technical error server-side where developers can find it
+
+The gap between "Error: SQLITE_CONSTRAINT_UNIQUE" and "That email address is already registered" is the difference between a frustrating product and a usable one.

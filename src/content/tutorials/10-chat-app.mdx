@@ -1,0 +1,683 @@
+---
+title: "Build a Real-Time Chat Application"
+description: "Create a WebSocket-powered chat app with message history, user presence indicators, and typing notifications."
+slug: "chat-app"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["websocket", "real-time", "node", "chat", "full-stack"]
+---
+
+## Overview
+
+You'll build a real-time chat application with a Node.js WebSocket server and a vanilla JavaScript client. Features include persistent message history, user presence tracking (who's online), typing indicators, and multiple chat rooms. The server uses the `ws` library — no Socket.IO, no abstractions hiding what's happening on the wire.
+
+**What you'll learn:**
+
+- WebSocket protocol fundamentals
+- Designing a message protocol over WebSockets
+- Server-side connection management and broadcasting
+- Client-side reconnection and heartbeat logic
+- User presence and typing indicators
+- Persisting messages with SQLite
+
+## Step 1: Project Setup
+
+```bash
+mkdir chat-app && cd chat-app
+npm init -y
+npm install ws better-sqlite3 uuid
+npm install -D @types/ws @types/better-sqlite3 typescript tsx
+npx tsc --init
+```
+
+Update `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "outDir": "./dist",
+    "rootDir": "./src"
+  }
+}
+```
+
+Project structure:
+
+```
+chat-app/
+├── src/
+│   ├── server.ts
+│   ├── db.ts
+│   ├── types.ts
+│   └── handlers.ts
+├── public/
+│   ├── index.html
+│   ├── style.css
+│   └── client.js
+└── package.json
+```
+
+Add scripts to `package.json`:
+
+```json
+"scripts": {
+  "dev": "tsx watch src/server.ts",
+  "build": "tsc",
+  "start": "node dist/server.js"
+}
+```
+
+## Step 2: Message Protocol
+
+Define the message types exchanged between client and server. Every message is a JSON object with a `type` field:
+
+```ts
+// src/types.ts
+export interface ChatMessage {
+  id: string;
+  room: string;
+  username: string;
+  content: string;
+  timestamp: number;
+}
+
+export type ClientMessage =
+  | { type: "join"; room: string; username: string }
+  | { type: "leave"; room: string }
+  | { type: "message"; room: string; content: string }
+  | { type: "typing"; room: string; isTyping: boolean }
+  | { type: "ping" };
+
+export type ServerMessage =
+  | { type: "message"; message: ChatMessage }
+  | { type: "history"; messages: ChatMessage[] }
+  | { type: "presence"; room: string; users: string[] }
+  | { type: "typing"; room: string; username: string; isTyping: boolean }
+  | { type: "error"; message: string }
+  | { type: "pong" };
+```
+
+## Step 3: Database Layer
+
+SQLite stores message history. Each room's last 100 messages are loaded when a user joins:
+
+```ts
+// src/db.ts
+import Database from "better-sqlite3";
+import { ChatMessage } from "./types";
+
+const db = new Database("chat.db");
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    room TEXT NOT NULL,
+    username TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room, timestamp);
+`);
+
+const insertStmt = db.prepare(
+  "INSERT INTO messages (id, room, username, content, timestamp) VALUES (?, ?, ?, ?, ?)"
+);
+
+const historyStmt = db.prepare(
+  "SELECT * FROM messages WHERE room = ? ORDER BY timestamp DESC LIMIT 100"
+);
+
+export function saveMessage(msg: ChatMessage): void {
+  insertStmt.run(msg.id, msg.room, msg.username, msg.content, msg.timestamp);
+}
+
+export function getHistory(room: string): ChatMessage[] {
+  const rows = historyStmt.all(room) as ChatMessage[];
+  return rows.reverse(); // chronological order
+}
+```
+
+## Step 4: WebSocket Server
+
+The server tracks connections, their usernames, and which rooms they've joined:
+
+```ts
+// src/server.ts
+import { createServer } from "http";
+import { readFileSync } from "fs";
+import { join } from "path";
+import { WebSocketServer, WebSocket } from "ws";
+import { v4 as uuid } from "uuid";
+import { ClientMessage, ServerMessage } from "./types";
+import { saveMessage, getHistory } from "./db";
+
+const PORT = 3000;
+
+// Serve static files
+const http = createServer((req, res) => {
+  const filePath = join(__dirname, "../public", req.url === "/" ? "index.html" : req.url!);
+  try {
+    const content = readFileSync(filePath);
+    const ext = filePath.split(".").pop();
+    const types: Record<string, string> = {
+      html: "text/html",
+      css: "text/css",
+      js: "application/javascript",
+    };
+    res.writeHead(200, { "Content-Type": types[ext!] || "text/plain" });
+    res.end(content);
+  } catch {
+    res.writeHead(404);
+    res.end("Not found");
+  }
+});
+
+const wss = new WebSocketServer({ server: http });
+
+interface Client {
+  ws: WebSocket;
+  username: string;
+  rooms: Set<string>;
+}
+
+const clients = new Map<WebSocket, Client>();
+
+function broadcast(room: string, msg: ServerMessage, exclude?: WebSocket): void {
+  const data = JSON.stringify(msg);
+  clients.forEach((client) => {
+    if (
+      client.rooms.has(room) &&
+      client.ws !== exclude &&
+      client.ws.readyState === WebSocket.OPEN
+    ) {
+      client.ws.send(data);
+    }
+  });
+}
+
+function getRoomUsers(room: string): string[] {
+  const users: string[] = [];
+  clients.forEach((client) => {
+    if (client.rooms.has(room)) users.push(client.username);
+  });
+  return users;
+}
+
+function send(ws: WebSocket, msg: ServerMessage): void {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+  }
+}
+
+wss.on("connection", (ws) => {
+  const client: Client = { ws, username: "anonymous", rooms: new Set() };
+  clients.set(ws, client);
+
+  ws.on("message", (raw) => {
+    let msg: ClientMessage;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      send(ws, { type: "error", message: "Invalid JSON" });
+      return;
+    }
+
+    switch (msg.type) {
+      case "join": {
+        client.username = msg.username;
+        client.rooms.add(msg.room);
+        const history = getHistory(msg.room);
+        send(ws, { type: "history", messages: history });
+        broadcast(msg.room, { type: "presence", room: msg.room, users: getRoomUsers(msg.room) });
+        break;
+      }
+      case "leave": {
+        client.rooms.delete(msg.room);
+        broadcast(msg.room, { type: "presence", room: msg.room, users: getRoomUsers(msg.room) });
+        break;
+      }
+      case "message": {
+        if (!client.rooms.has(msg.room)) {
+          send(ws, { type: "error", message: "Not in this room" });
+          return;
+        }
+        const chatMsg = {
+          id: uuid(),
+          room: msg.room,
+          username: client.username,
+          content: msg.content.slice(0, 2000), // limit message length
+          timestamp: Date.now(),
+        };
+        saveMessage(chatMsg);
+        broadcast(msg.room, { type: "message", message: chatMsg });
+        break;
+      }
+      case "typing": {
+        broadcast(
+          msg.room,
+          {
+            type: "typing",
+            room: msg.room,
+            username: client.username,
+            isTyping: msg.isTyping,
+          },
+          ws
+        );
+        break;
+      }
+      case "ping": {
+        send(ws, { type: "pong" });
+        break;
+      }
+    }
+  });
+
+  ws.on("close", () => {
+    client.rooms.forEach((room) => {
+      broadcast(room, { type: "presence", room, users: getRoomUsers(room) });
+    });
+    clients.delete(ws);
+  });
+});
+
+http.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
+```
+
+## Step 5: Client HTML
+
+```html
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="login-screen">
+        <h1>Join Chat</h1>
+        <input id="username-input" placeholder="Username" maxlength="30" />
+        <input id="room-input" placeholder="Room name" value="general" />
+        <button id="join-btn">Join</button>
+      </div>
+      <div id="chat-screen" hidden>
+        <aside id="sidebar">
+          <h2 id="room-name"></h2>
+          <div id="presence-list"></div>
+        </aside>
+        <main>
+          <div id="messages"></div>
+          <div id="typing-indicator"></div>
+          <form id="message-form">
+            <input
+              id="message-input"
+              placeholder="Type a message..."
+              maxlength="2000"
+              autocomplete="off"
+            />
+            <button type="submit">Send</button>
+          </form>
+        </main>
+      </div>
+    </div>
+    <script src="client.js"></script>
+  </body>
+</html>
+```
+
+## Step 6: Client Styling
+
+```css
+/* public/style.css */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+body {
+  font-family: system-ui, sans-serif;
+  background: #0a0a0f;
+  color: #e0e0e0;
+  height: 100vh;
+}
+
+#login-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 1rem;
+}
+#login-screen input,
+#login-screen button {
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font-size: 1rem;
+  width: 250px;
+}
+#login-screen button {
+  background: #10b981;
+  border-color: #10b981;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+#chat-screen {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  height: 100vh;
+}
+
+#sidebar {
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+#sidebar h2 {
+  font-size: 1rem;
+  color: #10b981;
+}
+.user-badge {
+  font-size: 0.85rem;
+  padding: 0.25rem 0;
+  color: #a0a0a8;
+}
+.user-badge::before {
+  content: "● ";
+  color: #10b981;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.msg {
+  max-width: 70%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 12px;
+}
+.msg .author {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #10b981;
+}
+.msg .text {
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.msg .time {
+  font-size: 0.65rem;
+  color: #6b6b75;
+  margin-top: 2px;
+}
+.msg.own {
+  align-self: flex-end;
+  background: rgba(16, 185, 129, 0.15);
+}
+.msg.other {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+#typing-indicator {
+  padding: 0 1rem;
+  font-size: 0.8rem;
+  color: #6b6b75;
+  min-height: 1.5rem;
+}
+
+#message-form {
+  display: flex;
+  gap: 0.5rem;
+  padding: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+#message-input {
+  flex: 1;
+  padding: 0.75rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font-size: 0.9rem;
+}
+#message-form button {
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  background: #10b981;
+  border: none;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+```
+
+## Step 7: Client WebSocket Logic
+
+```js
+// public/client.js
+let ws = null;
+let username = "";
+let room = "";
+let typingTimeout = null;
+let isTyping = false;
+
+const $ = (sel) => document.querySelector(sel);
+
+function connect() {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${protocol}//${location.host}`);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "join", room, username }));
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    handleServerMessage(msg);
+  };
+
+  ws.onclose = () => {
+    // Reconnect after 2 seconds
+    setTimeout(connect, 2000);
+  };
+
+  // Heartbeat every 30 seconds
+  setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "ping" }));
+    }
+  }, 30000);
+}
+
+function handleServerMessage(msg) {
+  switch (msg.type) {
+    case "history":
+      $("#messages").innerHTML = "";
+      msg.messages.forEach(renderMessage);
+      scrollToBottom();
+      break;
+    case "message":
+      renderMessage(msg.message);
+      scrollToBottom();
+      break;
+    case "presence":
+      renderPresence(msg.users);
+      break;
+    case "typing":
+      renderTyping(msg.username, msg.isTyping);
+      break;
+    case "error":
+      console.error("Server error:", msg.message);
+      break;
+  }
+}
+```
+
+## Step 8: Rendering Messages and Presence
+
+```js
+function renderMessage(msg) {
+  const el = document.createElement("div");
+  const isOwn = msg.username === username;
+  el.className = `msg ${isOwn ? "own" : "other"}`;
+  el.innerHTML = `
+    <div class="author">${escapeHtml(msg.username)}</div>
+    <div class="text">${escapeHtml(msg.content)}</div>
+    <div class="time">${new Date(msg.timestamp).toLocaleTimeString()}</div>
+  `;
+  $("#messages").appendChild(el);
+}
+
+function renderPresence(users) {
+  $("#presence-list").innerHTML = users
+    .map((u) => `<div class="user-badge">${escapeHtml(u)}</div>`)
+    .join("");
+}
+
+const typingUsers = new Set();
+function renderTyping(user, isTyping) {
+  if (isTyping) typingUsers.add(user);
+  else typingUsers.delete(user);
+
+  const el = $("#typing-indicator");
+  if (typingUsers.size === 0) {
+    el.textContent = "";
+  } else if (typingUsers.size === 1) {
+    el.textContent = `${[...typingUsers][0]} is typing...`;
+  } else {
+    el.textContent = `${typingUsers.size} people are typing...`;
+  }
+}
+
+function scrollToBottom() {
+  const el = $("#messages");
+  el.scrollTop = el.scrollHeight;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+```
+
+## Step 9: Sending Messages and Typing Indicators
+
+Wire up the form submission and typing detection:
+
+```js
+$("#message-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = $("#message-input");
+  const content = input.value.trim();
+  if (!content || ws.readyState !== WebSocket.OPEN) return;
+
+  ws.send(JSON.stringify({ type: "message", room, content }));
+  input.value = "";
+
+  // Clear typing indicator
+  if (isTyping) {
+    isTyping = false;
+    ws.send(JSON.stringify({ type: "typing", room, isTyping: false }));
+  }
+});
+
+$("#message-input").addEventListener("input", () => {
+  if (!isTyping) {
+    isTyping = true;
+    ws.send(JSON.stringify({ type: "typing", room, isTyping: true }));
+  }
+  clearTimeout(typingTimeout);
+  typingTimeout = setTimeout(() => {
+    isTyping = false;
+    ws.send(JSON.stringify({ type: "typing", room, isTyping: false }));
+  }, 2000);
+});
+
+// Join handler
+$("#join-btn").addEventListener("click", () => {
+  username = $("#username-input").value.trim();
+  room = $("#room-input").value.trim() || "general";
+  if (!username) return;
+
+  $("#login-screen").hidden = true;
+  $("#chat-screen").hidden = false;
+  $("#room-name").textContent = `#${room}`;
+  connect();
+});
+
+// Join on Enter key
+["#username-input", "#room-input"].forEach((sel) => {
+  $(sel).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("#join-btn").click();
+  });
+});
+```
+
+## Step 10: Reconnection and Robustness
+
+The client reconnects automatically on disconnect, but it needs to rejoin the room after reconnecting. Refactor the `connect` function:
+
+```js
+let reconnectDelay = 1000;
+const MAX_RECONNECT_DELAY = 30000;
+
+function connect() {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${protocol}//${location.host}`);
+
+  ws.onopen = () => {
+    reconnectDelay = 1000; // reset on successful connection
+    ws.send(JSON.stringify({ type: "join", room, username }));
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    handleServerMessage(msg);
+  };
+
+  ws.onclose = () => {
+    console.log(`Disconnected. Reconnecting in ${reconnectDelay}ms...`);
+    setTimeout(() => {
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      connect();
+    }, reconnectDelay);
+  };
+
+  ws.onerror = (err) => {
+    console.error("WebSocket error:", err);
+    ws.close();
+  };
+}
+```
+
+The exponential backoff prevents hammering the server during outages. The delay doubles each attempt up to 30 seconds, then resets on successful connection.
+
+Run `npm run dev` and open multiple browser tabs to `http://localhost:3000`. Each tab joins as a different user — you'll see messages appear in real time, presence lists update, and typing indicators show when someone is composing a message. Messages persist in SQLite, so restarting the server retains history.

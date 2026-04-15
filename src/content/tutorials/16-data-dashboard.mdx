@@ -1,0 +1,517 @@
+---
+title: "Build a Data Dashboard with SQL and Charts"
+description: "Write PostgreSQL queries with joins, aggregations, and window functions, then visualize the results in an interactive chart dashboard."
+slug: "data-dashboard"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["sql", "postgresql", "data-visualization", "charts", "dashboard", "window-functions"]
+---
+
+## Overview
+
+Data without visualization is just numbers in a table. In this tutorial, you'll build a complete data pipeline: design a PostgreSQL schema, write progressively complex queries (joins, aggregations, CTEs, window functions), and render the results in an interactive dashboard with filters, tooltips, and responsive charts.
+
+**What you'll build:**
+
+- A normalized PostgreSQL schema for an e-commerce analytics platform
+- Queries using JOINs, GROUP BY, CTEs, and window functions
+- A React dashboard with line charts, bar charts, and KPI cards
+- Interactive filters that update all charts simultaneously
+- A reusable chart wrapper component
+
+**Prerequisites:** Basic SQL knowledge, React with TypeScript, a PostgreSQL database (local or Supabase).
+
+## Step 1: Schema Design
+
+A well-designed schema makes queries simple. Here's a normalized schema for e-commerce analytics:
+
+```sql
+CREATE TABLE customers (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email       TEXT UNIQUE NOT NULL,
+  name        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE products (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        TEXT NOT NULL,
+  category    TEXT NOT NULL,
+  price       NUMERIC(10, 2) NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE orders (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id UUID REFERENCES customers(id),
+  status      TEXT CHECK (status IN ('pending', 'completed', 'refunded')) DEFAULT 'pending',
+  total       NUMERIC(10, 2) NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE order_items (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id    UUID REFERENCES orders(id),
+  product_id  UUID REFERENCES products(id),
+  quantity    INTEGER NOT NULL CHECK (quantity > 0),
+  unit_price  NUMERIC(10, 2) NOT NULL
+);
+
+CREATE INDEX idx_orders_customer ON orders(customer_id);
+CREATE INDEX idx_orders_created ON orders(created_at);
+CREATE INDEX idx_order_items_order ON order_items(order_id);
+CREATE INDEX idx_order_items_product ON order_items(product_id);
+```
+
+Key decisions: UUIDs for primary keys (safe for distributed systems), `NUMERIC` for money (never use `FLOAT`), check constraints for enum-like columns, indexes on foreign keys and filter columns.
+
+## Step 2: Seed Data
+
+Generate realistic test data with a seed script:
+
+```sql
+-- Insert 100 customers
+INSERT INTO customers (name, email)
+SELECT
+  'Customer ' || i,
+  'customer' || i || '@example.com'
+FROM generate_series(1, 100) AS i;
+
+-- Insert products across categories
+INSERT INTO products (name, category, price) VALUES
+  ('TypeScript Handbook', 'books', 39.99),
+  ('React Masterclass', 'courses', 199.99),
+  ('VS Code Pro Theme', 'tools', 9.99),
+  ('Node.js Blueprint', 'books', 44.99),
+  ('DevOps Bootcamp', 'courses', 299.99),
+  ('Git Workflow Guide', 'books', 24.99),
+  ('Cloud Deploy Kit', 'tools', 49.99),
+  ('API Design Patterns', 'books', 54.99);
+
+-- Generate 2000 orders over the past year
+INSERT INTO orders (customer_id, status, total, created_at)
+SELECT
+  (SELECT id FROM customers ORDER BY random() LIMIT 1),
+  (ARRAY['completed', 'completed', 'completed', 'pending', 'refunded'])[floor(random() * 5 + 1)],
+  round((random() * 500 + 10)::numeric, 2),
+  now() - (random() * INTERVAL '365 days')
+FROM generate_series(1, 2000);
+
+-- Generate order items
+INSERT INTO order_items (order_id, product_id, quantity, unit_price)
+SELECT
+  o.id,
+  p.id,
+  floor(random() * 3 + 1)::int,
+  p.price
+FROM orders o
+CROSS JOIN LATERAL (
+  SELECT id, price FROM products ORDER BY random() LIMIT floor(random() * 3 + 1)::int
+) p;
+```
+
+## Step 3: Basic Aggregations
+
+Start with the queries your dashboard needs. Revenue by month:
+
+```sql
+SELECT
+  date_trunc('month', created_at) AS month,
+  COUNT(*) AS order_count,
+  SUM(total) AS revenue,
+  AVG(total) AS avg_order_value
+FROM orders
+WHERE status = 'completed'
+GROUP BY date_trunc('month', created_at)
+ORDER BY month;
+```
+
+Revenue by category with JOIN:
+
+```sql
+SELECT
+  p.category,
+  COUNT(DISTINCT o.id) AS orders,
+  SUM(oi.quantity * oi.unit_price) AS revenue
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+JOIN products p ON p.id = oi.product_id
+WHERE o.status = 'completed'
+GROUP BY p.category
+ORDER BY revenue DESC;
+```
+
+## Step 4: Window Functions
+
+Window functions are PostgreSQL's superpower. They compute values across rows without collapsing them.
+
+Running total of revenue:
+
+```sql
+SELECT
+  date_trunc('month', created_at) AS month,
+  SUM(total) AS monthly_revenue,
+  SUM(SUM(total)) OVER (ORDER BY date_trunc('month', created_at)) AS cumulative_revenue
+FROM orders
+WHERE status = 'completed'
+GROUP BY date_trunc('month', created_at)
+ORDER BY month;
+```
+
+Month-over-month growth rate:
+
+```sql
+WITH monthly AS (
+  SELECT
+    date_trunc('month', created_at) AS month,
+    SUM(total) AS revenue
+  FROM orders
+  WHERE status = 'completed'
+  GROUP BY date_trunc('month', created_at)
+)
+SELECT
+  month,
+  revenue,
+  LAG(revenue) OVER (ORDER BY month) AS prev_month,
+  ROUND(
+    (revenue - LAG(revenue) OVER (ORDER BY month))
+    / NULLIF(LAG(revenue) OVER (ORDER BY month), 0) * 100,
+    1
+  ) AS growth_pct
+FROM monthly
+ORDER BY month;
+```
+
+Top customers ranked by spend:
+
+```sql
+SELECT
+  c.name,
+  SUM(o.total) AS total_spend,
+  COUNT(o.id) AS order_count,
+  RANK() OVER (ORDER BY SUM(o.total) DESC) AS spend_rank,
+  NTILE(4) OVER (ORDER BY SUM(o.total) DESC) AS quartile
+FROM customers c
+JOIN orders o ON o.customer_id = c.id
+WHERE o.status = 'completed'
+GROUP BY c.id, c.name
+ORDER BY spend_rank
+LIMIT 20;
+```
+
+## Step 5: API Route for Dashboard Data
+
+Create a Next.js API route that executes these queries and returns structured data:
+
+```typescript
+// app/api/dashboard/route.ts
+import { createClient } from "@supabase/supabase-js";
+import { NextResponse, type NextRequest } from "next/server";
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const searchParams = request.nextUrl.searchParams;
+  const startDate = searchParams.get("start") ?? "2024-01-01";
+  const endDate = searchParams.get("end") ?? new Date().toISOString();
+
+  try {
+    const [revenueResult, categoryResult, topCustomersResult] = await Promise.all([
+      supabase.rpc("monthly_revenue", { start_date: startDate, end_date: endDate }),
+      supabase.rpc("category_revenue", { start_date: startDate, end_date: endDate }),
+      supabase.rpc("top_customers", { limit_count: 10 }),
+    ]);
+
+    return NextResponse.json({
+      revenue: revenueResult.data,
+      categories: categoryResult.data,
+      topCustomers: topCustomersResult.data,
+    });
+  } catch (error) {
+    console.error("Dashboard query failed:", error);
+    return NextResponse.json({ error: "Failed to fetch dashboard data" }, { status: 500 });
+  }
+}
+```
+
+Wrap each complex query in a PostgreSQL function so it's callable via `supabase.rpc()`:
+
+```sql
+CREATE OR REPLACE FUNCTION monthly_revenue(start_date TEXT, end_date TEXT)
+RETURNS TABLE(month TIMESTAMPTZ, revenue NUMERIC, order_count BIGINT, growth_pct NUMERIC)
+LANGUAGE sql STABLE
+AS $$
+  WITH monthly AS (
+    SELECT
+      date_trunc('month', created_at) AS month,
+      SUM(total) AS revenue,
+      COUNT(*) AS order_count
+    FROM orders
+    WHERE status = 'completed'
+      AND created_at >= start_date::timestamptz
+      AND created_at <= end_date::timestamptz
+    GROUP BY date_trunc('month', created_at)
+  )
+  SELECT
+    month,
+    revenue,
+    order_count,
+    ROUND(
+      (revenue - LAG(revenue) OVER (ORDER BY month))
+      / NULLIF(LAG(revenue) OVER (ORDER BY month), 0) * 100,
+      1
+    ) AS growth_pct
+  FROM monthly
+  ORDER BY month;
+$$;
+```
+
+## Step 6: Chart Component Wrapper
+
+Build a reusable chart wrapper using a lightweight charting library. Here we use `recharts` (or you can use `chart.js`):
+
+```tsx
+"use client";
+
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+} from "recharts";
+
+interface ChartData {
+  label: string;
+  value: number;
+  [key: string]: string | number;
+}
+
+interface LineChartProps {
+  data: ChartData[];
+  xKey: string;
+  yKey: string;
+  color?: string;
+  height?: number;
+}
+
+export function DashboardLineChart({
+  data,
+  xKey,
+  yKey,
+  color = "#10b981",
+  height = 300,
+}: LineChartProps) {
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-surface)] p-4">
+      <ResponsiveContainer width="100%" height={height}>
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+          <XAxis dataKey={xKey} stroke="var(--text-muted)" fontSize={12} />
+          <YAxis stroke="var(--text-muted)" fontSize={12} />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: "var(--bg-primary)",
+              border: "1px solid var(--border)",
+              borderRadius: "8px",
+            }}
+          />
+          <Line type="monotone" dataKey={yKey} stroke={color} strokeWidth={2} dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+```
+
+## Step 7: KPI Cards
+
+KPI cards show headline numbers at the top of the dashboard:
+
+```tsx
+interface KPICardProps {
+  title: string;
+  value: string;
+  change?: number;
+  prefix?: string;
+}
+
+export function KPICard({ title, value, change, prefix = "" }: KPICardProps) {
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-surface)] p-6">
+      <p className="text-sm text-[var(--text-muted)]">{title}</p>
+      <p className="mt-1 text-3xl font-semibold text-[var(--text-primary)]">
+        {prefix}
+        {value}
+      </p>
+      {change !== undefined && (
+        <p className={`mt-1 text-sm ${change >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+          {change >= 0 ? "+" : ""}
+          {change.toFixed(1)}% vs last period
+        </p>
+      )}
+    </div>
+  );
+}
+```
+
+## Step 8: Date Range Filter
+
+A filter component that updates URL search params so the dashboard state is shareable:
+
+```tsx
+"use client";
+
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback } from "react";
+
+const PRESETS = [
+  { label: "7d", days: 7 },
+  { label: "30d", days: 30 },
+  { label: "90d", days: 90 },
+  { label: "1y", days: 365 },
+] as const;
+
+export function DateFilter() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const setRange = useCallback(
+    (days: number) => {
+      const params = new URLSearchParams(searchParams.toString());
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - days);
+      params.set("start", start.toISOString().split("T")[0]);
+      params.set("end", end.toISOString().split("T")[0]);
+      router.push(`?${params.toString()}`);
+    },
+    [router, searchParams]
+  );
+
+  return (
+    <div className="flex gap-2">
+      {PRESETS.map((preset) => (
+        <button
+          key={preset.label}
+          onClick={() => setRange(preset.days)}
+          className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--bg-surface-hover)]"
+        >
+          {preset.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+```
+
+## Step 9: Assembling the Dashboard
+
+Bring it all together in a dashboard page:
+
+```tsx
+import { KPICard } from "@/components/dashboard/KPICard";
+import { DashboardLineChart } from "@/components/dashboard/LineChart";
+import { DateFilter } from "@/components/dashboard/DateFilter";
+
+interface DashboardPageProps {
+  searchParams: Promise<{ start?: string; end?: string }>;
+}
+
+export default async function DashboardPage({ searchParams }: DashboardPageProps) {
+  const params = await searchParams;
+  const start = params.start ?? "2024-01-01";
+  const end = params.end ?? new Date().toISOString().split("T")[0];
+
+  const response = await fetch(
+    `${process.env.NEXT_PUBLIC_APP_URL}/api/dashboard?start=${start}&end=${end}`,
+    { next: { revalidate: 300 } }
+  );
+  const data = await response.json();
+
+  const totalRevenue = data.revenue.reduce(
+    (sum: number, m: { revenue: number }) => sum + m.revenue,
+    0
+  );
+  const totalOrders = data.revenue.reduce(
+    (sum: number, m: { order_count: number }) => sum + m.order_count,
+    0
+  );
+
+  return (
+    <div className="mx-auto max-w-7xl space-y-6 p-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <DateFilter />
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <KPICard title="Total Revenue" value={totalRevenue.toLocaleString()} prefix="$" />
+        <KPICard title="Orders" value={totalOrders.toLocaleString()} />
+        <KPICard
+          title="Avg Order Value"
+          value={(totalRevenue / totalOrders).toFixed(2)}
+          prefix="$"
+        />
+        <KPICard title="Customers" value={data.topCustomers.length.toString()} />
+      </div>
+
+      <DashboardLineChart
+        data={data.revenue.map((r: { month: string; revenue: number }) => ({
+          label: new Date(r.month).toLocaleDateString("en", { month: "short" }),
+          value: r.revenue,
+        }))}
+        xKey="label"
+        yKey="value"
+      />
+    </div>
+  );
+}
+```
+
+## Step 10: Query Optimization
+
+Once your dashboard works, optimize the slow parts.
+
+**EXPLAIN ANALYZE** everything:
+
+```sql
+EXPLAIN ANALYZE
+SELECT date_trunc('month', created_at), SUM(total)
+FROM orders
+WHERE status = 'completed'
+GROUP BY 1;
+```
+
+Look for sequential scans on large tables — add indexes. Look for hash joins that could be nested loop joins with an index. Common optimizations:
+
+**Partial indexes** for filtered queries:
+
+```sql
+CREATE INDEX idx_orders_completed ON orders(created_at)
+WHERE status = 'completed';
+```
+
+**Materialized views** for expensive aggregations that don't need real-time data:
+
+```sql
+CREATE MATERIALIZED VIEW monthly_stats AS
+SELECT
+  date_trunc('month', created_at) AS month,
+  COUNT(*) AS orders,
+  SUM(total) AS revenue
+FROM orders
+WHERE status = 'completed'
+GROUP BY 1;
+
+-- Refresh on a schedule
+REFRESH MATERIALIZED VIEW CONCURRENTLY monthly_stats;
+```
+
+Your dashboard now queries a real database, handles date range filtering via URL params, renders responsive charts, and displays KPI cards with growth indicators. The SQL patterns here — CTEs, window functions, partial indexes, materialized views — are the same patterns used in production analytics at any scale.

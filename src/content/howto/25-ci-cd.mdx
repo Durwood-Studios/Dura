@@ -1,0 +1,206 @@
+---
+title: "How to Build a CI/CD Pipeline from Scratch"
+description: "Set up a GitHub Actions pipeline that lints, typechecks, tests, builds, and deploys your application automatically."
+slug: "ci-cd"
+difficulty: "intermediate"
+estimatedMinutes: 30
+steps: 7
+tags: ["ci-cd", "github-actions", "devops", "deployment", "automation"]
+---
+
+## Step 1: Understand What CI/CD Actually Does
+
+CI (Continuous Integration) means every code change is automatically verified. CD (Continuous Deployment) means verified changes ship to production without manual intervention. Together, they eliminate the "it works on my machine" problem.
+
+A typical pipeline runs in this order:
+
+1. **Lint** — Catch style and pattern issues
+2. **Typecheck** — Catch type errors
+3. **Test** — Catch logic errors
+4. **Build** — Catch build-time errors
+5. **Deploy** — Ship to production
+
+Each step gates the next. If linting fails, you don't waste time building. If tests fail, you don't deploy broken code.
+
+## Step 2: Create Your First GitHub Actions Workflow
+
+GitHub Actions workflows live in `.github/workflows/`. Create a file called `ci.yml`:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+```
+
+Key decisions:
+
+- **`npm ci`** over `npm install` — it's faster and uses the exact lockfile versions
+- **`cache: "npm"`** — caches `~/.npm` so repeat installs are fast
+- **Trigger on both push and PR** — catches issues before and after merge
+
+## Step 3: Add Linting and Type Checking
+
+These are the cheapest checks. They run in seconds and catch entire categories of bugs.
+
+```yaml
+- name: Lint
+  run: npm run lint
+
+- name: Typecheck
+  run: npm run typecheck
+```
+
+Run these before tests and builds because they're fast. If you have a formatting check, add it here too:
+
+```yaml
+- name: Format check
+  run: npm run format:check
+```
+
+A common mistake is running lint with auto-fix in CI. Don't. CI should **detect** problems, not silently fix them. Developers should fix issues locally before pushing.
+
+## Step 4: Add Tests
+
+Tests are the core of your pipeline. They verify behavior, not just syntax.
+
+```yaml
+- name: Test
+  run: npm test -- --coverage --ci
+```
+
+The `--ci` flag (in Jest) disables interactive mode and fails on missing snapshots. The `--coverage` flag generates a coverage report you can use later.
+
+For projects with different test types, split them into parallel jobs:
+
+```yaml
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:unit
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+      - run: npm ci
+      - run: npx playwright install --with-deps
+      - run: npm run test:e2e
+```
+
+Parallel jobs cut your total pipeline time significantly.
+
+## Step 5: Add the Build Step
+
+The build step catches issues that linting and typechecking miss — missing environment variables, broken imports, SSR errors.
+
+```yaml
+- name: Build
+  run: npm run build
+  env:
+    NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+```
+
+Secrets are configured in your repository's Settings > Secrets and variables > Actions. Never hardcode them in the workflow file.
+
+For build artifacts you might need later (like for deployment), upload them:
+
+```yaml
+- name: Upload build
+  uses: actions/upload-artifact@v4
+  with:
+    name: build-output
+    path: .next/
+    retention-days: 1
+```
+
+## Step 6: Add Deployment
+
+Deployment depends on your hosting platform. For Vercel, the simplest approach is to let Vercel's GitHub integration handle it — it deploys automatically on push. But if you want explicit control:
+
+```yaml
+deploy:
+  needs: [ci]
+  runs-on: ubuntu-latest
+  if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Deploy to Vercel
+      run: npx vercel --prod --token=${{ secrets.VERCEL_TOKEN }}
+      env:
+        VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+        VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+```
+
+The `needs: [ci]` line ensures deployment only runs after CI passes. The `if` condition restricts deployment to pushes to `main` — pull requests get CI checks but don't deploy.
+
+For staging environments, deploy PRs to preview URLs:
+
+```yaml
+preview:
+  needs: [ci]
+  runs-on: ubuntu-latest
+  if: github.event_name == 'pull_request'
+  steps:
+    - uses: actions/checkout@v4
+    - name: Deploy Preview
+      run: npx vercel --token=${{ secrets.VERCEL_TOKEN }}
+```
+
+## Step 7: Add Notifications and Branch Protection
+
+A pipeline nobody checks is worthless. Set up notifications and enforce the pipeline.
+
+**Branch protection rules** (Settings > Branches > Add rule):
+
+- Require status checks to pass before merging
+- Select your CI job as a required check
+- Require branches to be up to date before merging
+- Optionally require review approval
+
+**Notifications for failures** — add a step at the end of your workflow:
+
+```yaml
+- name: Notify on failure
+  if: failure()
+  uses: actions/github-script@v7
+  with:
+    script: |
+      github.rest.issues.createComment({
+        issue_number: context.issue.number,
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        body: '❌ CI failed. Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.'
+      })
+```
+
+The complete pipeline should take under 5 minutes for most projects. If it's slower, look for opportunities to parallelize jobs, cache dependencies, and skip unnecessary steps on draft PRs. A fast pipeline is one developers actually wait for instead of ignoring.
