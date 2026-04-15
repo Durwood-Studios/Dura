@@ -89,14 +89,14 @@ export function Hero(): React.ReactElement {
             />
             <Link
               href="/paths"
-              className="relative inline-flex h-12 w-full items-center justify-center rounded-lg bg-[#10B981] px-6 text-base font-medium text-white shadow-lg shadow-emerald-500/25 transition-all duration-200 hover:bg-[#059669] hover:shadow-xl hover:shadow-emerald-500/30 dark:shadow-emerald-500/15 dark:hover:shadow-emerald-500/20"
+              className="relative inline-flex h-14 w-full items-center justify-center rounded-lg bg-[#10B981] px-8 text-lg font-medium text-white shadow-lg shadow-emerald-500/25 transition-all duration-200 hover:bg-[#059669] hover:shadow-xl hover:shadow-emerald-500/30 dark:shadow-emerald-500/15 dark:hover:shadow-emerald-500/20"
             >
               Start Learning
             </Link>
           </div>
           <Link
             href="/dictionary"
-            className="inline-flex h-12 items-center justify-center rounded-lg border border-[#E5E5E5] bg-white/80 px-6 text-base font-medium text-[#171717] shadow-sm backdrop-blur-sm transition-all duration-200 hover:border-[#10B981] hover:text-[#10B981] hover:shadow-md sm:min-w-[180px] dark:border-white/10 dark:bg-white/5 dark:text-[#f0f0f0] dark:hover:border-emerald-500 dark:hover:text-emerald-400"
+            className="inline-flex h-11 items-center justify-center rounded-lg border border-[#E5E5E5]/60 bg-white/80 px-6 text-sm font-medium text-[#525252] backdrop-blur-sm transition-all duration-200 hover:border-[#10B981] hover:text-[#10B981] sm:min-w-[180px] dark:border-white/6 dark:bg-white/5 dark:text-[#a0a0a8] dark:hover:border-emerald-500 dark:hover:text-emerald-400"
           >
             Explore Dictionary
           </Link>

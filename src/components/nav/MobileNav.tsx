@@ -27,10 +27,11 @@ export function MobileBottomTabs(): React.ReactElement {
             key={href}
             href={href}
             className={cn(
-              "flex flex-1 flex-col items-center justify-center gap-1 text-[11px] font-medium",
+              "relative flex flex-1 flex-col items-center justify-center gap-1 text-[11px] font-medium",
               active ? "text-emerald-600" : "text-[var(--color-text-secondary)]"
             )}
           >
+            {active && <span className="absolute top-1 h-0.5 w-5 rounded-full bg-emerald-500" />}
             <span className="relative">
               <Icon className="h-5 w-5" aria-hidden />
               {href === "/review" && (
@@ -45,22 +46,54 @@ export function MobileBottomTabs(): React.ReactElement {
   );
 }
 
-const DRAWER_LINKS = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/paths", label: "Learn" },
-  { href: "/review", label: "Review" },
-  { href: "/dictionary", label: "Dictionary" },
-  { href: "/sandbox", label: "Sandbox" },
-  { href: "/goals", label: "Goals" },
-  { href: "/stats", label: "Stats" },
-  { href: "/howto", label: "How-To" },
-  { href: "/tutorials", label: "Tutorials" },
-  { href: "/verify", label: "Verify" },
-  { href: "/teach", label: "Teach" },
-  { href: "/settings", label: "Settings" },
-] as const;
+interface DrawerLink {
+  href: string;
+  label: string;
+}
+
+interface DrawerGroup {
+  section: string;
+  links: DrawerLink[];
+}
+
+const DRAWER_GROUPS: DrawerGroup[] = [
+  {
+    section: "Learn",
+    links: [
+      { href: "/dashboard", label: "Dashboard" },
+      { href: "/paths", label: "Paths" },
+      { href: "/howto", label: "How-To" },
+      { href: "/tutorials", label: "Tutorials" },
+    ],
+  },
+  {
+    section: "Practice",
+    links: [
+      { href: "/review", label: "Review" },
+      { href: "/challenge", label: "Challenge" },
+      { href: "/sandbox", label: "Sandbox" },
+    ],
+  },
+  {
+    section: "Reference",
+    links: [
+      { href: "/dictionary", label: "Dictionary" },
+      { href: "/stats", label: "Stats" },
+      { href: "/goals", label: "Goals" },
+    ],
+  },
+  {
+    section: "More",
+    links: [
+      { href: "/verify", label: "Verify" },
+      { href: "/teach", label: "Teach" },
+      { href: "/settings", label: "Settings" },
+    ],
+  },
+];
 
 export function MobileDrawer(): React.ReactElement | null {
+  const pathname = usePathname();
   const open = useUIStore((s) => s.mobileNavOpen);
   const close = useUIStore((s) => s.setMobileNav);
 
@@ -99,16 +132,32 @@ export function MobileDrawer(): React.ReactElement | null {
             <X className="h-5 w-5" />
           </button>
         </div>
-        <nav className="flex flex-col gap-1">
-          {DRAWER_LINKS.map(({ href, label }) => (
-            <Link
-              key={href}
-              href={href}
-              onClick={() => close(false)}
-              className="rounded-lg px-3 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
-            >
-              {label}
-            </Link>
+        <nav className="flex flex-col gap-1 overflow-y-auto">
+          {DRAWER_GROUPS.map((group, gi) => (
+            <div key={group.section}>
+              {gi > 0 && <div className="mx-3 my-2 border-t border-[var(--color-border)]" />}
+              <p className="px-3 pt-3 pb-1 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+                {group.section}
+              </p>
+              {group.links.map(({ href, label }) => {
+                const active = pathname === href || pathname.startsWith(href + "/");
+                return (
+                  <Link
+                    key={href}
+                    href={href}
+                    onClick={() => close(false)}
+                    className={cn(
+                      "rounded-lg px-3 py-2 text-sm font-medium transition",
+                      active
+                        ? "border-l-2 border-l-emerald-500 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                        : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                    )}
+                  >
+                    {label}
+                  </Link>
+                );
+              })}
+            </div>
           ))}
         </nav>
       </div>

@@ -13,7 +13,7 @@ import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { LevelBadge } from "@/components/gamification/LevelBadge";
 import { cn, formatMinutes } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { TOTAL_LESSONS } from "@/content/phases";
+import { TOTAL_LESSONS, getPhase } from "@/content/phases";
 import type { LessonProgress } from "@/types/curriculum";
 
 interface DashboardData {
@@ -129,6 +129,9 @@ export function DashboardClient(): React.ReactElement {
   const continueHref = data.lastLesson
     ? `/paths/${data.lastLesson.phaseId}/${data.lastLesson.moduleId}/${data.lastLesson.lessonId}`
     : "/paths/0/0-1/01";
+  const phaseColor = data.lastLesson
+    ? (getPhase(data.lastLesson.phaseId)?.color ?? "#10b981")
+    : "#6ee7b7";
   const completionPercent =
     TOTAL_LESSONS > 0 ? Math.round((data.completedCount / TOTAL_LESSONS) * 100) : 0;
 
@@ -223,6 +226,7 @@ export function DashboardClient(): React.ReactElement {
         <Link
           href={continueHref}
           className="dura-card group relative overflow-hidden p-6 no-underline transition-shadow"
+          style={{ borderLeft: `4px solid ${phaseColor}` }}
         >
           {/* Background gradient accent */}
           <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/8 via-transparent to-emerald-500/3 opacity-60 transition-opacity group-hover:opacity-100" />

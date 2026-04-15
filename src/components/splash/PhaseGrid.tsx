@@ -141,7 +141,7 @@ export function PhaseGrid(): React.ReactElement {
           </p>
         </div>
 
-        <div className="mt-16 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-16 grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-3">
           {PHASES.map((phase, i) => (
             <motion.article
               key={phase.number}
@@ -177,7 +177,7 @@ export function PhaseGrid(): React.ReactElement {
               {/* "Explore" slide-in on hover */}
               <div className="mt-3 h-5 overflow-hidden">
                 <span
-                  className="inline-flex translate-x-[-10px] items-center gap-1 text-sm font-medium opacity-0 transition-all duration-200 group-hover:translate-x-0 group-hover:opacity-100 motion-reduce:transition-none"
+                  className="inline-flex items-center gap-1 text-sm font-medium opacity-100 transition-all duration-200 motion-reduce:transition-none sm:translate-x-[-10px] sm:opacity-0 sm:group-hover:translate-x-0 sm:group-hover:opacity-100"
                   style={{ color: phase.color }}
                 >
                   Explore

@@ -1,5 +1,9 @@
 import type { Metadata } from "next";
-import { AdminDashboard } from "@/components/admin/AdminDashboard";
+import dynamic from "next/dynamic";
+
+const AdminDashboard = dynamic(() =>
+  import("@/components/admin/AdminDashboard").then((m) => m.AdminDashboard)
+);
 
 export const metadata: Metadata = {
   title: "Admin — DURA",

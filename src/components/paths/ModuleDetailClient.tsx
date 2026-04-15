@@ -80,11 +80,28 @@ export function ModuleDetailClient({
           {lessons.map((lesson) => {
             const record = progress.get(lesson.id);
             const done = record?.completedAt !== null && record?.completedAt !== undefined;
+            const isNext =
+              !done &&
+              lessons.every((l) => {
+                if (l.order < lesson.order) {
+                  const r = progress.get(l.id);
+                  return r?.completedAt !== null && r?.completedAt !== undefined;
+                }
+                return true;
+              }) &&
+              lessons.filter((l) => {
+                const r = progress.get(l.id);
+                return !(r?.completedAt !== null && r?.completedAt !== undefined);
+              })[0]?.id === lesson.id;
             return (
               <li key={lesson.id}>
                 <Link
                   href={`/paths/${phaseId}/${moduleId}/${lesson.id}`}
-                  className="group flex items-center gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4 shadow-sm transition hover:shadow-md"
+                  className={cn(
+                    "group flex items-center gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4 shadow-sm transition hover:shadow-md",
+                    isNext &&
+                      "border-l-4 border-l-emerald-500 bg-emerald-50/50 dark:bg-emerald-500/5"
+                  )}
                 >
                   <span
                     className={cn(

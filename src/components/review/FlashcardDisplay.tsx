@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { FlashCard } from "@/types/flashcard";
 
@@ -51,9 +52,10 @@ export function FlashcardDisplay({
           <h2 className="text-center text-3xl font-semibold text-[var(--color-text-primary)] sm:text-4xl">
             {card.front}
           </h2>
-          <span className="mt-6 text-xs text-[var(--color-text-muted)]">
-            Tap or press space to reveal
-          </span>
+          <div className="mt-6 flex flex-col items-center gap-1">
+            <RotateCcw className="h-4 w-4 text-[var(--color-text-muted)]" aria-hidden />
+            <span className="text-xs text-[var(--color-text-muted)]">Tap to flip</span>
+          </div>
         </div>
         {/* Back */}
         <div className="flashcard-face flashcard-back absolute inset-0 flex flex-col items-center justify-center rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-8 shadow-md">

@@ -202,7 +202,7 @@ function ModuleRow({ phaseId, module, phaseColor, index }: ModuleRowProps): Reac
           </div>
 
           <MasteryIcon status={status} />
-          <ArrowRight className="h-4 w-4 text-[var(--color-text-muted)] transition-transform group-hover:translate-x-0.5 group-hover:text-emerald-500" />
+          <ArrowRight className="h-4 w-4 text-emerald-500 transition-transform sm:text-[var(--color-text-muted)] sm:group-hover:translate-x-0.5 sm:group-hover:text-emerald-500" />
         </div>
 
         {/* Stat row */}
