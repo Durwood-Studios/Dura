@@ -8,6 +8,7 @@ import { ToastLayer } from "@/components/gamification/ToastLayer";
 import { TipButton } from "@/components/support/TipButton";
 import { CommandPalette } from "@/components/nav/CommandPalette";
 import { LenisProvider } from "@/components/providers/LenisProvider";
+import { PageTransition } from "@/components/motion/PageTransition";
 
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
@@ -25,7 +26,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
           <TopBar />
           <Breadcrumbs />
           <main id="main-content" className="flex-1 pb-20 lg:pb-0">
-            {children}
+            <PageTransition>{children}</PageTransition>
           </main>
         </div>
         <MobileBottomTabs />
