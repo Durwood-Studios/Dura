@@ -1,0 +1,546 @@
+---
+title: "Build a Webhook Relay Service"
+description: "Receive webhooks, queue them for delivery, retry with exponential backoff, log deliveries, and verify signatures."
+slug: "webhook-relay"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["webhooks", "api", "queue", "retry", "node"]
+---
+
+## Overview
+
+Webhooks are how modern services communicate asynchronously. When a payment succeeds in Stripe or a push lands on GitHub, they POST a JSON payload to your URL. But what happens when your server is down? Or slow? Or returns an error?
+
+In this tutorial, you will build a webhook relay service that accepts incoming webhooks, queues them for reliable delivery, retries failed deliveries with exponential backoff, verifies HMAC signatures for security, and keeps a complete delivery log. Think of it as a personal webhook infrastructure layer.
+
+We use Node.js with the built-in `node:http` and `node:crypto` modules. No external dependencies. Runs on macOS, Windows, and Linux.
+
+## Step 1: Define the Data Models
+
+Webhooks flow through the system as events with delivery attempts tracked separately.
+
+```typescript
+// src/types.ts
+export interface WebhookEvent {
+  id: string;
+  source: string;
+  endpoint: string;
+  payload: Record<string, unknown>;
+  headers: Record<string, string>;
+  receivedAt: string;
+  status: "pending" | "delivered" | "failed" | "retrying";
+}
+
+export interface DeliveryAttempt {
+  id: string;
+  eventId: string;
+  attemptNumber: number;
+  statusCode: number | null;
+  responseBody: string;
+  duration: number;
+  timestamp: string;
+  error: string | null;
+}
+
+export interface Endpoint {
+  id: string;
+  url: string;
+  secret: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface RelayConfig {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  timeoutMs: number;
+}
+
+export const DEFAULT_CONFIG: RelayConfig = {
+  maxRetries: 5,
+  baseDelayMs: 1000,
+  maxDelayMs: 60000,
+  timeoutMs: 30000,
+};
+```
+
+## Step 2: Build the Event Store
+
+Store webhook events and delivery attempts with JSON file persistence.
+
+```typescript
+// src/store.ts
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { WebhookEvent, DeliveryAttempt, Endpoint } from "./types.js";
+
+export class WebhookStore {
+  private events: WebhookEvent[] = [];
+  private attempts: DeliveryAttempt[] = [];
+  private endpoints: Endpoint[] = [];
+  private dataPath: string;
+
+  constructor(dataDir: string = "./data") {
+    mkdirSync(dataDir, { recursive: true });
+    this.dataPath = join(dataDir, "webhooks.json");
+    this.load();
+  }
+
+  addEvent(event: WebhookEvent): void {
+    this.events.push(event);
+    this.save();
+  }
+
+  updateEventStatus(id: string, status: WebhookEvent["status"]): void {
+    const event = this.events.find((e) => e.id === id);
+    if (event) {
+      event.status = status;
+      this.save();
+    }
+  }
+
+  addAttempt(attempt: DeliveryAttempt): void {
+    this.attempts.push(attempt);
+    this.save();
+  }
+
+  getAttemptsForEvent(eventId: string): DeliveryAttempt[] {
+    return this.attempts.filter((a) => a.eventId === eventId);
+  }
+
+  getPendingEvents(): WebhookEvent[] {
+    return this.events.filter((e) => e.status === "pending" || e.status === "retrying");
+  }
+
+  registerEndpoint(endpoint: Endpoint): void {
+    this.endpoints.push(endpoint);
+    this.save();
+  }
+
+  getEndpoint(id: string): Endpoint | undefined {
+    return this.endpoints.find((e) => e.id === id);
+  }
+
+  getActiveEndpoints(): Endpoint[] {
+    return this.endpoints.filter((e) => e.isActive);
+  }
+
+  getAllEvents(): WebhookEvent[] {
+    return [...this.events];
+  }
+
+  private load(): void {
+    try {
+      const data = JSON.parse(readFileSync(this.dataPath, "utf-8"));
+      this.events = data.events ?? [];
+      this.attempts = data.attempts ?? [];
+      this.endpoints = data.endpoints ?? [];
+    } catch {
+      /* Fresh start */
+    }
+  }
+
+  private save(): void {
+    writeFileSync(
+      this.dataPath,
+      JSON.stringify(
+        {
+          events: this.events,
+          attempts: this.attempts,
+          endpoints: this.endpoints,
+        },
+        null,
+        2
+      )
+    );
+  }
+}
+```
+
+## Step 3: Implement Signature Verification
+
+Verify incoming webhooks using HMAC-SHA256 signatures to prevent spoofing.
+
+```typescript
+// src/signatures.ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export function signPayload(payload: string, secret: string): string {
+  return createHmac("sha256", secret).update(payload).digest("hex");
+}
+
+export function verifySignature(payload: string, signature: string, secret: string): boolean {
+  const expected = signPayload(payload, secret);
+  try {
+    return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+export function generateSecret(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+```
+
+## Step 4: Build the Delivery Engine
+
+Deliver webhooks to endpoints with timeout handling and response capture.
+
+```typescript
+// src/deliver.ts
+import { WebhookEvent, DeliveryAttempt } from "./types.js";
+import { signPayload } from "./signatures.js";
+
+export async function deliverWebhook(
+  event: WebhookEvent,
+  secret: string,
+  attemptNumber: number,
+  timeoutMs: number
+): Promise<DeliveryAttempt> {
+  const body = JSON.stringify(event.payload);
+  const signature = signPayload(body, secret);
+  const start = performance.now();
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(event.endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Webhook-Id": event.id,
+        "X-Webhook-Signature": signature,
+        "X-Webhook-Timestamp": event.receivedAt,
+        ...event.headers,
+      },
+      body,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+    const responseBody = await response.text();
+    const duration = Math.round(performance.now() - start);
+
+    return {
+      id: crypto.randomUUID(),
+      eventId: event.id,
+      attemptNumber,
+      statusCode: response.status,
+      responseBody: responseBody.substring(0, 1000),
+      duration,
+      timestamp: new Date().toISOString(),
+      error: response.ok ? null : `HTTP ${response.status}`,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const duration = Math.round(performance.now() - start);
+    const message = err instanceof Error ? err.message : "Unknown error";
+
+    return {
+      id: crypto.randomUUID(),
+      eventId: event.id,
+      attemptNumber,
+      statusCode: null,
+      responseBody: "",
+      duration,
+      timestamp: new Date().toISOString(),
+      error: message,
+    };
+  }
+}
+```
+
+## Step 5: Implement Retry with Exponential Backoff
+
+Failed deliveries are retried with increasing delays, capped at a maximum.
+
+```typescript
+// src/retry.ts
+import { WebhookStore } from "./store.js";
+import { deliverWebhook } from "./deliver.js";
+import { RelayConfig, DEFAULT_CONFIG } from "./types.js";
+
+function calculateDelay(attempt: number, config: RelayConfig): number {
+  // Exponential backoff with jitter
+  const exponential = config.baseDelayMs * Math.pow(2, attempt);
+  const jitter = Math.random() * config.baseDelayMs;
+  return Math.min(exponential + jitter, config.maxDelayMs);
+}
+
+export class RetryProcessor {
+  private timers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
+  constructor(
+    private store: WebhookStore,
+    private config: RelayConfig = DEFAULT_CONFIG
+  ) {}
+
+  async processEvent(eventId: string, secret: string): Promise<void> {
+    const events = this.store.getAllEvents();
+    const event = events.find((e) => e.id === eventId);
+    if (!event) return;
+
+    const attempts = this.store.getAttemptsForEvent(eventId);
+    const attemptNumber = attempts.length + 1;
+
+    if (attemptNumber > this.config.maxRetries + 1) {
+      this.store.updateEventStatus(eventId, "failed");
+      console.log(`[FAILED] Event ${eventId} after ${this.config.maxRetries} retries`);
+      return;
+    }
+
+    console.log(`[DELIVER] Event ${eventId} attempt #${attemptNumber}`);
+    const result = await deliverWebhook(event, secret, attemptNumber, this.config.timeoutMs);
+    this.store.addAttempt(result);
+
+    if (
+      result.error === null &&
+      result.statusCode !== null &&
+      result.statusCode >= 200 &&
+      result.statusCode < 300
+    ) {
+      this.store.updateEventStatus(eventId, "delivered");
+      console.log(`[OK] Event ${eventId} delivered in ${result.duration}ms`);
+    } else {
+      this.store.updateEventStatus(eventId, "retrying");
+      const delay = calculateDelay(attemptNumber, this.config);
+      console.log(`[RETRY] Event ${eventId} in ${Math.round(delay)}ms (attempt ${attemptNumber})`);
+
+      const timer = setTimeout(() => {
+        this.processEvent(eventId, secret);
+        this.timers.delete(eventId);
+      }, delay);
+      this.timers.set(eventId, timer);
+    }
+  }
+
+  stop(): void {
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
+  }
+}
+```
+
+## Step 6: Build the HTTP Server
+
+Create the relay server that receives, queues, and delivers webhooks.
+
+```typescript
+// src/server.ts
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { WebhookStore } from "./store.js";
+import { RetryProcessor } from "./retry.js";
+import { verifySignature, generateSecret } from "./signatures.js";
+import { WebhookEvent, Endpoint } from "./types.js";
+
+const store = new WebhookStore();
+const processor = new RetryProcessor(store);
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let body = "";
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString();
+    });
+    req.on("end", () => resolve(body));
+  });
+}
+
+function json(res: ServerResponse, data: unknown, status: number = 200): void {
+  res.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+  res.end(JSON.stringify(data));
+}
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+
+  try {
+    // Register an endpoint
+    if (req.method === "POST" && url.pathname === "/endpoints") {
+      const body = JSON.parse(await readBody(req));
+      const secret = generateSecret();
+      const endpoint: Endpoint = {
+        id: crypto.randomUUID(),
+        url: body.url,
+        secret,
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      };
+      store.registerEndpoint(endpoint);
+      json(res, { ...endpoint, secret }, 201);
+      return;
+    }
+
+    // Receive a webhook
+    if (req.method === "POST" && url.pathname.startsWith("/webhook/")) {
+      const endpointId = url.pathname.split("/")[2];
+      const endpoint = store.getEndpoint(endpointId);
+      if (!endpoint) {
+        json(res, { error: "Endpoint not found" }, 404);
+        return;
+      }
+
+      const body = await readBody(req);
+      const signature = req.headers["x-webhook-signature"] as string | undefined;
+
+      if (signature && !verifySignature(body, signature, endpoint.secret)) {
+        json(res, { error: "Invalid signature" }, 401);
+        return;
+      }
+
+      const event: WebhookEvent = {
+        id: crypto.randomUUID(),
+        source: req.headers["user-agent"] ?? "unknown",
+        endpoint: endpoint.url,
+        payload: JSON.parse(body),
+        headers: {},
+        receivedAt: new Date().toISOString(),
+        status: "pending",
+      };
+
+      store.addEvent(event);
+      processor.processEvent(event.id, endpoint.secret);
+      json(res, { id: event.id, status: "accepted" }, 202);
+      return;
+    }
+
+    // List events
+    if (req.method === "GET" && url.pathname === "/events") {
+      json(res, store.getAllEvents());
+      return;
+    }
+
+    // Get delivery log for an event
+    if (
+      req.method === "GET" &&
+      url.pathname.startsWith("/events/") &&
+      url.pathname.endsWith("/attempts")
+    ) {
+      const eventId = url.pathname.split("/")[2];
+      json(res, store.getAttemptsForEvent(eventId));
+      return;
+    }
+
+    json(res, { error: "Not found" }, 404);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Internal error";
+    json(res, { error: message }, 500);
+  }
+});
+
+const PORT = parseInt(process.env.PORT ?? "4000");
+server.listen(PORT, () => console.log(`Webhook relay running on http://localhost:${PORT}`));
+```
+
+## Step 7: Build a Test Receiver
+
+Create a simple server that acts as the destination endpoint for testing.
+
+```typescript
+// src/test-receiver.ts
+import { createServer } from "node:http";
+
+let requestCount = 0;
+
+const server = createServer((req, res) => {
+  let body = "";
+  req.on("data", (chunk: Buffer) => {
+    body += chunk.toString();
+  });
+  req.on("end", () => {
+    requestCount++;
+    const signature = req.headers["x-webhook-signature"] ?? "none";
+    console.log(`[Received #${requestCount}] ${req.method} ${req.url}`);
+    console.log(`  Signature: ${signature}`);
+    console.log(`  Body: ${body.substring(0, 200)}`);
+
+    // Simulate occasional failures for retry testing
+    if (requestCount % 3 === 0) {
+      console.log("  -> Simulating failure (503)");
+      res.writeHead(503);
+      res.end("Service Unavailable");
+    } else {
+      console.log("  -> Success (200)");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ received: true }));
+    }
+  });
+});
+
+const PORT = parseInt(process.env.PORT ?? "4001");
+server.listen(PORT, () => console.log(`Test receiver on http://localhost:${PORT}`));
+```
+
+## Step 8: Integration Test
+
+Write a script that exercises the full pipeline: register, send, deliver, retry.
+
+```typescript
+// src/test-integration.ts
+async function run(): Promise<void> {
+  const RELAY = "http://localhost:4000";
+  const RECEIVER = "http://localhost:4001";
+
+  // Register an endpoint
+  console.log("Registering endpoint...");
+  const regRes = await fetch(`${RELAY}/endpoints`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: RECEIVER }),
+  });
+  const endpoint = await regRes.json();
+  console.log(`Endpoint ID: ${endpoint.id}`);
+  console.log(`Secret: ${endpoint.secret.substring(0, 8)}...`);
+
+  // Send webhooks
+  for (let i = 1; i <= 5; i++) {
+    console.log(`\nSending webhook #${i}...`);
+    const res = await fetch(`${RELAY}/webhook/${endpoint.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event: "test", index: i, timestamp: Date.now() }),
+    });
+    const data = await res.json();
+    console.log(`  Accepted: ${data.id}`);
+  }
+
+  // Wait for retries to process
+  console.log("\nWaiting 5 seconds for retries...");
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+
+  // Check delivery status
+  const eventsRes = await fetch(`${RELAY}/events`);
+  const events = await eventsRes.json();
+  console.log("\n--- Event Status ---");
+  for (const event of events) {
+    console.log(`${event.id.substring(0, 8)}... -> ${event.status}`);
+  }
+}
+
+run().catch(console.error);
+```
+
+To test the full system, open three terminal windows:
+
+```bash
+# Terminal 1: Start the test receiver
+npx tsx src/test-receiver.ts
+
+# Terminal 2: Start the relay server
+npx tsx src/server.ts
+
+# Terminal 3: Run the integration test
+npx tsx src/test-integration.ts
+```
+
+You will see webhooks being received, some failing with 503 errors, and the relay automatically retrying with exponential backoff until delivery succeeds. The delivery log at `/events/{id}/attempts` shows every attempt with status codes, response times, and error messages.
+
+From here, you could add dead letter queues for permanently failed webhooks, rate limiting per endpoint, a web dashboard for monitoring, or persistent storage with SQLite.

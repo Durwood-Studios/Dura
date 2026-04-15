@@ -1,0 +1,770 @@
+---
+title: "Build a Headless CMS"
+description: "Create a headless content management system with a CRUD API, Markdown rendering, media uploads, webhook notifications, and an admin interface."
+slug: "cms-headless"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["cms", "api", "nextjs", "markdown", "content"]
+---
+
+## Overview
+
+A headless CMS decouples content management from presentation. Instead of a monolithic system that controls both the admin interface and the frontend, a headless CMS exposes content through an API. Any client — a React app, a mobile app, a static site generator — can consume the same content.
+
+In this tutorial, you will build a headless CMS with a REST API supporting full CRUD operations, Markdown content with frontmatter parsing, media file uploads and management, webhook notifications when content changes, and a minimal admin UI for managing posts. The system stores content as JSON files on disk, making it portable and easy to back up.
+
+## Step 1: Project Setup
+
+```bash
+mkdir headless-cms && cd headless-cms
+npm init -y
+npm install express cors multer uuid gray-matter marked
+npm install -D typescript @types/node @types/express @types/cors @types/multer @types/uuid ts-node
+npx tsc --init --strict --esModuleInterop --outDir dist --rootDir src
+```
+
+Add `"type": "module"` to `package.json`:
+
+```bash
+mkdir -p src/server data/posts data/media public
+```
+
+## Step 2: Define Content Types
+
+Create `src/server/types.ts`:
+
+```typescript
+export interface Post {
+  id: string;
+  title: string;
+  slug: string;
+  content: string;
+  excerpt: string;
+  status: "draft" | "published" | "archived";
+  author: string;
+  tags: string[];
+  coverImage?: string;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt?: string;
+}
+
+export interface MediaFile {
+  id: string;
+  filename: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  url: string;
+  uploadedAt: string;
+}
+
+export interface WebhookConfig {
+  id: string;
+  url: string;
+  events: WebhookEvent[];
+  secret: string;
+  isActive: boolean;
+}
+
+export type WebhookEvent = "post.created" | "post.updated" | "post.deleted" | "post.published";
+```
+
+The `Post` type includes both a `createdAt` and `updatedAt` timestamp, plus a separate `publishedAt` for when the post transitions from draft to published. Slugs are auto-generated from titles but can be overridden.
+
+## Step 3: Build the Content Store
+
+Create `src/server/store.ts`:
+
+```typescript
+import { readFile, writeFile, readdir, unlink, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Post } from "./types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const POSTS_DIR = path.join(__dirname, "..", "..", "data", "posts");
+
+async function ensureDir(): Promise<void> {
+  await mkdir(POSTS_DIR, { recursive: true });
+}
+
+function postPath(id: string): string {
+  return path.join(POSTS_DIR, `${id}.json`);
+}
+
+export async function getAllPosts(): Promise<Post[]> {
+  await ensureDir();
+  const files = await readdir(POSTS_DIR);
+  const posts: Post[] = [];
+
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const raw = await readFile(path.join(POSTS_DIR, file), "utf-8");
+      posts.push(JSON.parse(raw) as Post);
+    } catch {
+      // Skip corrupted files
+    }
+  }
+
+  return posts.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+}
+
+export async function getPost(id: string): Promise<Post | null> {
+  try {
+    const raw = await readFile(postPath(id), "utf-8");
+    return JSON.parse(raw) as Post;
+  } catch {
+    return null;
+  }
+}
+
+export async function getPostBySlug(slug: string): Promise<Post | null> {
+  const posts = await getAllPosts();
+  return posts.find((p) => p.slug === slug) ?? null;
+}
+
+export async function savePost(post: Post): Promise<void> {
+  await ensureDir();
+  await writeFile(postPath(post.id), JSON.stringify(post, null, 2), "utf-8");
+}
+
+export async function deletePost(id: string): Promise<boolean> {
+  try {
+    await unlink(postPath(id));
+    return true;
+  } catch {
+    return false;
+  }
+}
+```
+
+Each post is a separate JSON file, named by its ID. This makes individual post reads fast and avoids contention on a single data file. For a production CMS with thousands of posts, you would migrate to a database — but the API interface stays identical.
+
+## Step 4: Implement Markdown Processing
+
+Create `src/server/markdown.ts`:
+
+```typescript
+import matter from "gray-matter";
+import { marked } from "marked";
+
+export interface ParsedContent {
+  frontmatter: Record<string, unknown>;
+  content: string;
+  html: string;
+  excerpt: string;
+}
+
+export function parseMarkdown(raw: string): ParsedContent {
+  const { data: frontmatter, content } = matter(raw);
+
+  const html = marked(content, { async: false }) as string;
+
+  // Generate excerpt from first paragraph
+  const firstParagraph = content
+    .split("\n\n")
+    .find((block) => block.trim() && !block.startsWith("#"));
+  const excerpt = firstParagraph
+    ? firstParagraph
+        .replace(/[#*_`\[\]]/g, "")
+        .trim()
+        .slice(0, 200)
+    : "";
+
+  return { frontmatter, content, html, excerpt };
+}
+
+export function generateSlug(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+```
+
+Gray-matter extracts YAML frontmatter from Markdown. Marked converts the Markdown body to HTML. The excerpt is auto-generated from the first paragraph for use in listings and meta descriptions.
+
+## Step 5: Add Webhook Notifications
+
+Create `src/server/webhooks.ts`:
+
+```typescript
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createHmac } from "node:crypto";
+import type { WebhookConfig, WebhookEvent } from "./types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CONFIG_FILE = path.join(__dirname, "..", "..", "data", "webhooks.json");
+
+let webhooks: WebhookConfig[] = [];
+
+export async function loadWebhooks(): Promise<void> {
+  try {
+    const raw = await readFile(CONFIG_FILE, "utf-8");
+    webhooks = JSON.parse(raw) as WebhookConfig[];
+  } catch {
+    webhooks = [];
+  }
+}
+
+export async function saveWebhooks(): Promise<void> {
+  const dir = path.dirname(CONFIG_FILE);
+  await mkdir(dir, { recursive: true });
+  await writeFile(CONFIG_FILE, JSON.stringify(webhooks, null, 2), "utf-8");
+}
+
+export function getWebhooks(): WebhookConfig[] {
+  return webhooks;
+}
+
+export async function addWebhook(config: WebhookConfig): Promise<void> {
+  webhooks.push(config);
+  await saveWebhooks();
+}
+
+export async function removeWebhook(id: string): Promise<boolean> {
+  const index = webhooks.findIndex((w) => w.id === id);
+  if (index === -1) return false;
+  webhooks.splice(index, 1);
+  await saveWebhooks();
+  return true;
+}
+
+function signPayload(payload: string, secret: string): string {
+  return createHmac("sha256", secret).update(payload).digest("hex");
+}
+
+export async function triggerWebhooks(event: WebhookEvent, data: unknown): Promise<void> {
+  const matching = webhooks.filter((w) => w.isActive && w.events.includes(event));
+
+  for (const webhook of matching) {
+    const payload = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
+    const signature = signPayload(payload, webhook.secret);
+
+    try {
+      await fetch(webhook.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Webhook-Signature": signature,
+          "X-Webhook-Event": event,
+        },
+        body: payload,
+      });
+    } catch (error) {
+      console.error(`Webhook delivery failed for ${webhook.url}:`, error);
+    }
+  }
+}
+```
+
+Each webhook payload is signed with HMAC-SHA256 using a shared secret. The receiving server verifies the signature to ensure the request genuinely came from the CMS. Webhook deliveries are fire-and-forget — failures are logged but do not block the API response.
+
+## Step 6: Build the REST API
+
+Create `src/server/index.ts`:
+
+```typescript
+import express from "express";
+import cors from "cors";
+import multer from "multer";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { v4 as uuidv4 } from "uuid";
+import { getAllPosts, getPost, getPostBySlug, savePost, deletePost } from "./store.js";
+import { parseMarkdown, generateSlug } from "./markdown.js";
+import { loadWebhooks, triggerWebhooks } from "./webhooks.js";
+import type { Post } from "./types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "5mb" }));
+app.use(express.static(path.join(__dirname, "..", "..", "public")));
+app.use("/media", express.static(path.join(__dirname, "..", "..", "data", "media")));
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: path.join(__dirname, "..", "..", "data", "media"),
+    filename(_req, file, cb) {
+      const ext = path.extname(file.originalname);
+      cb(null, `${uuidv4()}${ext}`);
+    },
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+// List posts with filtering
+app.get("/api/posts", async (req, res) => {
+  const { status, tag, limit, offset } = req.query;
+  let posts = await getAllPosts();
+
+  if (status) posts = posts.filter((p) => p.status === status);
+  if (tag) posts = posts.filter((p) => p.tags.includes(tag as string));
+
+  const total = posts.length;
+  const pageOffset = Number(offset) || 0;
+  const pageLimit = Number(limit) || 20;
+  posts = posts.slice(pageOffset, pageOffset + pageLimit);
+
+  res.json({ posts, total, offset: pageOffset, limit: pageLimit });
+});
+
+// Get single post by ID
+app.get("/api/posts/:id", async (req, res) => {
+  const post = await getPost(req.params.id);
+  if (!post) {
+    res.status(404).json({ error: "Post not found" });
+    return;
+  }
+  res.json(post);
+});
+
+// Get post by slug
+app.get("/api/posts/slug/:slug", async (req, res) => {
+  const post = await getPostBySlug(req.params.slug);
+  if (!post) {
+    res.status(404).json({ error: "Post not found" });
+    return;
+  }
+  res.json(post);
+});
+
+// Create post
+app.post("/api/posts", async (req, res) => {
+  const { title, content, status, author, tags, coverImage } = req.body as Partial<Post>;
+
+  if (!title || !content) {
+    res.status(400).json({ error: "Title and content are required" });
+    return;
+  }
+
+  const parsed = parseMarkdown(content);
+  const now = new Date().toISOString();
+
+  const post: Post = {
+    id: uuidv4(),
+    title,
+    slug: generateSlug(title),
+    content,
+    excerpt: parsed.excerpt,
+    status: status ?? "draft",
+    author: author ?? "Anonymous",
+    tags: tags ?? [],
+    coverImage,
+    createdAt: now,
+    updatedAt: now,
+    publishedAt: status === "published" ? now : undefined,
+  };
+
+  await savePost(post);
+  await triggerWebhooks("post.created", post);
+  res.status(201).json(post);
+});
+
+// Update post
+app.put("/api/posts/:id", async (req, res) => {
+  const existing = await getPost(req.params.id);
+  if (!existing) {
+    res.status(404).json({ error: "Post not found" });
+    return;
+  }
+
+  const updates = req.body as Partial<Post>;
+  const now = new Date().toISOString();
+
+  if (updates.content) {
+    const parsed = parseMarkdown(updates.content);
+    updates.excerpt = parsed.excerpt;
+  }
+
+  if (updates.title && updates.title !== existing.title) {
+    updates.slug = generateSlug(updates.title);
+  }
+
+  const wasPublished = existing.status === "published";
+  const post: Post = { ...existing, ...updates, updatedAt: now };
+
+  if (!wasPublished && post.status === "published") {
+    post.publishedAt = now;
+    await triggerWebhooks("post.published", post);
+  }
+
+  await savePost(post);
+  await triggerWebhooks("post.updated", post);
+  res.json(post);
+});
+
+// Delete post
+app.delete("/api/posts/:id", async (req, res) => {
+  const post = await getPost(req.params.id);
+  if (!post) {
+    res.status(404).json({ error: "Post not found" });
+    return;
+  }
+
+  await deletePost(req.params.id);
+  await triggerWebhooks("post.deleted", post);
+  res.json({ deleted: true });
+});
+
+// Upload media
+app.post("/api/media", (req, res) => {
+  upload.single("file")(req, res, (err) => {
+    if (err) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (!req.file) {
+      res.status(400).json({ error: "No file provided" });
+      return;
+    }
+
+    res.status(201).json({
+      id: uuidv4(),
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+      url: `/media/${req.file.filename}`,
+      uploadedAt: new Date().toISOString(),
+    });
+  });
+});
+
+// Content delivery endpoint — returns rendered HTML
+app.get("/api/render/:slug", async (req, res) => {
+  const post = await getPostBySlug(req.params.slug);
+  if (!post) {
+    res.status(404).json({ error: "Post not found" });
+    return;
+  }
+
+  const { html } = parseMarkdown(post.content);
+  res.json({ ...post, html });
+});
+
+const PORT = Number(process.env.PORT) || 3003;
+
+async function start(): Promise<void> {
+  await loadWebhooks();
+  app.listen(PORT, () => {
+    console.log(`CMS API running on http://localhost:${PORT}`);
+  });
+}
+
+start();
+```
+
+## Step 7: Build the Admin UI
+
+Create `public/index.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CMS Admin</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        background: #0a0a0f;
+        color: #f0f0f0;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        min-height: 100vh;
+      }
+      .sidebar {
+        background: rgba(255, 255, 255, 0.02);
+        border-right: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 24px;
+      }
+      .sidebar h1 {
+        font-size: 20px;
+        margin-bottom: 24px;
+      }
+      .post-list {
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .post-list li {
+        padding: 8px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      .post-list li:hover {
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .post-list li.active {
+        background: rgba(16, 185, 129, 0.1);
+        color: #10b981;
+      }
+      .status-badge {
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        margin-left: 8px;
+      }
+      .status-badge.draft {
+        background: rgba(250, 204, 21, 0.15);
+        color: #fbbf24;
+      }
+      .status-badge.published {
+        background: rgba(16, 185, 129, 0.15);
+        color: #10b981;
+      }
+      .main {
+        padding: 24px;
+      }
+      .editor {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        max-width: 800px;
+      }
+      .editor input,
+      .editor textarea,
+      .editor select {
+        width: 100%;
+        padding: 10px 14px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        color: #f0f0f0;
+        font-size: 14px;
+        font-family: inherit;
+      }
+      .editor textarea {
+        min-height: 400px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 13px;
+        line-height: 1.6;
+        resize: vertical;
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+      }
+      .toolbar button {
+        padding: 8px 16px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 500;
+        font-size: 13px;
+      }
+      .btn-primary {
+        background: #10b981;
+        color: white;
+      }
+      .btn-secondary {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f0f0f0;
+      }
+      .btn-danger {
+        background: rgba(239, 68, 68, 0.15);
+        color: #ef4444;
+      }
+      .new-btn {
+        width: 100%;
+        padding: 10px;
+        margin-bottom: 16px;
+        background: #10b981;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 500;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <h1>CMS Admin</h1>
+        <button class="new-btn" id="newBtn">+ New Post</button>
+        <ul class="post-list" id="postList"></ul>
+      </aside>
+      <main class="main" id="main"></main>
+    </div>
+    <script src="admin.js"></script>
+  </body>
+</html>
+```
+
+## Step 8: Implement the Admin Logic
+
+Create `public/admin.js`:
+
+```javascript
+const API = "";
+let posts = [];
+let activeId = null;
+
+async function loadPosts() {
+  const res = await fetch(`${API}/api/posts`);
+  const data = await res.json();
+  posts = data.posts;
+  renderSidebar();
+}
+
+function renderSidebar() {
+  const list = document.getElementById("postList");
+  list.innerHTML = posts
+    .map(
+      (p) => `
+    <li class="${p.id === activeId ? "active" : ""}" data-id="${p.id}">
+      ${p.title}
+      <span class="status-badge ${p.status}">${p.status}</span>
+    </li>
+  `
+    )
+    .join("");
+
+  list.querySelectorAll("li").forEach((li) => {
+    li.addEventListener("click", () => openPost(li.dataset.id));
+  });
+}
+
+function openPost(id) {
+  activeId = id;
+  const post = posts.find((p) => p.id === id);
+  if (!post) return;
+  renderEditor(post);
+  renderSidebar();
+}
+
+function renderEditor(post) {
+  const main = document.getElementById("main");
+  main.innerHTML = `
+    <div class="editor">
+      <input id="edTitle" value="${post.title}" placeholder="Post title" />
+      <div style="display:flex;gap:12px;">
+        <select id="edStatus">
+          <option value="draft" ${post.status === "draft" ? "selected" : ""}>Draft</option>
+          <option value="published" ${post.status === "published" ? "selected" : ""}>Published</option>
+          <option value="archived" ${post.status === "archived" ? "selected" : ""}>Archived</option>
+        </select>
+        <input id="edTags" value="${post.tags.join(", ")}" placeholder="Tags (comma-separated)" style="flex:1;" />
+      </div>
+      <textarea id="edContent">${post.content}</textarea>
+      <div class="toolbar">
+        <button class="btn-primary" id="saveBtn">Save</button>
+        <button class="btn-secondary" id="publishBtn">Publish</button>
+        <button class="btn-danger" id="deleteBtn">Delete</button>
+      </div>
+    </div>`;
+
+  document.getElementById("saveBtn").addEventListener("click", () => savePost(post.id));
+  document.getElementById("publishBtn").addEventListener("click", () => publishPost(post.id));
+  document.getElementById("deleteBtn").addEventListener("click", () => deletePost(post.id));
+}
+
+async function savePost(id) {
+  await fetch(`${API}/api/posts/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: document.getElementById("edTitle").value,
+      content: document.getElementById("edContent").value,
+      status: document.getElementById("edStatus").value,
+      tags: document
+        .getElementById("edTags")
+        .value.split(",")
+        .map((t) => t.trim())
+        .filter(Boolean),
+    }),
+  });
+  await loadPosts();
+  openPost(id);
+}
+
+async function publishPost(id) {
+  document.getElementById("edStatus").value = "published";
+  await savePost(id);
+}
+
+async function deletePost(id) {
+  if (!confirm("Delete this post?")) return;
+  await fetch(`${API}/api/posts/${id}`, { method: "DELETE" });
+  activeId = null;
+  document.getElementById("main").innerHTML = "";
+  await loadPosts();
+}
+
+document.getElementById("newBtn").addEventListener("click", async () => {
+  const res = await fetch(`${API}/api/posts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: "Untitled Post",
+      content: "# New Post\n\nStart writing here...",
+      status: "draft",
+      tags: [],
+    }),
+  });
+  const post = await res.json();
+  await loadPosts();
+  openPost(post.id);
+});
+
+loadPosts();
+```
+
+## Step 9: Test the Content API
+
+Start the server and exercise the API:
+
+```bash
+npm start
+```
+
+Create a post with Markdown:
+
+```bash
+curl -X POST http://localhost:3003/api/posts \
+  -H "Content-Type: application/json" \
+  -d "{\"title\":\"Getting Started with TypeScript\",\"content\":\"# TypeScript Basics\\n\\nTypeScript adds **static typing** to JavaScript.\\n\\n## Why TypeScript?\\n\\n- Catch errors at compile time\\n- Better IDE support\\n- Self-documenting code\",\"status\":\"published\",\"author\":\"Admin\",\"tags\":[\"typescript\",\"tutorial\"]}"
+```
+
+Fetch the rendered version:
+
+```bash
+curl http://localhost:3003/api/render/getting-started-with-typescript
+```
+
+## Step 10: Run the Full System
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "start": "npx ts-node --esm src/server/index.ts",
+    "build": "tsc"
+  }
+}
+```
+
+Open `http://localhost:3003` for the admin interface. Create posts, edit Markdown content, publish them, and fetch them through the API.
+
+The architecture supports several natural extensions: content versioning by storing previous versions alongside the current one, scheduled publishing using a background job that flips status at a specified `publishAt` time, full-text search by indexing content with the search engine from the search engine tutorial, and preview mode that renders draft content with a special token. The webhook system already supports triggering static site rebuilds on publish — point a webhook at your build service to get automatic deployments on content changes.

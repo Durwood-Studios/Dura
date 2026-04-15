@@ -1,0 +1,569 @@
+---
+title: "Build a State Machine Engine"
+description: "Create a state machine engine with typed states and transitions, guards, actions, hierarchical states, and a visualization tool."
+slug: "state-machine"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["state-machine", "typescript", "patterns", "xstate", "architecture"]
+---
+
+## Overview
+
+State machines eliminate an entire category of bugs: impossible states. Instead of juggling booleans like `isLoading`, `hasError`, `isSubmitted`, and hoping they never contradict each other, you define exactly which states exist and which transitions are allowed between them. The machine enforces that a form cannot be simultaneously "submitting" and "idle", that a door cannot go from "locked" to "open" without unlocking first.
+
+In this tutorial, you will build a state machine engine from scratch. It supports typed states and events, guard conditions that block transitions, side-effect actions, hierarchical (nested) states, and a text-based visualization of the state graph. The engine is framework-agnostic — you can use it for form wizards, game logic, workflow automation, or any system with discrete states.
+
+## Step 1: Project Setup
+
+```bash
+mkdir state-machine && cd state-machine
+npm init -y
+npm install -D typescript @types/node ts-node
+npx tsc --init --strict --esModuleInterop --outDir dist --rootDir src
+```
+
+Add `"type": "module"` to `package.json`:
+
+```bash
+mkdir -p src
+```
+
+## Step 2: Define the Core Types
+
+Create `src/types.ts`:
+
+```typescript
+export interface MachineConfig<TContext, TState extends string, TEvent extends { type: string }> {
+  id: string;
+  initial: TState;
+  context: TContext;
+  states: Record<TState, StateNode<TContext, TState, TEvent>>;
+}
+
+export interface StateNode<TContext, TState extends string, TEvent extends { type: string }> {
+  on?: TransitionMap<TContext, TState, TEvent>;
+  entry?: Action<TContext, TEvent>[];
+  exit?: Action<TContext, TEvent>[];
+  initial?: string;
+  states?: Record<string, StateNode<TContext, TState, TEvent>>;
+}
+
+export type TransitionMap<
+  TContext,
+  TState extends string,
+  TEvent extends { type: string },
+> = Partial<Record<TEvent["type"], TransitionConfig<TContext, TState, TEvent>>>;
+
+export interface TransitionConfig<
+  TContext,
+  TState extends string,
+  TEvent extends { type: string },
+> {
+  target: TState;
+  guard?: Guard<TContext, TEvent>;
+  actions?: Action<TContext, TEvent>[];
+}
+
+export type Guard<TContext, TEvent> = (context: TContext, event: TEvent) => boolean;
+export type Action<TContext, TEvent> = (context: TContext, event: TEvent) => void;
+
+export interface MachineState<TContext, TState extends string> {
+  value: TState;
+  context: TContext;
+  history: TState[];
+}
+```
+
+The generics enforce type safety across the entire machine: the context shape, the set of valid states, and the set of valid events are all constrained at the type level. Sending an event that does not exist in the config is a compile-time error.
+
+## Step 3: Build the State Machine Interpreter
+
+Create `src/machine.ts`:
+
+```typescript
+import type { MachineConfig, MachineState, TransitionConfig, Action } from "./types.js";
+
+type Listener<TContext, TState extends string> = (state: MachineState<TContext, TState>) => void;
+
+export class StateMachine<TContext, TState extends string, TEvent extends { type: string }> {
+  private config: MachineConfig<TContext, TState, TEvent>;
+  private currentState: MachineState<TContext, TState>;
+  private listeners: Set<Listener<TContext, TState>> = new Set();
+  private isRunning = false;
+
+  constructor(config: MachineConfig<TContext, TState, TEvent>) {
+    this.config = config;
+    this.currentState = {
+      value: config.initial,
+      context: structuredClone(config.context),
+      history: [],
+    };
+  }
+
+  start(): MachineState<TContext, TState> {
+    this.isRunning = true;
+
+    // Execute entry actions for initial state
+    const initialNode = this.config.states[this.currentState.value];
+    if (initialNode?.entry) {
+      this.executeActions(initialNode.entry, { type: "INIT" } as TEvent);
+    }
+
+    this.notify();
+    return this.getState();
+  }
+
+  stop(): void {
+    this.isRunning = false;
+  }
+
+  send(event: TEvent): MachineState<TContext, TState> {
+    if (!this.isRunning) {
+      throw new Error("Machine is not running. Call start() first.");
+    }
+
+    const stateNode = this.config.states[this.currentState.value];
+    if (!stateNode?.on) return this.getState();
+
+    const transitionConfig = stateNode.on[event.type as TEvent["type"]] as
+      | TransitionConfig<TContext, TState, TEvent>
+      | undefined;
+
+    if (!transitionConfig) return this.getState();
+
+    // Check guard condition
+    if (transitionConfig.guard) {
+      const isAllowed = transitionConfig.guard(this.currentState.context, event);
+      if (!isAllowed) return this.getState();
+    }
+
+    const previousState = this.currentState.value;
+
+    // Execute exit actions on current state
+    if (stateNode.exit) {
+      this.executeActions(stateNode.exit, event);
+    }
+
+    // Execute transition actions
+    if (transitionConfig.actions) {
+      this.executeActions(transitionConfig.actions, event);
+    }
+
+    // Transition to new state
+    this.currentState = {
+      value: transitionConfig.target,
+      context: this.currentState.context,
+      history: [...this.currentState.history, previousState],
+    };
+
+    // Execute entry actions on new state
+    const newStateNode = this.config.states[transitionConfig.target];
+    if (newStateNode?.entry) {
+      this.executeActions(newStateNode.entry, event);
+    }
+
+    this.notify();
+    return this.getState();
+  }
+
+  getState(): MachineState<TContext, TState> {
+    return {
+      value: this.currentState.value,
+      context: structuredClone(this.currentState.context),
+      history: [...this.currentState.history],
+    };
+  }
+
+  subscribe(listener: Listener<TContext, TState>): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  canSend(eventType: TEvent["type"]): boolean {
+    const stateNode = this.config.states[this.currentState.value];
+    return stateNode?.on?.[eventType] !== undefined;
+  }
+
+  private executeActions(actions: Action<TContext, TEvent>[], event: TEvent): void {
+    for (const action of actions) {
+      try {
+        action(this.currentState.context, event);
+      } catch (error) {
+        console.error("Action execution failed:", error);
+      }
+    }
+  }
+
+  private notify(): void {
+    const state = this.getState();
+    for (const listener of this.listeners) {
+      listener(state);
+    }
+  }
+}
+```
+
+The interpreter processes events by checking the current state's transition map, evaluating guard conditions, executing exit/transition/entry actions in order, and updating the state. Each `getState()` returns a deep clone to prevent external mutation.
+
+## Step 4: Add Guard Conditions
+
+Guards are predicates that block transitions when conditions are not met. Here is a practical example — a login form machine:
+
+Create `src/examples/login.ts`:
+
+```typescript
+import { StateMachine } from "../machine.js";
+import type { MachineConfig } from "../types.js";
+
+interface LoginContext {
+  email: string;
+  password: string;
+  errorMessage: string;
+  attempts: number;
+}
+
+type LoginState = "idle" | "validating" | "submitting" | "success" | "error" | "locked";
+
+type LoginEvent =
+  | { type: "SUBMIT"; email: string; password: string }
+  | { type: "RESOLVE" }
+  | { type: "REJECT"; message: string }
+  | { type: "RETRY" }
+  | { type: "RESET" };
+
+const loginConfig: MachineConfig<LoginContext, LoginState, LoginEvent> = {
+  id: "login",
+  initial: "idle",
+  context: {
+    email: "",
+    password: "",
+    errorMessage: "",
+    attempts: 0,
+  },
+  states: {
+    idle: {
+      on: {
+        SUBMIT: {
+          target: "validating",
+          actions: [
+            (ctx, event) => {
+              if (event.type === "SUBMIT") {
+                ctx.email = event.email;
+                ctx.password = event.password;
+              }
+            },
+          ],
+        },
+      },
+    },
+    validating: {
+      entry: [
+        (ctx) => {
+          // Validation happens as an entry action
+          // In a real app, this would trigger async validation
+          console.log(`Validating ${ctx.email}...`);
+        },
+      ],
+      on: {
+        RESOLVE: { target: "submitting" },
+        REJECT: {
+          target: "error",
+          actions: [
+            (ctx, event) => {
+              if (event.type === "REJECT") {
+                ctx.errorMessage = event.message;
+              }
+            },
+          ],
+        },
+      },
+    },
+    submitting: {
+      on: {
+        RESOLVE: { target: "success" },
+        REJECT: {
+          target: "error",
+          actions: [
+            (ctx, event) => {
+              if (event.type === "REJECT") {
+                ctx.errorMessage = event.message;
+                ctx.attempts++;
+              }
+            },
+          ],
+        },
+      },
+    },
+    success: {
+      entry: [(ctx) => console.log(`Welcome, ${ctx.email}!`)],
+      on: {
+        RESET: { target: "idle" },
+      },
+    },
+    error: {
+      on: {
+        RETRY: {
+          target: "idle",
+          guard: (ctx) => ctx.attempts < 3,
+          actions: [
+            (ctx) => {
+              ctx.errorMessage = "";
+            },
+          ],
+        },
+        SUBMIT: {
+          target: "validating",
+          guard: (ctx) => ctx.attempts < 3,
+        },
+      },
+    },
+    locked: {
+      entry: [
+        (ctx) => {
+          ctx.errorMessage = "Too many attempts. Account locked.";
+        },
+      ],
+    },
+  },
+};
+
+export function createLoginMachine(): StateMachine<LoginContext, LoginState, LoginEvent> {
+  return new StateMachine(loginConfig);
+}
+```
+
+The `RETRY` transition has a guard: `ctx.attempts < 3`. After three failed attempts, the guard returns false and the machine stays in the "error" state. This is impossible to bypass from the UI because the machine itself enforces the rule.
+
+## Step 5: Implement Hierarchical States
+
+Add nested state support. Create `src/hierarchical.ts`:
+
+```typescript
+import type { MachineConfig, StateNode } from "./types.js";
+
+interface FlattenedTransition {
+  from: string;
+  event: string;
+  to: string;
+  hasGuard: boolean;
+}
+
+/**
+ * Flatten a hierarchical machine config into a list of transitions.
+ * This is useful for visualization and debugging.
+ */
+export function flattenTransitions<
+  TContext,
+  TState extends string,
+  TEvent extends { type: string },
+>(config: MachineConfig<TContext, TState, TEvent>): FlattenedTransition[] {
+  const transitions: FlattenedTransition[] = [];
+
+  function processState(
+    stateName: string,
+    stateNode: StateNode<TContext, TState, TEvent>,
+    parentPath: string
+  ): void {
+    const fullPath = parentPath ? `${parentPath}.${stateName}` : stateName;
+
+    if (stateNode.on) {
+      for (const [eventType, transition] of Object.entries(stateNode.on)) {
+        if (transition) {
+          const t = transition as { target: string; guard?: unknown };
+          transitions.push({
+            from: fullPath,
+            event: eventType,
+            to: t.target,
+            hasGuard: t.guard !== undefined,
+          });
+        }
+      }
+    }
+
+    if (stateNode.states) {
+      for (const [childName, childNode] of Object.entries(stateNode.states)) {
+        processState(childName, childNode as StateNode<TContext, TState, TEvent>, fullPath);
+      }
+    }
+  }
+
+  for (const [stateName, stateNode] of Object.entries(config.states)) {
+    processState(stateName, stateNode as StateNode<TContext, TState, TEvent>, "");
+  }
+
+  return transitions;
+}
+```
+
+Hierarchical states let you model "active.editing" or "active.previewing" as sub-states of "active", sharing transitions defined at the parent level. This reduces duplication when multiple sub-states handle the same event identically.
+
+## Step 6: Build the State Visualizer
+
+Create `src/visualize.ts`:
+
+```typescript
+import type { MachineConfig, StateNode } from "./types.js";
+
+/**
+ * Generate a text-based visualization of a state machine.
+ */
+export function visualize<TContext, TState extends string, TEvent extends { type: string }>(
+  config: MachineConfig<TContext, TState, TEvent>
+): string {
+  const lines: string[] = [];
+  lines.push(`State Machine: ${config.id}`);
+  lines.push(`Initial: [${config.initial}]`);
+  lines.push("─".repeat(50));
+
+  for (const [stateName, stateNode] of Object.entries(config.states)) {
+    const node = stateNode as StateNode<TContext, TState, TEvent>;
+    const isInitial = stateName === config.initial;
+    const marker = isInitial ? " (initial)" : "";
+
+    const entryCount = node.entry?.length ?? 0;
+    const exitCount = node.exit?.length ?? 0;
+    const actionInfo = entryCount || exitCount ? ` [entry: ${entryCount}, exit: ${exitCount}]` : "";
+
+    lines.push(`\n  ${stateName}${marker}${actionInfo}`);
+
+    if (node.on) {
+      for (const [eventType, transition] of Object.entries(node.on)) {
+        if (transition) {
+          const t = transition as { target: string; guard?: unknown; actions?: unknown[] };
+          const guardIcon = t.guard ? " [guarded]" : "";
+          const actionCount = t.actions?.length ?? 0;
+          const actionIcon = actionCount ? ` (${actionCount} actions)` : "";
+          lines.push(`    ${eventType} → ${t.target}${guardIcon}${actionIcon}`);
+        }
+      }
+    }
+
+    if (!node.on || Object.keys(node.on).length === 0) {
+      lines.push("    (terminal state)");
+    }
+  }
+
+  lines.push("\n" + "─".repeat(50));
+  return lines.join("\n");
+}
+```
+
+## Step 7: Create a Runnable Example
+
+Create `src/demo.ts`:
+
+```typescript
+import { StateMachine } from "./machine.js";
+import { visualize } from "./visualize.js";
+import { createLoginMachine } from "./examples/login.js";
+import type { MachineConfig } from "./types.js";
+
+// Traffic light example
+interface TrafficContext {
+  tickCount: number;
+}
+
+type TrafficState = "green" | "yellow" | "red";
+type TrafficEvent = { type: "TIMER" } | { type: "EMERGENCY" };
+
+const trafficConfig: MachineConfig<TrafficContext, TrafficState, TrafficEvent> = {
+  id: "trafficLight",
+  initial: "green",
+  context: { tickCount: 0 },
+  states: {
+    green: {
+      entry: [
+        (ctx) => {
+          ctx.tickCount++;
+        },
+      ],
+      on: {
+        TIMER: { target: "yellow" },
+        EMERGENCY: { target: "red" },
+      },
+    },
+    yellow: {
+      entry: [
+        (ctx) => {
+          ctx.tickCount++;
+        },
+      ],
+      on: {
+        TIMER: { target: "red" },
+        EMERGENCY: { target: "red" },
+      },
+    },
+    red: {
+      entry: [
+        (ctx) => {
+          ctx.tickCount++;
+        },
+      ],
+      on: {
+        TIMER: { target: "green" },
+      },
+    },
+  },
+};
+
+// Run traffic light demo
+console.log(visualize(trafficConfig));
+console.log("\n--- Running Traffic Light ---\n");
+
+const traffic = new StateMachine(trafficConfig);
+traffic.subscribe((state) => {
+  console.log(`  State: ${state.value} | Ticks: ${state.context.tickCount}`);
+});
+
+traffic.start();
+traffic.send({ type: "TIMER" }); // green → yellow
+traffic.send({ type: "TIMER" }); // yellow → red
+traffic.send({ type: "TIMER" }); // red → green
+traffic.send({ type: "EMERGENCY" }); // green → red
+traffic.stop();
+
+// Run login demo
+console.log("\n\n--- Running Login Machine ---\n");
+
+const login = createLoginMachine();
+login.subscribe((state) => {
+  const ctx = state.context;
+  console.log(
+    `  State: ${state.value} | Attempts: ${ctx.attempts} | Error: ${ctx.errorMessage || "none"}`
+  );
+});
+
+login.start();
+login.send({ type: "SUBMIT", email: "user@example.com", password: "wrong" });
+login.send({ type: "RESOLVE" }); // validation passes
+login.send({ type: "REJECT", message: "Invalid credentials" }); // submit fails
+login.send({ type: "RETRY" }); // attempt 1
+login.send({ type: "SUBMIT", email: "user@example.com", password: "correct" });
+login.send({ type: "RESOLVE" }); // validation passes
+login.send({ type: "RESOLVE" }); // submit succeeds
+login.stop();
+```
+
+## Step 8: Run and Extend
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "start": "npx ts-node --esm src/demo.ts",
+    "build": "tsc"
+  }
+}
+```
+
+```bash
+npm start
+```
+
+The traffic light cycles through states predictably. The login machine demonstrates guards blocking retries after too many attempts. The visualizer outputs a readable map of every state and transition.
+
+Key concepts to internalize: state machines make impossible states unrepresentable. Instead of `if (isLoading && !hasError && isSubmitted)`, you have a single `state.value` that is always one of the defined states. The transition map is the single source of truth for what can happen.
+
+Extensions to explore: add delayed transitions (auto-advance after N milliseconds using `setTimeout`), implement parallel states where multiple sub-machines run concurrently, add event queuing so events sent during a transition are buffered, or build a React hook that wraps the `subscribe` method with `useSyncExternalStore`.

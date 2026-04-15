@@ -1,0 +1,778 @@
+---
+title: "Build a Privacy-First Analytics Dashboard"
+description: "Create a cookie-free analytics system with event collection, session tracking via fingerprinting, funnel visualization, and data export."
+slug: "analytics-dashboard"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["analytics", "charts", "react", "data", "dashboard"]
+---
+
+## Overview
+
+Most analytics platforms track users with cookies, collect personal data, and send everything to third-party servers. Privacy-first analytics takes a different approach: no cookies, no personal identifiers, no third-party data sharing. You still get actionable insights — page views, sessions, referrers, funnels — without compromising user privacy.
+
+In this tutorial, you will build a complete privacy-first analytics system. The tracking script is under 2KB, uses no cookies, and generates anonymous session IDs from non-identifying signals. The backend collects events, aggregates them into metrics, and serves a dashboard with page view charts, referrer breakdowns, session tracking, funnel visualization, and CSV export. Everything runs on your own server.
+
+## Step 1: Project Setup
+
+```bash
+mkdir analytics-dashboard && cd analytics-dashboard
+npm init -y
+npm install express cors uuid
+npm install -D typescript @types/node @types/express @types/cors @types/uuid ts-node
+npx tsc --init --strict --esModuleInterop --outDir dist --rootDir src
+```
+
+Add `"type": "module"` to `package.json`:
+
+```bash
+mkdir -p src/server data public
+```
+
+## Step 2: Design the Event Schema
+
+Create `src/server/types.ts`:
+
+```typescript
+export interface AnalyticsEvent {
+  id: string;
+  sessionId: string;
+  type: "pageview" | "event" | "session_start" | "session_end";
+  path: string;
+  referrer: string;
+  timestamp: string;
+  data?: Record<string, string | number | boolean>;
+}
+
+export interface Session {
+  id: string;
+  firstSeen: string;
+  lastSeen: string;
+  pageViews: number;
+  events: number;
+  referrer: string;
+  entryPage: string;
+  country?: string;
+}
+
+export interface PageStats {
+  path: string;
+  views: number;
+  uniqueSessions: number;
+  avgTimeOnPage: number;
+}
+
+export interface DailyStats {
+  date: string;
+  pageViews: number;
+  sessions: number;
+  uniqueVisitors: number;
+  bounceRate: number;
+  topPages: PageStats[];
+  topReferrers: Array<{ referrer: string; count: number }>;
+}
+
+export interface FunnelStep {
+  name: string;
+  path: string;
+  count: number;
+  dropoff: number;
+  dropoffPercent: number;
+}
+```
+
+The schema deliberately omits IP addresses, user agents, and any personally identifiable information. Session IDs are derived from a hash of the date plus screen dimensions plus timezone — enough to group pageviews into sessions without identifying individuals.
+
+## Step 3: Build the Event Store
+
+Create `src/server/store.ts`:
+
+```typescript
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { AnalyticsEvent, Session } from "./types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.join(__dirname, "..", "..", "data");
+
+function eventsFile(date: string): string {
+  return path.join(DATA_DIR, `events-${date}.json`);
+}
+
+async function ensureDir(): Promise<void> {
+  await mkdir(DATA_DIR, { recursive: true });
+}
+
+export async function storeEvent(event: AnalyticsEvent): Promise<void> {
+  await ensureDir();
+  const date = event.timestamp.split("T")[0];
+  const filePath = eventsFile(date);
+
+  let events: AnalyticsEvent[] = [];
+  try {
+    const raw = await readFile(filePath, "utf-8");
+    events = JSON.parse(raw) as AnalyticsEvent[];
+  } catch {
+    // File does not exist yet
+  }
+
+  events.push(event);
+  await writeFile(filePath, JSON.stringify(events), "utf-8");
+}
+
+export async function getEvents(date: string): Promise<AnalyticsEvent[]> {
+  try {
+    const raw = await readFile(eventsFile(date), "utf-8");
+    return JSON.parse(raw) as AnalyticsEvent[];
+  } catch {
+    return [];
+  }
+}
+
+export async function getEventsRange(
+  startDate: string,
+  endDate: string
+): Promise<AnalyticsEvent[]> {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  const allEvents: AnalyticsEvent[] = [];
+
+  const current = new Date(start);
+  while (current <= end) {
+    const dateStr = current.toISOString().split("T")[0];
+    const events = await getEvents(dateStr);
+    allEvents.push(...events);
+    current.setDate(current.getDate() + 1);
+  }
+
+  return allEvents;
+}
+
+export function buildSessions(events: AnalyticsEvent[]): Session[] {
+  const sessionMap: Map<string, Session> = new Map();
+
+  for (const event of events) {
+    if (!sessionMap.has(event.sessionId)) {
+      sessionMap.set(event.sessionId, {
+        id: event.sessionId,
+        firstSeen: event.timestamp,
+        lastSeen: event.timestamp,
+        pageViews: 0,
+        events: 0,
+        referrer: event.referrer,
+        entryPage: event.path,
+      });
+    }
+
+    const session = sessionMap.get(event.sessionId)!;
+    session.lastSeen = event.timestamp;
+    session.events++;
+    if (event.type === "pageview") {
+      session.pageViews++;
+    }
+  }
+
+  return [...sessionMap.values()];
+}
+```
+
+Events are partitioned by date into separate files. This makes querying a date range straightforward (read the files for each day) and keeps individual files small. For production volumes, a time-series database like ClickHouse would be more appropriate.
+
+## Step 4: Build the Aggregation Engine
+
+Create `src/server/aggregate.ts`:
+
+```typescript
+import type { AnalyticsEvent, DailyStats, PageStats, FunnelStep } from "./types.js";
+import { buildSessions } from "./store.js";
+
+export function aggregateDaily(events: AnalyticsEvent[]): DailyStats {
+  const sessions = buildSessions(events);
+  const pageViews = events.filter((e) => e.type === "pageview");
+
+  // Page stats
+  const pageMap: Map<string, { views: number; sessions: Set<string> }> = new Map();
+  for (const pv of pageViews) {
+    if (!pageMap.has(pv.path)) {
+      pageMap.set(pv.path, { views: 0, sessions: new Set() });
+    }
+    const entry = pageMap.get(pv.path)!;
+    entry.views++;
+    entry.sessions.add(pv.sessionId);
+  }
+
+  const topPages: PageStats[] = [...pageMap.entries()]
+    .map(([pagePath, data]) => ({
+      path: pagePath,
+      views: data.views,
+      uniqueSessions: data.sessions.size,
+      avgTimeOnPage: 0,
+    }))
+    .sort((a, b) => b.views - a.views)
+    .slice(0, 10);
+
+  // Referrer stats
+  const refMap: Map<string, number> = new Map();
+  for (const session of sessions) {
+    const ref = session.referrer || "(direct)";
+    refMap.set(ref, (refMap.get(ref) ?? 0) + 1);
+  }
+
+  const topReferrers = [...refMap.entries()]
+    .map(([referrer, count]) => ({ referrer, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+
+  // Bounce rate: sessions with only 1 pageview
+  const bouncedSessions = sessions.filter((s) => s.pageViews <= 1).length;
+  const bounceRate =
+    sessions.length > 0 ? Math.round((bouncedSessions / sessions.length) * 100) : 0;
+
+  return {
+    date: events[0]?.timestamp.split("T")[0] ?? new Date().toISOString().split("T")[0],
+    pageViews: pageViews.length,
+    sessions: sessions.length,
+    uniqueVisitors: sessions.length,
+    bounceRate,
+    topPages,
+    topReferrers,
+  };
+}
+
+export function computeFunnel(
+  events: AnalyticsEvent[],
+  steps: Array<{ name: string; path: string }>
+): FunnelStep[] {
+  const sessions = buildSessions(events);
+  const sessionPaths: Map<string, Set<string>> = new Map();
+
+  for (const event of events) {
+    if (event.type !== "pageview") continue;
+    if (!sessionPaths.has(event.sessionId)) {
+      sessionPaths.set(event.sessionId, new Set());
+    }
+    sessionPaths.get(event.sessionId)!.add(event.path);
+  }
+
+  const result: FunnelStep[] = [];
+  let previousCount = sessions.length;
+
+  for (const step of steps) {
+    let count = 0;
+    for (const paths of sessionPaths.values()) {
+      if (paths.has(step.path)) count++;
+    }
+
+    const dropoff = previousCount - count;
+    const dropoffPercent = previousCount > 0 ? Math.round((dropoff / previousCount) * 100) : 0;
+
+    result.push({
+      name: step.name,
+      path: step.path,
+      count,
+      dropoff,
+      dropoffPercent,
+    });
+
+    previousCount = count;
+  }
+
+  return result;
+}
+```
+
+## Step 5: Create the Tracking Script
+
+Create `public/tracker.js` — the lightweight script that sites embed:
+
+```javascript
+(function () {
+  "use strict";
+
+  var API_URL = document.currentScript.getAttribute("data-api") || "/api/event";
+
+  // Generate a session ID without cookies
+  // Uses date + screen size + timezone as a loose session signal
+  function generateSessionId() {
+    var today = new Date().toISOString().split("T")[0];
+    var screen = window.screen.width + "x" + window.screen.height;
+    var tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    var raw = today + "|" + screen + "|" + tz;
+
+    // Simple hash
+    var hash = 0;
+    for (var i = 0; i < raw.length; i++) {
+      var char = raw.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return "s_" + Math.abs(hash).toString(36);
+  }
+
+  var sessionId = generateSessionId();
+
+  function send(type, data) {
+    var payload = JSON.stringify({
+      sessionId: sessionId,
+      type: type,
+      path: window.location.pathname,
+      referrer: document.referrer || "",
+      data: data || {},
+    });
+
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(API_URL, payload);
+    } else {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", API_URL, true);
+      xhr.setRequestHeader("Content-Type", "application/json");
+      xhr.send(payload);
+    }
+  }
+
+  // Track pageview
+  send("pageview");
+
+  // Track SPA navigation (pushState)
+  var originalPushState = history.pushState;
+  history.pushState = function () {
+    originalPushState.apply(this, arguments);
+    send("pageview");
+  };
+
+  window.addEventListener("popstate", function () {
+    send("pageview");
+  });
+
+  // Expose for custom events
+  window.trackEvent = function (name, data) {
+    send("event", Object.assign({ name: name }, data || {}));
+  };
+})();
+```
+
+The script uses `navigator.sendBeacon` for non-blocking delivery that survives page unloads. The session ID is derived from the date, screen size, and timezone — enough to group requests into sessions for one day, but not enough to identify or track an individual across days.
+
+## Step 6: Build the API Server
+
+Create `src/server/index.ts`:
+
+```typescript
+import express from "express";
+import cors from "cors";
+import { v4 as uuidv4 } from "uuid";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { storeEvent, getEventsRange } from "./store.js";
+import { aggregateDaily, computeFunnel } from "./aggregate.js";
+import type { AnalyticsEvent } from "./types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, "..", "..", "public")));
+
+// Collect events
+app.post("/api/event", async (req, res) => {
+  const {
+    sessionId,
+    type,
+    path: pagePath,
+    referrer,
+    data,
+  } = req.body as {
+    sessionId?: string;
+    type?: string;
+    path?: string;
+    referrer?: string;
+    data?: Record<string, string | number | boolean>;
+  };
+
+  if (!sessionId || !type || !pagePath) {
+    res.status(400).json({ error: "Missing required fields" });
+    return;
+  }
+
+  const event: AnalyticsEvent = {
+    id: uuidv4(),
+    sessionId,
+    type: type as AnalyticsEvent["type"],
+    path: pagePath,
+    referrer: referrer ?? "",
+    timestamp: new Date().toISOString(),
+    data,
+  };
+
+  await storeEvent(event);
+  res.status(201).json({ ok: true });
+});
+
+// Dashboard data
+app.get("/api/stats", async (req, res) => {
+  const { start, end } = req.query;
+  const startDate = (start as string) || new Date().toISOString().split("T")[0];
+  const endDate = (end as string) || startDate;
+
+  const events = await getEventsRange(startDate, endDate);
+  const stats = aggregateDaily(events);
+  res.json(stats);
+});
+
+// Funnel analysis
+app.post("/api/funnel", async (req, res) => {
+  const { start, end, steps } = req.body as {
+    start: string;
+    end: string;
+    steps: Array<{ name: string; path: string }>;
+  };
+
+  if (!start || !end || !steps?.length) {
+    res.status(400).json({ error: "start, end, and steps are required" });
+    return;
+  }
+
+  const events = await getEventsRange(start, end);
+  const funnel = computeFunnel(events, steps);
+  res.json({ funnel });
+});
+
+// CSV export
+app.get("/api/export", async (req, res) => {
+  const { start, end } = req.query;
+  const startDate = (start as string) || new Date().toISOString().split("T")[0];
+  const endDate = (end as string) || startDate;
+
+  const events = await getEventsRange(startDate, endDate);
+  const header = "id,sessionId,type,path,referrer,timestamp";
+  const rows = events.map(
+    (e) => `${e.id},${e.sessionId},${e.type},"${e.path}","${e.referrer}",${e.timestamp}`
+  );
+
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="analytics-${startDate}-${endDate}.csv"`
+  );
+  res.send([header, ...rows].join("\n"));
+});
+
+const PORT = Number(process.env.PORT) || 3005;
+app.listen(PORT, () => {
+  console.log(`Analytics server running on http://localhost:${PORT}`);
+});
+```
+
+## Step 7: Build the Dashboard UI
+
+Create `public/index.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Analytics Dashboard</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        background: #0a0a0f;
+        color: #f0f0f0;
+        padding: 24px;
+      }
+      h1 {
+        font-size: 22px;
+        margin-bottom: 8px;
+      }
+      .subtitle {
+        color: #6b6b75;
+        font-size: 14px;
+        margin-bottom: 24px;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 16px;
+        margin-bottom: 32px;
+      }
+      .metric-card {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 20px;
+      }
+      .metric-card .label {
+        font-size: 12px;
+        color: #6b6b75;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .metric-card .value {
+        font-size: 32px;
+        font-weight: 700;
+        margin-top: 4px;
+      }
+      .section {
+        margin-bottom: 32px;
+      }
+      .section h2 {
+        font-size: 16px;
+        margin-bottom: 12px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 8px 12px;
+        font-size: 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      th {
+        color: #6b6b75;
+        font-weight: 500;
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+      .bar-chart {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .bar-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .bar-label {
+        width: 200px;
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .bar-fill {
+        height: 24px;
+        background: #10b981;
+        border-radius: 4px;
+        min-width: 2px;
+        transition: width 300ms;
+      }
+      .bar-value {
+        font-size: 12px;
+        color: #a0a0a8;
+        min-width: 40px;
+      }
+      .controls {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 24px;
+      }
+      .controls input {
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        color: #f0f0f0;
+      }
+      .controls button {
+        padding: 8px 16px;
+        background: #10b981;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Analytics Dashboard</h1>
+    <p class="subtitle">Privacy-first, cookie-free analytics</p>
+    <div class="controls">
+      <input type="date" id="startDate" />
+      <input type="date" id="endDate" />
+      <button id="loadBtn">Load</button>
+      <button id="exportBtn">Export CSV</button>
+    </div>
+    <div class="metrics" id="metrics"></div>
+    <div class="section" id="pagesSection">
+      <h2>Top Pages</h2>
+      <div id="pagesChart" class="bar-chart"></div>
+    </div>
+    <div class="section" id="referrerSection">
+      <h2>Top Referrers</h2>
+      <div id="referrerChart" class="bar-chart"></div>
+    </div>
+    <script src="dashboard.js"></script>
+  </body>
+</html>
+```
+
+## Step 8: Implement the Dashboard Client
+
+Create `public/dashboard.js`:
+
+```javascript
+const today = new Date().toISOString().split("T")[0];
+document.getElementById("startDate").value = today;
+document.getElementById("endDate").value = today;
+
+async function loadStats() {
+  const start = document.getElementById("startDate").value;
+  const end = document.getElementById("endDate").value;
+  const res = await fetch(`/api/stats?start=${start}&end=${end}`);
+  const stats = await res.json();
+  renderMetrics(stats);
+  renderBarChart(
+    "pagesChart",
+    stats.topPages.map((p) => ({ label: p.path, value: p.views }))
+  );
+  renderBarChart(
+    "referrerChart",
+    stats.topReferrers.map((r) => ({ label: r.referrer, value: r.count }))
+  );
+}
+
+function renderMetrics(stats) {
+  document.getElementById("metrics").innerHTML = [
+    { label: "Page Views", value: stats.pageViews },
+    { label: "Sessions", value: stats.sessions },
+    { label: "Unique Visitors", value: stats.uniqueVisitors },
+    { label: "Bounce Rate", value: stats.bounceRate + "%" },
+  ]
+    .map(
+      (m) =>
+        `<div class="metric-card"><div class="label">${m.label}</div><div class="value">${m.value}</div></div>`
+    )
+    .join("");
+}
+
+function renderBarChart(containerId, data) {
+  const container = document.getElementById(containerId);
+  if (data.length === 0) {
+    container.innerHTML = "<p style='color:#6b6b75;font-size:13px;'>No data</p>";
+    return;
+  }
+  const max = Math.max(...data.map((d) => d.value), 1);
+  container.innerHTML = data
+    .map((d) => {
+      const width = Math.round((d.value / max) * 100);
+      return `<div class="bar-row"><span class="bar-label" title="${d.label}">${d.label}</span><div class="bar-fill" style="width:${width}%"></div><span class="bar-value">${d.value}</span></div>`;
+    })
+    .join("");
+}
+
+document.getElementById("loadBtn").addEventListener("click", loadStats);
+
+document.getElementById("exportBtn").addEventListener("click", () => {
+  const start = document.getElementById("startDate").value;
+  const end = document.getElementById("endDate").value;
+  window.open(`/api/export?start=${start}&end=${end}`, "_blank");
+});
+
+loadStats();
+```
+
+## Step 9: Seed Test Data
+
+Create `src/server/seed.ts` to generate realistic test data:
+
+```typescript
+import { v4 as uuidv4 } from "uuid";
+import { storeEvent } from "./store.js";
+import type { AnalyticsEvent } from "./types.js";
+
+const PAGES = ["/", "/about", "/pricing", "/docs", "/blog", "/contact", "/signup", "/dashboard"];
+const REFERRERS = [
+  "https://google.com",
+  "https://twitter.com",
+  "https://github.com",
+  "(direct)",
+  "https://reddit.com",
+];
+
+async function seed(): Promise<void> {
+  const today = new Date();
+  const sessionCount = 50 + Math.floor(Math.random() * 100);
+
+  for (let s = 0; s < sessionCount; s++) {
+    const sessionId = `s_${Math.random().toString(36).slice(2, 10)}`;
+    const referrer = REFERRERS[Math.floor(Math.random() * REFERRERS.length)];
+    const pageCount = 1 + Math.floor(Math.random() * 5);
+
+    for (let p = 0; p < pageCount; p++) {
+      const pagePath = PAGES[Math.floor(Math.random() * PAGES.length)];
+      const hour = Math.floor(Math.random() * 24);
+      const minute = Math.floor(Math.random() * 60);
+      const timestamp = new Date(today);
+      timestamp.setHours(hour, minute, 0, 0);
+
+      const event: AnalyticsEvent = {
+        id: uuidv4(),
+        sessionId,
+        type: "pageview",
+        path: pagePath,
+        referrer: p === 0 ? referrer : "",
+        timestamp: timestamp.toISOString(),
+      };
+
+      await storeEvent(event);
+    }
+  }
+
+  console.log(`Seeded ${sessionCount} sessions with pageview events.`);
+}
+
+seed();
+```
+
+Run the seeder:
+
+```bash
+npx ts-node --esm src/server/seed.ts
+```
+
+## Step 10: Run and Verify
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "start": "npx ts-node --esm src/server/index.ts",
+    "seed": "npx ts-node --esm src/server/seed.ts",
+    "build": "tsc"
+  }
+}
+```
+
+```bash
+npm run seed
+npm start
+```
+
+Open `http://localhost:3005`. The dashboard shows today's seeded data with metric cards, bar charts for top pages and referrers, and an export button that downloads a CSV.
+
+To track a real site, add this to any HTML page:
+
+```html
+<script
+  defer
+  src="http://localhost:3005/tracker.js"
+  data-api="http://localhost:3005/api/event"
+></script>
+```
+
+The tracker sends pageview events automatically. For custom events, call `window.trackEvent("signup", { plan: "free" })` from your application code.
+
+This system respects privacy by design: no cookies, no IP logging, no cross-site tracking. Sessions are ephemeral (reset daily), and the data cannot be used to identify individuals. Extensions to consider: hourly breakdown charts, real-time visitor count via SSE, geographic aggregation from timezone data, and A/B test result tracking.

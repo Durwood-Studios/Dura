@@ -1,0 +1,503 @@
+---
+title: "Build an API Testing Framework"
+description: "Create a declarative API testing framework with YAML test definitions, an HTTP runner, assertion engine, environment variables, and CI report output."
+slug: "api-testing-framework"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["testing", "api", "node", "assertions", "automation"]
+---
+
+## Overview
+
+Manual API testing with cURL or Postman is fine for exploration, but automated suites catch regressions before they reach production. In this tutorial you will build a declarative API testing framework where tests are defined in YAML files, executed by an HTTP runner, and validated by a composable assertion engine. The framework outputs both human-readable console reports and machine-readable JSON for CI pipelines.
+
+No external testing library is needed. You will write the runner, the assertion engine, and the reporter from scratch in TypeScript.
+
+**Prerequisites:** Node.js 18+, TypeScript basics, a terminal.
+
+## Step 1: Project Setup
+
+```bash
+mkdir api-test-framework && cd api-test-framework
+npm init -y
+npm install typescript tsx yaml --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir -p src tests
+```
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "test:api": "tsx src/runner.ts tests/",
+    "build": "tsc"
+  }
+}
+```
+
+## Step 2: Define the Test Schema
+
+Create `src/types.ts` with the shape of a YAML test file.
+
+```typescript
+// src/types.ts
+export interface TestSuite {
+  name: string;
+  baseUrl: string;
+  headers?: Record<string, string>;
+  tests: TestCase[];
+}
+
+export interface TestCase {
+  name: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  expect: Expectation;
+}
+
+export interface Expectation {
+  status?: number;
+  headers?: Record<string, string>;
+  body?: BodyAssertion;
+  maxResponseTime?: number;
+}
+
+export interface BodyAssertion {
+  equals?: unknown;
+  contains?: Record<string, unknown>;
+  hasKeys?: string[];
+  arrayLength?: { min?: number; max?: number };
+}
+
+export interface TestResult {
+  suite: string;
+  test: string;
+  passed: boolean;
+  duration: number;
+  errors: string[];
+}
+```
+
+## Step 3: Build the Environment Variable Resolver
+
+Create `src/env.ts`. This replaces `{{VAR_NAME}}` tokens in strings with environment variable values, letting you inject secrets and base URLs per environment.
+
+```typescript
+// src/env.ts
+const ENV_PATTERN = /\{\{(\w+)\}\}/g;
+
+export function resolveEnvVars(input: string): string {
+  return input.replace(ENV_PATTERN, (_match, varName: string) => {
+    const value = process.env[varName];
+    if (value === undefined) {
+      throw new Error(`Environment variable '${varName}' is not set`);
+    }
+    return value;
+  });
+}
+
+export function resolveDeep(obj: unknown): unknown {
+  if (typeof obj === "string") return resolveEnvVars(obj);
+  if (Array.isArray(obj)) return obj.map(resolveDeep);
+  if (obj !== null && typeof obj === "object") {
+    const resolved: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      resolved[key] = resolveDeep(value);
+    }
+    return resolved;
+  }
+  return obj;
+}
+```
+
+## Step 4: Build the HTTP Client
+
+Create `src/http-client.ts`. A thin wrapper around `fetch` that records timing and returns a normalized response.
+
+```typescript
+// src/http-client.ts
+export interface HttpResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: unknown;
+  duration: number;
+}
+
+export async function executeRequest(
+  baseUrl: string,
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  body?: unknown
+): Promise<HttpResponse> {
+  const url = `${baseUrl}${path}`;
+  const start = performance.now();
+
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...headers,
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    const duration = Math.round(performance.now() - start);
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+
+    let responseBody: unknown;
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      responseBody = await response.json();
+    } else {
+      responseBody = await response.text();
+    }
+
+    return { status: response.status, headers: responseHeaders, body: responseBody, duration };
+  } catch (error) {
+    const duration = Math.round(performance.now() - start);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Request to ${method} ${url} failed after ${duration}ms: ${message}`);
+  }
+}
+```
+
+## Step 5: Build the Assertion Engine
+
+Create `src/assertions.ts`. Each assertion function returns an array of error strings — empty means the assertion passed.
+
+```typescript
+// src/assertions.ts
+import { Expectation, HttpResponse } from "./types.js";
+
+type AssertionError = string;
+
+export function assertStatus(expected: number, actual: number): AssertionError[] {
+  if (expected !== actual) {
+    return [`Expected status ${expected}, got ${actual}`];
+  }
+  return [];
+}
+
+export function assertHeaders(
+  expected: Record<string, string>,
+  actual: Record<string, string>
+): AssertionError[] {
+  const errors: AssertionError[] = [];
+  for (const [key, value] of Object.entries(expected)) {
+    const actualValue = actual[key.toLowerCase()];
+    if (actualValue === undefined) {
+      errors.push(`Missing header '${key}'`);
+    } else if (!actualValue.includes(value)) {
+      errors.push(`Header '${key}': expected to contain '${value}', got '${actualValue}'`);
+    }
+  }
+  return errors;
+}
+
+export function assertBody(
+  assertion: NonNullable<Expectation["body"]>,
+  actual: unknown
+): AssertionError[] {
+  const errors: AssertionError[] = [];
+
+  if (assertion.equals !== undefined) {
+    if (JSON.stringify(actual) !== JSON.stringify(assertion.equals)) {
+      errors.push(`Body does not equal expected value`);
+    }
+  }
+
+  if (assertion.contains && typeof actual === "object" && actual !== null) {
+    const obj = actual as Record<string, unknown>;
+    for (const [key, value] of Object.entries(assertion.contains)) {
+      if (JSON.stringify(obj[key]) !== JSON.stringify(value)) {
+        errors.push(
+          `Body.${key}: expected ${JSON.stringify(value)}, got ${JSON.stringify(obj[key])}`
+        );
+      }
+    }
+  }
+
+  if (assertion.hasKeys && typeof actual === "object" && actual !== null) {
+    const keys = Object.keys(actual as Record<string, unknown>);
+    for (const key of assertion.hasKeys) {
+      if (!keys.includes(key)) {
+        errors.push(`Body missing key '${key}'`);
+      }
+    }
+  }
+
+  if (assertion.arrayLength && Array.isArray(actual)) {
+    if (assertion.arrayLength.min !== undefined && actual.length < assertion.arrayLength.min) {
+      errors.push(`Array length ${actual.length} is less than min ${assertion.arrayLength.min}`);
+    }
+    if (assertion.arrayLength.max !== undefined && actual.length > assertion.arrayLength.max) {
+      errors.push(`Array length ${actual.length} is greater than max ${assertion.arrayLength.max}`);
+    }
+  }
+
+  return errors;
+}
+
+export function assertResponseTime(max: number, actual: number): AssertionError[] {
+  if (actual > max) {
+    return [`Response time ${actual}ms exceeds max ${max}ms`];
+  }
+  return [];
+}
+
+export function runAssertions(expectation: Expectation, response: HttpResponse): AssertionError[] {
+  const errors: AssertionError[] = [];
+
+  if (expectation.status !== undefined) {
+    errors.push(...assertStatus(expectation.status, response.status));
+  }
+  if (expectation.headers) {
+    errors.push(...assertHeaders(expectation.headers, response.headers));
+  }
+  if (expectation.body) {
+    errors.push(...assertBody(expectation.body, response.body));
+  }
+  if (expectation.maxResponseTime !== undefined) {
+    errors.push(...assertResponseTime(expectation.maxResponseTime, response.duration));
+  }
+
+  return errors;
+}
+```
+
+## Step 6: Build the Reporter
+
+Create `src/reporter.ts`. Outputs results to the console with pass/fail coloring and writes a `results.json` file for CI.
+
+```typescript
+// src/reporter.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { TestResult } from "./types.js";
+
+const GREEN = "\x1b[32m";
+const RED = "\x1b[31m";
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+
+export function printResults(results: TestResult[]): void {
+  const passed = results.filter((r) => r.passed);
+  const failed = results.filter((r) => !r.passed);
+
+  console.log(`\n${BOLD}Test Results${RESET}\n`);
+
+  for (const result of results) {
+    const icon = result.passed ? `${GREEN}PASS${RESET}` : `${RED}FAIL${RESET}`;
+    console.log(`  ${icon} [${result.suite}] ${result.test} (${result.duration}ms)`);
+
+    for (const error of result.errors) {
+      console.log(`       ${RED}-> ${error}${RESET}`);
+    }
+  }
+
+  console.log(
+    `\n  ${GREEN}${passed.length} passed${RESET}, ${RED}${failed.length} failed${RESET}, ${results.length} total\n`
+  );
+}
+
+export function writeJsonReport(results: TestResult[], outputDir: string): void {
+  const report = {
+    timestamp: new Date().toISOString(),
+    summary: {
+      total: results.length,
+      passed: results.filter((r) => r.passed).length,
+      failed: results.filter((r) => !r.passed).length,
+    },
+    results,
+  };
+
+  const outputPath = path.join(outputDir, "results.json");
+  fs.writeFileSync(outputPath, JSON.stringify(report, null, 2));
+  console.log(`Report written to ${outputPath}`);
+}
+```
+
+## Step 7: Build the Test Runner
+
+Create `src/runner.ts`. This loads YAML files, resolves environment variables, executes tests, and outputs results.
+
+```typescript
+// src/runner.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { parse } from "yaml";
+import { TestSuite, TestResult } from "./types.js";
+import { resolveDeep } from "./env.js";
+import { executeRequest } from "./http-client.js";
+import { runAssertions } from "./assertions.js";
+import { printResults, writeJsonReport } from "./reporter.js";
+
+async function loadSuites(dir: string): Promise<TestSuite[]> {
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"));
+  const suites: TestSuite[] = [];
+
+  for (const file of files) {
+    const content = fs.readFileSync(path.join(dir, file), "utf-8");
+    const parsed = parse(content) as TestSuite;
+    const resolved = resolveDeep(parsed) as TestSuite;
+    suites.push(resolved);
+  }
+
+  return suites;
+}
+
+async function runSuite(suite: TestSuite): Promise<TestResult[]> {
+  const results: TestResult[] = [];
+
+  for (const test of suite.tests) {
+    const mergedHeaders = { ...suite.headers, ...test.headers };
+
+    try {
+      const response = await executeRequest(
+        suite.baseUrl,
+        test.method,
+        test.path,
+        mergedHeaders,
+        test.body
+      );
+
+      const errors = runAssertions(test.expect, response);
+      results.push({
+        suite: suite.name,
+        test: test.name,
+        passed: errors.length === 0,
+        duration: response.duration,
+        errors,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      results.push({
+        suite: suite.name,
+        test: test.name,
+        passed: false,
+        duration: 0,
+        errors: [message],
+      });
+    }
+  }
+
+  return results;
+}
+
+async function main(): Promise<void> {
+  const testDir = process.argv[2];
+  if (!testDir) {
+    console.error("Usage: tsx src/runner.ts <test-directory>");
+    process.exit(1);
+  }
+
+  const absoluteDir = path.resolve(testDir);
+  const suites = await loadSuites(absoluteDir);
+
+  if (suites.length === 0) {
+    console.log("No test suites found.");
+    return;
+  }
+
+  const allResults: TestResult[] = [];
+  for (const suite of suites) {
+    console.log(`Running suite: ${suite.name}`);
+    const results = await runSuite(suite);
+    allResults.push(...results);
+  }
+
+  printResults(allResults);
+  writeJsonReport(allResults, absoluteDir);
+
+  const hasFailed = allResults.some((r) => !r.passed);
+  process.exit(hasFailed ? 1 : 0);
+}
+
+main().catch((error) => {
+  console.error("Fatal error:", error);
+  process.exit(1);
+});
+```
+
+## Step 8: Write a Sample Test Suite
+
+Create `tests/jsonplaceholder.yaml` to test against the free JSONPlaceholder API.
+
+```yaml
+# tests/jsonplaceholder.yaml
+name: JSONPlaceholder API
+baseUrl: https://jsonplaceholder.typicode.com
+headers:
+  Accept: application/json
+
+tests:
+  - name: Get all posts
+    method: GET
+    path: /posts
+    expect:
+      status: 200
+      body:
+        arrayLength:
+          min: 1
+          max: 100
+
+  - name: Get single post
+    method: GET
+    path: /posts/1
+    expect:
+      status: 200
+      body:
+        hasKeys: ["id", "title", "body", "userId"]
+        contains:
+          id: 1
+
+  - name: Create a post
+    method: POST
+    path: /posts
+    body:
+      title: "Test Post"
+      body: "This is a test."
+      userId: 1
+    expect:
+      status: 201
+      body:
+        contains:
+          title: "Test Post"
+
+  - name: Get nonexistent post
+    method: GET
+    path: /posts/99999
+    expect:
+      status: 404
+
+  - name: Response time check
+    method: GET
+    path: /posts/1
+    expect:
+      status: 200
+      maxResponseTime: 5000
+```
+
+Run the tests:
+
+```bash
+npm run test:api
+```
+
+You should see pass/fail output for each test and a `results.json` file in the `tests/` directory. The exit code is `1` if any test fails, making this CI-friendly — pipe it into GitHub Actions or any CI system and it will report failures automatically.
+
+**Extend ideas:**
+
+- Add authentication helpers (`bearer`, `basic`) that inject tokens from environment variables.
+- Support chaining: use a value from one test's response as input to the next.
+- Add retry logic for flaky endpoints with configurable backoff.
+- Generate HTML reports from the JSON output.

@@ -1,0 +1,780 @@
+---
+title: "Build a Kubernetes Deployment Tool"
+description: "Create a CLI tool that generates Kubernetes YAML manifests, deploys to clusters, performs health checks, supports rollback, and streams logs."
+slug: "kubernetes-deployer"
+difficulty: "advanced"
+estimatedMinutes: 210
+steps: 10
+tags: ["kubernetes", "deployment", "yaml", "docker", "devops"]
+---
+
+## Overview
+
+Deploying applications to Kubernetes involves a web of YAML manifests, kubectl commands, health checks, and rollback procedures. In this tutorial, you will build a deployment CLI tool in TypeScript that generates Kubernetes manifests from a simple configuration file, deploys them to a cluster, monitors health checks, supports automatic rollback on failure, and streams pod logs for debugging.
+
+This tool abstracts the complexity of Kubernetes deployments into a single command while keeping the generated manifests transparent and editable. You will learn how Kubernetes resources fit together, how to interact with kubectl programmatically, and how to build reliable deployment pipelines with safety checks.
+
+Prerequisites: a Kubernetes cluster (minikube, kind, Docker Desktop, or a cloud cluster) and kubectl configured on your PATH. The tool itself runs on macOS, Windows, and Linux.
+
+## Step 1: Project Setup
+
+```bash
+mkdir k8s-deployer && cd k8s-deployer
+npm init -y
+npm install -D typescript @types/node
+npm install yaml zod
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir -p src/generators src/core templates
+```
+
+Update `package.json`:
+
+```json
+{
+  "scripts": {
+    "build": "tsc",
+    "deploy": "tsc && node dist/cli.js"
+  }
+}
+```
+
+## Step 2: Deployment Configuration Schema
+
+Create `src/core/types.ts`:
+
+```typescript
+import { z } from "zod";
+
+export const deployConfigSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z][a-z0-9-]*$/),
+  namespace: z.string().default("default"),
+  image: z.string().min(1),
+  tag: z.string().default("latest"),
+  replicas: z.number().int().min(1).max(100).default(2),
+  port: z.number().int().min(1).max(65535),
+  env: z.record(z.string()).optional(),
+  resources: z
+    .object({
+      cpuRequest: z.string().default("100m"),
+      cpuLimit: z.string().default("500m"),
+      memoryRequest: z.string().default("128Mi"),
+      memoryLimit: z.string().default("512Mi"),
+    })
+    .default({}),
+  healthCheck: z
+    .object({
+      path: z.string().default("/health"),
+      port: z.number().optional(),
+      initialDelay: z.number().default(10),
+      period: z.number().default(10),
+      failureThreshold: z.number().default(3),
+    })
+    .default({}),
+  ingress: z
+    .object({
+      host: z.string(),
+      tls: z.boolean().default(false),
+    })
+    .optional(),
+  rollback: z
+    .object({
+      enabled: z.boolean().default(true),
+      timeoutSeconds: z.number().default(120),
+    })
+    .default({}),
+});
+
+export type DeployConfig = z.infer<typeof deployConfigSchema>;
+
+export interface DeployResult {
+  success: boolean;
+  manifests: string[];
+  appliedAt: string;
+  rollbackPerformed: boolean;
+  healthCheckPassed: boolean;
+  errors: string[];
+}
+```
+
+## Step 3: Deployment Manifest Generator
+
+Create `src/generators/deployment.ts`:
+
+```typescript
+import type { DeployConfig } from "../core/types.js";
+
+export function generateDeployment(config: DeployConfig): Record<string, unknown> {
+  const envVars = config.env
+    ? Object.entries(config.env).map(([name, value]) => ({ name, value }))
+    : [];
+
+  return {
+    apiVersion: "apps/v1",
+    kind: "Deployment",
+    metadata: {
+      name: config.name,
+      namespace: config.namespace,
+      labels: {
+        app: config.name,
+        "managed-by": "k8s-deployer",
+      },
+    },
+    spec: {
+      replicas: config.replicas,
+      selector: {
+        matchLabels: { app: config.name },
+      },
+      strategy: {
+        type: "RollingUpdate",
+        rollingUpdate: {
+          maxSurge: 1,
+          maxUnavailable: 0,
+        },
+      },
+      template: {
+        metadata: {
+          labels: {
+            app: config.name,
+            version: config.tag,
+          },
+        },
+        spec: {
+          containers: [
+            {
+              name: config.name,
+              image: `${config.image}:${config.tag}`,
+              ports: [{ containerPort: config.port }],
+              env: envVars.length > 0 ? envVars : undefined,
+              resources: {
+                requests: {
+                  cpu: config.resources.cpuRequest,
+                  memory: config.resources.memoryRequest,
+                },
+                limits: {
+                  cpu: config.resources.cpuLimit,
+                  memory: config.resources.memoryLimit,
+                },
+              },
+              livenessProbe: {
+                httpGet: {
+                  path: config.healthCheck.path,
+                  port: config.healthCheck.port ?? config.port,
+                },
+                initialDelaySeconds: config.healthCheck.initialDelay,
+                periodSeconds: config.healthCheck.period,
+                failureThreshold: config.healthCheck.failureThreshold,
+              },
+              readinessProbe: {
+                httpGet: {
+                  path: config.healthCheck.path,
+                  port: config.healthCheck.port ?? config.port,
+                },
+                initialDelaySeconds: 5,
+                periodSeconds: 5,
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+```
+
+## Step 4: Service and Ingress Generators
+
+Create `src/generators/service.ts`:
+
+```typescript
+import type { DeployConfig } from "../core/types.js";
+
+export function generateService(config: DeployConfig): Record<string, unknown> {
+  return {
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: {
+      name: config.name,
+      namespace: config.namespace,
+      labels: {
+        app: config.name,
+        "managed-by": "k8s-deployer",
+      },
+    },
+    spec: {
+      selector: { app: config.name },
+      ports: [
+        {
+          port: 80,
+          targetPort: config.port,
+          protocol: "TCP",
+        },
+      ],
+      type: config.ingress ? "ClusterIP" : "LoadBalancer",
+    },
+  };
+}
+
+export function generateIngress(config: DeployConfig): Record<string, unknown> | null {
+  if (!config.ingress) return null;
+
+  const spec: Record<string, unknown> = {
+    rules: [
+      {
+        host: config.ingress.host,
+        http: {
+          paths: [
+            {
+              path: "/",
+              pathType: "Prefix",
+              backend: {
+                service: {
+                  name: config.name,
+                  port: { number: 80 },
+                },
+              },
+            },
+          ],
+        },
+      },
+    ],
+  };
+
+  if (config.ingress.tls) {
+    spec["tls"] = [
+      {
+        hosts: [config.ingress.host],
+        secretName: `${config.name}-tls`,
+      },
+    ];
+  }
+
+  return {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "Ingress",
+    metadata: {
+      name: config.name,
+      namespace: config.namespace,
+      labels: {
+        app: config.name,
+        "managed-by": "k8s-deployer",
+      },
+      annotations: {
+        "kubernetes.io/ingress.class": "nginx",
+      },
+    },
+    spec,
+  };
+}
+```
+
+## Step 5: Kubectl Wrapper
+
+Create `src/core/kubectl.ts`:
+
+```typescript
+import { execSync, spawn } from "node:child_process";
+
+interface KubectlResult {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+export function kubectl(args: string[], options?: { timeout?: number }): KubectlResult {
+  const timeout = options?.timeout ?? 30_000;
+
+  try {
+    const stdout = execSync(`kubectl ${args.join(" ")}`, {
+      encoding: "utf8",
+      timeout,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return { success: true, stdout: stdout.trim(), stderr: "" };
+  } catch (error: unknown) {
+    const execError = error as { stdout?: string; stderr?: string; message: string };
+    return {
+      success: false,
+      stdout: execError.stdout?.trim() ?? "",
+      stderr: execError.stderr?.trim() ?? execError.message,
+    };
+  }
+}
+
+export function kubectlApply(yamlContent: string): KubectlResult {
+  try {
+    const stdout = execSync("kubectl apply -f -", {
+      input: yamlContent,
+      encoding: "utf8",
+      timeout: 30_000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return { success: true, stdout: stdout.trim(), stderr: "" };
+  } catch (error: unknown) {
+    const execError = error as { stdout?: string; stderr?: string; message: string };
+    return {
+      success: false,
+      stdout: execError.stdout?.trim() ?? "",
+      stderr: execError.stderr?.trim() ?? execError.message,
+    };
+  }
+}
+
+export function streamLogs(name: string, namespace: string): void {
+  const proc = spawn(
+    "kubectl",
+    ["logs", "-f", "-l", `app=${name}`, "-n", namespace, "--tail=50", "--all-containers=true"],
+    { stdio: "inherit" }
+  );
+
+  process.on("SIGINT", () => {
+    proc.kill();
+    process.exit(0);
+  });
+}
+
+export function checkClusterConnection(): boolean {
+  const result = kubectl(["cluster-info"], { timeout: 10_000 });
+  return result.success;
+}
+```
+
+## Step 6: Health Check Monitor
+
+Create `src/core/health.ts`:
+
+```typescript
+import { kubectl } from "./kubectl.js";
+
+interface HealthStatus {
+  ready: boolean;
+  availableReplicas: number;
+  desiredReplicas: number;
+  message: string;
+}
+
+export function checkDeploymentHealth(name: string, namespace: string): HealthStatus {
+  const result = kubectl([
+    "get",
+    "deployment",
+    name,
+    "-n",
+    namespace,
+    "-o",
+    "jsonpath={.status.availableReplicas},{.status.replicas},{.status.conditions[?(@.type=='Available')].status}",
+  ]);
+
+  if (!result.success) {
+    return {
+      ready: false,
+      availableReplicas: 0,
+      desiredReplicas: 0,
+      message: result.stderr,
+    };
+  }
+
+  const parts = result.stdout.split(",");
+  const available = parseInt(parts[0] || "0", 10);
+  const desired = parseInt(parts[1] || "0", 10);
+  const isAvailable = parts[2] === "True";
+
+  return {
+    ready: isAvailable && available >= desired,
+    availableReplicas: available,
+    desiredReplicas: desired,
+    message: isAvailable ? "Deployment healthy" : `${available}/${desired} replicas ready`,
+  };
+}
+
+export async function waitForHealthy(
+  name: string,
+  namespace: string,
+  timeoutSeconds: number,
+  onProgress: (status: HealthStatus) => void
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  const pollInterval = 5000;
+
+  while (Date.now() < deadline) {
+    const status = checkDeploymentHealth(name, namespace);
+    onProgress(status);
+
+    if (status.ready) return true;
+
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+
+  return false;
+}
+```
+
+## Step 7: Rollback Manager
+
+Create `src/core/rollback.ts`:
+
+```typescript
+import { kubectl } from "./kubectl.js";
+
+interface RollbackResult {
+  success: boolean;
+  previousRevision: string;
+  message: string;
+}
+
+export function getRevisionHistory(name: string, namespace: string): string[] {
+  const result = kubectl(["rollout", "history", `deployment/${name}`, "-n", namespace]);
+
+  if (!result.success) return [];
+
+  return result.stdout
+    .split("\n")
+    .filter((line) => /^\d+/.test(line.trim()))
+    .map((line) => line.trim().split(/\s+/)[0]);
+}
+
+export function rollbackDeployment(name: string, namespace: string): RollbackResult {
+  const revisions = getRevisionHistory(name, namespace);
+  const previousRevision = revisions.length >= 2 ? revisions[revisions.length - 2] : "unknown";
+
+  console.log(`[ROLLBACK] Rolling back ${name} to previous revision...`);
+
+  const result = kubectl(["rollout", "undo", `deployment/${name}`, "-n", namespace]);
+
+  if (result.success) {
+    console.log(`[ROLLBACK] Successfully rolled back to revision ${previousRevision}`);
+    return {
+      success: true,
+      previousRevision,
+      message: result.stdout,
+    };
+  }
+
+  console.error(`[ROLLBACK] Failed: ${result.stderr}`);
+  return {
+    success: false,
+    previousRevision,
+    message: result.stderr,
+  };
+}
+
+export function getDeploymentStatus(name: string, namespace: string): string {
+  const result = kubectl([
+    "rollout",
+    "status",
+    `deployment/${name}`,
+    "-n",
+    namespace,
+    "--timeout=5s",
+  ]);
+
+  return result.success ? result.stdout : result.stderr;
+}
+```
+
+## Step 8: Deployment Pipeline
+
+Create `src/core/pipeline.ts`:
+
+```typescript
+import { stringify } from "yaml";
+import { generateDeployment } from "../generators/deployment.js";
+import { generateService, generateIngress } from "../generators/service.js";
+import { kubectlApply, checkClusterConnection } from "./kubectl.js";
+import { waitForHealthy } from "./health.js";
+import { rollbackDeployment } from "./rollback.js";
+import type { DeployConfig, DeployResult } from "./types.js";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+
+export async function deploy(config: DeployConfig): Promise<DeployResult> {
+  const result: DeployResult = {
+    success: false,
+    manifests: [],
+    appliedAt: new Date().toISOString(),
+    rollbackPerformed: false,
+    healthCheckPassed: false,
+    errors: [],
+  };
+
+  // Pre-flight checks
+  console.log("[DEPLOY] Checking cluster connection...");
+  if (!checkClusterConnection()) {
+    result.errors.push("Cannot connect to Kubernetes cluster. Check kubectl configuration.");
+    return result;
+  }
+  console.log("[DEPLOY] Cluster connected.");
+
+  // Generate manifests
+  console.log("[DEPLOY] Generating manifests...");
+  const manifests: Record<string, unknown>[] = [];
+
+  manifests.push(generateDeployment(config));
+  manifests.push(generateService(config));
+
+  const ingress = generateIngress(config);
+  if (ingress) manifests.push(ingress);
+
+  // Write manifests to disk for transparency
+  const outputDir = join(process.cwd(), ".k8s-deploy", config.name);
+  mkdirSync(outputDir, { recursive: true });
+
+  manifests.forEach((manifest, index) => {
+    const kind = (manifest["kind"] as string).toLowerCase();
+    const filename = `${index}-${kind}.yaml`;
+    const yaml = stringify(manifest);
+    writeFileSync(join(outputDir, filename), yaml);
+    result.manifests.push(filename);
+    console.log(`[DEPLOY] Generated ${filename}`);
+  });
+
+  // Apply manifests
+  console.log("[DEPLOY] Applying manifests...");
+  const combinedYaml = manifests.map((m) => stringify(m)).join("---\n");
+  const applyResult = kubectlApply(combinedYaml);
+
+  if (!applyResult.success) {
+    result.errors.push(`kubectl apply failed: ${applyResult.stderr}`);
+    return result;
+  }
+  console.log("[DEPLOY] Manifests applied.");
+  console.log(applyResult.stdout);
+
+  // Wait for healthy
+  console.log(`[DEPLOY] Waiting for healthy (timeout: ${config.rollback.timeoutSeconds}s)...`);
+  const isHealthy = await waitForHealthy(
+    config.name,
+    config.namespace,
+    config.rollback.timeoutSeconds,
+    (status) => {
+      console.log(
+        `[HEALTH] ${status.message} (${status.availableReplicas}/${status.desiredReplicas})`
+      );
+    }
+  );
+
+  result.healthCheckPassed = isHealthy;
+
+  if (!isHealthy && config.rollback.enabled) {
+    console.log("[DEPLOY] Health check failed. Initiating rollback...");
+    const rollback = rollbackDeployment(config.name, config.namespace);
+    result.rollbackPerformed = true;
+
+    if (!rollback.success) {
+      result.errors.push(`Rollback failed: ${rollback.message}`);
+    }
+
+    result.errors.push("Deployment failed health checks and was rolled back.");
+    return result;
+  }
+
+  if (!isHealthy) {
+    result.errors.push("Deployment failed health checks. Rollback disabled.");
+    return result;
+  }
+
+  result.success = true;
+  console.log("[DEPLOY] Deployment successful!");
+  return result;
+}
+```
+
+## Step 9: CLI Interface
+
+Create `src/cli.ts`:
+
+```typescript
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { stringify } from "yaml";
+import { deployConfigSchema } from "./core/types.js";
+import { deploy } from "./core/pipeline.js";
+import { streamLogs } from "./core/kubectl.js";
+import { generateDeployment } from "./generators/deployment.js";
+import { generateService, generateIngress } from "./generators/service.js";
+
+function printUsage(): void {
+  console.log(`
+k8s-deployer - Kubernetes Deployment Tool
+
+Usage:
+  npm run deploy -- apply <config.json>     Deploy to cluster
+  npm run deploy -- generate <config.json>  Generate manifests only
+  npm run deploy -- logs <name> [namespace] Stream pod logs
+  npm run deploy -- init                    Create example config
+`);
+}
+
+function init(): void {
+  const example = {
+    name: "my-app",
+    namespace: "default",
+    image: "my-registry/my-app",
+    tag: "v1.0.0",
+    replicas: 2,
+    port: 3000,
+    env: {
+      NODE_ENV: "production",
+    },
+    resources: {
+      cpuRequest: "100m",
+      cpuLimit: "500m",
+      memoryRequest: "128Mi",
+      memoryLimit: "512Mi",
+    },
+    healthCheck: {
+      path: "/health",
+      initialDelay: 10,
+      period: 10,
+      failureThreshold: 3,
+    },
+    rollback: {
+      enabled: true,
+      timeoutSeconds: 120,
+    },
+  };
+
+  writeFileSync("deploy.json", JSON.stringify(example, null, 2));
+  console.log("Created deploy.json with example configuration.");
+}
+
+function loadConfig(filePath: string): ReturnType<typeof deployConfigSchema.parse> {
+  const fullPath = resolve(filePath);
+  if (!existsSync(fullPath)) {
+    console.error(`Config file not found: ${fullPath}`);
+    process.exit(1);
+  }
+
+  const raw = JSON.parse(readFileSync(fullPath, "utf8"));
+  const result = deployConfigSchema.safeParse(raw);
+
+  if (!result.success) {
+    console.error("Invalid configuration:");
+    result.error.errors.forEach((err) => {
+      console.error(`  ${err.path.join(".")}: ${err.message}`);
+    });
+    process.exit(1);
+  }
+
+  return result.data;
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const command = args[0];
+
+  switch (command) {
+    case "apply": {
+      const config = loadConfig(args[1]);
+      const result = await deploy(config);
+
+      console.log("\n=== Deployment Summary ===");
+      console.log(`Status: ${result.success ? "SUCCESS" : "FAILED"}`);
+      console.log(`Manifests: ${result.manifests.join(", ")}`);
+      console.log(`Health: ${result.healthCheckPassed ? "PASSED" : "FAILED"}`);
+      console.log(`Rollback: ${result.rollbackPerformed ? "YES" : "NO"}`);
+
+      if (result.errors.length > 0) {
+        console.log("Errors:");
+        result.errors.forEach((e) => console.log(`  - ${e}`));
+      }
+
+      process.exit(result.success ? 0 : 1);
+    }
+
+    case "generate": {
+      const config = loadConfig(args[1]);
+      const manifests = [
+        generateDeployment(config),
+        generateService(config),
+        generateIngress(config),
+      ].filter(Boolean);
+
+      const yaml = manifests.map((m) => stringify(m)).join("---\n");
+      console.log(yaml);
+      break;
+    }
+
+    case "logs": {
+      const name = args[1];
+      const namespace = args[2] || "default";
+
+      if (!name) {
+        console.error("Usage: npm run deploy -- logs <name> [namespace]");
+        process.exit(1);
+      }
+
+      streamLogs(name, namespace);
+      break;
+    }
+
+    case "init":
+      init();
+      break;
+
+    default:
+      printUsage();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error("Fatal:", error instanceof Error ? error.message : error);
+  process.exit(1);
+});
+```
+
+## Step 10: Test the Full Workflow
+
+First, create a test deployment configuration:
+
+```bash
+npm run build
+npm run deploy -- init
+```
+
+This creates `deploy.json`. For testing with a local cluster like minikube or kind, update the image to something available:
+
+```json
+{
+  "name": "nginx-test",
+  "namespace": "default",
+  "image": "nginx",
+  "tag": "alpine",
+  "replicas": 2,
+  "port": 80,
+  "healthCheck": {
+    "path": "/",
+    "initialDelay": 5,
+    "period": 5,
+    "failureThreshold": 3
+  },
+  "rollback": {
+    "enabled": true,
+    "timeoutSeconds": 60
+  }
+}
+```
+
+Generate manifests without applying:
+
+```bash
+npm run deploy -- generate deploy.json
+```
+
+Review the generated YAML, then deploy:
+
+```bash
+npm run deploy -- apply deploy.json
+```
+
+Watch the pipeline execute: cluster connection check, manifest generation, kubectl apply, health monitoring with progress updates, and a final status report. The generated YAML files are saved to `.k8s-deploy/nginx-test/` for inspection and version control.
+
+Stream logs from the deployed pods:
+
+```bash
+npm run deploy -- logs nginx-test
+```
+
+To test rollback, modify the config to reference a nonexistent image tag and redeploy. The health check will fail, and the tool will automatically roll back to the previous working revision. This safety net is what makes the tool production-grade: every deployment either succeeds and passes health checks, or it rolls back to the last known good state.

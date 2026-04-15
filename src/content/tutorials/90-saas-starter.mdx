@@ -1,0 +1,815 @@
+---
+title: "Build a SaaS Starter Kit"
+description: "Create a complete SaaS boilerplate with authentication, team management, Stripe billing, dashboard, settings, and deployment."
+slug: "saas-starter"
+difficulty: "advanced"
+estimatedMinutes: 240
+steps: 12
+tags: ["saas", "nextjs", "auth", "stripe", "full-stack"]
+---
+
+## Overview
+
+Every SaaS application shares the same foundational features: user authentication, team/organization management, subscription billing, a dashboard, and settings pages. Building these from scratch every time wastes weeks. In this tutorial, you will build a production-ready SaaS starter kit using Next.js that you can clone and customize for any product.
+
+The stack: Next.js 15 (App Router), TypeScript, Tailwind CSS, NextAuth.js for authentication, Stripe for billing, and SQLite (via `better-sqlite3`) for the database so the entire system runs locally without external services. When you are ready to scale, swap SQLite for PostgreSQL and add your preferred hosting.
+
+## Step 1: Initialize the Project
+
+```bash
+npx create-next-app@latest saas-starter --typescript --tailwind --app --no-src-dir
+cd saas-starter
+npm install next-auth @auth/core better-sqlite3 stripe zod
+npm install -D @types/better-sqlite3
+```
+
+Create the environment file:
+
+```bash
+# .env.local
+NEXTAUTH_SECRET=your-random-secret-at-least-32-chars
+NEXTAUTH_URL=http://localhost:3000
+STRIPE_SECRET_KEY=sk_test_your_key
+STRIPE_PUBLISHABLE_KEY=pk_test_your_key
+STRIPE_WEBHOOK_SECRET=whsec_your_key
+DATABASE_PATH=./data/saas.db
+```
+
+## Step 2: Set Up the Database Layer
+
+Create a database abstraction that handles schema creation and queries.
+
+```typescript
+// lib/db.ts
+import Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+
+const DB_PATH = process.env.DATABASE_PATH ?? "./data/saas.db";
+mkdirSync(dirname(DB_PATH), { recursive: true });
+
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+
+// Initialize schema
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT,
+    avatar_url TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS teams (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    plan TEXT NOT NULL DEFAULT 'free',
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS team_members (
+    team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('owner', 'admin', 'member')),
+    joined_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (team_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS invitations (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    invited_by TEXT NOT NULL REFERENCES users(id),
+    expires_at TEXT NOT NULL,
+    accepted_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+export { db };
+```
+
+## Step 3: Build User Authentication
+
+Implement email/password authentication with secure password hashing.
+
+```typescript
+// lib/auth.ts
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { db } from "./db.js";
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  avatar_url: string | null;
+  created_at: string;
+}
+
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16).toString("hex");
+  const hash = createHash("sha256")
+    .update(salt + password)
+    .digest("hex");
+  return `${salt}:${hash}`;
+}
+
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [salt, hash] = stored.split(":");
+  const attempt = createHash("sha256")
+    .update(salt + password)
+    .digest("hex");
+  return timingSafeEqual(Buffer.from(hash), Buffer.from(attempt));
+}
+
+export function createUser(name: string, email: string, passwordHash: string): User {
+  const id = crypto.randomUUID();
+  db.prepare("INSERT INTO users (id, name, email, password_hash) VALUES (?, ?, ?, ?)").run(
+    id,
+    name,
+    email,
+    passwordHash
+  );
+
+  return { id, name, email, avatar_url: null, created_at: new Date().toISOString() };
+}
+
+export function getUserByEmail(email: string): (User & { password_hash: string }) | undefined {
+  return db.prepare("SELECT * FROM users WHERE email = ?").get(email) as
+    | (User & { password_hash: string })
+    | undefined;
+}
+
+export function getUserById(id: string): User | undefined {
+  return db
+    .prepare("SELECT id, name, email, avatar_url, created_at FROM users WHERE id = ?")
+    .get(id) as User | undefined;
+}
+```
+
+## Step 4: Implement Registration and Login API Routes
+
+```typescript
+// app/api/auth/register/route.ts
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { hashPassword, createUser, getUserByEmail } from "@/lib/auth";
+
+const registerSchema = z.object({
+  name: z.string().min(2).max(100),
+  email: z.string().email(),
+  password: z.string().min(8).max(128),
+});
+
+export async function POST(request: Request): Promise<NextResponse> {
+  try {
+    const body = await request.json();
+    const data = registerSchema.parse(body);
+
+    const existing = getUserByEmail(data.email);
+    if (existing) {
+      return NextResponse.json({ error: "Email already registered" }, { status: 409 });
+    }
+
+    const passwordHash = await hashPassword(data.password);
+    const user = createUser(data.name, data.email, passwordHash);
+
+    return NextResponse.json({ id: user.id, name: user.name, email: user.email }, { status: 201 });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return NextResponse.json({ error: err.errors[0].message }, { status: 400 });
+    }
+    return NextResponse.json({ error: "Registration failed" }, { status: 500 });
+  }
+}
+```
+
+```typescript
+// app/api/auth/login/route.ts
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { getUserByEmail, verifyPassword } from "@/lib/auth";
+import { createSession } from "@/lib/session";
+
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string(),
+});
+
+export async function POST(request: Request): Promise<NextResponse> {
+  try {
+    const body = await request.json();
+    const data = loginSchema.parse(body);
+
+    const user = getUserByEmail(data.email);
+    if (!user || !user.password_hash) {
+      return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+    }
+
+    const isValid = await verifyPassword(data.password, user.password_hash);
+    if (!isValid) {
+      return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+    }
+
+    const token = createSession(user.id);
+    const response = NextResponse.json({ id: user.id, name: user.name, email: user.email });
+    response.cookies.set("session", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+      path: "/",
+    });
+
+    return response;
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return NextResponse.json({ error: err.errors[0].message }, { status: 400 });
+    }
+    return NextResponse.json({ error: "Login failed" }, { status: 500 });
+  }
+}
+```
+
+## Step 5: Session Management
+
+Handle JWT-based sessions without external dependencies.
+
+```typescript
+// lib/session.ts
+import { createHmac } from "node:crypto";
+
+const SECRET = process.env.NEXTAUTH_SECRET ?? "development-secret";
+
+interface SessionPayload {
+  userId: string;
+  exp: number;
+}
+
+export function createSession(userId: string): string {
+  const payload: SessionPayload = {
+    userId,
+    exp: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+  };
+  const data = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = createHmac("sha256", SECRET).update(data).digest("base64url");
+  return `${data}.${signature}`;
+}
+
+export function verifySession(token: string): SessionPayload | null {
+  try {
+    const [data, signature] = token.split(".");
+    const expected = createHmac("sha256", SECRET).update(data).digest("base64url");
+    if (signature !== expected) return null;
+
+    const payload: SessionPayload = JSON.parse(Buffer.from(data, "base64url").toString());
+    if (payload.exp < Date.now()) return null;
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+```
+
+## Step 6: Team Management
+
+Create and manage teams with roles and invitations.
+
+```typescript
+// lib/teams.ts
+import { db } from "./db.js";
+
+export interface Team {
+  id: string;
+  name: string;
+  slug: string;
+  plan: string;
+  stripe_customer_id: string | null;
+  created_at: string;
+}
+
+export interface TeamMember {
+  team_id: string;
+  user_id: string;
+  role: "owner" | "admin" | "member";
+  joined_at: string;
+  name?: string;
+  email?: string;
+}
+
+export function createTeam(name: string, ownerId: string): Team {
+  const id = crypto.randomUUID();
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+
+  db.prepare("INSERT INTO teams (id, name, slug) VALUES (?, ?, ?)").run(id, name, slug);
+  db.prepare("INSERT INTO team_members (team_id, user_id, role) VALUES (?, ?, 'owner')").run(
+    id,
+    ownerId
+  );
+
+  return {
+    id,
+    name,
+    slug,
+    plan: "free",
+    stripe_customer_id: null,
+    created_at: new Date().toISOString(),
+  };
+}
+
+export function getUserTeams(userId: string): Team[] {
+  return db
+    .prepare(
+      `
+    SELECT t.* FROM teams t
+    JOIN team_members tm ON t.id = tm.team_id
+    WHERE tm.user_id = ?
+    ORDER BY t.created_at DESC
+  `
+    )
+    .all(userId) as Team[];
+}
+
+export function getTeamMembers(teamId: string): TeamMember[] {
+  return db
+    .prepare(
+      `
+    SELECT tm.*, u.name, u.email FROM team_members tm
+    JOIN users u ON tm.user_id = u.id
+    WHERE tm.team_id = ?
+    ORDER BY tm.role, tm.joined_at
+  `
+    )
+    .all(teamId) as TeamMember[];
+}
+
+export function addTeamMember(teamId: string, userId: string, role: string = "member"): void {
+  db.prepare("INSERT OR IGNORE INTO team_members (team_id, user_id, role) VALUES (?, ?, ?)").run(
+    teamId,
+    userId,
+    role
+  );
+}
+
+export function removeTeamMember(teamId: string, userId: string): void {
+  db.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ? AND role != 'owner'").run(
+    teamId,
+    userId
+  );
+}
+
+export function updateMemberRole(teamId: string, userId: string, role: string): void {
+  db.prepare("UPDATE team_members SET role = ? WHERE team_id = ? AND user_id = ?").run(
+    role,
+    teamId,
+    userId
+  );
+}
+```
+
+## Step 7: Stripe Billing Integration
+
+Set up subscription management with Stripe Checkout and webhooks.
+
+```typescript
+// lib/billing.ts
+import Stripe from "stripe";
+import { db } from "./db.js";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? "", { apiVersion: "2024-12-18.acacia" });
+
+export const PLANS = {
+  free: { name: "Free", priceId: null, features: ["1 team member", "100 records"] },
+  pro: {
+    name: "Pro",
+    priceId: "price_pro_monthly",
+    features: ["10 team members", "10,000 records", "API access"],
+  },
+  enterprise: {
+    name: "Enterprise",
+    priceId: "price_enterprise_monthly",
+    features: ["Unlimited members", "Unlimited records", "Priority support"],
+  },
+} as const;
+
+export async function createCheckoutSession(
+  teamId: string,
+  priceId: string,
+  returnUrl: string
+): Promise<string> {
+  const team = db.prepare("SELECT * FROM teams WHERE id = ?").get(teamId) as
+    | { stripe_customer_id: string | null; name: string }
+    | undefined;
+  if (!team) throw new Error("Team not found");
+
+  let customerId = team.stripe_customer_id;
+  if (!customerId) {
+    const customer = await stripe.customers.create({ name: team.name, metadata: { teamId } });
+    customerId = customer.id;
+    db.prepare("UPDATE teams SET stripe_customer_id = ? WHERE id = ?").run(customerId, teamId);
+  }
+
+  const session = await stripe.checkout.sessions.create({
+    customer: customerId,
+    mode: "subscription",
+    line_items: [{ price: priceId, quantity: 1 }],
+    success_url: `${returnUrl}?success=true`,
+    cancel_url: `${returnUrl}?canceled=true`,
+    metadata: { teamId },
+  });
+
+  return session.url ?? returnUrl;
+}
+
+export async function createPortalSession(teamId: string, returnUrl: string): Promise<string> {
+  const team = db.prepare("SELECT stripe_customer_id FROM teams WHERE id = ?").get(teamId) as
+    | { stripe_customer_id: string | null }
+    | undefined;
+  if (!team?.stripe_customer_id) throw new Error("No billing account");
+
+  const session = await stripe.billingPortal.sessions.create({
+    customer: team.stripe_customer_id,
+    return_url: returnUrl,
+  });
+
+  return session.url;
+}
+
+export async function handleWebhookEvent(event: Stripe.Event): Promise<void> {
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const teamId = session.metadata?.teamId;
+      if (teamId && session.subscription) {
+        db.prepare("UPDATE teams SET plan = 'pro', stripe_subscription_id = ? WHERE id = ?").run(
+          String(session.subscription),
+          teamId
+        );
+      }
+      break;
+    }
+    case "customer.subscription.deleted": {
+      const subscription = event.data.object as Stripe.Subscription;
+      db.prepare(
+        "UPDATE teams SET plan = 'free', stripe_subscription_id = NULL WHERE stripe_subscription_id = ?"
+      ).run(subscription.id);
+      break;
+    }
+  }
+}
+```
+
+## Step 8: Stripe Webhook Route
+
+```typescript
+// app/api/webhooks/stripe/route.ts
+import { NextResponse } from "next/server";
+import Stripe from "stripe";
+import { handleWebhookEvent } from "@/lib/billing";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? "");
+
+export async function POST(request: Request): Promise<NextResponse> {
+  const body = await request.text();
+  const signature = request.headers.get("stripe-signature");
+
+  if (!signature) {
+    return NextResponse.json({ error: "Missing signature" }, { status: 400 });
+  }
+
+  try {
+    const event = stripe.webhooks.constructEvent(
+      body,
+      signature,
+      process.env.STRIPE_WEBHOOK_SECRET ?? ""
+    );
+    await handleWebhookEvent(event);
+    return NextResponse.json({ received: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Webhook error";
+    console.error("Stripe webhook error:", message);
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
+}
+```
+
+## Step 9: Build the Dashboard Layout
+
+Create the authenticated dashboard shell with navigation.
+
+```tsx
+// app/dashboard/layout.tsx
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { verifySession } from "@/lib/session";
+import { getUserById } from "@/lib/auth";
+import Link from "next/link";
+
+export default async function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}): Promise<JSX.Element> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get("session")?.value;
+  if (!token) redirect("/login");
+
+  const session = verifySession(token);
+  if (!session) redirect("/login");
+
+  const user = getUserById(session.userId);
+  if (!user) redirect("/login");
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
+      <nav className="border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
+        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
+          <div className="flex items-center gap-8">
+            <span className="text-lg font-bold">SaaS Kit</span>
+            <div className="flex gap-4">
+              <Link
+                href="/dashboard"
+                className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+              >
+                Dashboard
+              </Link>
+              <Link
+                href="/dashboard/team"
+                className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+              >
+                Team
+              </Link>
+              <Link
+                href="/dashboard/billing"
+                className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+              >
+                Billing
+              </Link>
+              <Link
+                href="/dashboard/settings"
+                className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+              >
+                Settings
+              </Link>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-gray-500">{user.email}</span>
+            <form action="/api/auth/logout" method="POST">
+              <button type="submit" className="text-sm text-red-600 hover:text-red-800">
+                Logout
+              </button>
+            </form>
+          </div>
+        </div>
+      </nav>
+      <main className="mx-auto max-w-7xl px-4 py-8">{children}</main>
+    </div>
+  );
+}
+```
+
+## Step 10: Dashboard Home Page
+
+Display key metrics and recent activity.
+
+```tsx
+// app/dashboard/page.tsx
+import { cookies } from "next/headers";
+import { verifySession } from "@/lib/session";
+import { getUserTeams } from "@/lib/teams";
+
+export default async function DashboardPage(): Promise<JSX.Element> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get("session")?.value ?? "";
+  const session = verifySession(token);
+  const teams = session ? getUserTeams(session.userId) : [];
+
+  return (
+    <div>
+      <h1 className="mb-6 text-2xl font-bold">Dashboard</h1>
+
+      <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-3">
+        <div className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-900">
+          <p className="mb-1 text-sm text-gray-500">Teams</p>
+          <p className="text-3xl font-bold">{teams.length}</p>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-900">
+          <p className="mb-1 text-sm text-gray-500">Current Plan</p>
+          <p className="text-3xl font-bold capitalize">{teams[0]?.plan ?? "Free"}</p>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-900">
+          <p className="mb-1 text-sm text-gray-500">Status</p>
+          <p className="text-3xl font-bold text-green-600">Active</p>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-900">
+        <h2 className="mb-4 text-lg font-semibold">Your Teams</h2>
+        {teams.length === 0 ? (
+          <p className="text-gray-500">No teams yet. Create one to get started.</p>
+        ) : (
+          <div className="space-y-3">
+            {teams.map((team) => (
+              <div
+                key={team.id}
+                className="flex items-center justify-between border-b border-gray-100 py-3 last:border-0 dark:border-gray-800"
+              >
+                <div>
+                  <p className="font-medium">{team.name}</p>
+                  <p className="text-sm text-gray-500">/{team.slug}</p>
+                </div>
+                <span className="rounded-full bg-gray-100 px-2 py-1 text-xs capitalize dark:bg-gray-800">
+                  {team.plan}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+## Step 11: Settings Page
+
+Allow users to update their profile and manage account preferences.
+
+```tsx
+// app/dashboard/settings/page.tsx
+"use client";
+
+import { useState, useEffect } from "react";
+
+interface UserProfile {
+  name: string;
+  email: string;
+}
+
+export default function SettingsPage(): JSX.Element {
+  const [profile, setProfile] = useState<UserProfile>({ name: "", email: "" });
+  const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/user/profile")
+      .then((res) => res.json())
+      .then((data: UserProfile) => setProfile(data))
+      .catch(console.error);
+  }, []);
+
+  async function handleSave(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const res = await fetch("/api/user/profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: profile.name }),
+      });
+      if (res.ok) {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 3000);
+      }
+    } catch (err) {
+      console.error("Failed to save:", err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <h1 className="mb-6 text-2xl font-bold">Settings</h1>
+
+      <div className="max-w-xl rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-900">
+        <h2 className="mb-4 text-lg font-semibold">Profile</h2>
+        <form onSubmit={handleSave} className="space-y-4">
+          <div>
+            <label className="mb-1 block text-sm font-medium">Name</label>
+            <input
+              type="text"
+              value={profile.name}
+              onChange={(e) => setProfile({ ...profile, name: e.target.value })}
+              className="w-full rounded-lg border border-gray-300 bg-transparent px-3 py-2 dark:border-gray-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium">Email</label>
+            <input
+              type="email"
+              value={profile.email}
+              disabled
+              className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-gray-500 dark:border-gray-800 dark:bg-gray-800"
+            />
+            <p className="mt-1 text-xs text-gray-400">Email cannot be changed</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              type="submit"
+              disabled={loading}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {loading ? "Saving..." : "Save Changes"}
+            </button>
+            {saved && <span className="text-sm text-green-600">Saved successfully</span>}
+          </div>
+        </form>
+      </div>
+
+      <div className="mt-6 max-w-xl rounded-xl border border-red-200 bg-white p-6 dark:border-red-900 dark:bg-gray-900">
+        <h2 className="mb-2 text-lg font-semibold text-red-600">Danger Zone</h2>
+        <p className="mb-4 text-sm text-gray-500">
+          Permanently delete your account and all associated data.
+        </p>
+        <button className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+          Delete Account
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+## Step 12: Deploy
+
+Configure the project for production deployment.
+
+```typescript
+// next.config.ts
+import type { NextConfig } from "next";
+
+const config: NextConfig = {
+  serverExternalPackages: ["better-sqlite3"],
+  headers: async () => [
+    {
+      source: "/(.*)",
+      headers: [
+        { key: "X-Frame-Options", value: "DENY" },
+        { key: "X-Content-Type-Options", value: "nosniff" },
+        { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+      ],
+    },
+  ],
+};
+
+export default config;
+```
+
+Add a middleware for auth protection:
+
+```typescript
+// middleware.ts
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+const PUBLIC_PATHS = ["/", "/login", "/register", "/api/auth", "/api/webhooks"];
+
+export function middleware(request: NextRequest): NextResponse {
+  const { pathname } = request.nextUrl;
+
+  const isPublic = PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
+  if (isPublic) return NextResponse.next();
+
+  const session = request.cookies.get("session")?.value;
+  if (!session) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+};
+```
+
+To deploy:
+
+```bash
+# Build for production
+npm run build
+
+# Test locally
+npm start
+
+# Deploy to Vercel (swap SQLite for Postgres first)
+npx vercel
+```
+
+You now have a complete SaaS starter kit with authentication, team management, Stripe billing, a dashboard, settings, and security headers. Clone this for your next project and replace the dashboard content with your actual product.
+
+Key areas to customize: add your product's core features to the dashboard, configure real Stripe price IDs, swap SQLite for PostgreSQL with a migration, add email verification and password reset flows, and set up proper error monitoring.

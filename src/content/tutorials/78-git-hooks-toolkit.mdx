@@ -1,0 +1,548 @@
+---
+title: "Build a Git Hooks Toolkit"
+description: "Create a cross-platform Git hooks toolkit with pre-commit linting, commit message validation, pre-push tests, and an automatic hook installer."
+slug: "git-hooks-toolkit"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["git", "hooks", "automation", "node", "cli"]
+---
+
+## Overview
+
+Git hooks automate quality checks at critical moments in the development workflow — before a commit is recorded, before code is pushed, and when commit messages are written. Tools like Husky popularized this pattern, but the underlying mechanism is simple: executable scripts in `.git/hooks/`. In this tutorial you will build a complete Git hooks toolkit from scratch. It includes a cross-platform installer, pre-commit linting with staged-file filtering, commit message validation against Conventional Commits, pre-push test running, and a configuration file for teams to share hook settings.
+
+**Prerequisites:** Node.js 18+, Git installed, TypeScript basics.
+
+## Step 1: Project Setup
+
+```bash
+mkdir git-hooks-toolkit && cd git-hooks-toolkit
+npm init -y
+npm install typescript tsx --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir -p src/{hooks,utils}
+```
+
+Scripts in `package.json`:
+
+```json
+{
+  "scripts": {
+    "install-hooks": "tsx src/install.ts",
+    "build": "tsc"
+  }
+}
+```
+
+## Step 2: Define the Configuration Schema
+
+Create `src/types.ts` with the hook configuration interface and defaults.
+
+```typescript
+// src/types.ts
+export interface HookConfig {
+  preCommit?: PreCommitConfig;
+  commitMsg?: CommitMsgConfig;
+  prePush?: PrePushConfig;
+}
+
+export interface PreCommitConfig {
+  enabled: boolean;
+  lintCommand?: string;
+  formatCommand?: string;
+  stagedOnly: boolean;
+  filePatterns?: string[];
+}
+
+export interface CommitMsgConfig {
+  enabled: boolean;
+  conventionalCommits: boolean;
+  maxLength?: number;
+  allowedTypes?: string[];
+}
+
+export interface PrePushConfig {
+  enabled: boolean;
+  testCommand?: string;
+  typecheckCommand?: string;
+}
+
+export const DEFAULT_CONFIG: HookConfig = {
+  preCommit: {
+    enabled: true,
+    lintCommand: "npx eslint",
+    stagedOnly: true,
+    filePatterns: ["*.ts", "*.tsx", "*.js", "*.jsx"],
+  },
+  commitMsg: {
+    enabled: true,
+    conventionalCommits: true,
+    maxLength: 72,
+    allowedTypes: [
+      "feat",
+      "fix",
+      "docs",
+      "style",
+      "refactor",
+      "perf",
+      "test",
+      "build",
+      "ci",
+      "chore",
+    ],
+  },
+  prePush: {
+    enabled: true,
+    testCommand: "npm test",
+  },
+};
+```
+
+## Step 3: Build Cross-Platform Utilities
+
+Create `src/utils/exec.ts` and `src/utils/git.ts` for running commands and interacting with Git.
+
+```typescript
+// src/utils/exec.ts
+import { execSync, ExecSyncOptions } from "node:child_process";
+
+export interface ExecResult {
+  success: boolean;
+  output: string;
+  exitCode: number;
+}
+
+export function exec(command: string, options?: ExecSyncOptions): ExecResult {
+  try {
+    const output = execSync(command, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      ...options,
+    });
+    return { success: true, output: output.trim(), exitCode: 0 };
+  } catch (error) {
+    const err = error as { status?: number; stdout?: string; stderr?: string };
+    return {
+      success: false,
+      output: (err.stdout ?? err.stderr ?? "").toString().trim(),
+      exitCode: err.status ?? 1,
+    };
+  }
+}
+```
+
+```typescript
+// src/utils/git.ts
+import { exec } from "./exec.js";
+
+export function getGitRoot(): string | null {
+  const result = exec("git rev-parse --show-toplevel");
+  return result.success ? result.output : null;
+}
+
+export function getStagedFiles(): string[] {
+  const result = exec("git diff --cached --name-only --diff-filter=ACM");
+  if (!result.success || !result.output) return [];
+  return result.output.split("\n").filter(Boolean);
+}
+
+export function getCommitMessage(filePath: string): string {
+  const fs = require("node:fs");
+  return fs.readFileSync(filePath, "utf-8").trim();
+}
+
+export function matchesPattern(file: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => {
+    // Simple glob: *.ts matches any .ts file
+    const ext = pattern.replace("*", "");
+    return file.endsWith(ext);
+  });
+}
+```
+
+## Step 4: Build the Pre-Commit Hook
+
+Create `src/hooks/pre-commit.ts`. This filters staged files by pattern and runs the lint command on them.
+
+```typescript
+// src/hooks/pre-commit.ts
+import { PreCommitConfig } from "../types.js";
+import { exec } from "../utils/exec.js";
+import { getStagedFiles, matchesPattern } from "../utils/git.js";
+
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+const YELLOW = "\x1b[33m";
+const RESET = "\x1b[0m";
+
+export function runPreCommit(config: PreCommitConfig): boolean {
+  if (!config.enabled) return true;
+
+  console.log(`${YELLOW}Running pre-commit checks...${RESET}\n`);
+
+  let files: string[];
+  if (config.stagedOnly) {
+    files = getStagedFiles();
+    if (config.filePatterns) {
+      files = files.filter((f) => matchesPattern(f, config.filePatterns!));
+    }
+  } else {
+    files = ["."];
+  }
+
+  if (files.length === 0) {
+    console.log(`${GREEN}No matching staged files to check.${RESET}`);
+    return true;
+  }
+
+  let allPassed = true;
+
+  // Run lint command
+  if (config.lintCommand) {
+    const fileArgs = files.join(" ");
+    const command = `${config.lintCommand} ${fileArgs}`;
+    console.log(`Linting ${files.length} file(s)...`);
+
+    const result = exec(command);
+    if (!result.success) {
+      console.log(`${RED}Lint failed:${RESET}`);
+      console.log(result.output);
+      allPassed = false;
+    } else {
+      console.log(`${GREEN}Lint passed.${RESET}`);
+    }
+  }
+
+  // Run format check
+  if (config.formatCommand) {
+    const fileArgs = files.join(" ");
+    const command = `${config.formatCommand} ${fileArgs}`;
+    console.log("Checking formatting...");
+
+    const result = exec(command);
+    if (!result.success) {
+      console.log(`${RED}Format check failed:${RESET}`);
+      console.log(result.output);
+      allPassed = false;
+    } else {
+      console.log(`${GREEN}Format check passed.${RESET}`);
+    }
+  }
+
+  return allPassed;
+}
+```
+
+## Step 5: Build the Commit Message Validator
+
+Create `src/hooks/commit-msg.ts`. Validates messages against the Conventional Commits specification.
+
+```typescript
+// src/hooks/commit-msg.ts
+import * as fs from "node:fs";
+import { CommitMsgConfig } from "../types.js";
+
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+const YELLOW = "\x1b[33m";
+const DIM = "\x1b[2m";
+const RESET = "\x1b[0m";
+
+export function runCommitMsg(config: CommitMsgConfig, msgFilePath: string): boolean {
+  if (!config.enabled) return true;
+
+  const message = fs.readFileSync(msgFilePath, "utf-8").trim();
+  const firstLine = message.split("\n")[0];
+
+  console.log(`${YELLOW}Validating commit message...${RESET}\n`);
+
+  const errors: string[] = [];
+
+  // Check max length
+  if (config.maxLength && firstLine.length > config.maxLength) {
+    errors.push(`Subject line is ${firstLine.length} chars, max is ${config.maxLength}`);
+  }
+
+  // Check conventional commit format
+  if (config.conventionalCommits) {
+    const pattern = /^(\w+)(?:\(([^)]+)\))?(!)?:\s(.+)$/;
+    const match = firstLine.match(pattern);
+
+    if (!match) {
+      errors.push("Message must follow Conventional Commits: type(scope): description");
+    } else {
+      const type = match[1];
+      if (config.allowedTypes && !config.allowedTypes.includes(type)) {
+        errors.push(`Type '${type}' is not allowed. Use: ${config.allowedTypes.join(", ")}`);
+      }
+
+      const description = match[4];
+      if (description.length === 0) {
+        errors.push("Description cannot be empty");
+      }
+      if (description[0] === description[0].toUpperCase() && /[A-Z]/.test(description[0])) {
+        errors.push("Description should start with lowercase");
+      }
+      if (description.endsWith(".")) {
+        errors.push("Description should not end with a period");
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    console.log(`${RED}Commit message validation failed:${RESET}\n`);
+    for (const err of errors) {
+      console.log(`  ${RED}x${RESET} ${err}`);
+    }
+    console.log(`\n${DIM}Your message: "${firstLine}"${RESET}`);
+    console.log(`${DIM}Example:      feat(auth): add login with OAuth${RESET}\n`);
+    return false;
+  }
+
+  console.log(`${GREEN}Commit message is valid.${RESET}`);
+  return true;
+}
+```
+
+## Step 6: Build the Pre-Push Hook
+
+Create `src/hooks/pre-push.ts`.
+
+```typescript
+// src/hooks/pre-push.ts
+import { PrePushConfig } from "../types.js";
+import { exec } from "../utils/exec.js";
+
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+const YELLOW = "\x1b[33m";
+const RESET = "\x1b[0m";
+
+export function runPrePush(config: PrePushConfig): boolean {
+  if (!config.enabled) return true;
+
+  console.log(`${YELLOW}Running pre-push checks...${RESET}\n`);
+  let allPassed = true;
+
+  if (config.typecheckCommand) {
+    console.log("Running type check...");
+    const result = exec(config.typecheckCommand);
+    if (!result.success) {
+      console.log(`${RED}Type check failed:${RESET}`);
+      console.log(result.output);
+      allPassed = false;
+    } else {
+      console.log(`${GREEN}Type check passed.${RESET}`);
+    }
+  }
+
+  if (config.testCommand) {
+    console.log("Running tests...");
+    const result = exec(config.testCommand);
+    if (!result.success) {
+      console.log(`${RED}Tests failed:${RESET}`);
+      console.log(result.output);
+      allPassed = false;
+    } else {
+      console.log(`${GREEN}Tests passed.${RESET}`);
+    }
+  }
+
+  return allPassed;
+}
+```
+
+## Step 7: Build the Hook Installer
+
+Create `src/install.ts`. This generates executable shell scripts in `.git/hooks/` that delegate to the TypeScript hook runners. The scripts work on macOS, Windows (Git Bash), and Linux.
+
+```typescript
+// src/install.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { getGitRoot } from "./utils/git.js";
+
+const HOOKS: Record<string, string> = {
+  "pre-commit": `#!/usr/bin/env sh
+# Generated by git-hooks-toolkit
+npx tsx "$(dirname "$0")/../../src/hooks/run.ts" pre-commit
+`,
+  "commit-msg": `#!/usr/bin/env sh
+# Generated by git-hooks-toolkit
+npx tsx "$(dirname "$0")/../../src/hooks/run.ts" commit-msg "$1"
+`,
+  "pre-push": `#!/usr/bin/env sh
+# Generated by git-hooks-toolkit
+npx tsx "$(dirname "$0")/../../src/hooks/run.ts" pre-push
+`,
+};
+
+function install(): void {
+  const gitRoot = getGitRoot();
+  if (!gitRoot) {
+    console.error("Not a git repository. Run 'git init' first.");
+    process.exit(1);
+  }
+
+  const hooksDir = path.join(gitRoot, ".git", "hooks");
+
+  if (!fs.existsSync(hooksDir)) {
+    fs.mkdirSync(hooksDir, { recursive: true });
+  }
+
+  for (const [hookName, script] of Object.entries(HOOKS)) {
+    const hookPath = path.join(hooksDir, hookName);
+
+    // Back up existing hook
+    if (fs.existsSync(hookPath)) {
+      const backupPath = `${hookPath}.backup`;
+      fs.copyFileSync(hookPath, backupPath);
+      console.log(`Backed up existing ${hookName} to ${hookName}.backup`);
+    }
+
+    fs.writeFileSync(hookPath, script);
+    fs.chmodSync(hookPath, 0o755);
+    console.log(`Installed ${hookName} hook`);
+  }
+
+  console.log("\nAll hooks installed successfully.");
+}
+
+install();
+```
+
+Create the hook runner `src/hooks/run.ts` that loads config and dispatches to the right hook.
+
+```typescript
+// src/hooks/run.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { HookConfig, DEFAULT_CONFIG } from "../types.js";
+import { runPreCommit } from "./pre-commit.js";
+import { runCommitMsg } from "./commit-msg.js";
+import { runPrePush } from "./pre-push.js";
+import { getGitRoot } from "../utils/git.js";
+
+function loadConfig(): HookConfig {
+  const gitRoot = getGitRoot();
+  if (!gitRoot) return DEFAULT_CONFIG;
+
+  const configPath = path.join(gitRoot, "hooks.config.json");
+
+  if (fs.existsSync(configPath)) {
+    try {
+      const raw = fs.readFileSync(configPath, "utf-8");
+      const userConfig = JSON.parse(raw) as Partial<HookConfig>;
+      return {
+        preCommit: { ...DEFAULT_CONFIG.preCommit!, ...userConfig.preCommit },
+        commitMsg: { ...DEFAULT_CONFIG.commitMsg!, ...userConfig.commitMsg },
+        prePush: { ...DEFAULT_CONFIG.prePush!, ...userConfig.prePush },
+      };
+    } catch (error) {
+      console.error("Failed to load hooks.config.json, using defaults");
+      return DEFAULT_CONFIG;
+    }
+  }
+
+  return DEFAULT_CONFIG;
+}
+
+function main(): void {
+  const hookType = process.argv[2];
+  const config = loadConfig();
+  let passed = true;
+
+  switch (hookType) {
+    case "pre-commit":
+      passed = runPreCommit(config.preCommit!);
+      break;
+    case "commit-msg": {
+      const msgFile = process.argv[3];
+      if (!msgFile) {
+        console.error("commit-msg hook requires message file path");
+        process.exit(1);
+      }
+      passed = runCommitMsg(config.commitMsg!, msgFile);
+      break;
+    }
+    case "pre-push":
+      passed = runPrePush(config.prePush!);
+      break;
+    default:
+      console.error(`Unknown hook type: ${hookType}`);
+      process.exit(1);
+  }
+
+  process.exit(passed ? 0 : 1);
+}
+
+main();
+```
+
+## Step 8: Configure and Test
+
+Create a `hooks.config.json` in the project root to customize hook behavior:
+
+```json
+{
+  "preCommit": {
+    "enabled": true,
+    "lintCommand": "npx eslint",
+    "stagedOnly": true,
+    "filePatterns": ["*.ts", "*.tsx", "*.js", "*.jsx"]
+  },
+  "commitMsg": {
+    "enabled": true,
+    "conventionalCommits": true,
+    "maxLength": 72,
+    "allowedTypes": [
+      "feat",
+      "fix",
+      "docs",
+      "style",
+      "refactor",
+      "perf",
+      "test",
+      "build",
+      "ci",
+      "chore"
+    ]
+  },
+  "prePush": {
+    "enabled": true,
+    "testCommand": "npm test",
+    "typecheckCommand": "npx tsc --noEmit"
+  }
+}
+```
+
+Install the hooks:
+
+```bash
+npm run install-hooks
+```
+
+Test them:
+
+```bash
+# Pre-commit: stage a file and commit
+echo "const x = 1" > test.ts
+git add test.ts
+git commit -m "feat(test): add test file"
+
+# Bad commit message (should fail)
+git commit -m "added stuff"
+
+# Pre-push: runs on push
+git push origin main
+```
+
+The hook scripts use `#!/usr/bin/env sh` which works on all platforms including Git Bash on Windows. The config file is committed to the repo, so the whole team shares the same hook settings. Each developer runs `npm run install-hooks` once after cloning.
+
+**Extend ideas:**
+
+- Add a `prepare` script in `package.json` to auto-install hooks on `npm install`.
+- Support glob patterns with `minimatch` for more precise file filtering.
+- Add a `--bypass` environment variable for emergency commits: `SKIP_HOOKS=1 git commit`.
+- Build a `lint-staged` equivalent that stashes unstaged changes before running checks.

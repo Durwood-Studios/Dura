@@ -1,0 +1,668 @@
+---
+title: "Build a PDF Generator Service"
+description: "Create an HTTP service that renders HTML templates with variable substitution into PDFs, supports batch generation, and provides a download API."
+slug: "pdf-generator"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["pdf", "node", "templates", "html", "api"]
+---
+
+## Overview
+
+PDF generation powers invoices, reports, certificates, and contracts in nearly every business application. In this tutorial you will build a PDF generator service that takes HTML templates, substitutes variables, renders them to PDF using Puppeteer's built-in print-to-PDF capability, and serves them via an HTTP API. The service supports single and batch generation, template management, and a download endpoint.
+
+This approach uses HTML and CSS for layout — skills you already have — instead of low-level PDF APIs.
+
+**Prerequisites:** Node.js 18+, TypeScript basics, a terminal. Puppeteer downloads Chromium automatically.
+
+## Step 1: Project Setup
+
+```bash
+mkdir pdf-generator && cd pdf-generator
+npm init -y
+npm install express puppeteer
+npm install typescript tsx @types/node @types/express --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir -p src/{templates,output,routes}
+```
+
+Scripts:
+
+```json
+{
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  }
+}
+```
+
+## Step 2: Build the Template Engine
+
+Create `src/template-engine.ts`. This replaces `{{variable}}` placeholders in HTML with provided data, including support for loops and conditionals.
+
+```typescript
+// src/template-engine.ts
+
+/**
+ * Replace {{variable}} placeholders with values from the data object.
+ * Supports dot notation: {{user.name}} accesses data.user.name.
+ * Supports {{#each items}}...{{/each}} for loops.
+ * Supports {{#if condition}}...{{/if}} for conditionals.
+ */
+export function renderTemplate(template: string, data: Record<string, unknown>): string {
+  let result = template;
+
+  // Process {{#each key}}...{{/each}} blocks
+  result = result.replace(
+    /\{\{#each\s+(\w+)\}\}([\s\S]*?)\{\{\/each\}\}/g,
+    (_match, key: string, body: string) => {
+      const items = resolveValue(key, data);
+      if (!Array.isArray(items)) return "";
+      return items
+        .map((item, index) => {
+          const itemData =
+            typeof item === "object" && item !== null
+              ? { ...data, ...item, _index: index }
+              : { ...data, _item: item, _index: index };
+          return renderTemplate(body, itemData as Record<string, unknown>);
+        })
+        .join("");
+    }
+  );
+
+  // Process {{#if key}}...{{/if}} blocks
+  result = result.replace(
+    /\{\{#if\s+(\w+(?:\.\w+)*)\}\}([\s\S]*?)\{\{\/if\}\}/g,
+    (_match, key: string, body: string) => {
+      const value = resolveValue(key, data);
+      return value ? renderTemplate(body, data) : "";
+    }
+  );
+
+  // Replace simple {{variable}} placeholders
+  result = result.replace(/\{\{(\w+(?:\.\w+)*)\}\}/g, (_match, key: string) => {
+    const value = resolveValue(key, data);
+    if (value === undefined || value === null) return "";
+    return escapeHtml(String(value));
+  });
+
+  return result;
+}
+
+function resolveValue(path: string, data: Record<string, unknown>): unknown {
+  const parts = path.split(".");
+  let current: unknown = data;
+  for (const part of parts) {
+    if (current === null || current === undefined) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+```
+
+## Step 3: Build the PDF Renderer
+
+Create `src/renderer.ts`. This uses Puppeteer to render HTML to PDF with configurable page settings.
+
+```typescript
+// src/renderer.ts
+import puppeteer, { Browser, PDFOptions } from "puppeteer";
+
+let browser: Browser | null = null;
+
+export interface PdfOptions {
+  format?: "A4" | "Letter" | "Legal";
+  landscape?: boolean;
+  margin?: {
+    top?: string;
+    right?: string;
+    bottom?: string;
+    left?: string;
+  };
+  headerTemplate?: string;
+  footerTemplate?: string;
+  displayHeaderFooter?: boolean;
+}
+
+const DEFAULT_PDF_OPTIONS: PdfOptions = {
+  format: "A4",
+  landscape: false,
+  margin: { top: "20mm", right: "15mm", bottom: "20mm", left: "15mm" },
+};
+
+async function getBrowser(): Promise<Browser> {
+  if (!browser || !browser.connected) {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"],
+    });
+  }
+  return browser;
+}
+
+export async function renderPdf(html: string, options: PdfOptions = {}): Promise<Buffer> {
+  const merged = { ...DEFAULT_PDF_OPTIONS, ...options };
+  const b = await getBrowser();
+  const page = await b.newPage();
+
+  try {
+    await page.setContent(html, { waitUntil: "networkidle0" });
+
+    const pdfOptions: PDFOptions = {
+      format: merged.format,
+      landscape: merged.landscape,
+      margin: merged.margin,
+      printBackground: true,
+    };
+
+    if (merged.displayHeaderFooter) {
+      pdfOptions.displayHeaderFooter = true;
+      pdfOptions.headerTemplate = merged.headerTemplate ?? "";
+      pdfOptions.footerTemplate =
+        merged.footerTemplate ??
+        '<div style="font-size:10px;text-align:center;width:100%;"><span class="pageNumber"></span> / <span class="totalPages"></span></div>';
+    }
+
+    const buffer = await page.pdf(pdfOptions);
+    return Buffer.from(buffer);
+  } finally {
+    await page.close();
+  }
+}
+
+export async function closeBrowser(): Promise<void> {
+  if (browser) {
+    await browser.close();
+    browser = null;
+  }
+}
+```
+
+## Step 4: Build the Template Manager
+
+Create `src/template-manager.ts`. Templates are stored as HTML files on disk. The manager handles loading, listing, and validating them.
+
+```typescript
+// src/template-manager.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+const TEMPLATES_DIR = path.resolve("src/templates");
+
+export interface TemplateInfo {
+  name: string;
+  path: string;
+  size: number;
+  modifiedAt: string;
+}
+
+export function listTemplates(): TemplateInfo[] {
+  if (!fs.existsSync(TEMPLATES_DIR)) return [];
+
+  return fs
+    .readdirSync(TEMPLATES_DIR)
+    .filter((f) => f.endsWith(".html"))
+    .map((f) => {
+      const fullPath = path.join(TEMPLATES_DIR, f);
+      const stat = fs.statSync(fullPath);
+      return {
+        name: f.replace(".html", ""),
+        path: fullPath,
+        size: stat.size,
+        modifiedAt: stat.mtime.toISOString(),
+      };
+    });
+}
+
+export function loadTemplate(name: string): string | null {
+  const filePath = path.join(TEMPLATES_DIR, `${name}.html`);
+  if (!fs.existsSync(filePath)) return null;
+  return fs.readFileSync(filePath, "utf-8");
+}
+
+export function saveTemplate(name: string, content: string): void {
+  if (!fs.existsSync(TEMPLATES_DIR)) {
+    fs.mkdirSync(TEMPLATES_DIR, { recursive: true });
+  }
+  const filePath = path.join(TEMPLATES_DIR, `${name}.html`);
+  fs.writeFileSync(filePath, content);
+}
+
+export function extractVariables(template: string): string[] {
+  const matches = template.matchAll(/\{\{(\w+(?:\.\w+)*)\}\}/g);
+  const variables = new Set<string>();
+  for (const match of matches) {
+    variables.add(match[1]);
+  }
+  return [...variables];
+}
+```
+
+## Step 5: Create Sample Templates
+
+Create `src/templates/invoice.html`:
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font-family: "Helvetica Neue", Arial, sans-serif;
+        color: #333;
+        margin: 0;
+        padding: 40px;
+      }
+      .header {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 40px;
+      }
+      .company {
+        font-size: 24px;
+        font-weight: bold;
+      }
+      .invoice-info {
+        text-align: right;
+        color: #666;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 20px 0;
+      }
+      th {
+        background: #f5f5f5;
+        padding: 12px;
+        text-align: left;
+        border-bottom: 2px solid #ddd;
+      }
+      td {
+        padding: 12px;
+        border-bottom: 1px solid #eee;
+      }
+      .total-row td {
+        font-weight: bold;
+        border-top: 2px solid #333;
+      }
+      .footer {
+        margin-top: 40px;
+        color: #999;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div class="company">{{companyName}}</div>
+      <div class="invoice-info">
+        <div>Invoice #{{invoiceNumber}}</div>
+        <div>Date: {{date}}</div>
+        <div>Due: {{dueDate}}</div>
+      </div>
+    </div>
+
+    <div>
+      <strong>Bill To:</strong><br />
+      {{clientName}}<br />
+      {{clientAddress}}
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Description</th>
+          <th>Qty</th>
+          <th>Price</th>
+          <th>Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each items}}
+        <tr>
+          <td>{{description}}</td>
+          <td>{{quantity}}</td>
+          <td>${{price}}</td>
+          <td>${{total}}</td>
+        </tr>
+        {{/each}}
+        <tr class="total-row">
+          <td colspan="3">Total</td>
+          <td>${{grandTotal}}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    {{#if notes}}
+    <div class="footer"><strong>Notes:</strong> {{notes}}</div>
+    {{/if}}
+  </body>
+</html>
+```
+
+## Step 6: Build the Output Manager
+
+Create `src/output.ts` for saving generated PDFs and tracking them.
+
+```typescript
+// src/output.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as crypto from "node:crypto";
+
+const OUTPUT_DIR = path.resolve("src/output");
+
+export interface GeneratedPdf {
+  id: string;
+  filename: string;
+  path: string;
+  size: number;
+  createdAt: string;
+}
+
+export function savePdf(buffer: Buffer, prefix: string): GeneratedPdf {
+  if (!fs.existsSync(OUTPUT_DIR)) {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  }
+
+  const id = crypto.randomUUID();
+  const filename = `${prefix}-${id.slice(0, 8)}.pdf`;
+  const filePath = path.join(OUTPUT_DIR, filename);
+
+  fs.writeFileSync(filePath, buffer);
+
+  return {
+    id,
+    filename,
+    path: filePath,
+    size: buffer.length,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export function getPdf(filename: string): Buffer | null {
+  const filePath = path.join(OUTPUT_DIR, filename);
+  if (!fs.existsSync(filePath)) return null;
+  return fs.readFileSync(filePath);
+}
+
+export function listPdfs(): GeneratedPdf[] {
+  if (!fs.existsSync(OUTPUT_DIR)) return [];
+
+  return fs
+    .readdirSync(OUTPUT_DIR)
+    .filter((f) => f.endsWith(".pdf"))
+    .map((f) => {
+      const filePath = path.join(OUTPUT_DIR, f);
+      const stat = fs.statSync(filePath);
+      return {
+        id: f.replace(".pdf", ""),
+        filename: f,
+        path: filePath,
+        size: stat.size,
+        createdAt: stat.mtime.toISOString(),
+      };
+    });
+}
+```
+
+## Step 7: Build the API Routes
+
+Create `src/routes/pdf.ts`.
+
+```typescript
+// src/routes/pdf.ts
+import { Router, Request, Response } from "express";
+import { loadTemplate, listTemplates, extractVariables } from "../template-manager.js";
+import { renderTemplate } from "../template-engine.js";
+import { renderPdf, PdfOptions } from "../renderer.js";
+import { savePdf, getPdf, listPdfs } from "../output.js";
+
+const router = Router();
+
+interface GenerateRequest {
+  template: string;
+  data: Record<string, unknown>;
+  options?: PdfOptions;
+  save?: boolean;
+}
+
+interface BatchRequest {
+  template: string;
+  items: Record<string, unknown>[];
+  options?: PdfOptions;
+}
+
+router.get("/templates", (_req: Request, res: Response) => {
+  const templates = listTemplates();
+  const detailed = templates.map((t) => {
+    const content = loadTemplate(t.name);
+    return {
+      ...t,
+      variables: content ? extractVariables(content) : [],
+    };
+  });
+  res.json(detailed);
+});
+
+router.post("/generate", async (req: Request, res: Response) => {
+  const body = req.body as GenerateRequest;
+
+  if (!body.template || !body.data) {
+    res.status(400).json({ error: "template and data are required" });
+    return;
+  }
+
+  const templateHtml = loadTemplate(body.template);
+  if (!templateHtml) {
+    res.status(404).json({ error: `Template '${body.template}' not found` });
+    return;
+  }
+
+  try {
+    const html = renderTemplate(templateHtml, body.data);
+    const pdfBuffer = await renderPdf(html, body.options);
+
+    if (body.save) {
+      const saved = savePdf(pdfBuffer, body.template);
+      res.json({ message: "PDF generated and saved", file: saved });
+      return;
+    }
+
+    res.set("Content-Type", "application/pdf");
+    res.set("Content-Disposition", `attachment; filename="${body.template}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("PDF generation failed:", message);
+    res.status(500).json({ error: "Failed to generate PDF", details: message });
+  }
+});
+
+router.post("/batch", async (req: Request, res: Response) => {
+  const body = req.body as BatchRequest;
+
+  if (!body.template || !body.items || !Array.isArray(body.items)) {
+    res.status(400).json({ error: "template and items array are required" });
+    return;
+  }
+
+  const templateHtml = loadTemplate(body.template);
+  if (!templateHtml) {
+    res.status(404).json({ error: `Template '${body.template}' not found` });
+    return;
+  }
+
+  try {
+    const results = [];
+    for (const item of body.items) {
+      const html = renderTemplate(templateHtml, item);
+      const pdfBuffer = await renderPdf(html, body.options);
+      const saved = savePdf(pdfBuffer, body.template);
+      results.push(saved);
+    }
+
+    res.json({
+      message: `Generated ${results.length} PDFs`,
+      files: results,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: "Batch generation failed", details: message });
+  }
+});
+
+router.get("/files", (_req: Request, res: Response) => {
+  res.json(listPdfs());
+});
+
+router.get("/download/:filename", (req: Request, res: Response) => {
+  const buffer = getPdf(req.params.filename);
+  if (!buffer) {
+    res.status(404).json({ error: "File not found" });
+    return;
+  }
+
+  res.set("Content-Type", "application/pdf");
+  res.set("Content-Disposition", `attachment; filename="${req.params.filename}"`);
+  res.send(buffer);
+});
+
+export default router;
+```
+
+## Step 8: Wire Up the Server
+
+Create `src/server.ts`.
+
+```typescript
+// src/server.ts
+import express from "express";
+import pdfRoutes from "./routes/pdf.js";
+import { closeBrowser } from "./renderer.js";
+
+const app = express();
+const port = parseInt(process.env.PORT ?? "3000", 10);
+
+app.use(express.json({ limit: "10mb" }));
+app.use("/api/pdf", pdfRoutes);
+
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+const server = app.listen(port, () => {
+  console.log(`PDF Generator running on http://localhost:${port}`);
+});
+
+function shutdown(): void {
+  console.log("Shutting down...");
+  closeBrowser()
+    .then(() => {
+      server.close();
+      process.exit(0);
+    })
+    .catch(() => process.exit(1));
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+```
+
+## Step 9: Test Single Generation
+
+Start the server and generate an invoice:
+
+```bash
+npm run dev
+```
+
+```bash
+curl -X POST http://localhost:3000/api/pdf/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template": "invoice",
+    "data": {
+      "companyName": "Acme Corp",
+      "invoiceNumber": "INV-001",
+      "date": "2025-01-15",
+      "dueDate": "2025-02-15",
+      "clientName": "Jane Smith",
+      "clientAddress": "123 Main St, Springfield",
+      "items": [
+        {"description": "Web Development", "quantity": 40, "price": "150.00", "total": "6,000.00"},
+        {"description": "Design Review", "quantity": 8, "price": "125.00", "total": "1,000.00"}
+      ],
+      "grandTotal": "7,000.00",
+      "notes": "Payment due within 30 days."
+    }
+  }' --output invoice.pdf
+```
+
+Open `invoice.pdf` — you should see a clean, styled invoice.
+
+## Step 10: Test Batch Generation
+
+Generate multiple invoices at once:
+
+```bash
+curl -X POST http://localhost:3000/api/pdf/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template": "invoice",
+    "items": [
+      {
+        "companyName": "Acme Corp",
+        "invoiceNumber": "INV-001",
+        "date": "2025-01-15",
+        "dueDate": "2025-02-15",
+        "clientName": "Alice",
+        "clientAddress": "123 Main St",
+        "items": [{"description": "Consulting", "quantity": 10, "price": "200", "total": "2000"}],
+        "grandTotal": "2,000.00"
+      },
+      {
+        "companyName": "Acme Corp",
+        "invoiceNumber": "INV-002",
+        "date": "2025-01-16",
+        "dueDate": "2025-02-16",
+        "clientName": "Bob",
+        "clientAddress": "456 Oak Ave",
+        "items": [{"description": "Development", "quantity": 20, "price": "150", "total": "3000"}],
+        "grandTotal": "3,000.00"
+      }
+    ]
+  }'
+```
+
+List and download generated files:
+
+```bash
+# List all generated PDFs
+curl http://localhost:3000/api/pdf/files
+
+# Download a specific file
+curl http://localhost:3000/api/pdf/download/invoice-abc12345.pdf --output downloaded.pdf
+```
+
+**Extend ideas:**
+
+- Add a template upload endpoint so users can manage templates via the API.
+- Support CSS page break rules for multi-page documents.
+- Add watermark support by injecting an overlay div into the HTML.
+- Implement a queue for batch jobs with progress tracking.
+- Add PDF merge: combine multiple generated PDFs into a single document.
+
+The HTML-to-PDF approach means any web developer can create templates without learning a PDF-specific library. Puppeteer handles all the rendering complexity, and the template engine keeps data injection simple and predictable.

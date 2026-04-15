@@ -1,0 +1,596 @@
+---
+title: "Build a Kanban Board API"
+description: "Create a REST API for a Kanban board with boards, columns, cards, drag ordering, user assignment, and a PostgreSQL schema."
+slug: "kanban-api"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["api", "postgresql", "rest", "node", "project-management"]
+---
+
+## Overview
+
+Kanban boards are one of the most practical project management tools. Behind every Trello or Jira board sits an API that manages boards, columns, cards, and their ordering. In this tutorial you will build a complete REST API for a Kanban board using Node.js, Express, TypeScript, and PostgreSQL. The API supports creating boards, adding columns with sort ordering, managing cards with drag-and-drop reordering, and assigning users to cards.
+
+**Prerequisites:** Node.js 18+, PostgreSQL installed and running, TypeScript basics.
+
+## Step 1: Project Setup
+
+```bash
+mkdir kanban-api && cd kanban-api
+npm init -y
+npm install express pg dotenv
+npm install typescript tsx @types/node @types/express @types/pg --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir -p src/{routes,db,middleware}
+```
+
+Create a `.env` file (add `.env` to `.gitignore`):
+
+```bash
+DATABASE_URL=postgresql://localhost:5432/kanban
+PORT=3000
+```
+
+Scripts in `package.json`:
+
+```json
+{
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "db:setup": "tsx src/db/setup.ts"
+  }
+}
+```
+
+## Step 2: Design the Database Schema
+
+Create `src/db/schema.sql`. The key design decision is using a `position` float column for ordering — this allows reordering without updating every row.
+
+```sql
+-- src/db/schema.sql
+CREATE TABLE IF NOT EXISTS boards (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS columns (
+  id SERIAL PRIMARY KEY,
+  board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  name VARCHAR(255) NOT NULL,
+  position FLOAT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cards (
+  id SERIAL PRIMARY KEY,
+  column_id INTEGER NOT NULL REFERENCES columns(id) ON DELETE CASCADE,
+  title VARCHAR(500) NOT NULL,
+  description TEXT,
+  position FLOAT NOT NULL DEFAULT 0,
+  assignee VARCHAR(255),
+  labels TEXT[] DEFAULT '{}',
+  due_date DATE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_columns_board_id ON columns(board_id);
+CREATE INDEX idx_columns_position ON columns(board_id, position);
+CREATE INDEX idx_cards_column_id ON cards(column_id);
+CREATE INDEX idx_cards_position ON cards(column_id, position);
+```
+
+## Step 3: Set Up the Database Connection and Migrations
+
+Create `src/db/pool.ts` and `src/db/setup.ts`.
+
+```typescript
+// src/db/pool.ts
+import pg from "pg";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+export default pool;
+```
+
+```typescript
+// src/db/setup.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import pool from "./pool.js";
+
+async function setup(): Promise<void> {
+  const schemaPath = path.join(import.meta.dirname, "schema.sql");
+  const sql = fs.readFileSync(schemaPath, "utf-8");
+
+  try {
+    await pool.query(sql);
+    console.log("Database schema created successfully.");
+  } catch (error) {
+    console.error("Failed to create schema:", error);
+    process.exit(1);
+  } finally {
+    await pool.end();
+  }
+}
+
+setup();
+```
+
+Create the database and run setup:
+
+```bash
+createdb kanban
+npm run db:setup
+```
+
+## Step 4: Build the Board Routes
+
+Create `src/routes/boards.ts` with CRUD endpoints.
+
+```typescript
+// src/routes/boards.ts
+import { Router, Request, Response } from "express";
+import pool from "../db/pool.js";
+
+const router = Router();
+
+router.get("/", async (_req: Request, res: Response) => {
+  try {
+    const result = await pool.query("SELECT * FROM boards ORDER BY created_at DESC");
+    res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch boards" });
+  }
+});
+
+router.get("/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const board = await pool.query("SELECT * FROM boards WHERE id = $1", [id]);
+    if (board.rows.length === 0) {
+      res.status(404).json({ error: "Board not found" });
+      return;
+    }
+
+    const columns = await pool.query(
+      "SELECT * FROM columns WHERE board_id = $1 ORDER BY position",
+      [id]
+    );
+
+    const columnIds = columns.rows.map((c) => c.id);
+    let cards: pg.QueryResult | undefined;
+    if (columnIds.length > 0) {
+      cards = await pool.query("SELECT * FROM cards WHERE column_id = ANY($1) ORDER BY position", [
+        columnIds,
+      ]);
+    }
+
+    const cardsByColumn = new Map<
+      number,
+      typeof cards extends undefined ? never : typeof cards.rows
+    >();
+    for (const card of cards?.rows ?? []) {
+      const existing = cardsByColumn.get(card.column_id) ?? [];
+      existing.push(card);
+      cardsByColumn.set(card.column_id, existing);
+    }
+
+    res.json({
+      ...board.rows[0],
+      columns: columns.rows.map((col) => ({
+        ...col,
+        cards: cardsByColumn.get(col.id) ?? [],
+      })),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch board" });
+  }
+});
+
+router.post("/", async (req: Request, res: Response) => {
+  try {
+    const { name, description } = req.body as { name: string; description?: string };
+    if (!name) {
+      res.status(400).json({ error: "Name is required" });
+      return;
+    }
+    const result = await pool.query(
+      "INSERT INTO boards (name, description) VALUES ($1, $2) RETURNING *",
+      [name, description ?? null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to create board" });
+  }
+});
+
+router.delete("/:id", async (req: Request, res: Response) => {
+  try {
+    const result = await pool.query("DELETE FROM boards WHERE id = $1 RETURNING *", [
+      req.params.id,
+    ]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: "Board not found" });
+      return;
+    }
+    res.json({ message: "Board deleted" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to delete board" });
+  }
+});
+
+export default router;
+```
+
+## Step 5: Build the Column Routes
+
+Create `src/routes/columns.ts`.
+
+```typescript
+// src/routes/columns.ts
+import { Router, Request, Response } from "express";
+import pool from "../db/pool.js";
+
+const router = Router();
+
+router.post("/", async (req: Request, res: Response) => {
+  try {
+    const { board_id, name } = req.body as { board_id: number; name: string };
+    if (!board_id || !name) {
+      res.status(400).json({ error: "board_id and name are required" });
+      return;
+    }
+
+    // Position after the last column
+    const lastCol = await pool.query(
+      "SELECT COALESCE(MAX(position), 0) + 1024 AS next_pos FROM columns WHERE board_id = $1",
+      [board_id]
+    );
+    const position = lastCol.rows[0].next_pos;
+
+    const result = await pool.query(
+      "INSERT INTO columns (board_id, name, position) VALUES ($1, $2, $3) RETURNING *",
+      [board_id, name, position]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to create column" });
+  }
+});
+
+router.put("/:id/reorder", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { position } = req.body as { position: number };
+
+    if (typeof position !== "number") {
+      res.status(400).json({ error: "position is required" });
+      return;
+    }
+
+    const result = await pool.query("UPDATE columns SET position = $1 WHERE id = $2 RETURNING *", [
+      position,
+      id,
+    ]);
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: "Column not found" });
+      return;
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to reorder column" });
+  }
+});
+
+router.delete("/:id", async (req: Request, res: Response) => {
+  try {
+    const result = await pool.query("DELETE FROM columns WHERE id = $1 RETURNING *", [
+      req.params.id,
+    ]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: "Column not found" });
+      return;
+    }
+    res.json({ message: "Column deleted" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to delete column" });
+  }
+});
+
+export default router;
+```
+
+## Step 6: Build the Card Routes
+
+Create `src/routes/cards.ts` with full CRUD and move/reorder support.
+
+```typescript
+// src/routes/cards.ts
+import { Router, Request, Response } from "express";
+import pool from "../db/pool.js";
+
+const router = Router();
+
+router.post("/", async (req: Request, res: Response) => {
+  try {
+    const { column_id, title, description, assignee, labels, due_date } = req.body as {
+      column_id: number;
+      title: string;
+      description?: string;
+      assignee?: string;
+      labels?: string[];
+      due_date?: string;
+    };
+
+    if (!column_id || !title) {
+      res.status(400).json({ error: "column_id and title are required" });
+      return;
+    }
+
+    const lastCard = await pool.query(
+      "SELECT COALESCE(MAX(position), 0) + 1024 AS next_pos FROM cards WHERE column_id = $1",
+      [column_id]
+    );
+
+    const result = await pool.query(
+      `INSERT INTO cards (column_id, title, description, position, assignee, labels, due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [
+        column_id,
+        title,
+        description ?? null,
+        lastCard.rows[0].next_pos,
+        assignee ?? null,
+        labels ?? [],
+        due_date ?? null,
+      ]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to create card" });
+  }
+});
+
+router.put("/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { title, description, assignee, labels, due_date } = req.body as {
+      title?: string;
+      description?: string;
+      assignee?: string;
+      labels?: string[];
+      due_date?: string;
+    };
+
+    const result = await pool.query(
+      `UPDATE cards SET
+        title = COALESCE($1, title),
+        description = COALESCE($2, description),
+        assignee = COALESCE($3, assignee),
+        labels = COALESCE($4, labels),
+        due_date = COALESCE($5, due_date),
+        updated_at = NOW()
+       WHERE id = $6 RETURNING *`,
+      [title, description, assignee, labels, due_date, id]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to update card" });
+  }
+});
+
+router.put("/:id/move", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { column_id, position } = req.body as { column_id: number; position: number };
+
+    if (!column_id || typeof position !== "number") {
+      res.status(400).json({ error: "column_id and position are required" });
+      return;
+    }
+
+    const result = await pool.query(
+      "UPDATE cards SET column_id = $1, position = $2, updated_at = NOW() WHERE id = $3 RETURNING *",
+      [column_id, position, id]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to move card" });
+  }
+});
+
+router.delete("/:id", async (req: Request, res: Response) => {
+  try {
+    const result = await pool.query("DELETE FROM cards WHERE id = $1 RETURNING *", [req.params.id]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
+    res.json({ message: "Card deleted" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to delete card" });
+  }
+});
+
+export default router;
+```
+
+## Step 7: Add Position Calculation Utility
+
+Create `src/middleware/position.ts`. When dragging a card between two others, calculate the midpoint. When positions get too close (due to many insertions), rebalance the entire column.
+
+```typescript
+// src/middleware/position.ts
+
+/**
+ * Calculate a position between two existing positions.
+ * Used when inserting a card between two others during drag-and-drop.
+ */
+export function midpoint(before: number | null, after: number | null): number {
+  if (before === null && after === null) return 1024;
+  if (before === null) return (after as number) / 2;
+  if (after === null) return before + 1024;
+  return (before + after) / 2;
+}
+
+/**
+ * When positions get too close together (less than 1 apart),
+ * rebalance all items in the list with even spacing.
+ */
+export function needsRebalance(positions: number[]): boolean {
+  for (let i = 1; i < positions.length; i++) {
+    if (positions[i] - positions[i - 1] < 1) return true;
+  }
+  return false;
+}
+
+export function rebalancePositions(count: number): number[] {
+  const spacing = 1024;
+  return Array.from({ length: count }, (_, i) => (i + 1) * spacing);
+}
+```
+
+## Step 8: Build the Error Handler Middleware
+
+Create `src/middleware/error-handler.ts`.
+
+```typescript
+// src/middleware/error-handler.ts
+import { Request, Response, NextFunction } from "express";
+
+export function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction): void {
+  console.error("Unhandled error:", err.message);
+  res.status(500).json({
+    error: "Internal server error",
+    message: process.env.NODE_ENV === "development" ? err.message : undefined,
+  });
+}
+```
+
+## Step 9: Wire Up the Server
+
+Create `src/server.ts`.
+
+```typescript
+// src/server.ts
+import express from "express";
+import dotenv from "dotenv";
+import boardRoutes from "./routes/boards.js";
+import columnRoutes from "./routes/columns.js";
+import cardRoutes from "./routes/cards.js";
+import { errorHandler } from "./middleware/error-handler.js";
+
+dotenv.config();
+
+const app = express();
+const port = parseInt(process.env.PORT ?? "3000", 10);
+
+app.use(express.json());
+
+// Routes
+app.use("/api/boards", boardRoutes);
+app.use("/api/columns", columnRoutes);
+app.use("/api/cards", cardRoutes);
+
+// Health check
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+// Error handler
+app.use(errorHandler);
+
+app.listen(port, () => {
+  console.log(`Kanban API running on http://localhost:${port}`);
+});
+```
+
+## Step 10: Test the API
+
+Start the server:
+
+```bash
+npm run dev
+```
+
+Test with cURL:
+
+```bash
+# Create a board
+curl -X POST http://localhost:3000/api/boards \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Sprint 1", "description": "Q1 sprint board"}'
+
+# Create columns
+curl -X POST http://localhost:3000/api/columns \
+  -H "Content-Type: application/json" \
+  -d '{"board_id": 1, "name": "To Do"}'
+
+curl -X POST http://localhost:3000/api/columns \
+  -H "Content-Type: application/json" \
+  -d '{"board_id": 1, "name": "In Progress"}'
+
+curl -X POST http://localhost:3000/api/columns \
+  -H "Content-Type: application/json" \
+  -d '{"board_id": 1, "name": "Done"}'
+
+# Create a card
+curl -X POST http://localhost:3000/api/cards \
+  -H "Content-Type: application/json" \
+  -d '{"column_id": 1, "title": "Set up CI", "assignee": "alice"}'
+
+# Move card to "In Progress" column
+curl -X PUT http://localhost:3000/api/cards/1/move \
+  -H "Content-Type: application/json" \
+  -d '{"column_id": 2, "position": 1024}'
+
+# Get full board with columns and cards
+curl http://localhost:3000/api/boards/1
+```
+
+The position-based ordering uses float midpoints so reordering a card between two others requires only a single UPDATE. When positions converge too closely, use the rebalance utility from Step 7 to redistribute positions evenly across all cards in a column.
+
+**Extend ideas:**
+
+- Add WebSocket notifications so connected clients see real-time card moves.
+- Add activity log tracking who moved what and when.
+- Add card comments as a separate table with foreign key to cards.
+- Implement board-level authorization with JWT tokens.

@@ -1,0 +1,441 @@
+---
+title: "Build a Screenshot Service"
+description: "Create an HTTP API that accepts URLs, renders pages headlessly with Puppeteer, captures screenshots, and caches results for fast repeat requests."
+slug: "screenshot-service"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["puppeteer", "automation", "node", "api", "screenshots"]
+---
+
+## Overview
+
+Screenshot services power link previews, social media cards, visual regression testing, and PDF generation. In this tutorial you will build an HTTP API that accepts a URL, renders it in a headless browser using Puppeteer, captures a screenshot, caches the result on disk, and serves it back. The service handles viewport configuration, full-page captures, wait strategies, and basic abuse prevention.
+
+**Prerequisites:** Node.js 18+, TypeScript basics, a terminal. Puppeteer will download Chromium automatically.
+
+## Step 1: Project Setup
+
+```bash
+mkdir screenshot-service && cd screenshot-service
+npm init -y
+npm install express puppeteer
+npm install typescript tsx @types/node @types/express --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir -p src cache
+```
+
+Scripts in `package.json`:
+
+```json
+{
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  }
+}
+```
+
+## Step 2: Define Request Types and Validation
+
+Create `src/types.ts` with the screenshot request options and a validation function.
+
+```typescript
+// src/types.ts
+export interface ScreenshotOptions {
+  url: string;
+  width: number;
+  height: number;
+  fullPage: boolean;
+  format: "png" | "jpeg" | "webp";
+  quality: number;
+  waitUntil: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
+  delay: number;
+}
+
+export interface ScreenshotRequest {
+  url?: string;
+  width?: number;
+  height?: number;
+  fullPage?: boolean;
+  format?: string;
+  quality?: number;
+  waitUntil?: string;
+  delay?: number;
+}
+
+const VALID_FORMATS = new Set(["png", "jpeg", "webp"]);
+const VALID_WAIT = new Set(["load", "domcontentloaded", "networkidle0", "networkidle2"]);
+
+export function validateAndNormalize(
+  body: ScreenshotRequest
+): { options: ScreenshotOptions } | { error: string } {
+  if (!body.url || typeof body.url !== "string") {
+    return { error: "url is required" };
+  }
+
+  try {
+    const parsed = new URL(body.url);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return { error: "Only http and https URLs are allowed" };
+    }
+  } catch {
+    return { error: "Invalid URL format" };
+  }
+
+  const format = body.format ?? "png";
+  if (!VALID_FORMATS.has(format)) {
+    return { error: `Invalid format. Use: ${[...VALID_FORMATS].join(", ")}` };
+  }
+
+  const waitUntil = body.waitUntil ?? "networkidle2";
+  if (!VALID_WAIT.has(waitUntil)) {
+    return { error: `Invalid waitUntil. Use: ${[...VALID_WAIT].join(", ")}` };
+  }
+
+  return {
+    options: {
+      url: body.url,
+      width: Math.min(Math.max(body.width ?? 1280, 320), 3840),
+      height: Math.min(Math.max(body.height ?? 800, 200), 2160),
+      fullPage: body.fullPage ?? false,
+      format: format as ScreenshotOptions["format"],
+      quality: format === "png" ? 100 : Math.min(Math.max(body.quality ?? 80, 1), 100),
+      waitUntil: waitUntil as ScreenshotOptions["waitUntil"],
+      delay: Math.min(Math.max(body.delay ?? 0, 0), 10000),
+    },
+  };
+}
+```
+
+## Step 3: Build the Cache Layer
+
+Create `src/cache.ts`. Screenshots are cached on disk keyed by a hash of the options. This avoids re-rendering the same page with the same settings.
+
+```typescript
+// src/cache.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as crypto from "node:crypto";
+import { ScreenshotOptions } from "./types.js";
+
+const CACHE_DIR = path.resolve("cache");
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+export function getCacheKey(options: ScreenshotOptions): string {
+  const data = JSON.stringify({
+    url: options.url,
+    width: options.width,
+    height: options.height,
+    fullPage: options.fullPage,
+    format: options.format,
+  });
+  return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+export function getCached(key: string, format: string): Buffer | null {
+  const filePath = path.join(CACHE_DIR, `${key}.${format}`);
+
+  if (!fs.existsSync(filePath)) return null;
+
+  const stat = fs.statSync(filePath);
+  const age = Date.now() - stat.mtimeMs;
+
+  if (age > CACHE_TTL_MS) {
+    fs.unlinkSync(filePath);
+    return null;
+  }
+
+  return fs.readFileSync(filePath);
+}
+
+export function setCache(key: string, format: string, data: Buffer): void {
+  if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+  }
+  const filePath = path.join(CACHE_DIR, `${key}.${format}`);
+  fs.writeFileSync(filePath, data);
+}
+
+export function clearCache(): number {
+  if (!fs.existsSync(CACHE_DIR)) return 0;
+
+  const files = fs.readdirSync(CACHE_DIR);
+  for (const file of files) {
+    fs.unlinkSync(path.join(CACHE_DIR, file));
+  }
+  return files.length;
+}
+```
+
+## Step 4: Build the Screenshot Renderer
+
+Create `src/renderer.ts`. This manages a single browser instance and captures screenshots.
+
+```typescript
+// src/renderer.ts
+import puppeteer, { Browser } from "puppeteer";
+import { ScreenshotOptions } from "./types.js";
+
+let browser: Browser | null = null;
+
+export async function getBrowser(): Promise<Browser> {
+  if (!browser || !browser.connected) {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+      ],
+    });
+  }
+  return browser;
+}
+
+export async function captureScreenshot(options: ScreenshotOptions): Promise<Buffer> {
+  const b = await getBrowser();
+  const page = await b.newPage();
+
+  try {
+    await page.setViewport({
+      width: options.width,
+      height: options.height,
+    });
+
+    await page.goto(options.url, {
+      waitUntil: options.waitUntil,
+      timeout: 30000,
+    });
+
+    // Optional delay after page load (for animations, lazy content)
+    if (options.delay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, options.delay));
+    }
+
+    const screenshotOptions: Parameters<typeof page.screenshot>[0] = {
+      type: options.format,
+      fullPage: options.fullPage,
+      encoding: "binary",
+    };
+
+    // Quality only applies to jpeg and webp
+    if (options.format !== "png") {
+      screenshotOptions.quality = options.quality;
+    }
+
+    const buffer = await page.screenshot(screenshotOptions);
+    return Buffer.from(buffer);
+  } finally {
+    await page.close();
+  }
+}
+
+export async function closeBrowser(): Promise<void> {
+  if (browser) {
+    await browser.close();
+    browser = null;
+  }
+}
+```
+
+## Step 5: Build Rate Limiting Middleware
+
+Create `src/rate-limiter.ts`. A simple in-memory rate limiter to prevent abuse.
+
+```typescript
+// src/rate-limiter.ts
+import { Request, Response, NextFunction } from "express";
+
+interface RateEntry {
+  count: number;
+  resetAt: number;
+}
+
+const store = new Map<string, RateEntry>();
+const MAX_REQUESTS = 30;
+const WINDOW_MS = 60 * 1000; // 1 minute
+
+export function rateLimiter(req: Request, res: Response, next: NextFunction): void {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+  const now = Date.now();
+
+  const entry = store.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    store.set(ip, { count: 1, resetAt: now + WINDOW_MS });
+    next();
+    return;
+  }
+
+  if (entry.count >= MAX_REQUESTS) {
+    const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
+    res.status(429).json({
+      error: "Too many requests",
+      retryAfter,
+    });
+    return;
+  }
+
+  entry.count++;
+  next();
+}
+```
+
+## Step 6: Build the API Routes
+
+Create `src/routes.ts` with the screenshot endpoint and a cache management endpoint.
+
+```typescript
+// src/routes.ts
+import { Router, Request, Response } from "express";
+import { validateAndNormalize, ScreenshotRequest } from "./types.js";
+import { getCacheKey, getCached, setCache, clearCache } from "./cache.js";
+import { captureScreenshot } from "./renderer.js";
+
+const router = Router();
+
+const CONTENT_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+};
+
+router.post("/screenshot", async (req: Request, res: Response) => {
+  const result = validateAndNormalize(req.body as ScreenshotRequest);
+
+  if ("error" in result) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+
+  const { options } = result;
+  const cacheKey = getCacheKey(options);
+
+  // Check cache first
+  const cached = getCached(cacheKey, options.format);
+  if (cached) {
+    res.set("Content-Type", CONTENT_TYPES[options.format]);
+    res.set("X-Cache", "HIT");
+    res.send(cached);
+    return;
+  }
+
+  try {
+    const screenshot = await captureScreenshot(options);
+    setCache(cacheKey, options.format, screenshot);
+
+    res.set("Content-Type", CONTENT_TYPES[options.format]);
+    res.set("X-Cache", "MISS");
+    res.send(screenshot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Screenshot failed:", message);
+    res.status(500).json({ error: "Failed to capture screenshot", details: message });
+  }
+});
+
+router.delete("/cache", (_req: Request, res: Response) => {
+  const count = clearCache();
+  res.json({ message: `Cleared ${count} cached screenshots` });
+});
+
+export default router;
+```
+
+## Step 7: Wire Up the Server
+
+Create `src/server.ts`.
+
+```typescript
+// src/server.ts
+import express from "express";
+import routes from "./routes.js";
+import { rateLimiter } from "./rate-limiter.js";
+import { closeBrowser } from "./renderer.js";
+
+const app = express();
+const port = parseInt(process.env.PORT ?? "3000", 10);
+
+app.use(express.json());
+app.use(rateLimiter);
+app.use("/api", routes);
+
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+const server = app.listen(port, () => {
+  console.log(`Screenshot service running on http://localhost:${port}`);
+});
+
+// Graceful shutdown
+function shutdown(): void {
+  console.log("Shutting down...");
+  closeBrowser()
+    .then(() => {
+      server.close();
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error("Shutdown error:", err);
+      process.exit(1);
+    });
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+```
+
+## Step 8: Test the Service
+
+Start the server:
+
+```bash
+npm run dev
+```
+
+Capture a screenshot:
+
+```bash
+# Basic screenshot
+curl -X POST http://localhost:3000/api/screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}' \
+  --output screenshot.png
+
+# Full page with custom viewport
+curl -X POST http://localhost:3000/api/screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "fullPage": true, "width": 1920, "height": 1080}' \
+  --output fullpage.png
+
+# JPEG with quality setting
+curl -X POST http://localhost:3000/api/screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "format": "jpeg", "quality": 60}' \
+  --output screenshot.jpg
+
+# Second request is served from cache (check X-Cache header)
+curl -v -X POST http://localhost:3000/api/screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}' \
+  --output cached.png
+
+# Clear cache
+curl -X DELETE http://localhost:3000/api/cache
+```
+
+The `X-Cache` response header tells you whether the image was served from cache (`HIT`) or freshly rendered (`MISS`).
+
+**Extend ideas:**
+
+- Add a `selector` option to screenshot a specific CSS selector instead of the full viewport.
+- Support custom JavaScript injection before capture (for dismissing cookie banners).
+- Add S3 or R2 upload so screenshots persist beyond the local disk.
+- Add a queue system (BullMQ) for handling many concurrent requests without exhausting browser memory.
+- Generate Open Graph images by rendering an HTML template with dynamic data.
+
+The service handles the full lifecycle: validate input, check cache, render, store, and serve. Each concern is isolated in its own module, making it straightforward to swap Puppeteer for Playwright or replace the disk cache with Redis.

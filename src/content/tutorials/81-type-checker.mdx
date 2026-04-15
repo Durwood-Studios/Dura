@@ -1,0 +1,736 @@
+---
+title: "Build a Type Checker"
+description: "Parse type annotations, build a type environment, check assignments, and report errors in a mini TypeScript-like language."
+slug: "type-checker"
+difficulty: "advanced"
+estimatedMinutes: 240
+steps: 12
+tags: ["types", "typescript", "compiler", "ast", "analysis"]
+---
+
+## Overview
+
+Type checkers are the silent guardians of modern codebases. They catch bugs before your code ever runs, turning runtime crashes into compile-time errors. In this tutorial, you will build a type checker from scratch for a small, statically-typed language with integers, booleans, strings, functions, and basic generics.
+
+You will parse type annotations into an AST, build a type environment that tracks variable bindings, implement unification for checking type compatibility, and produce clear error messages when types do not match. By the end, you will understand how tools like TypeScript, Flow, and Rust's compiler decide whether your code is correct.
+
+We will use only Node.js with zero external dependencies. Everything runs on macOS, Windows, and Linux.
+
+## Step 1: Define the Token Types
+
+Every compiler begins with tokenization. Define the tokens your language supports.
+
+```typescript
+// src/tokens.ts
+export enum TokenType {
+  Number = "Number",
+  String = "String",
+  Boolean = "Boolean",
+  Identifier = "Identifier",
+  Colon = "Colon",
+  Arrow = "Arrow",
+  Equals = "Equals",
+  LeftParen = "LeftParen",
+  RightParen = "RightParen",
+  LeftBrace = "LeftBrace",
+  RightBrace = "RightBrace",
+  Comma = "Comma",
+  Let = "Let",
+  Fn = "Fn",
+  If = "If",
+  Return = "Return",
+  True = "True",
+  False = "False",
+  Semicolon = "Semicolon",
+  Plus = "Plus",
+  Minus = "Minus",
+  Star = "Star",
+  EqualEqual = "EqualEqual",
+  EOF = "EOF",
+}
+
+export interface Token {
+  type: TokenType;
+  value: string;
+  line: number;
+  column: number;
+}
+```
+
+## Step 2: Build the Lexer
+
+The lexer transforms raw source text into a stream of tokens.
+
+```typescript
+// src/lexer.ts
+import { Token, TokenType } from "./tokens.js";
+
+const KEYWORDS: Record<string, TokenType> = {
+  let: TokenType.Let,
+  fn: TokenType.Fn,
+  if: TokenType.If,
+  return: TokenType.Return,
+  true: TokenType.True,
+  false: TokenType.False,
+};
+
+export function tokenize(source: string): Token[] {
+  const tokens: Token[] = [];
+  let pos = 0;
+  let line = 1;
+  let column = 1;
+
+  while (pos < source.length) {
+    const char = source[pos];
+
+    if (char === "\n") {
+      line++;
+      column = 1;
+      pos++;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      column++;
+      pos++;
+      continue;
+    }
+
+    if (char === "/" && source[pos + 1] === "/") {
+      while (pos < source.length && source[pos] !== "\n") pos++;
+      continue;
+    }
+
+    const start = column;
+
+    if (/[0-9]/.test(char)) {
+      let num = "";
+      while (pos < source.length && /[0-9]/.test(source[pos])) {
+        num += source[pos];
+        pos++;
+        column++;
+      }
+      tokens.push({ type: TokenType.Number, value: num, line, column: start });
+      continue;
+    }
+
+    if (char === '"') {
+      let str = "";
+      pos++;
+      column++;
+      while (pos < source.length && source[pos] !== '"') {
+        str += source[pos];
+        pos++;
+        column++;
+      }
+      pos++;
+      column++;
+      tokens.push({ type: TokenType.String, value: str, line, column: start });
+      continue;
+    }
+
+    if (/[a-zA-Z_]/.test(char)) {
+      let id = "";
+      while (pos < source.length && /[a-zA-Z0-9_]/.test(source[pos])) {
+        id += source[pos];
+        pos++;
+        column++;
+      }
+      const type = KEYWORDS[id] ?? TokenType.Identifier;
+      tokens.push({ type, value: id, line, column: start });
+      continue;
+    }
+
+    const simple: Record<string, TokenType> = {
+      ":": TokenType.Colon,
+      "(": TokenType.LeftParen,
+      ")": TokenType.RightParen,
+      "{": TokenType.LeftBrace,
+      "}": TokenType.RightBrace,
+      ",": TokenType.Comma,
+      ";": TokenType.Semicolon,
+      "+": TokenType.Plus,
+      "-": TokenType.Minus,
+      "*": TokenType.Star,
+    };
+
+    if (char === "=" && source[pos + 1] === "=") {
+      tokens.push({ type: TokenType.EqualEqual, value: "==", line, column: start });
+      pos += 2;
+      column += 2;
+      continue;
+    }
+    if (char === "=") {
+      tokens.push({ type: TokenType.Equals, value: "=", line, column: start });
+      pos++;
+      column++;
+      continue;
+    }
+    if (char === "-" && source[pos + 1] === ">") {
+      tokens.push({ type: TokenType.Arrow, value: "->", line, column: start });
+      pos += 2;
+      column += 2;
+      continue;
+    }
+    if (simple[char]) {
+      tokens.push({ type: simple[char], value: char, line, column: start });
+      pos++;
+      column++;
+      continue;
+    }
+
+    throw new Error(`Unexpected character '${char}' at ${line}:${column}`);
+  }
+
+  tokens.push({ type: TokenType.EOF, value: "", line, column });
+  return tokens;
+}
+```
+
+## Step 3: Define the AST Nodes
+
+The AST captures the structure of your language including type annotations.
+
+```typescript
+// src/ast.ts
+export type TypeAnnotation =
+  | { kind: "primitive"; name: "number" | "boolean" | "string" | "void" }
+  | { kind: "function"; params: TypeAnnotation[]; returnType: TypeAnnotation }
+  | { kind: "generic"; name: string };
+
+export type Expression =
+  | { kind: "number"; value: number }
+  | { kind: "string"; value: string }
+  | { kind: "boolean"; value: boolean }
+  | { kind: "identifier"; name: string }
+  | { kind: "binary"; op: string; left: Expression; right: Expression }
+  | { kind: "call"; callee: Expression; args: Expression[] }
+  | { kind: "if"; condition: Expression; then: Expression; else_: Expression };
+
+export interface Parameter {
+  name: string;
+  typeAnnotation: TypeAnnotation;
+}
+
+export type Statement =
+  | { kind: "let"; name: string; typeAnnotation: TypeAnnotation | null; value: Expression }
+  | {
+      kind: "function";
+      name: string;
+      params: Parameter[];
+      returnType: TypeAnnotation;
+      body: Statement[];
+    }
+  | { kind: "return"; value: Expression }
+  | { kind: "expression"; value: Expression };
+
+export type Program = Statement[];
+```
+
+## Step 4: Build the Parser
+
+Parse tokens into the AST. Handle type annotations after colons and function return types after arrows.
+
+```typescript
+// src/parser.ts
+import { Token, TokenType } from "./tokens.js";
+import { TypeAnnotation, Expression, Statement, Parameter, Program } from "./ast.js";
+
+export class Parser {
+  private pos = 0;
+  constructor(private tokens: Token[]) {}
+
+  parse(): Program {
+    const stmts: Statement[] = [];
+    while (!this.isAtEnd()) stmts.push(this.statement());
+    return stmts;
+  }
+
+  private statement(): Statement {
+    if (this.match(TokenType.Let)) return this.letStatement();
+    if (this.match(TokenType.Fn)) return this.fnStatement();
+    if (this.match(TokenType.Return)) return this.returnStatement();
+    const expr = this.expression();
+    this.expect(TokenType.Semicolon);
+    return { kind: "expression", value: expr };
+  }
+
+  private letStatement(): Statement {
+    const name = this.expect(TokenType.Identifier).value;
+    let typeAnnotation: TypeAnnotation | null = null;
+    if (this.match(TokenType.Colon)) typeAnnotation = this.typeAnnotation();
+    this.expect(TokenType.Equals);
+    const value = this.expression();
+    this.expect(TokenType.Semicolon);
+    return { kind: "let", name, typeAnnotation, value };
+  }
+
+  private fnStatement(): Statement {
+    const name = this.expect(TokenType.Identifier).value;
+    this.expect(TokenType.LeftParen);
+    const params = this.parameterList();
+    this.expect(TokenType.RightParen);
+    this.expect(TokenType.Arrow);
+    const returnType = this.typeAnnotation();
+    this.expect(TokenType.LeftBrace);
+    const body: Statement[] = [];
+    while (this.peek().type !== TokenType.RightBrace) body.push(this.statement());
+    this.expect(TokenType.RightBrace);
+    return { kind: "function", name, params, returnType, body };
+  }
+
+  private returnStatement(): Statement {
+    const value = this.expression();
+    this.expect(TokenType.Semicolon);
+    return { kind: "return", value };
+  }
+
+  private parameterList(): Parameter[] {
+    const params: Parameter[] = [];
+    if (this.peek().type === TokenType.RightParen) return params;
+    do {
+      const name = this.expect(TokenType.Identifier).value;
+      this.expect(TokenType.Colon);
+      const typeAnnotation = this.typeAnnotation();
+      params.push({ name, typeAnnotation });
+    } while (this.match(TokenType.Comma));
+    return params;
+  }
+
+  private typeAnnotation(): TypeAnnotation {
+    const token = this.expect(TokenType.Identifier);
+    const primitives = ["number", "boolean", "string", "void"];
+    if (primitives.includes(token.value)) {
+      return { kind: "primitive", name: token.value as "number" | "boolean" | "string" | "void" };
+    }
+    return { kind: "generic", name: token.value };
+  }
+
+  private expression(): Expression {
+    return this.equality();
+  }
+
+  private equality(): Expression {
+    let left = this.addition();
+    while (this.match(TokenType.EqualEqual)) {
+      left = { kind: "binary", op: "==", left, right: this.addition() };
+    }
+    return left;
+  }
+
+  private addition(): Expression {
+    let left = this.multiplication();
+    while (this.peek().type === TokenType.Plus || this.peek().type === TokenType.Minus) {
+      const op = this.advance().value;
+      left = { kind: "binary", op, left, right: this.multiplication() };
+    }
+    return left;
+  }
+
+  private multiplication(): Expression {
+    let left = this.primary();
+    while (this.match(TokenType.Star)) {
+      left = { kind: "binary", op: "*", left, right: this.primary() };
+    }
+    return left;
+  }
+
+  private primary(): Expression {
+    const token = this.peek();
+    if (token.type === TokenType.Number) {
+      this.advance();
+      return { kind: "number", value: parseInt(token.value) };
+    }
+    if (token.type === TokenType.String) {
+      this.advance();
+      return { kind: "string", value: token.value };
+    }
+    if (token.type === TokenType.True) {
+      this.advance();
+      return { kind: "boolean", value: true };
+    }
+    if (token.type === TokenType.False) {
+      this.advance();
+      return { kind: "boolean", value: false };
+    }
+    if (token.type === TokenType.Identifier) {
+      this.advance();
+      let expr: Expression = { kind: "identifier", name: token.value };
+      if (this.match(TokenType.LeftParen)) {
+        const args: Expression[] = [];
+        if (this.peek().type !== TokenType.RightParen) {
+          do {
+            args.push(this.expression());
+          } while (this.match(TokenType.Comma));
+        }
+        this.expect(TokenType.RightParen);
+        expr = { kind: "call", callee: expr, args };
+      }
+      return expr;
+    }
+    if (this.match(TokenType.LeftParen)) {
+      const expr = this.expression();
+      this.expect(TokenType.RightParen);
+      return expr;
+    }
+    throw new Error(`Unexpected token '${token.value}' at ${token.line}:${token.column}`);
+  }
+
+  private peek(): Token {
+    return this.tokens[this.pos];
+  }
+  private advance(): Token {
+    return this.tokens[this.pos++];
+  }
+  private isAtEnd(): boolean {
+    return this.peek().type === TokenType.EOF;
+  }
+  private match(type: TokenType): boolean {
+    if (this.peek().type === type) {
+      this.advance();
+      return true;
+    }
+    return false;
+  }
+  private expect(type: TokenType): Token {
+    const token = this.peek();
+    if (token.type !== type)
+      throw new Error(`Expected ${type} but got '${token.value}' at ${token.line}:${token.column}`);
+    return this.advance();
+  }
+}
+```
+
+## Step 5: Create the Type Environment
+
+The type environment maps variable names to their types, with support for nested scopes.
+
+```typescript
+// src/type-env.ts
+import { TypeAnnotation } from "./ast.js";
+
+export class TypeEnvironment {
+  private bindings: Map<string, TypeAnnotation> = new Map();
+  constructor(private parent: TypeEnvironment | null = null) {}
+
+  define(name: string, type: TypeAnnotation): void {
+    this.bindings.set(name, type);
+  }
+
+  lookup(name: string): TypeAnnotation | null {
+    return this.bindings.get(name) ?? this.parent?.lookup(name) ?? null;
+  }
+
+  child(): TypeEnvironment {
+    return new TypeEnvironment(this);
+  }
+}
+```
+
+## Step 6: Implement Type Comparison
+
+Build a function that checks whether two types are compatible.
+
+```typescript
+// src/type-utils.ts
+import { TypeAnnotation } from "./ast.js";
+
+export function typeEquals(a: TypeAnnotation, b: TypeAnnotation): boolean {
+  if (a.kind === "primitive" && b.kind === "primitive") return a.name === b.name;
+  if (a.kind === "function" && b.kind === "function") {
+    if (a.params.length !== b.params.length) return false;
+    for (let i = 0; i < a.params.length; i++) {
+      if (!typeEquals(a.params[i], b.params[i])) return false;
+    }
+    return typeEquals(a.returnType, b.returnType);
+  }
+  if (a.kind === "generic" || b.kind === "generic") return true;
+  return false;
+}
+
+export function typeToString(t: TypeAnnotation): string {
+  if (t.kind === "primitive") return t.name;
+  if (t.kind === "generic") return t.name;
+  if (t.kind === "function") {
+    const params = t.params.map(typeToString).join(", ");
+    return `(${params}) -> ${typeToString(t.returnType)}`;
+  }
+  return "unknown";
+}
+```
+
+## Step 7: Build the Type Checker Core
+
+The checker walks the AST and verifies every expression and statement.
+
+```typescript
+// src/checker.ts
+import { Expression, Statement, Program, TypeAnnotation } from "./ast.js";
+import { TypeEnvironment } from "./type-env.js";
+import { typeEquals, typeToString } from "./type-utils.js";
+
+export interface TypeError {
+  message: string;
+  kind: "type-mismatch" | "undefined-variable" | "arity-mismatch" | "not-callable";
+}
+
+export class TypeChecker {
+  private errors: TypeError[] = [];
+  constructor(private env: TypeEnvironment = new TypeEnvironment()) {}
+
+  check(program: Program): TypeError[] {
+    for (const stmt of program) this.checkStatement(stmt, this.env);
+    return this.errors;
+  }
+
+  private checkStatement(stmt: Statement, env: TypeEnvironment): void {
+    switch (stmt.kind) {
+      case "let": {
+        const valueType = this.inferExpression(stmt.value, env);
+        if (stmt.typeAnnotation && !typeEquals(stmt.typeAnnotation, valueType)) {
+          this.errors.push({
+            kind: "type-mismatch",
+            message: `Cannot assign ${typeToString(valueType)} to ${typeToString(stmt.typeAnnotation)}`,
+          });
+        }
+        env.define(stmt.name, stmt.typeAnnotation ?? valueType);
+        break;
+      }
+      case "function": {
+        const fnType: TypeAnnotation = {
+          kind: "function",
+          params: stmt.params.map((p) => p.typeAnnotation),
+          returnType: stmt.returnType,
+        };
+        env.define(stmt.name, fnType);
+        const childEnv = env.child();
+        for (const param of stmt.params) childEnv.define(param.name, param.typeAnnotation);
+        for (const bodyStmt of stmt.body) this.checkStatement(bodyStmt, childEnv);
+        break;
+      }
+      case "return": {
+        this.inferExpression(stmt.value, env);
+        break;
+      }
+      case "expression": {
+        this.inferExpression(stmt.value, env);
+        break;
+      }
+    }
+  }
+
+  private inferExpression(expr: Expression, env: TypeEnvironment): TypeAnnotation {
+    switch (expr.kind) {
+      case "number":
+        return { kind: "primitive", name: "number" };
+      case "string":
+        return { kind: "primitive", name: "string" };
+      case "boolean":
+        return { kind: "primitive", name: "boolean" };
+      case "identifier": {
+        const type = env.lookup(expr.name);
+        if (!type) {
+          this.errors.push({
+            kind: "undefined-variable",
+            message: `Undefined variable '${expr.name}'`,
+          });
+          return { kind: "primitive", name: "void" };
+        }
+        return type;
+      }
+      case "binary": {
+        const left = this.inferExpression(expr.left, env);
+        const right = this.inferExpression(expr.right, env);
+        if (expr.op === "==") return { kind: "primitive", name: "boolean" };
+        if (!typeEquals(left, right)) {
+          this.errors.push({
+            kind: "type-mismatch",
+            message: `Cannot apply '${expr.op}' to ${typeToString(left)} and ${typeToString(right)}`,
+          });
+        }
+        return left;
+      }
+      case "call": {
+        const calleeType = this.inferExpression(expr.callee, env);
+        if (calleeType.kind !== "function") {
+          this.errors.push({
+            kind: "not-callable",
+            message: `${typeToString(calleeType)} is not callable`,
+          });
+          return { kind: "primitive", name: "void" };
+        }
+        if (expr.args.length !== calleeType.params.length) {
+          this.errors.push({
+            kind: "arity-mismatch",
+            message: `Expected ${calleeType.params.length} arguments but got ${expr.args.length}`,
+          });
+        }
+        for (let i = 0; i < Math.min(expr.args.length, calleeType.params.length); i++) {
+          const argType = this.inferExpression(expr.args[i], env);
+          if (!typeEquals(calleeType.params[i], argType)) {
+            this.errors.push({
+              kind: "type-mismatch",
+              message: `Argument ${i + 1}: expected ${typeToString(calleeType.params[i])} but got ${typeToString(argType)}`,
+            });
+          }
+        }
+        return calleeType.returnType;
+      }
+      case "if": {
+        const condType = this.inferExpression(expr.condition, env);
+        if (condType.kind !== "primitive" || condType.name !== "boolean") {
+          this.errors.push({
+            kind: "type-mismatch",
+            message: `Condition must be boolean, got ${typeToString(condType)}`,
+          });
+        }
+        const thenType = this.inferExpression(expr.then, env);
+        const elseType = this.inferExpression(expr.else_, env);
+        if (!typeEquals(thenType, elseType)) {
+          this.errors.push({ kind: "type-mismatch", message: `If branches must have same type` });
+        }
+        return thenType;
+      }
+    }
+  }
+}
+```
+
+## Step 8: Add Return Type Checking
+
+Extend the checker to verify that functions actually return the declared type. Modify the function case in `checkStatement` to track the return type and compare it against the declared return type.
+
+```typescript
+// Add to the "function" case in checkStatement:
+case "function": {
+  const fnType: TypeAnnotation = {
+    kind: "function",
+    params: stmt.params.map((p) => p.typeAnnotation),
+    returnType: stmt.returnType,
+  };
+  env.define(stmt.name, fnType);
+  const childEnv = env.child();
+  for (const param of stmt.params) childEnv.define(param.name, param.typeAnnotation);
+
+  let lastReturnType: TypeAnnotation | null = null;
+  for (const bodyStmt of stmt.body) {
+    this.checkStatement(bodyStmt, childEnv);
+    if (bodyStmt.kind === "return") {
+      lastReturnType = this.inferExpression(bodyStmt.value, childEnv);
+    }
+  }
+  if (lastReturnType && !typeEquals(stmt.returnType, lastReturnType)) {
+    this.errors.push({
+      kind: "type-mismatch",
+      message: `Function '${stmt.name}' declares return type ${typeToString(stmt.returnType)} but returns ${typeToString(lastReturnType)}`,
+    });
+  }
+  break;
+}
+```
+
+## Step 9: Format Error Messages
+
+Create a formatter that produces clear, readable error output.
+
+```typescript
+// src/reporter.ts
+import { TypeError } from "./checker.js";
+
+export function formatErrors(errors: TypeError[], source: string): string {
+  if (errors.length === 0) return "No type errors found.";
+
+  const lines = errors.map((err, i) => {
+    const icon =
+      err.kind === "type-mismatch" ? "TYPE" : err.kind === "undefined-variable" ? "REF" : "CALL";
+    return `  [${icon}] ${err.message}`;
+  });
+
+  return `Found ${errors.length} type error(s):\n${lines.join("\n")}`;
+}
+```
+
+## Step 10: Wire It All Together
+
+Create the main entry point that processes source code end-to-end.
+
+```typescript
+// src/main.ts
+import { tokenize } from "./lexer.js";
+import { Parser } from "./parser.js";
+import { TypeChecker } from "./checker.js";
+import { formatErrors } from "./reporter.js";
+import { readFileSync } from "node:fs";
+
+const filePath = process.argv[2];
+if (!filePath) {
+  console.error("Usage: npx tsx src/main.ts <file.tc>");
+  process.exit(1);
+}
+
+const source = readFileSync(filePath, "utf-8");
+const tokens = tokenize(source);
+const ast = new Parser(tokens).parse();
+const errors = new TypeChecker().check(ast);
+console.log(formatErrors(errors, source));
+process.exit(errors.length > 0 ? 1 : 0);
+```
+
+## Step 11: Write Test Programs
+
+Create sample programs to exercise the checker.
+
+```typescript
+// examples/valid.tc
+let x: number = 42;
+let name: string = "hello";
+let flag: boolean = true;
+
+fn add(a: number, b: number) -> number {
+  return a + b;
+}
+
+let result: number = add(1, 2);
+```
+
+```typescript
+// examples/errors.tc
+let x: number = "oops";
+let y: boolean = 42;
+
+fn greet(name: string) -> string {
+  return 42;
+}
+
+greet(123);
+z + 1;
+```
+
+Running `npx tsx src/main.ts examples/errors.tc` should output multiple type errors: assigning a string to a number, a number to a boolean, returning the wrong type, passing wrong argument types, and referencing an undefined variable.
+
+## Step 12: Extend with Type Inference
+
+Add basic type inference so `let` statements do not always need annotations.
+
+```typescript
+// Update the "let" case in checkStatement:
+case "let": {
+  const valueType = this.inferExpression(stmt.value, env);
+  if (stmt.typeAnnotation) {
+    if (!typeEquals(stmt.typeAnnotation, valueType)) {
+      this.errors.push({
+        kind: "type-mismatch",
+        message: `Cannot assign ${typeToString(valueType)} to ${typeToString(stmt.typeAnnotation)}`,
+      });
+    }
+    env.define(stmt.name, stmt.typeAnnotation);
+  } else {
+    // Infer the type from the value
+    env.define(stmt.name, valueType);
+  }
+  break;
+}
+```
+
+Now `let x = 42;` automatically gets type `number`, while `let x: string = 42;` correctly reports an error.
+
+You now have a working type checker that parses annotations, infers types, checks assignments and function calls, and produces actionable error messages. From here, you could add union types, struct types, or a full Hindley-Milner inference engine.

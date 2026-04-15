@@ -1,0 +1,796 @@
+---
+title: "Build a Notification System"
+description: "Create an in-app notification system with a bell badge, dropdown panel, read/unread states, real-time delivery via Server-Sent Events, and persistent storage."
+slug: "notification-system"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["react", "notifications", "real-time", "websocket", "ui"]
+---
+
+## Overview
+
+Notification systems are a core UX pattern in modern applications. Users expect real-time updates without refreshing the page, clear visual indicators of unread items, and smooth interactions for managing their notifications.
+
+In this tutorial, you will build a complete notification system from scratch. The system includes a bell icon with an unread badge, a dropdown panel listing notifications, read/unread state management, real-time delivery using Server-Sent Events (SSE), and persistence via a simple JSON-based store. By the end, you will understand how real-time data flows from server to client, how to manage notification state efficiently, and how to build accessible dropdown UIs.
+
+We use SSE instead of WebSockets because SSE is simpler for unidirectional server-to-client communication, works over standard HTTP, and requires no additional libraries.
+
+## Step 1: Project Setup
+
+Initialize a new project and install dependencies.
+
+```bash
+mkdir notification-system && cd notification-system
+npm init -y
+npm install express cors uuid
+npm install -D typescript @types/node @types/express @types/cors @types/uuid ts-node
+npx tsc --init --strict --esModuleInterop --outDir dist --rootDir src
+```
+
+Create the directory structure:
+
+```bash
+mkdir -p src/server src/client
+```
+
+Update `tsconfig.json` to set `"target": "ES2020"` and `"module": "ES2020"`. Add `"type": "module"` to your `package.json`.
+
+## Step 2: Define the Notification Model
+
+Create `src/server/types.ts` to define the shape of a notification:
+
+```typescript
+export interface Notification {
+  id: string;
+  userId: string;
+  title: string;
+  body: string;
+  type: "info" | "success" | "warning" | "error";
+  isRead: boolean;
+  createdAt: string;
+  link?: string;
+}
+
+export interface NotificationStore {
+  notifications: Notification[];
+}
+```
+
+Every notification has a unique ID, belongs to a user, carries a type for styling, and tracks whether the user has read it. The `link` field is optional and allows clicking a notification to navigate somewhere.
+
+## Step 3: Build the In-Memory Store with File Persistence
+
+Create `src/server/store.ts`:
+
+```typescript
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Notification, NotificationStore } from "./types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.join(__dirname, "..", "..", "data");
+const DATA_FILE = path.join(DATA_DIR, "notifications.json");
+
+let store: NotificationStore = { notifications: [] };
+
+export async function loadStore(): Promise<void> {
+  try {
+    const raw = await readFile(DATA_FILE, "utf-8");
+    store = JSON.parse(raw) as NotificationStore;
+  } catch {
+    store = { notifications: [] };
+    await persistStore();
+  }
+}
+
+async function persistStore(): Promise<void> {
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(DATA_FILE, JSON.stringify(store, null, 2), "utf-8");
+}
+
+export function getNotifications(userId: string): Notification[] {
+  return store.notifications
+    .filter((n) => n.userId === userId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
+export function getUnreadCount(userId: string): number {
+  return store.notifications.filter((n) => n.userId === userId && !n.isRead).length;
+}
+
+export async function addNotification(notification: Notification): Promise<Notification> {
+  store.notifications.push(notification);
+  await persistStore();
+  return notification;
+}
+
+export async function markAsRead(notificationId: string): Promise<Notification | null> {
+  const notification = store.notifications.find((n) => n.id === notificationId);
+  if (!notification) return null;
+  notification.isRead = true;
+  await persistStore();
+  return notification;
+}
+
+export async function markAllAsRead(userId: string): Promise<number> {
+  let count = 0;
+  for (const n of store.notifications) {
+    if (n.userId === userId && !n.isRead) {
+      n.isRead = true;
+      count++;
+    }
+  }
+  await persistStore();
+  return count;
+}
+```
+
+This store loads from disk on startup and writes back on every mutation. For production, you would replace this with a database, but the interface remains the same.
+
+## Step 4: Implement the SSE Connection Manager
+
+Create `src/server/sse.ts` to manage active SSE connections:
+
+```typescript
+import type { Response } from "express";
+
+interface SSEClient {
+  userId: string;
+  response: Response;
+}
+
+const clients: SSEClient[] = [];
+
+export function addClient(userId: string, response: Response): void {
+  clients.push({ userId, response });
+
+  response.on("close", () => {
+    const index = clients.findIndex((c) => c.response === response);
+    if (index !== -1) {
+      clients.splice(index, 1);
+    }
+  });
+}
+
+export function sendToUser(userId: string, event: string, data: unknown): void {
+  const userClients = clients.filter((c) => c.userId === userId);
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+  for (const client of userClients) {
+    client.response.write(payload);
+  }
+}
+
+export function getClientCount(): number {
+  return clients.length;
+}
+```
+
+SSE sends data as plain text over a persistent HTTP connection. Each message has an event type and a JSON-serialized data field. When a client disconnects, the `close` event fires and we clean up.
+
+## Step 5: Build the Express API
+
+Create `src/server/index.ts`:
+
+```typescript
+import express from "express";
+import cors from "cors";
+import { v4 as uuidv4 } from "uuid";
+import {
+  loadStore,
+  getNotifications,
+  getUnreadCount,
+  addNotification,
+  markAsRead,
+  markAllAsRead,
+} from "./store.js";
+import { addClient, sendToUser } from "./sse.js";
+import type { Notification } from "./types.js";
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static("public"));
+
+// SSE endpoint
+app.get("/api/notifications/stream/:userId", (req, res) => {
+  const { userId } = req.params;
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+
+  res.write(`event: connected\ndata: ${JSON.stringify({ userId })}\n\n`);
+  addClient(userId, res);
+});
+
+// Get all notifications for a user
+app.get("/api/notifications/:userId", (req, res) => {
+  const notifications = getNotifications(req.params.userId);
+  const unreadCount = getUnreadCount(req.params.userId);
+  res.json({ notifications, unreadCount });
+});
+
+// Create a notification
+app.post("/api/notifications", async (req, res) => {
+  const { userId, title, body, type, link } = req.body as Partial<Notification>;
+
+  if (!userId || !title || !body) {
+    res.status(400).json({ error: "userId, title, and body are required" });
+    return;
+  }
+
+  const notification: Notification = {
+    id: uuidv4(),
+    userId,
+    title,
+    body,
+    type: type ?? "info",
+    isRead: false,
+    createdAt: new Date().toISOString(),
+    link,
+  };
+
+  await addNotification(notification);
+  sendToUser(userId, "notification", notification);
+  res.status(201).json(notification);
+});
+
+// Mark one as read
+app.patch("/api/notifications/:id/read", async (req, res) => {
+  const notification = await markAsRead(req.params.id);
+  if (!notification) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  sendToUser(notification.userId, "read", { id: notification.id });
+  res.json(notification);
+});
+
+// Mark all as read
+app.patch("/api/notifications/:userId/read-all", async (req, res) => {
+  const count = await markAllAsRead(req.params.userId);
+  sendToUser(req.params.userId, "readAll", { count });
+  res.json({ markedAsRead: count });
+});
+
+const PORT = Number(process.env.PORT) || 3001;
+
+async function start(): Promise<void> {
+  await loadStore();
+  app.listen(PORT, () => {
+    console.log(`Notification server running on http://localhost:${PORT}`);
+  });
+}
+
+start();
+```
+
+The API provides five endpoints: SSE stream, list notifications, create notification, mark as read, and mark all as read. Every mutation also pushes an SSE event to connected clients.
+
+## Step 6: Build the Client-Side SSE Hook
+
+Create `src/client/useNotifications.ts`. This is a plain TypeScript module that manages state and the SSE connection — it can be adapted to any framework:
+
+```typescript
+type Listener = () => void;
+
+interface NotificationData {
+  id: string;
+  userId: string;
+  title: string;
+  body: string;
+  type: "info" | "success" | "warning" | "error";
+  isRead: boolean;
+  createdAt: string;
+  link?: string;
+}
+
+interface NotificationState {
+  notifications: NotificationData[];
+  unreadCount: number;
+  isConnected: boolean;
+}
+
+export function createNotificationManager(apiBase: string, userId: string) {
+  let state: NotificationState = {
+    notifications: [],
+    unreadCount: 0,
+    isConnected: false,
+  };
+  const listeners: Set<Listener> = new Set();
+  let eventSource: EventSource | null = null;
+
+  function notify(): void {
+    for (const listener of listeners) listener();
+  }
+
+  function subscribe(listener: Listener): () => void {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+
+  function getState(): NotificationState {
+    return state;
+  }
+
+  async function fetchNotifications(): Promise<void> {
+    try {
+      const res = await fetch(`${apiBase}/api/notifications/${userId}`);
+      const data = (await res.json()) as { notifications: NotificationData[]; unreadCount: number };
+      state = { ...state, notifications: data.notifications, unreadCount: data.unreadCount };
+      notify();
+    } catch (error) {
+      console.error("Failed to fetch notifications:", error);
+    }
+  }
+
+  function connect(): void {
+    eventSource = new EventSource(`${apiBase}/api/notifications/stream/${userId}`);
+
+    eventSource.addEventListener("connected", () => {
+      state = { ...state, isConnected: true };
+      notify();
+    });
+
+    eventSource.addEventListener("notification", (event) => {
+      const notification = JSON.parse(event.data) as NotificationData;
+      state = {
+        ...state,
+        notifications: [notification, ...state.notifications],
+        unreadCount: state.unreadCount + 1,
+      };
+      notify();
+    });
+
+    eventSource.addEventListener("read", (event) => {
+      const { id } = JSON.parse(event.data) as { id: string };
+      state = {
+        ...state,
+        notifications: state.notifications.map((n) => (n.id === id ? { ...n, isRead: true } : n)),
+        unreadCount: Math.max(0, state.unreadCount - 1),
+      };
+      notify();
+    });
+
+    eventSource.addEventListener("readAll", () => {
+      state = {
+        ...state,
+        notifications: state.notifications.map((n) => ({ ...n, isRead: true })),
+        unreadCount: 0,
+      };
+      notify();
+    });
+
+    eventSource.onerror = () => {
+      state = { ...state, isConnected: false };
+      notify();
+    };
+  }
+
+  function disconnect(): void {
+    eventSource?.close();
+    state = { ...state, isConnected: false };
+    notify();
+  }
+
+  return { getState, subscribe, fetchNotifications, connect, disconnect };
+}
+```
+
+This manager uses a pub/sub pattern so any UI framework can subscribe to state changes. Call `connect()` to open the SSE stream, and `disconnect()` to clean up.
+
+## Step 7: Build the Notification Bell Component
+
+Create `public/index.html` with a vanilla implementation of the bell UI:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notification System</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        background: #0a0a0f;
+        color: #f0f0f0;
+      }
+      .header {
+        display: flex;
+        justify-content: flex-end;
+        padding: 16px 24px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .bell-container {
+        position: relative;
+      }
+      .bell-btn {
+        background: none;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 8px 12px;
+        color: #f0f0f0;
+        cursor: pointer;
+        font-size: 20px;
+        position: relative;
+      }
+      .bell-btn:hover {
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .badge {
+        position: absolute;
+        top: -4px;
+        right: -4px;
+        background: #ef4444;
+        color: white;
+        border-radius: 50%;
+        min-width: 18px;
+        height: 18px;
+        font-size: 11px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+      }
+      .badge.hidden {
+        display: none;
+      }
+      .dropdown {
+        position: absolute;
+        right: 0;
+        top: 48px;
+        width: 380px;
+        max-height: 480px;
+        overflow-y: auto;
+        background: #151520;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        display: none;
+        z-index: 100;
+      }
+      .dropdown.open {
+        display: block;
+      }
+      .dropdown-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .dropdown-header h3 {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .mark-all-btn {
+        background: none;
+        border: none;
+        color: #10b981;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .notification-item {
+        padding: 12px 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        cursor: pointer;
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+      }
+      .notification-item:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .notification-item.unread {
+        background: rgba(16, 185, 129, 0.05);
+      }
+      .unread-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #10b981;
+        margin-top: 6px;
+        flex-shrink: 0;
+      }
+      .unread-dot.read {
+        visibility: hidden;
+      }
+      .notif-content {
+        flex: 1;
+      }
+      .notif-title {
+        font-size: 13px;
+        font-weight: 500;
+        margin-bottom: 2px;
+      }
+      .notif-body {
+        font-size: 12px;
+        color: #a0a0a8;
+      }
+      .notif-time {
+        font-size: 11px;
+        color: #6b6b75;
+        margin-top: 4px;
+      }
+      .empty {
+        padding: 32px;
+        text-align: center;
+        color: #6b6b75;
+        font-size: 14px;
+      }
+      .test-panel {
+        padding: 24px;
+        max-width: 400px;
+        margin: 40px auto;
+      }
+      .test-panel input,
+      .test-panel select,
+      .test-panel textarea {
+        width: 100%;
+        padding: 8px 12px;
+        margin-bottom: 12px;
+        background: #151520;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        color: #f0f0f0;
+        font-size: 14px;
+      }
+      .test-panel button {
+        width: 100%;
+        padding: 10px;
+        background: #10b981;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 500;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div class="bell-container">
+        <button class="bell-btn" id="bellBtn" aria-label="Notifications" aria-expanded="false">
+          &#128276;
+          <span class="badge hidden" id="badge">0</span>
+        </button>
+        <div class="dropdown" id="dropdown" role="menu">
+          <div class="dropdown-header">
+            <h3>Notifications</h3>
+            <button class="mark-all-btn" id="markAllBtn">Mark all read</button>
+          </div>
+          <div id="notificationList"></div>
+        </div>
+      </div>
+    </div>
+    <div class="test-panel">
+      <h2 style="margin-bottom:16px;font-size:18px;">Send Test Notification</h2>
+      <input id="titleInput" placeholder="Title" value="New message" />
+      <textarea id="bodyInput" placeholder="Body" rows="2">You have a new notification</textarea>
+      <select id="typeInput">
+        <option value="info">Info</option>
+        <option value="success">Success</option>
+        <option value="warning">Warning</option>
+        <option value="error">Error</option>
+      </select>
+      <button id="sendBtn">Send Notification</button>
+    </div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
+```
+
+## Step 8: Wire Up the Client JavaScript
+
+Create `public/app.js`:
+
+```javascript
+const API_BASE = `http://localhost:${location.port || 3001}`;
+const USER_ID = "user-1";
+
+const bellBtn = document.getElementById("bellBtn");
+const badge = document.getElementById("badge");
+const dropdown = document.getElementById("dropdown");
+const notificationList = document.getElementById("notificationList");
+const markAllBtn = document.getElementById("markAllBtn");
+const sendBtn = document.getElementById("sendBtn");
+
+let notifications = [];
+let unreadCount = 0;
+let isOpen = false;
+
+// SSE connection
+const eventSource = new EventSource(`${API_BASE}/api/notifications/stream/${USER_ID}`);
+
+eventSource.addEventListener("notification", (event) => {
+  const notification = JSON.parse(event.data);
+  notifications.unshift(notification);
+  unreadCount++;
+  render();
+});
+
+eventSource.addEventListener("read", (event) => {
+  const { id } = JSON.parse(event.data);
+  notifications = notifications.map((n) => (n.id === id ? { ...n, isRead: true } : n));
+  unreadCount = Math.max(0, unreadCount - 1);
+  render();
+});
+
+eventSource.addEventListener("readAll", () => {
+  notifications = notifications.map((n) => ({ ...n, isRead: true }));
+  unreadCount = 0;
+  render();
+});
+
+// Initial fetch
+async function fetchNotifications() {
+  const res = await fetch(`${API_BASE}/api/notifications/${USER_ID}`);
+  const data = await res.json();
+  notifications = data.notifications;
+  unreadCount = data.unreadCount;
+  render();
+}
+
+function timeAgo(dateStr) {
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function render() {
+  badge.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
+  badge.classList.toggle("hidden", unreadCount === 0);
+  bellBtn.setAttribute("aria-label", `Notifications, ${unreadCount} unread`);
+
+  if (notifications.length === 0) {
+    notificationList.innerHTML = '<div class="empty">No notifications yet</div>';
+    return;
+  }
+
+  notificationList.innerHTML = notifications
+    .map(
+      (n) => `
+    <div class="notification-item ${n.isRead ? "" : "unread"}" data-id="${n.id}">
+      <div class="unread-dot ${n.isRead ? "read" : ""}"></div>
+      <div class="notif-content">
+        <div class="notif-title">${n.title}</div>
+        <div class="notif-body">${n.body}</div>
+        <div class="notif-time">${timeAgo(n.createdAt)}</div>
+      </div>
+    </div>`
+    )
+    .join("");
+
+  notificationList.querySelectorAll(".notification-item").forEach((item) => {
+    item.addEventListener("click", () => markAsRead(item.dataset.id));
+  });
+}
+
+async function markAsRead(id) {
+  await fetch(`${API_BASE}/api/notifications/${id}/read`, { method: "PATCH" });
+}
+
+bellBtn.addEventListener("click", () => {
+  isOpen = !isOpen;
+  dropdown.classList.toggle("open", isOpen);
+  bellBtn.setAttribute("aria-expanded", String(isOpen));
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".bell-container")) {
+    isOpen = false;
+    dropdown.classList.remove("open");
+    bellBtn.setAttribute("aria-expanded", "false");
+  }
+});
+
+markAllBtn.addEventListener("click", async () => {
+  await fetch(`${API_BASE}/api/notifications/${USER_ID}/read-all`, { method: "PATCH" });
+});
+
+sendBtn.addEventListener("click", async () => {
+  await fetch(`${API_BASE}/api/notifications`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userId: USER_ID,
+      title: document.getElementById("titleInput").value,
+      body: document.getElementById("bodyInput").value,
+      type: document.getElementById("typeInput").value,
+    }),
+  });
+});
+
+fetchNotifications();
+```
+
+## Step 9: Add Keyboard Navigation and Accessibility
+
+Enhance the dropdown with keyboard support. Add this to `public/app.js`:
+
+```javascript
+bellBtn.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    bellBtn.click();
+  }
+  if (event.key === "Escape" && isOpen) {
+    isOpen = false;
+    dropdown.classList.remove("open");
+    bellBtn.setAttribute("aria-expanded", "false");
+    bellBtn.focus();
+  }
+});
+
+dropdown.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    isOpen = false;
+    dropdown.classList.remove("open");
+    bellBtn.setAttribute("aria-expanded", "false");
+    bellBtn.focus();
+  }
+
+  const items = [...notificationList.querySelectorAll(".notification-item")];
+  const current = document.activeElement;
+  const index = items.indexOf(current);
+
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    const next = items[index + 1] || items[0];
+    next?.focus();
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    const prev = items[index - 1] || items[items.length - 1];
+    prev?.focus();
+  }
+});
+```
+
+Add `tabindex="0"` and `role="menuitem"` to each notification item in the render function for proper focus management.
+
+## Step 10: Run and Test the System
+
+Add a start script to `package.json`:
+
+```json
+{
+  "scripts": {
+    "start": "npx ts-node --esm src/server/index.ts",
+    "build": "tsc",
+    "start:prod": "node dist/server/index.js"
+  }
+}
+```
+
+Start the server:
+
+```bash
+npm start
+```
+
+Open `http://localhost:3001` in your browser. Use the test panel to send notifications and watch them appear in real-time. Open a second browser tab to confirm SSE delivers to all connected clients simultaneously.
+
+To test from the command line on any OS:
+
+```bash
+curl -X POST http://localhost:3001/api/notifications \
+  -H "Content-Type: application/json" \
+  -d "{\"userId\":\"user-1\",\"title\":\"Hello\",\"body\":\"Test notification\",\"type\":\"success\"}"
+```
+
+Key behaviors to verify: the badge count updates instantly when a notification arrives, clicking a notification marks it as read and removes the unread dot, "Mark all read" clears the badge, closing and reopening the dropdown preserves state, and keyboard navigation works with arrow keys and Escape.
+
+From here you could extend the system with notification grouping, sound/vibration alerts via the Notification API, pagination for large notification volumes, or filtering by notification type.

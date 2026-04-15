@@ -1,0 +1,562 @@
+---
+title: "Build a File Upload Service"
+description: "Create a drag-and-drop file upload system with progress bars, file type validation, image previews, and server-side storage."
+slug: "file-uploader"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["react", "upload", "drag-drop", "progress", "node"]
+---
+
+## Overview
+
+File uploads seem simple until you handle edge cases: large files that need progress indicators, invalid file types that should be rejected before wasting bandwidth, images that users want to preview, and server-side storage that needs to be organized and secure.
+
+This tutorial builds a complete file upload service. The frontend handles drag-and-drop, validates file types and sizes, displays upload progress in real-time, and generates previews for image files. The backend receives multipart form data, stores files in an organized directory structure, and serves them back. Every path operation uses `path.join` for cross-platform compatibility.
+
+## Step 1: Project Setup
+
+```bash
+mkdir file-uploader && cd file-uploader
+npm init -y
+npm install express cors multer uuid mime-types
+npm install -D typescript @types/node @types/express @types/cors @types/multer @types/uuid @types/mime-types ts-node
+npx tsc --init --strict --esModuleInterop --outDir dist --rootDir src
+```
+
+Add `"type": "module"` to `package.json` and create the source directories:
+
+```bash
+mkdir -p src/server src/client uploads
+```
+
+## Step 2: Configure Multer for File Storage
+
+Create `src/server/storage.ts`:
+
+```typescript
+import multer from "multer";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { v4 as uuidv4 } from "uuid";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const UPLOADS_DIR = path.join(__dirname, "..", "..", "uploads");
+
+const ALLOWED_TYPES: Record<string, string[]> = {
+  image: ["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"],
+  document: ["application/pdf", "text/plain", "text/markdown", "application/json"],
+  archive: ["application/zip", "application/gzip"],
+};
+
+const ALL_ALLOWED = Object.values(ALLOWED_TYPES).flat();
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+
+const storage = multer.diskStorage({
+  destination(_req, _file, cb) {
+    cb(null, UPLOADS_DIR);
+  },
+  filename(_req, file, cb) {
+    const ext = path.extname(file.originalname);
+    const uniqueName = `${uuidv4()}${ext}`;
+    cb(null, uniqueName);
+  },
+});
+
+function fileFilter(
+  _req: Express.Request,
+  file: Express.Multer.File,
+  cb: multer.FileFilterCallback
+): void {
+  if (ALL_ALLOWED.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error(`File type ${file.mimetype} is not allowed`));
+  }
+}
+
+export const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: MAX_FILE_SIZE },
+});
+
+export { UPLOADS_DIR, ALLOWED_TYPES, ALL_ALLOWED, MAX_FILE_SIZE };
+```
+
+Multer handles multipart parsing and writes files to disk. Each file gets a UUID filename to prevent collisions and directory traversal attacks. The original extension is preserved for serving the correct content type.
+
+## Step 3: Build the Upload API
+
+Create `src/server/index.ts`:
+
+```typescript
+import express from "express";
+import cors from "cors";
+import path from "node:path";
+import { readdir, stat, unlink } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { lookup } from "mime-types";
+import { upload, UPLOADS_DIR, MAX_FILE_SIZE, ALL_ALLOWED } from "./storage.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, "..", "..", "public")));
+
+interface FileInfo {
+  name: string;
+  originalName: string;
+  size: number;
+  mimeType: string;
+  url: string;
+  uploadedAt: string;
+}
+
+// Upload single or multiple files
+app.post("/api/upload", (req, res) => {
+  const uploadHandler = upload.array("files", 10);
+
+  uploadHandler(req, res, (err) => {
+    if (err instanceof Error) {
+      const status = err.message.includes("not allowed") ? 415 : 413;
+      res.status(status).json({ error: err.message });
+      return;
+    }
+
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length === 0) {
+      res.status(400).json({ error: "No files provided" });
+      return;
+    }
+
+    const results: FileInfo[] = files.map((file) => ({
+      name: file.filename,
+      originalName: file.originalname,
+      size: file.size,
+      mimeType: file.mimetype,
+      url: `/api/files/${file.filename}`,
+      uploadedAt: new Date().toISOString(),
+    }));
+
+    res.status(201).json({ files: results });
+  });
+});
+
+// Serve uploaded files
+app.get("/api/files/:filename", (req, res) => {
+  const filePath = path.join(UPLOADS_DIR, path.basename(req.params.filename));
+  const mimeType = lookup(filePath) || "application/octet-stream";
+  res.setHeader("Content-Type", mimeType);
+  res.sendFile(filePath);
+});
+
+// List all uploaded files
+app.get("/api/files", async (_req, res) => {
+  try {
+    const filenames = await readdir(UPLOADS_DIR);
+    const files: FileInfo[] = [];
+
+    for (const name of filenames) {
+      const filePath = path.join(UPLOADS_DIR, name);
+      const stats = await stat(filePath);
+      files.push({
+        name,
+        originalName: name,
+        size: stats.size,
+        mimeType: lookup(filePath) || "application/octet-stream",
+        url: `/api/files/${name}`,
+        uploadedAt: stats.mtime.toISOString(),
+      });
+    }
+
+    res.json({ files: files.sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt)) });
+  } catch {
+    res.json({ files: [] });
+  }
+});
+
+// Delete a file
+app.delete("/api/files/:filename", async (req, res) => {
+  try {
+    const filePath = path.join(UPLOADS_DIR, path.basename(req.params.filename));
+    await unlink(filePath);
+    res.json({ deleted: true });
+  } catch {
+    res.status(404).json({ error: "File not found" });
+  }
+});
+
+// Upload config endpoint for client-side validation
+app.get("/api/upload/config", (_req, res) => {
+  res.json({ maxFileSize: MAX_FILE_SIZE, allowedTypes: ALL_ALLOWED });
+});
+
+const PORT = Number(process.env.PORT) || 3002;
+app.listen(PORT, () => {
+  console.log(`File upload server running on http://localhost:${PORT}`);
+});
+```
+
+The `path.basename` call on filenames is critical — it prevents directory traversal attacks where someone sends `../../etc/passwd` as a filename.
+
+## Step 4: Build the Drag-and-Drop Zone
+
+Create `public/index.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>File Uploader</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        background: #0a0a0f;
+        color: #f0f0f0;
+        padding: 24px;
+      }
+      h1 {
+        font-size: 24px;
+        margin-bottom: 24px;
+      }
+      .drop-zone {
+        border: 2px dashed rgba(255, 255, 255, 0.15);
+        border-radius: 12px;
+        padding: 48px;
+        text-align: center;
+        cursor: pointer;
+        transition: all 200ms;
+      }
+      .drop-zone:hover,
+      .drop-zone.dragover {
+        border-color: #10b981;
+        background: rgba(16, 185, 129, 0.05);
+      }
+      .drop-zone p {
+        color: #a0a0a8;
+        margin-bottom: 8px;
+      }
+      .drop-zone .hint {
+        font-size: 12px;
+        color: #6b6b75;
+      }
+      input[type="file"] {
+        display: none;
+      }
+      .upload-list {
+        margin-top: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .upload-item {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 12px 16px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .upload-item .preview {
+        width: 48px;
+        height: 48px;
+        border-radius: 6px;
+        object-fit: cover;
+        background: rgba(255, 255, 255, 0.06);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        flex-shrink: 0;
+      }
+      .upload-item .preview img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 6px;
+      }
+      .upload-item .info {
+        flex: 1;
+        min-width: 0;
+      }
+      .upload-item .name {
+        font-size: 14px;
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .upload-item .meta {
+        font-size: 12px;
+        color: #6b6b75;
+      }
+      .progress-bar {
+        height: 4px;
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 2px;
+        margin-top: 8px;
+        overflow: hidden;
+      }
+      .progress-bar .fill {
+        height: 100%;
+        background: #10b981;
+        border-radius: 2px;
+        transition: width 100ms;
+      }
+      .upload-item .status {
+        font-size: 12px;
+        font-weight: 500;
+        flex-shrink: 0;
+      }
+      .status.uploading {
+        color: #06b6d4;
+      }
+      .status.done {
+        color: #10b981;
+      }
+      .status.error {
+        color: #ef4444;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>File Uploader</h1>
+    <div class="drop-zone" id="dropZone">
+      <p>Drag files here or click to browse</p>
+      <p class="hint">Max 50MB per file. Images, documents, and archives.</p>
+      <input type="file" id="fileInput" multiple />
+    </div>
+    <div class="upload-list" id="uploadList"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
+```
+
+## Step 5: Implement Client-Side Validation
+
+Create `public/app.js` starting with validation logic:
+
+```javascript
+const API_BASE = "";
+const MAX_SIZE = 50 * 1024 * 1024;
+const ALLOWED = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/svg+xml",
+  "application/pdf",
+  "text/plain",
+  "text/markdown",
+  "application/json",
+  "application/zip",
+  "application/gzip",
+];
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function validateFile(file) {
+  if (file.size > MAX_SIZE) {
+    return { valid: false, error: `File exceeds ${formatSize(MAX_SIZE)} limit` };
+  }
+  if (!ALLOWED.includes(file.type)) {
+    return { valid: false, error: `Type ${file.type || "unknown"} not allowed` };
+  }
+  return { valid: true, error: null };
+}
+
+function getFileIcon(mimeType) {
+  if (mimeType.startsWith("image/")) return "\u{1F5BC}";
+  if (mimeType === "application/pdf") return "\u{1F4C4}";
+  if (mimeType.startsWith("text/")) return "\u{1F4DD}";
+  return "\u{1F4E6}";
+}
+```
+
+Client-side validation provides instant feedback. We still validate on the server because client checks can be bypassed.
+
+## Step 6: Build the Upload Engine with Progress Tracking
+
+Add the upload function to `public/app.js`:
+
+```javascript
+function createPreview(file) {
+  return new Promise((resolve) => {
+    if (!file.type.startsWith("image/")) {
+      resolve(null);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadFile(file, itemElement) {
+  const progressFill = itemElement.querySelector(".fill");
+  const statusEl = itemElement.querySelector(".status");
+
+  const formData = new FormData();
+  formData.append("files", file);
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable) {
+        const percent = Math.round((e.loaded / e.total) * 100);
+        progressFill.style.width = `${percent}%`;
+        statusEl.textContent = `${percent}%`;
+      }
+    });
+
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        statusEl.textContent = "Done";
+        statusEl.className = "status done";
+        progressFill.style.width = "100%";
+        resolve(JSON.parse(xhr.responseText));
+      } else {
+        const error = JSON.parse(xhr.responseText).error || "Upload failed";
+        statusEl.textContent = error;
+        statusEl.className = "status error";
+        reject(new Error(error));
+      }
+    });
+
+    xhr.addEventListener("error", () => {
+      statusEl.textContent = "Network error";
+      statusEl.className = "status error";
+      reject(new Error("Network error"));
+    });
+
+    xhr.open("POST", `${API_BASE}/api/upload`);
+    xhr.send(formData);
+  });
+}
+```
+
+We use `XMLHttpRequest` instead of `fetch` because fetch does not support upload progress events. The `xhr.upload.progress` event fires as bytes are sent, giving accurate percentage updates.
+
+## Step 7: Wire Up Drag-and-Drop Events
+
+Continue in `public/app.js`:
+
+```javascript
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("fileInput");
+const uploadList = document.getElementById("uploadList");
+
+dropZone.addEventListener("click", () => fileInput.click());
+
+dropZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropZone.classList.add("dragover");
+});
+
+dropZone.addEventListener("dragleave", () => {
+  dropZone.classList.remove("dragover");
+});
+
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  handleFiles(Array.from(e.dataTransfer.files));
+});
+
+fileInput.addEventListener("change", () => {
+  handleFiles(Array.from(fileInput.files));
+  fileInput.value = "";
+});
+
+async function handleFiles(files) {
+  for (const file of files) {
+    const validation = validateFile(file);
+
+    const item = document.createElement("div");
+    item.className = "upload-item";
+
+    const preview = await createPreview(file);
+    const previewHtml = preview
+      ? `<div class="preview"><img src="${preview}" alt="" /></div>`
+      : `<div class="preview">${getFileIcon(file.type)}</div>`;
+
+    if (!validation.valid) {
+      item.innerHTML = `
+        ${previewHtml}
+        <div class="info">
+          <div class="name">${file.name}</div>
+          <div class="meta">${formatSize(file.size)}</div>
+        </div>
+        <span class="status error">${validation.error}</span>`;
+      uploadList.prepend(item);
+      continue;
+    }
+
+    item.innerHTML = `
+      ${previewHtml}
+      <div class="info">
+        <div class="name">${file.name}</div>
+        <div class="meta">${formatSize(file.size)} &middot; ${file.type}</div>
+        <div class="progress-bar"><div class="fill" style="width:0%"></div></div>
+      </div>
+      <span class="status uploading">0%</span>`;
+
+    uploadList.prepend(item);
+
+    try {
+      await uploadFile(file, item);
+    } catch (error) {
+      console.error("Upload failed:", error);
+    }
+  }
+}
+```
+
+The `dragover` event must call `preventDefault` to allow the drop. Without it, the browser navigates to the file. Files are uploaded sequentially to avoid overwhelming the server, though you could parallelize with `Promise.all` for better throughput.
+
+## Step 8: Run and Test
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "start": "npx ts-node --esm src/server/index.ts",
+    "build": "tsc"
+  }
+}
+```
+
+Ensure the uploads directory exists and start the server:
+
+```bash
+mkdir -p uploads
+npm start
+```
+
+Open `http://localhost:3002`. Test these scenarios: drag an image and watch the preview render instantly while the progress bar fills, try uploading a `.exe` file and see the validation error, drop multiple files at once and watch them upload in sequence, upload a 50MB+ file to trigger the size limit error.
+
+You can also test via curl:
+
+```bash
+curl -X POST http://localhost:3002/api/upload \
+  -F "files=@path/to/your/file.png"
+```
+
+From here, consider adding chunked uploads for files over 100MB, resumable uploads using the tus protocol, image thumbnailing on the server with sharp, or virus scanning with ClamAV.

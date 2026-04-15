@@ -1,0 +1,685 @@
+---
+title: "Build a Code Playground"
+description: "Create a browser-based code playground with Monaco editor, live preview, console output, multi-file support, and URL sharing."
+slug: "code-playground"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["sandbox", "react", "monaco", "eval", "developer-tools"]
+---
+
+## Overview
+
+Code playgrounds like CodePen and CodeSandbox are indispensable tools for learning, prototyping, and sharing code. In this tutorial, you will build your own browser-based code playground featuring the Monaco editor (the same editor that powers VS Code), live HTML/CSS/JS preview in a sandboxed iframe, a console output panel, multi-file tabs, and shareable URLs that encode the entire project state.
+
+Everything runs client-side. There is no backend, no database, no accounts. The entire playground state is compressed and encoded in the URL, making every project instantly shareable by copying a link.
+
+You will learn about iframe sandboxing, secure code evaluation, cross-origin communication, URL encoding strategies, and how to integrate a professional code editor into a React application.
+
+## Step 1: Project Setup
+
+```bash
+npm create vite@latest code-playground -- --template react-ts
+cd code-playground
+npm install @monaco-editor/react lz-string
+npm install -D @types/lz-string
+```
+
+Create the directory structure:
+
+```bash
+mkdir -p src/components src/hooks src/utils src/types
+```
+
+## Step 2: Type Definitions
+
+Create `src/types/playground.ts`:
+
+```typescript
+export interface PlaygroundFile {
+  name: string;
+  language: "html" | "css" | "javascript";
+  content: string;
+}
+
+export interface PlaygroundState {
+  files: PlaygroundFile[];
+  activeFileIndex: number;
+}
+
+export interface ConsoleMessage {
+  id: string;
+  type: "log" | "warn" | "error" | "info";
+  content: string;
+  timestamp: number;
+}
+```
+
+## Step 3: Default Files and Constants
+
+Create `src/utils/defaults.ts`:
+
+```typescript
+import type { PlaygroundFile } from "../types/playground";
+
+export const DEFAULT_HTML: PlaygroundFile = {
+  name: "index.html",
+  language: "html",
+  content: `<div id="app">
+  <h1>Hello, Playground!</h1>
+  <p>Edit the HTML, CSS, and JS files to see live changes.</p>
+  <button id="counter-btn">Count: 0</button>
+</div>`,
+};
+
+export const DEFAULT_CSS: PlaygroundFile = {
+  name: "styles.css",
+  language: "css",
+  content: `* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+
+#app {
+  text-align: center;
+}
+
+h1 {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+p {
+  color: #94a3b8;
+  margin-bottom: 1.5rem;
+}
+
+button {
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  border: none;
+  border-radius: 8px;
+  background: #6366f1;
+  color: white;
+  cursor: pointer;
+  transition: transform 100ms ease;
+}
+
+button:active {
+  transform: scale(0.95);
+}`,
+};
+
+export const DEFAULT_JS: PlaygroundFile = {
+  name: "script.js",
+  language: "javascript",
+  content: `const btn = document.getElementById("counter-btn");
+let count = 0;
+
+btn.addEventListener("click", () => {
+  count++;
+  btn.textContent = \`Count: \${count}\`;
+  console.log(\`Button clicked! Count: \${count}\`);
+});
+
+console.log("Playground loaded!");`,
+};
+
+export const DEFAULT_FILES: PlaygroundFile[] = [DEFAULT_HTML, DEFAULT_CSS, DEFAULT_JS];
+```
+
+## Step 4: URL Encoding for Sharing
+
+Create `src/utils/sharing.ts`:
+
+```typescript
+import LZString from "lz-string";
+import type { PlaygroundFile } from "../types/playground";
+
+interface ShareData {
+  files: Array<{ n: string; l: string; c: string }>;
+}
+
+export function encodeToUrl(files: PlaygroundFile[]): string {
+  const data: ShareData = {
+    files: files.map((f) => ({
+      n: f.name,
+      l: f.language,
+      c: f.content,
+    })),
+  };
+
+  const json = JSON.stringify(data);
+  const compressed = LZString.compressToEncodedURIComponent(json);
+  return compressed;
+}
+
+export function decodeFromUrl(encoded: string): PlaygroundFile[] | null {
+  try {
+    const json = LZString.decompressFromEncodedURIComponent(encoded);
+    if (!json) return null;
+
+    const data = JSON.parse(json) as ShareData;
+    return data.files.map((f) => ({
+      name: f.n,
+      language: f.l as PlaygroundFile["language"],
+      content: f.c,
+    }));
+  } catch {
+    console.error("Failed to decode shared playground");
+    return null;
+  }
+}
+
+export function generateShareUrl(files: PlaygroundFile[]): string {
+  const encoded = encodeToUrl(files);
+  const url = new URL(window.location.href);
+  url.searchParams.set("code", encoded);
+  return url.toString();
+}
+```
+
+## Step 5: Playground State Hook
+
+Create `src/hooks/usePlayground.ts`:
+
+```typescript
+import { useState, useEffect, useCallback, useRef } from "react";
+import type { PlaygroundFile, PlaygroundState, ConsoleMessage } from "../types/playground";
+import { DEFAULT_FILES } from "../utils/defaults";
+import { decodeFromUrl, generateShareUrl } from "../utils/sharing";
+
+function generateId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+export function usePlayground(): {
+  state: PlaygroundState;
+  consoleMessages: ConsoleMessage[];
+  setActiveFile: (index: number) => void;
+  updateFileContent: (content: string) => void;
+  clearConsole: () => void;
+  addConsoleMessage: (type: ConsoleMessage["type"], content: string) => void;
+  getShareUrl: () => string;
+  getPreviewHtml: () => string;
+} {
+  const [state, setState] = useState<PlaygroundState>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const encoded = params.get("code");
+
+    if (encoded) {
+      const files = decodeFromUrl(encoded);
+      if (files) return { files, activeFileIndex: 0 };
+    }
+
+    return { files: DEFAULT_FILES, activeFileIndex: 0 };
+  });
+
+  const [consoleMessages, setConsoleMessages] = useState<ConsoleMessage[]>([]);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  const setActiveFile = useCallback((index: number): void => {
+    setState((prev) => ({ ...prev, activeFileIndex: index }));
+  }, []);
+
+  const updateFileContent = useCallback((content: string): void => {
+    setState((prev) => {
+      const files = [...prev.files];
+      files[prev.activeFileIndex] = { ...files[prev.activeFileIndex], content };
+      return { ...prev, files };
+    });
+  }, []);
+
+  const clearConsole = useCallback((): void => {
+    setConsoleMessages([]);
+  }, []);
+
+  const addConsoleMessage = useCallback((type: ConsoleMessage["type"], content: string): void => {
+    setConsoleMessages((prev) => [
+      ...prev.slice(-99),
+      { id: generateId(), type, content, timestamp: Date.now() },
+    ]);
+  }, []);
+
+  const getShareUrl = useCallback((): string => {
+    return generateShareUrl(state.files);
+  }, [state.files]);
+
+  const getPreviewHtml = useCallback((): string => {
+    const htmlFile = state.files.find((f) => f.language === "html");
+    const cssFile = state.files.find((f) => f.language === "css");
+    const jsFile = state.files.find((f) => f.language === "javascript");
+
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>${cssFile?.content ?? ""}</style>
+</head>
+<body>
+  ${htmlFile?.content ?? ""}
+  <script>
+    (function() {
+      const originalConsole = {};
+      ["log", "warn", "error", "info"].forEach(method => {
+        originalConsole[method] = console[method];
+        console[method] = function(...args) {
+          originalConsole[method].apply(console, args);
+          window.parent.postMessage({
+            type: "console",
+            method: method,
+            args: args.map(a => {
+              try { return typeof a === "object" ? JSON.stringify(a) : String(a); }
+              catch { return String(a); }
+            })
+          }, "*");
+        };
+      });
+
+      window.onerror = function(msg, url, line, col, error) {
+        window.parent.postMessage({
+          type: "console",
+          method: "error",
+          args: [msg + " (line " + line + ")"]
+        }, "*");
+      };
+    })();
+  <\/script>
+  <script>${jsFile?.content ?? ""}<\/script>
+</body>
+</html>`;
+  }, [state.files]);
+
+  return {
+    state,
+    consoleMessages,
+    setActiveFile,
+    updateFileContent,
+    clearConsole,
+    addConsoleMessage,
+    getShareUrl,
+    getPreviewHtml,
+  };
+}
+```
+
+## Step 6: Editor Component
+
+Create `src/components/Editor.tsx`:
+
+```typescript
+import React from "react";
+import MonacoEditor from "@monaco-editor/react";
+import type { PlaygroundFile } from "../types/playground";
+
+interface EditorProps {
+  file: PlaygroundFile;
+  onChange: (content: string) => void;
+}
+
+const LANGUAGE_MAP: Record<PlaygroundFile["language"], string> = {
+  html: "html",
+  css: "css",
+  javascript: "javascript",
+};
+
+export function Editor({ file, onChange }: EditorProps): React.ReactElement {
+  return (
+    <MonacoEditor
+      height="100%"
+      language={LANGUAGE_MAP[file.language]}
+      value={file.content}
+      theme="vs-dark"
+      onChange={(value) => onChange(value ?? "")}
+      options={{
+        minimap: { enabled: false },
+        fontSize: 14,
+        fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+        lineNumbers: "on",
+        scrollBeyondLastLine: false,
+        automaticLayout: true,
+        tabSize: 2,
+        wordWrap: "on",
+        padding: { top: 12, bottom: 12 },
+        renderLineHighlight: "gutter",
+        smoothScrolling: true,
+        cursorBlinking: "smooth",
+        bracketPairColorization: { enabled: true },
+      }}
+    />
+  );
+}
+```
+
+## Step 7: Preview Panel
+
+Create `src/components/Preview.tsx`:
+
+```typescript
+import React, { useRef, useEffect } from "react";
+
+interface PreviewProps {
+  html: string;
+  onConsoleMessage: (type: "log" | "warn" | "error" | "info", content: string) => void;
+}
+
+export function Preview({ html, onConsoleMessage }: PreviewProps): React.ReactElement {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+
+  useEffect(() => {
+    function handleMessage(event: MessageEvent): void {
+      if (event.data?.type === "console") {
+        const method = event.data.method as "log" | "warn" | "error" | "info";
+        const content = (event.data.args as string[]).join(" ");
+        onConsoleMessage(method, content);
+      }
+    }
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [onConsoleMessage]);
+
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+
+    const blob = new Blob([html], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    iframe.src = url;
+
+    return () => URL.revokeObjectURL(url);
+  }, [html]);
+
+  return (
+    <iframe
+      ref={iframeRef}
+      title="Preview"
+      sandbox="allow-scripts"
+      style={{
+        width: "100%",
+        height: "100%",
+        border: "none",
+        background: "white",
+      }}
+    />
+  );
+}
+```
+
+The `sandbox="allow-scripts"` attribute is critical for security. It prevents the iframe from accessing the parent page's cookies, storage, or DOM while still allowing JavaScript execution.
+
+## Step 8: Console Panel
+
+Create `src/components/Console.tsx`:
+
+```typescript
+import React, { useRef, useEffect } from "react";
+import type { ConsoleMessage } from "../types/playground";
+
+interface ConsoleProps {
+  messages: ConsoleMessage[];
+  onClear: () => void;
+}
+
+const TYPE_COLORS: Record<ConsoleMessage["type"], string> = {
+  log: "#e2e8f0",
+  warn: "#fbbf24",
+  error: "#f87171",
+  info: "#60a5fa",
+};
+
+export function Console({ messages, onClear }: ConsoleProps): React.ReactElement {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0f172a" }}>
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        padding: "6px 12px",
+        borderBottom: "1px solid #1e293b",
+        background: "#020617",
+      }}>
+        <span style={{ color: "#64748b", fontSize: 12, fontWeight: 600 }}>CONSOLE</span>
+        <button
+          onClick={onClear}
+          style={{
+            background: "none",
+            border: "none",
+            color: "#64748b",
+            cursor: "pointer",
+            fontSize: 11,
+          }}
+        >
+          Clear
+        </button>
+      </div>
+      <div ref={scrollRef} style={{ flex: 1, overflow: "auto", padding: "8px 12px" }}>
+        {messages.map((msg) => (
+          <div
+            key={msg.id}
+            style={{
+              color: TYPE_COLORS[msg.type],
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 12,
+              lineHeight: 1.6,
+              borderBottom: "1px solid #1e293b",
+              padding: "4px 0",
+              wordBreak: "break-all",
+            }}
+          >
+            <span style={{ color: "#475569", marginRight: 8 }}>
+              {new Date(msg.timestamp).toLocaleTimeString()}
+            </span>
+            {msg.content}
+          </div>
+        ))}
+        {messages.length === 0 && (
+          <div style={{ color: "#475569", fontSize: 12, fontStyle: "italic" }}>
+            Console output will appear here...
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+## Step 9: File Tabs and Toolbar
+
+Create `src/components/Toolbar.tsx`:
+
+```typescript
+import React, { useState } from "react";
+import type { PlaygroundFile } from "../types/playground";
+
+interface ToolbarProps {
+  files: PlaygroundFile[];
+  activeIndex: number;
+  onSelectFile: (index: number) => void;
+  onShare: () => string;
+}
+
+const FILE_ICONS: Record<PlaygroundFile["language"], string> = {
+  html: "{ }",
+  css: "#",
+  javascript: "JS",
+};
+
+export function Toolbar({ files, activeIndex, onSelectFile, onShare }: ToolbarProps): React.ReactElement {
+  const [isCopied, setIsCopied] = useState<boolean>(false);
+
+  async function handleShare(): Promise<void> {
+    const url = onShare();
+    try {
+      await navigator.clipboard.writeText(url);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    } catch {
+      window.prompt("Copy this URL:", url);
+    }
+  }
+
+  return (
+    <div style={{
+      display: "flex",
+      alignItems: "center",
+      background: "#020617",
+      borderBottom: "1px solid #1e293b",
+      padding: "0 8px",
+      height: 40,
+    }}>
+      {files.map((file, index) => (
+        <button
+          key={file.name}
+          onClick={() => onSelectFile(index)}
+          style={{
+            background: index === activeIndex ? "#1e293b" : "transparent",
+            border: "none",
+            color: index === activeIndex ? "#e2e8f0" : "#64748b",
+            padding: "8px 16px",
+            fontSize: 13,
+            cursor: "pointer",
+            borderBottom: index === activeIndex ? "2px solid #6366f1" : "2px solid transparent",
+            fontFamily: "inherit",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          <span style={{ fontSize: 10, opacity: 0.6 }}>{FILE_ICONS[file.language]}</span>
+          {file.name}
+        </button>
+      ))}
+      <div style={{ flex: 1 }} />
+      <button
+        onClick={() => void handleShare()}
+        style={{
+          background: isCopied ? "#10b981" : "#6366f1",
+          border: "none",
+          color: "white",
+          padding: "6px 14px",
+          borderRadius: 6,
+          fontSize: 12,
+          cursor: "pointer",
+          fontWeight: 600,
+        }}
+      >
+        {isCopied ? "Copied!" : "Share"}
+      </button>
+    </div>
+  );
+}
+```
+
+## Step 10: Main App Assembly
+
+Update `src/App.tsx` to compose all components:
+
+```typescript
+import React, { useMemo, useEffect, useRef } from "react";
+import { Editor } from "./components/Editor";
+import { Preview } from "./components/Preview";
+import { Console } from "./components/Console";
+import { Toolbar } from "./components/Toolbar";
+import { usePlayground } from "./hooks/usePlayground";
+
+export default function App(): React.ReactElement {
+  const {
+    state,
+    consoleMessages,
+    setActiveFile,
+    updateFileContent,
+    clearConsole,
+    addConsoleMessage,
+    getShareUrl,
+    getPreviewHtml,
+  } = usePlayground();
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const [previewHtml, setPreviewHtml] = React.useState<string>("");
+
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      clearConsole();
+      setPreviewHtml(getPreviewHtml());
+    }, 500);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [state.files, getPreviewHtml, clearConsole]);
+
+  const activeFile = state.files[state.activeFileIndex];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#020617" }}>
+      <Toolbar
+        files={state.files}
+        activeIndex={state.activeFileIndex}
+        onSelectFile={setActiveFile}
+        onShare={getShareUrl}
+      />
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", borderRight: "1px solid #1e293b" }}>
+          <Editor file={activeFile} onChange={updateFileContent} />
+        </div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+          <div style={{ flex: 1 }}>
+            <Preview html={previewHtml} onConsoleMessage={addConsoleMessage} />
+          </div>
+          <div style={{ height: 200, borderTop: "1px solid #1e293b" }}>
+            <Console messages={consoleMessages} onClear={clearConsole} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+Reset the default styles in `src/index.css`:
+
+```css
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+```
+
+Run the playground:
+
+```bash
+npm run dev
+```
+
+Open the browser and you have a fully functional code playground. Edit HTML, CSS, or JavaScript in the Monaco editor with syntax highlighting and autocomplete. The preview updates after 500ms of inactivity. Console output from the sandboxed iframe appears in the bottom panel. Click Share to copy a URL that encodes the entire project state using LZ compression, letting anyone reconstruct your playground by pasting the link.
+
+For further enhancements, consider adding TypeScript support with in-browser transpilation, a layout toggle for vertical/horizontal split views, local storage for recent playgrounds, and npm package imports via esm.sh CDN URLs.

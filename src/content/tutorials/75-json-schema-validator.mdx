@@ -1,0 +1,553 @@
+---
+title: "Build a JSON Schema Validator"
+description: "Create a JSON Schema validator that parses schema drafts, validates documents against them, collects errors with JSON Pointer paths, and supports custom formats."
+slug: "json-schema-validator"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["json", "validation", "schema", "typescript", "tooling"]
+---
+
+## Overview
+
+JSON Schema is the standard way to describe the shape of JSON data. Validators built on it power API request validation, configuration file checking, and form generation. In this tutorial you will build a JSON Schema validator from scratch that supports a core subset of the JSON Schema draft specification: type checking, required properties, string/number constraints, nested objects, arrays, enums, and custom format validators.
+
+The validator collects all errors (not just the first one) and reports them with JSON Pointer paths so you know exactly where validation failed.
+
+**Prerequisites:** Node.js 18+, TypeScript, familiarity with JSON.
+
+## Step 1: Project Setup
+
+```bash
+mkdir json-schema-validator && cd json-schema-validator
+npm init -y
+npm install typescript tsx --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir src
+```
+
+Scripts in `package.json`:
+
+```json
+{
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc"
+  }
+}
+```
+
+## Step 2: Define Types
+
+Create `src/types.ts` with the schema and validation result interfaces.
+
+```typescript
+// src/types.ts
+export interface JsonSchema {
+  type?: string | string[];
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  additionalProperties?: boolean | JsonSchema;
+  items?: JsonSchema;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  format?: string;
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  multipleOf?: number;
+  enum?: unknown[];
+  const?: unknown;
+  oneOf?: JsonSchema[];
+  anyOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  not?: JsonSchema;
+  description?: string;
+  default?: unknown;
+}
+
+export interface ValidationError {
+  path: string;
+  message: string;
+  schemaPath?: string;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  errors: ValidationError[];
+}
+
+export type FormatValidator = (value: string) => boolean;
+```
+
+## Step 3: Build the Core Validator
+
+Create `src/validator.ts`. This is the heart of the project — a recursive function that walks the schema and data tree simultaneously.
+
+```typescript
+// src/validator.ts
+import { JsonSchema, ValidationError, ValidationResult, FormatValidator } from "./types.js";
+
+export class SchemaValidator {
+  private formats: Map<string, FormatValidator> = new Map();
+
+  registerFormat(name: string, validator: FormatValidator): void {
+    this.formats.set(name, validator);
+  }
+
+  validate(schema: JsonSchema, data: unknown): ValidationResult {
+    const errors: ValidationError[] = [];
+    this.validateNode(schema, data, "", errors);
+    return { valid: errors.length === 0, errors };
+  }
+
+  private validateNode(
+    schema: JsonSchema,
+    data: unknown,
+    path: string,
+    errors: ValidationError[]
+  ): void {
+    // const keyword
+    if (schema.const !== undefined) {
+      if (JSON.stringify(data) !== JSON.stringify(schema.const)) {
+        errors.push({ path, message: `Must be ${JSON.stringify(schema.const)}` });
+      }
+      return;
+    }
+
+    // enum keyword
+    if (schema.enum !== undefined) {
+      const match = schema.enum.some((v) => JSON.stringify(v) === JSON.stringify(data));
+      if (!match) {
+        errors.push({
+          path,
+          message: `Must be one of: ${schema.enum.map((v) => JSON.stringify(v)).join(", ")}`,
+        });
+      }
+    }
+
+    // type keyword
+    if (schema.type) {
+      const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+      const actualType = this.getJsonType(data);
+      if (!types.includes(actualType)) {
+        errors.push({
+          path,
+          message: `Expected type ${types.join(" | ")}, got ${actualType}`,
+        });
+        return; // No point validating further if type is wrong
+      }
+    }
+
+    // Composition keywords
+    if (schema.allOf) {
+      for (const sub of schema.allOf) {
+        this.validateNode(sub, data, path, errors);
+      }
+    }
+    if (schema.anyOf) {
+      const anyValid = schema.anyOf.some((sub) => {
+        const subErrors: ValidationError[] = [];
+        this.validateNode(sub, data, path, subErrors);
+        return subErrors.length === 0;
+      });
+      if (!anyValid) {
+        errors.push({ path, message: "Does not match any of the 'anyOf' schemas" });
+      }
+    }
+    if (schema.oneOf) {
+      const matchCount = schema.oneOf.filter((sub) => {
+        const subErrors: ValidationError[] = [];
+        this.validateNode(sub, data, path, subErrors);
+        return subErrors.length === 0;
+      }).length;
+      if (matchCount !== 1) {
+        errors.push({
+          path,
+          message: `Must match exactly one 'oneOf' schema, matched ${matchCount}`,
+        });
+      }
+    }
+    if (schema.not) {
+      const subErrors: ValidationError[] = [];
+      this.validateNode(schema.not, data, path, subErrors);
+      if (subErrors.length === 0) {
+        errors.push({ path, message: "Must NOT match the 'not' schema" });
+      }
+    }
+
+    // Type-specific validation
+    if (typeof data === "string") this.validateString(schema, data, path, errors);
+    if (typeof data === "number") this.validateNumber(schema, data, path, errors);
+    if (Array.isArray(data)) this.validateArray(schema, data, path, errors);
+    if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+      this.validateObject(schema, data as Record<string, unknown>, path, errors);
+    }
+  }
+
+  private validateString(
+    schema: JsonSchema,
+    data: string,
+    path: string,
+    errors: ValidationError[]
+  ): void {
+    if (schema.minLength !== undefined && data.length < schema.minLength) {
+      errors.push({ path, message: `String must be at least ${schema.minLength} characters` });
+    }
+    if (schema.maxLength !== undefined && data.length > schema.maxLength) {
+      errors.push({ path, message: `String must be at most ${schema.maxLength} characters` });
+    }
+    if (schema.pattern) {
+      const regex = new RegExp(schema.pattern);
+      if (!regex.test(data)) {
+        errors.push({ path, message: `String must match pattern: ${schema.pattern}` });
+      }
+    }
+    if (schema.format) {
+      const formatFn = this.formats.get(schema.format);
+      if (formatFn && !formatFn(data)) {
+        errors.push({ path, message: `Invalid format: ${schema.format}` });
+      }
+    }
+  }
+
+  private validateNumber(
+    schema: JsonSchema,
+    data: number,
+    path: string,
+    errors: ValidationError[]
+  ): void {
+    if (schema.minimum !== undefined && data < schema.minimum) {
+      errors.push({ path, message: `Must be >= ${schema.minimum}` });
+    }
+    if (schema.maximum !== undefined && data > schema.maximum) {
+      errors.push({ path, message: `Must be <= ${schema.maximum}` });
+    }
+    if (schema.exclusiveMinimum !== undefined && data <= schema.exclusiveMinimum) {
+      errors.push({ path, message: `Must be > ${schema.exclusiveMinimum}` });
+    }
+    if (schema.exclusiveMaximum !== undefined && data >= schema.exclusiveMaximum) {
+      errors.push({ path, message: `Must be < ${schema.exclusiveMaximum}` });
+    }
+    if (schema.multipleOf !== undefined && data % schema.multipleOf !== 0) {
+      errors.push({ path, message: `Must be a multiple of ${schema.multipleOf}` });
+    }
+  }
+
+  private validateArray(
+    schema: JsonSchema,
+    data: unknown[],
+    path: string,
+    errors: ValidationError[]
+  ): void {
+    if (schema.minItems !== undefined && data.length < schema.minItems) {
+      errors.push({ path, message: `Array must have at least ${schema.minItems} items` });
+    }
+    if (schema.maxItems !== undefined && data.length > schema.maxItems) {
+      errors.push({ path, message: `Array must have at most ${schema.maxItems} items` });
+    }
+    if (schema.uniqueItems) {
+      const seen = new Set(data.map((item) => JSON.stringify(item)));
+      if (seen.size !== data.length) {
+        errors.push({ path, message: "Array items must be unique" });
+      }
+    }
+    if (schema.items) {
+      for (let i = 0; i < data.length; i++) {
+        this.validateNode(schema.items, data[i], `${path}/${i}`, errors);
+      }
+    }
+  }
+
+  private validateObject(
+    schema: JsonSchema,
+    data: Record<string, unknown>,
+    path: string,
+    errors: ValidationError[]
+  ): void {
+    if (schema.required) {
+      for (const key of schema.required) {
+        if (!(key in data)) {
+          errors.push({ path: `${path}/${key}`, message: `Required property '${key}' is missing` });
+        }
+      }
+    }
+    if (schema.properties) {
+      for (const [key, propSchema] of Object.entries(schema.properties)) {
+        if (key in data) {
+          this.validateNode(propSchema, data[key], `${path}/${key}`, errors);
+        }
+      }
+    }
+    if (schema.additionalProperties === false && schema.properties) {
+      const allowed = new Set(Object.keys(schema.properties));
+      for (const key of Object.keys(data)) {
+        if (!allowed.has(key)) {
+          errors.push({
+            path: `${path}/${key}`,
+            message: `Additional property '${key}' is not allowed`,
+          });
+        }
+      }
+    }
+  }
+
+  private getJsonType(value: unknown): string {
+    if (value === null) return "null";
+    if (Array.isArray(value)) return "array";
+    if (typeof value === "number" && Number.isInteger(value)) return "integer";
+    return typeof value;
+  }
+}
+```
+
+## Step 4: Add Built-in Format Validators
+
+Create `src/formats.ts` with common format checks.
+
+```typescript
+// src/formats.ts
+import { FormatValidator } from "./types.js";
+
+export const emailFormat: FormatValidator = (value: string): boolean => {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+};
+
+export const uriFormat: FormatValidator = (value: string): boolean => {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const dateFormat: FormatValidator = (value: string): boolean => {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !isNaN(Date.parse(value));
+};
+
+export const dateTimeFormat: FormatValidator = (value: string): boolean => {
+  return !isNaN(Date.parse(value)) && /T/.test(value);
+};
+
+export const ipv4Format: FormatValidator = (value: string): boolean => {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((p) => {
+    const num = parseInt(p, 10);
+    return num >= 0 && num <= 255 && String(num) === p;
+  });
+};
+
+export const uuidFormat: FormatValidator = (value: string): boolean => {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+};
+```
+
+## Step 5: Create a Validator Factory
+
+Create `src/create-validator.ts` that wires up the validator with all built-in formats.
+
+```typescript
+// src/create-validator.ts
+import { SchemaValidator } from "./validator.js";
+import {
+  emailFormat,
+  uriFormat,
+  dateFormat,
+  dateTimeFormat,
+  ipv4Format,
+  uuidFormat,
+} from "./formats.js";
+
+export function createValidator(): SchemaValidator {
+  const validator = new SchemaValidator();
+
+  validator.registerFormat("email", emailFormat);
+  validator.registerFormat("uri", uriFormat);
+  validator.registerFormat("date", dateFormat);
+  validator.registerFormat("date-time", dateTimeFormat);
+  validator.registerFormat("ipv4", ipv4Format);
+  validator.registerFormat("uuid", uuidFormat);
+
+  return validator;
+}
+```
+
+## Step 6: Build the Error Formatter
+
+Create `src/format-errors.ts` for human-readable error output.
+
+```typescript
+// src/format-errors.ts
+import { ValidationResult } from "./types.js";
+
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+const DIM = "\x1b[2m";
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+
+export function formatResult(result: ValidationResult): string {
+  if (result.valid) {
+    return `${GREEN}${BOLD}Valid${RESET} - Document passes schema validation.`;
+  }
+
+  const lines = [`${RED}${BOLD}Invalid${RESET} - ${result.errors.length} error(s) found:\n`];
+
+  for (const error of result.errors) {
+    const path = error.path || "(root)";
+    lines.push(`  ${RED}x${RESET} ${DIM}${path}${RESET}: ${error.message}`);
+  }
+
+  return lines.join("\n");
+}
+```
+
+## Step 7: Build the CLI
+
+Create `src/cli.ts` that accepts a schema file and a data file.
+
+```typescript
+#!/usr/bin/env node
+// src/cli.ts
+import * as fs from "node:fs";
+import { JsonSchema } from "./types.js";
+import { createValidator } from "./create-validator.js";
+import { formatResult } from "./format-errors.js";
+
+function main(): void {
+  const args = process.argv.slice(2);
+
+  if (args.length < 2) {
+    console.log("Usage: validate <schema.json> <data.json>");
+    process.exit(1);
+  }
+
+  const [schemaPath, dataPath] = args;
+
+  let schema: JsonSchema;
+  let data: unknown;
+
+  try {
+    schema = JSON.parse(fs.readFileSync(schemaPath, "utf-8")) as JsonSchema;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to read schema: ${message}`);
+    process.exit(1);
+  }
+
+  try {
+    data = JSON.parse(fs.readFileSync(dataPath, "utf-8")) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to read data: ${message}`);
+    process.exit(1);
+  }
+
+  const validator = createValidator();
+  const result = validator.validate(schema, data);
+
+  console.log(formatResult(result));
+
+  // Output JSON result for programmatic use
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(result, null, 2));
+  }
+
+  process.exit(result.valid ? 0 : 1);
+}
+
+main();
+```
+
+## Step 8: Test with Sample Files
+
+Create `test-schema.json`:
+
+```json
+{
+  "type": "object",
+  "required": ["name", "email", "age"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "email": {
+      "type": "string",
+      "format": "email"
+    },
+    "age": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 150
+    },
+    "website": {
+      "type": "string",
+      "format": "uri"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}
+```
+
+Create `test-valid.json`:
+
+```json
+{
+  "name": "Alice",
+  "email": "alice@example.com",
+  "age": 30,
+  "tags": ["developer", "writer"]
+}
+```
+
+Create `test-invalid.json`:
+
+```json
+{
+  "name": "",
+  "email": "not-an-email",
+  "age": -5,
+  "tags": ["dup", "dup"],
+  "extra": true
+}
+```
+
+Run validation:
+
+```bash
+npx tsx src/cli.ts test-schema.json test-valid.json
+# Output: Valid - Document passes schema validation.
+
+npx tsx src/cli.ts test-schema.json test-invalid.json
+# Output: Invalid - 5 error(s) found:
+#   x /name: String must be at least 1 characters
+#   x /email: Invalid format: email
+#   x /age: Must be >= 0
+#   x /tags: Array items must be unique
+#   x /extra: Additional property 'extra' is not allowed
+```
+
+The exit code is `0` for valid, `1` for invalid — perfect for scripting and CI. Add `--json` for machine-readable output.
+
+**Extend ideas:**
+
+- Add `$ref` support for referencing sub-schemas by path.
+- Implement `if`/`then`/`else` conditional schemas.
+- Add a `--watch` mode that re-validates when files change.
+- Generate TypeScript types from a JSON Schema file.
+
+You now have a working schema validator that handles the most commonly used JSON Schema keywords, reports precise error paths, and integrates cleanly into any toolchain.

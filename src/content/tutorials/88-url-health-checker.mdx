@@ -1,0 +1,507 @@
+---
+title: "Build a URL Health Checker"
+description: "Monitor multiple URLs with response time tracking, status code checks, failure alerts, and scheduled health checks."
+slug: "url-health-checker"
+difficulty: "beginner"
+estimatedMinutes: 120
+steps: 8
+tags: ["monitoring", "http", "node", "cli", "beginner"]
+---
+
+## Overview
+
+Uptime monitoring is critical for any web application. When your site goes down, you want to know before your users tell you. Commercial tools like UptimeRobot and Pingdom charge for this, but the core concept is straightforward: check a URL, record the result, alert if something is wrong.
+
+In this tutorial, you will build a URL health checker that monitors multiple URLs concurrently, tracks response times and status codes, stores history for trend analysis, sends alerts on failure, and runs checks on a configurable schedule. It works as a CLI tool that you can run on any machine with Node.js.
+
+No external dependencies. We use only built-in Node.js modules. Works on macOS, Windows, and Linux.
+
+## Step 1: Define the Configuration
+
+Set up the data structures for URLs to monitor and their check results.
+
+```typescript
+// src/types.ts
+export interface TargetUrl {
+  url: string;
+  name: string;
+  expectedStatus: number;
+  timeoutMs: number;
+  headers?: Record<string, string>;
+}
+
+export interface CheckResult {
+  url: string;
+  name: string;
+  status: "up" | "down" | "degraded";
+  statusCode: number | null;
+  responseTimeMs: number;
+  timestamp: string;
+  error: string | null;
+}
+
+export interface HealthConfig {
+  targets: TargetUrl[];
+  intervalSeconds: number;
+  degradedThresholdMs: number;
+  historyLimit: number;
+  alertWebhookUrl: string | null;
+}
+
+export const DEFAULT_CONFIG: HealthConfig = {
+  targets: [],
+  intervalSeconds: 60,
+  degradedThresholdMs: 2000,
+  historyLimit: 1000,
+  alertWebhookUrl: null,
+};
+```
+
+## Step 2: Build the HTTP Checker
+
+Perform health checks using the built-in `fetch` API with timeout support.
+
+```typescript
+// src/checker.ts
+import { TargetUrl, CheckResult } from "./types.js";
+
+export async function checkUrl(
+  target: TargetUrl,
+  degradedThresholdMs: number
+): Promise<CheckResult> {
+  const start = performance.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), target.timeoutMs);
+
+  try {
+    const response = await fetch(target.url, {
+      method: "HEAD",
+      headers: target.headers ?? {},
+      signal: controller.signal,
+      redirect: "follow",
+    });
+
+    clearTimeout(timer);
+    const responseTimeMs = Math.round(performance.now() - start);
+
+    let status: CheckResult["status"] = "up";
+    if (response.status !== target.expectedStatus) {
+      status = "down";
+    } else if (responseTimeMs > degradedThresholdMs) {
+      status = "degraded";
+    }
+
+    return {
+      url: target.url,
+      name: target.name,
+      status,
+      statusCode: response.status,
+      responseTimeMs,
+      timestamp: new Date().toISOString(),
+      error: status === "down" ? `Expected ${target.expectedStatus}, got ${response.status}` : null,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const responseTimeMs = Math.round(performance.now() - start);
+    const message = err instanceof Error ? err.message : "Unknown error";
+
+    return {
+      url: target.url,
+      name: target.name,
+      status: "down",
+      statusCode: null,
+      responseTimeMs,
+      timestamp: new Date().toISOString(),
+      error: message.includes("abort") ? `Timeout after ${target.timeoutMs}ms` : message,
+    };
+  }
+}
+
+export async function checkAll(
+  targets: TargetUrl[],
+  degradedThresholdMs: number
+): Promise<CheckResult[]> {
+  return Promise.all(targets.map((t) => checkUrl(t, degradedThresholdMs)));
+}
+```
+
+## Step 3: Store Check History
+
+Persist results to a JSON file for trend analysis.
+
+```typescript
+// src/history.ts
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { CheckResult } from "./types.js";
+
+export class HistoryStore {
+  private results: CheckResult[] = [];
+  private filePath: string;
+  private limit: number;
+
+  constructor(dataDir: string = "./data", limit: number = 1000) {
+    mkdirSync(dataDir, { recursive: true });
+    this.filePath = join(dataDir, "health-history.json");
+    this.limit = limit;
+    this.load();
+  }
+
+  add(results: CheckResult[]): void {
+    this.results.push(...results);
+    if (this.results.length > this.limit) {
+      this.results = this.results.slice(-this.limit);
+    }
+    this.save();
+  }
+
+  getLatest(url?: string): CheckResult[] {
+    const filtered = url ? this.results.filter((r) => r.url === url) : this.results;
+    return filtered.slice(-50);
+  }
+
+  getUptime(url: string, hours: number = 24): number {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const recent = this.results.filter((r) => r.url === url && r.timestamp >= since);
+    if (recent.length === 0) return 100;
+    const upCount = recent.filter((r) => r.status === "up").length;
+    return Math.round((upCount / recent.length) * 10000) / 100;
+  }
+
+  getAverageResponseTime(url: string, hours: number = 24): number {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const recent = this.results.filter(
+      (r) => r.url === url && r.timestamp >= since && r.statusCode !== null
+    );
+    if (recent.length === 0) return 0;
+    const total = recent.reduce((sum, r) => sum + r.responseTimeMs, 0);
+    return Math.round(total / recent.length);
+  }
+
+  private load(): void {
+    try {
+      this.results = JSON.parse(readFileSync(this.filePath, "utf-8"));
+    } catch {
+      this.results = [];
+    }
+  }
+
+  private save(): void {
+    writeFileSync(this.filePath, JSON.stringify(this.results, null, 2));
+  }
+}
+```
+
+## Step 4: Build the Alert System
+
+Send notifications when a URL goes down or recovers.
+
+```typescript
+// src/alerts.ts
+import { CheckResult } from "./types.js";
+
+interface AlertState {
+  url: string;
+  wasDown: boolean;
+  downSince: string | null;
+  consecutiveFailures: number;
+}
+
+export class AlertManager {
+  private state: Map<string, AlertState> = new Map();
+  private webhookUrl: string | null;
+
+  constructor(webhookUrl: string | null) {
+    this.webhookUrl = webhookUrl;
+  }
+
+  async process(results: CheckResult[]): Promise<void> {
+    for (const result of results) {
+      let alertState = this.state.get(result.url);
+      if (!alertState) {
+        alertState = { url: result.url, wasDown: false, downSince: null, consecutiveFailures: 0 };
+        this.state.set(result.url, alertState);
+      }
+
+      if (result.status === "down") {
+        alertState.consecutiveFailures++;
+        if (!alertState.wasDown && alertState.consecutiveFailures >= 2) {
+          alertState.wasDown = true;
+          alertState.downSince = result.timestamp;
+          await this.sendAlert("down", result);
+        }
+      } else {
+        if (alertState.wasDown) {
+          await this.sendAlert("recovered", result, alertState.downSince);
+          alertState.wasDown = false;
+          alertState.downSince = null;
+        }
+        alertState.consecutiveFailures = 0;
+      }
+    }
+  }
+
+  private async sendAlert(
+    type: "down" | "recovered",
+    result: CheckResult,
+    downSince?: string | null
+  ): Promise<void> {
+    const emoji = type === "down" ? "[DOWN]" : "[RECOVERED]";
+    const message =
+      type === "down"
+        ? `${emoji} ${result.name} (${result.url}) is DOWN. Error: ${result.error}`
+        : `${emoji} ${result.name} (${result.url}) has RECOVERED. Was down since ${downSince}`;
+
+    console.log(message);
+
+    if (this.webhookUrl) {
+      try {
+        await fetch(this.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: message, type, result }),
+        });
+      } catch (err) {
+        console.error("Failed to send webhook alert:", err instanceof Error ? err.message : err);
+      }
+    }
+  }
+}
+```
+
+## Step 5: Create the CLI Reporter
+
+Format check results as a clear console output with color-coding.
+
+```typescript
+// src/reporter.ts
+import { CheckResult } from "./types.js";
+import { HistoryStore } from "./history.js";
+
+const STATUS_ICONS: Record<string, string> = {
+  up: "[OK]",
+  down: "[FAIL]",
+  degraded: "[SLOW]",
+};
+
+export function formatResults(results: CheckResult[], history: HistoryStore): string {
+  const lines: string[] = [];
+  const now = new Date().toLocaleTimeString();
+
+  lines.push(`--- Health Check at ${now} ---`);
+  lines.push("");
+
+  for (const result of results) {
+    const icon = STATUS_ICONS[result.status];
+    const uptime = history.getUptime(result.url, 24);
+    const avgTime = history.getAverageResponseTime(result.url, 24);
+
+    let line = `${icon} ${result.name.padEnd(25)} ${String(result.statusCode ?? "ERR").padEnd(5)} ${String(result.responseTimeMs + "ms").padEnd(8)}`;
+    line += ` Uptime: ${uptime}%  Avg: ${avgTime}ms`;
+
+    if (result.error) line += `  Error: ${result.error}`;
+    lines.push(line);
+  }
+
+  lines.push("");
+  const upCount = results.filter((r) => r.status === "up").length;
+  lines.push(`Summary: ${upCount}/${results.length} targets healthy`);
+
+  return lines.join("\n");
+}
+```
+
+## Step 6: Load Configuration from File
+
+Read the target URLs and settings from a JSON config file.
+
+```typescript
+// src/config.ts
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { HealthConfig, DEFAULT_CONFIG } from "./types.js";
+
+const CONFIG_PATH = "./healthcheck.json";
+
+export function loadConfig(): HealthConfig {
+  if (!existsSync(CONFIG_PATH)) {
+    const sample: HealthConfig = {
+      ...DEFAULT_CONFIG,
+      targets: [
+        {
+          url: "https://httpstat.us/200",
+          name: "HTTPStat OK",
+          expectedStatus: 200,
+          timeoutMs: 5000,
+        },
+        {
+          url: "https://httpstat.us/500",
+          name: "HTTPStat 500",
+          expectedStatus: 200,
+          timeoutMs: 5000,
+        },
+        {
+          url: "https://httpstat.us/200?sleep=3000",
+          name: "HTTPStat Slow",
+          expectedStatus: 200,
+          timeoutMs: 5000,
+        },
+      ],
+      intervalSeconds: 30,
+      degradedThresholdMs: 2000,
+    };
+    writeFileSync(CONFIG_PATH, JSON.stringify(sample, null, 2));
+    console.log(`Created sample config at ${CONFIG_PATH}`);
+    return sample;
+  }
+
+  return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+}
+```
+
+## Step 7: Build the Scheduler
+
+Run health checks on a recurring interval.
+
+```typescript
+// src/scheduler.ts
+import { checkAll } from "./checker.js";
+import { HistoryStore } from "./history.js";
+import { AlertManager } from "./alerts.js";
+import { formatResults } from "./reporter.js";
+import { HealthConfig } from "./types.js";
+
+export class HealthScheduler {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private history: HistoryStore;
+  private alerts: AlertManager;
+  private isRunning = false;
+
+  constructor(
+    private config: HealthConfig,
+    dataDir: string = "./data"
+  ) {
+    this.history = new HistoryStore(dataDir, config.historyLimit);
+    this.alerts = new AlertManager(config.alertWebhookUrl);
+  }
+
+  async runOnce(): Promise<void> {
+    if (this.isRunning) return;
+    this.isRunning = true;
+
+    try {
+      const results = await checkAll(this.config.targets, this.config.degradedThresholdMs);
+      this.history.add(results);
+      await this.alerts.process(results);
+      console.log(formatResults(results, this.history));
+    } catch (err) {
+      console.error("Health check error:", err instanceof Error ? err.message : err);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  start(): void {
+    console.log(
+      `Starting health checker (interval: ${this.config.intervalSeconds}s, targets: ${this.config.targets.length})`
+    );
+    this.runOnce();
+    this.timer = setInterval(() => this.runOnce(), this.config.intervalSeconds * 1000);
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    console.log("Health checker stopped.");
+  }
+}
+```
+
+## Step 8: Create the CLI Entry Point
+
+Wire everything together with a simple command-line interface.
+
+```typescript
+// src/main.ts
+import { loadConfig } from "./config.js";
+import { HealthScheduler } from "./scheduler.js";
+import { checkAll } from "./checker.js";
+import { HistoryStore } from "./history.js";
+import { formatResults } from "./reporter.js";
+
+const command = process.argv[2] ?? "run";
+const config = loadConfig();
+
+async function main(): Promise<void> {
+  switch (command) {
+    case "run": {
+      // Run continuously on a schedule
+      const scheduler = new HealthScheduler(config);
+      scheduler.start();
+
+      process.on("SIGINT", () => {
+        scheduler.stop();
+        process.exit(0);
+      });
+
+      process.on("SIGTERM", () => {
+        scheduler.stop();
+        process.exit(0);
+      });
+      break;
+    }
+
+    case "check": {
+      // Run a single check and exit
+      const history = new HistoryStore();
+      const results = await checkAll(config.targets, config.degradedThresholdMs);
+      history.add(results);
+      console.log(formatResults(results, history));
+
+      const hasFailures = results.some((r) => r.status === "down");
+      process.exit(hasFailures ? 1 : 0);
+    }
+
+    case "status": {
+      // Show current status from history
+      const history = new HistoryStore();
+      for (const target of config.targets) {
+        const uptime = history.getUptime(target.url, 24);
+        const avg = history.getAverageResponseTime(target.url, 24);
+        console.log(`${target.name}: ${uptime}% uptime, ${avg}ms avg response`);
+      }
+      break;
+    }
+
+    default:
+      console.log("Usage: npx tsx src/main.ts [run|check|status]");
+      console.log("  run    - Start continuous monitoring");
+      console.log("  check  - Run once and exit (exit code 1 if any target is down)");
+      console.log("  status - Show 24-hour uptime summary");
+      process.exit(1);
+  }
+}
+
+main().catch((err) => {
+  console.error("Fatal error:", err);
+  process.exit(1);
+});
+```
+
+To use the health checker:
+
+```bash
+# Single check (good for CI/CD pipelines)
+npx tsx src/main.ts check
+
+# Continuous monitoring
+npx tsx src/main.ts run
+
+# View 24-hour status summary
+npx tsx src/main.ts status
+```
+
+The first run creates a `healthcheck.json` config file with sample targets. Edit it to add your own URLs. The checker runs concurrently across all targets, stores results in `data/health-history.json`, and alerts on consecutive failures to avoid false positives from transient network issues.
+
+From here, you could add a web dashboard with response time charts, integrate with Slack or Discord for alerts, add TCP/ping checks alongside HTTP, or package it as an npm binary with `#!/usr/bin/env node`.

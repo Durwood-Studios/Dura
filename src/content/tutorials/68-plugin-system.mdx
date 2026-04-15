@@ -1,0 +1,630 @@
+---
+title: "Build a Plugin System"
+description: "Create a plugin architecture with a registry, lifecycle hooks, dependency resolution, sandboxed execution, and API versioning."
+slug: "plugin-system"
+difficulty: "advanced"
+estimatedMinutes: 180
+steps: 10
+tags: ["architecture", "plugins", "typescript", "extensibility", "patterns"]
+---
+
+## Overview
+
+Plugin systems are how successful software stays relevant. VS Code, webpack, Babel, ESLint, Figma — they all share a pattern: a small core that does very little on its own, extended by plugins that add features. The core provides a stable API, the plugins provide everything else.
+
+Building a plugin system requires solving several hard problems: how do plugins register and discover each other? How do you manage dependencies between plugins? How do you prevent one broken plugin from crashing the entire application? How do you evolve the API without breaking existing plugins?
+
+In this tutorial, you will build a complete plugin system with a typed plugin interface and registry, lifecycle hooks (install, activate, deactivate, uninstall), dependency resolution with topological sorting, sandboxed execution that isolates plugin failures, and semantic version-based API compatibility checks.
+
+## Step 1: Project Setup
+
+```bash
+mkdir plugin-system && cd plugin-system
+npm init -y
+npm install -D typescript @types/node ts-node
+npx tsc --init --strict --esModuleInterop --outDir dist --rootDir src
+```
+
+Add `"type": "module"` to `package.json`:
+
+```bash
+mkdir -p src/plugins
+```
+
+## Step 2: Define the Plugin Interface
+
+Create `src/types.ts`:
+
+```typescript
+export interface PluginManifest {
+  name: string;
+  version: string;
+  description: string;
+  author?: string;
+  apiVersion: string;
+  dependencies?: Record<string, string>;
+}
+
+export interface PluginContext {
+  /** Register a hook handler */
+  on<T = unknown>(event: string, handler: (data: T) => void | Promise<void>): void;
+  /** Emit an event to all listeners */
+  emit<T = unknown>(event: string, data: T): Promise<void>;
+  /** Get a value from shared state */
+  get<T = unknown>(key: string): T | undefined;
+  /** Set a value in shared state */
+  set<T = unknown>(key: string, value: T): void;
+  /** Log a message scoped to this plugin */
+  log(message: string): void;
+  /** Access another plugin's public API */
+  getPluginApi<T = unknown>(pluginName: string): T | undefined;
+}
+
+export interface Plugin {
+  manifest: PluginManifest;
+  /** Called when the plugin is installed */
+  install?(context: PluginContext): void | Promise<void>;
+  /** Called when the plugin is activated */
+  activate(context: PluginContext): void | Promise<void>;
+  /** Called when the plugin is deactivated */
+  deactivate?(context: PluginContext): void | Promise<void>;
+  /** Called when the plugin is uninstalled */
+  uninstall?(context: PluginContext): void | Promise<void>;
+  /** Public API exposed to other plugins */
+  api?: Record<string, unknown>;
+}
+
+export type PluginStatus = "installed" | "active" | "inactive" | "error";
+
+export interface PluginEntry {
+  plugin: Plugin;
+  status: PluginStatus;
+  error?: string;
+  activatedAt?: string;
+}
+```
+
+The `PluginContext` is the sandbox — it is the only way a plugin interacts with the host application. Plugins never access global state directly. The `api` property lets plugins expose functionality to each other through a controlled interface.
+
+## Step 3: Build the Event System
+
+Create `src/events.ts`:
+
+```typescript
+type Handler<T = unknown> = (data: T) => void | Promise<void>;
+
+export class EventBus {
+  private handlers: Map<string, Set<Handler>> = new Map();
+
+  on<T = unknown>(event: string, handler: Handler<T>): () => void {
+    if (!this.handlers.has(event)) {
+      this.handlers.set(event, new Set());
+    }
+    this.handlers.get(event)!.add(handler as Handler);
+
+    // Return unsubscribe function
+    return () => {
+      this.handlers.get(event)?.delete(handler as Handler);
+    };
+  }
+
+  async emit<T = unknown>(event: string, data: T): Promise<void> {
+    const handlers = this.handlers.get(event);
+    if (!handlers) return;
+
+    const promises: Promise<void>[] = [];
+    for (const handler of handlers) {
+      try {
+        const result = handler(data);
+        if (result instanceof Promise) {
+          promises.push(result);
+        }
+      } catch (error) {
+        console.error(`Event handler error for "${event}":`, error);
+      }
+    }
+
+    await Promise.allSettled(promises);
+  }
+
+  removeAll(event?: string): void {
+    if (event) {
+      this.handlers.delete(event);
+    } else {
+      this.handlers.clear();
+    }
+  }
+}
+```
+
+`Promise.allSettled` ensures one failing handler does not prevent others from running. This is critical — a bug in one plugin's event handler must not break other plugins listening to the same event.
+
+## Step 4: Implement Version Compatibility
+
+Create `src/version.ts`:
+
+```typescript
+interface SemVer {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+export function parseSemVer(version: string): SemVer | null {
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return {
+    major: parseInt(match[1], 10),
+    minor: parseInt(match[2], 10),
+    patch: parseInt(match[3], 10),
+  };
+}
+
+/**
+ * Check if a version satisfies a requirement.
+ * Supports: exact ("1.2.3"), caret ("^1.2.0"), tilde ("~1.2.0"), wildcard ("1.x")
+ */
+export function satisfies(version: string, requirement: string): boolean {
+  const ver = parseSemVer(version);
+  if (!ver) return false;
+
+  // Wildcard: "1.x" or "1.*"
+  if (requirement.includes("x") || requirement.includes("*")) {
+    const parts = requirement.replace(/[x*]/g, "0").split(".");
+    const reqMajor = parseInt(parts[0], 10);
+    if (parts.length === 2 || requirement.endsWith(".x") || requirement.endsWith(".*")) {
+      return ver.major === reqMajor;
+    }
+    return ver.major === reqMajor && ver.minor === parseInt(parts[1], 10);
+  }
+
+  // Caret: ^1.2.3 means >=1.2.3 <2.0.0
+  if (requirement.startsWith("^")) {
+    const req = parseSemVer(requirement.slice(1));
+    if (!req) return false;
+    if (ver.major !== req.major) return false;
+    if (ver.minor < req.minor) return false;
+    if (ver.minor === req.minor && ver.patch < req.patch) return false;
+    return true;
+  }
+
+  // Tilde: ~1.2.3 means >=1.2.3 <1.3.0
+  if (requirement.startsWith("~")) {
+    const req = parseSemVer(requirement.slice(1));
+    if (!req) return false;
+    if (ver.major !== req.major || ver.minor !== req.minor) return false;
+    return ver.patch >= req.patch;
+  }
+
+  // Exact match
+  const req = parseSemVer(requirement);
+  if (!req) return false;
+  return ver.major === req.major && ver.minor === req.minor && ver.patch === req.patch;
+}
+```
+
+Version compatibility prevents plugins built for API v1 from loading in API v2 where breaking changes might have occurred. The caret notation (`^1.2.0`) is the most common — it means "any compatible version" within the same major.
+
+## Step 5: Implement Dependency Resolution
+
+Create `src/resolver.ts`:
+
+```typescript
+import type { Plugin } from "./types.js";
+import { satisfies } from "./version.js";
+
+export class DependencyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DependencyError";
+  }
+}
+
+/**
+ * Topological sort: order plugins so dependencies come before dependents.
+ */
+export function resolveLoadOrder(plugins: Plugin[]): Plugin[] {
+  const nameMap = new Map(plugins.map((p) => [p.manifest.name, p]));
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const sorted: Plugin[] = [];
+
+  function visit(plugin: Plugin): void {
+    const name = plugin.manifest.name;
+
+    if (visiting.has(name)) {
+      throw new DependencyError(`Circular dependency detected involving "${name}"`);
+    }
+    if (visited.has(name)) return;
+
+    visiting.add(name);
+
+    const deps = plugin.manifest.dependencies ?? {};
+    for (const [depName, depVersion] of Object.entries(deps)) {
+      const dep = nameMap.get(depName);
+      if (!dep) {
+        throw new DependencyError(
+          `Plugin "${name}" requires "${depName}" (${depVersion}) but it is not installed`
+        );
+      }
+      if (!satisfies(dep.manifest.version, depVersion)) {
+        throw new DependencyError(
+          `Plugin "${name}" requires "${depName}" ${depVersion} but found ${dep.manifest.version}`
+        );
+      }
+      visit(dep);
+    }
+
+    visiting.delete(name);
+    visited.add(name);
+    sorted.push(plugin);
+  }
+
+  for (const plugin of plugins) {
+    visit(plugin);
+  }
+
+  return sorted;
+}
+```
+
+Topological sorting ensures that if plugin A depends on plugin B, B is activated first. The cycle detection catches impossible dependency chains like A depends on B depends on A.
+
+## Step 6: Build the Plugin Registry
+
+Create `src/registry.ts`:
+
+```typescript
+import type { Plugin, PluginEntry, PluginContext, PluginStatus } from "./types.js";
+import { EventBus } from "./events.js";
+import { satisfies } from "./version.js";
+import { resolveLoadOrder } from "./resolver.js";
+
+const CURRENT_API_VERSION = "1.0.0";
+
+export class PluginRegistry {
+  private plugins: Map<string, PluginEntry> = new Map();
+  private sharedState: Map<string, unknown> = new Map();
+  private eventBus = new EventBus();
+  private pluginEventCleanup: Map<string, Array<() => void>> = new Map();
+
+  /**
+   * Register a plugin without activating it.
+   */
+  async install(plugin: Plugin): Promise<void> {
+    const { name, apiVersion } = plugin.manifest;
+
+    if (this.plugins.has(name)) {
+      throw new Error(`Plugin "${name}" is already installed`);
+    }
+
+    if (!satisfies(CURRENT_API_VERSION, apiVersion)) {
+      throw new Error(
+        `Plugin "${name}" requires API ${apiVersion} but current is ${CURRENT_API_VERSION}`
+      );
+    }
+
+    const entry: PluginEntry = { plugin, status: "installed" };
+    this.plugins.set(name, entry);
+
+    if (plugin.install) {
+      try {
+        await plugin.install(this.createContext(name));
+      } catch (error) {
+        entry.status = "error";
+        entry.error = String(error);
+        console.error(`Failed to install plugin "${name}":`, error);
+      }
+    }
+  }
+
+  /**
+   * Activate all installed plugins in dependency order.
+   */
+  async activateAll(): Promise<void> {
+    const installed = [...this.plugins.values()]
+      .filter((e) => e.status === "installed")
+      .map((e) => e.plugin);
+
+    const ordered = resolveLoadOrder(installed);
+
+    for (const plugin of ordered) {
+      await this.activate(plugin.manifest.name);
+    }
+  }
+
+  /**
+   * Activate a single plugin.
+   */
+  async activate(name: string): Promise<void> {
+    const entry = this.plugins.get(name);
+    if (!entry) throw new Error(`Plugin "${name}" is not installed`);
+    if (entry.status === "active") return;
+
+    try {
+      await entry.plugin.activate(this.createContext(name));
+      entry.status = "active";
+      entry.activatedAt = new Date().toISOString();
+      await this.eventBus.emit("plugin:activated", { name });
+    } catch (error) {
+      entry.status = "error";
+      entry.error = String(error);
+      console.error(`Failed to activate plugin "${name}":`, error);
+    }
+  }
+
+  /**
+   * Deactivate a plugin and clean up its event handlers.
+   */
+  async deactivate(name: string): Promise<void> {
+    const entry = this.plugins.get(name);
+    if (!entry || entry.status !== "active") return;
+
+    try {
+      if (entry.plugin.deactivate) {
+        await entry.plugin.deactivate(this.createContext(name));
+      }
+    } catch (error) {
+      console.error(`Error during deactivation of "${name}":`, error);
+    }
+
+    // Clean up event subscriptions
+    const cleanups = this.pluginEventCleanup.get(name) ?? [];
+    for (const cleanup of cleanups) cleanup();
+    this.pluginEventCleanup.delete(name);
+
+    entry.status = "inactive";
+    await this.eventBus.emit("plugin:deactivated", { name });
+  }
+
+  /**
+   * Uninstall a plugin completely.
+   */
+  async uninstall(name: string): Promise<void> {
+    await this.deactivate(name);
+
+    const entry = this.plugins.get(name);
+    if (entry?.plugin.uninstall) {
+      try {
+        await entry.plugin.uninstall(this.createContext(name));
+      } catch (error) {
+        console.error(`Error during uninstall of "${name}":`, error);
+      }
+    }
+
+    this.plugins.delete(name);
+  }
+
+  getPlugin(name: string): PluginEntry | undefined {
+    return this.plugins.get(name);
+  }
+
+  listPlugins(): Array<{ name: string; version: string; status: PluginStatus }> {
+    return [...this.plugins.entries()].map(([name, entry]) => ({
+      name,
+      version: entry.plugin.manifest.version,
+      status: entry.status,
+    }));
+  }
+
+  private createContext(pluginName: string): PluginContext {
+    const cleanups: Array<() => void> = [];
+    this.pluginEventCleanup.set(pluginName, cleanups);
+
+    return {
+      on: <T = unknown>(event: string, handler: (data: T) => void | Promise<void>) => {
+        const cleanup = this.eventBus.on(event, handler);
+        cleanups.push(cleanup);
+      },
+      emit: async <T = unknown>(event: string, data: T) => {
+        await this.eventBus.emit(`${pluginName}:${event}`, data);
+      },
+      get: <T = unknown>(key: string) => this.sharedState.get(key) as T | undefined,
+      set: <T = unknown>(key: string, value: T) => {
+        this.sharedState.set(key, value);
+      },
+      log: (message: string) => console.log(`[${pluginName}] ${message}`),
+      getPluginApi: <T = unknown>(name: string) => {
+        const entry = this.plugins.get(name);
+        if (!entry || entry.status !== "active") return undefined;
+        return entry.plugin.api as T | undefined;
+      },
+    };
+  }
+}
+```
+
+The `createContext` method builds a sandboxed environment for each plugin. Event subscriptions are tracked per-plugin so they can be cleaned up on deactivation. The `emit` method prefixes events with the plugin name to prevent collisions.
+
+## Step 7: Create Example Plugins
+
+Create `src/plugins/logger.ts`:
+
+```typescript
+import type { Plugin } from "../types.js";
+
+export const loggerPlugin: Plugin = {
+  manifest: {
+    name: "logger",
+    version: "1.0.0",
+    description: "Logs all events passing through the system",
+    apiVersion: "^1.0.0",
+  },
+
+  activate(context) {
+    context.log("Logger activated");
+
+    context.on("plugin:activated", (data) => {
+      context.log(`Plugin activated: ${JSON.stringify(data)}`);
+    });
+
+    context.on("plugin:deactivated", (data) => {
+      context.log(`Plugin deactivated: ${JSON.stringify(data)}`);
+    });
+  },
+
+  deactivate(context) {
+    context.log("Logger deactivated");
+  },
+
+  api: {
+    getLogLevel(): string {
+      return "info";
+    },
+  },
+};
+```
+
+Create `src/plugins/metrics.ts`:
+
+```typescript
+import type { Plugin } from "../types.js";
+
+interface Metric {
+  name: string;
+  value: number;
+  timestamp: string;
+}
+
+export const metricsPlugin: Plugin = {
+  manifest: {
+    name: "metrics",
+    version: "1.0.0",
+    description: "Collects and reports metrics",
+    apiVersion: "^1.0.0",
+    dependencies: {
+      logger: "^1.0.0",
+    },
+  },
+
+  activate(context) {
+    const metrics: Metric[] = [];
+
+    context.on("metric:record", (data: unknown) => {
+      const metric = data as Metric;
+      metrics.push({ ...metric, timestamp: new Date().toISOString() });
+      context.log(`Metric recorded: ${metric.name} = ${metric.value}`);
+    });
+
+    context.set("metrics", metrics);
+    context.log("Metrics collector activated");
+  },
+
+  deactivate(context) {
+    context.log("Metrics collector deactivated");
+  },
+
+  api: {
+    getMetrics(): Metric[] {
+      return [];
+    },
+  },
+};
+```
+
+## Step 8: Build a Third Plugin with Complex Dependencies
+
+Create `src/plugins/dashboard.ts`:
+
+```typescript
+import type { Plugin } from "../types.js";
+
+export const dashboardPlugin: Plugin = {
+  manifest: {
+    name: "dashboard",
+    version: "1.0.0",
+    description: "Displays metrics in a dashboard view",
+    apiVersion: "^1.0.0",
+    dependencies: {
+      metrics: "^1.0.0",
+      logger: "^1.0.0",
+    },
+  },
+
+  activate(context) {
+    const loggerApi = context.getPluginApi<{ getLogLevel: () => string }>("logger");
+    if (loggerApi) {
+      context.log(`Logger log level: ${loggerApi.getLogLevel()}`);
+    }
+
+    context.log("Dashboard activated — ready to display metrics");
+  },
+
+  deactivate(context) {
+    context.log("Dashboard deactivated");
+  },
+};
+```
+
+The dashboard plugin depends on both metrics and logger. The dependency resolver ensures logger activates first, then metrics, then dashboard.
+
+## Step 9: Create the Demo Runner
+
+Create `src/demo.ts`:
+
+```typescript
+import { PluginRegistry } from "./registry.js";
+import { loggerPlugin } from "./plugins/logger.js";
+import { metricsPlugin } from "./plugins/metrics.js";
+import { dashboardPlugin } from "./plugins/dashboard.js";
+
+async function main(): Promise<void> {
+  const registry = new PluginRegistry();
+
+  console.log("=== Installing plugins ===\n");
+
+  // Install in arbitrary order — resolver handles ordering
+  await registry.install(dashboardPlugin);
+  await registry.install(loggerPlugin);
+  await registry.install(metricsPlugin);
+
+  console.log("\nInstalled plugins:");
+  for (const p of registry.listPlugins()) {
+    console.log(`  ${p.name} v${p.version} [${p.status}]`);
+  }
+
+  console.log("\n=== Activating all plugins ===\n");
+  await registry.activateAll();
+
+  console.log("\nActive plugins:");
+  for (const p of registry.listPlugins()) {
+    console.log(`  ${p.name} v${p.version} [${p.status}]`);
+  }
+
+  console.log("\n=== Deactivating metrics ===\n");
+  await registry.deactivate("metrics");
+
+  console.log("\n=== Uninstalling logger ===\n");
+  await registry.uninstall("logger");
+
+  console.log("\nRemaining plugins:");
+  for (const p of registry.listPlugins()) {
+    console.log(`  ${p.name} v${p.version} [${p.status}]`);
+  }
+}
+
+main();
+```
+
+## Step 10: Run and Verify
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "start": "npx ts-node --esm src/demo.ts",
+    "build": "tsc"
+  }
+}
+```
+
+```bash
+npm start
+```
+
+The output shows plugins being installed in arbitrary order, then activated in dependency order (logger, metrics, dashboard). Deactivating metrics cleans up its event handlers. Uninstalling logger removes it completely.
+
+Key architectural takeaways: the plugin context is the only interface between plugins and the host — this is the "narrow waist" that makes the system maintainable. Event cleanup on deactivation prevents memory leaks. API versioning protects against breaking changes. Dependency resolution prevents activation of plugins whose dependencies are missing or incompatible.
+
+Extensions to explore: hot-reloading plugins by deactivating, replacing, and reactivating, a plugin marketplace that downloads and installs from a registry, per-plugin configuration via a settings API, resource quotas that limit CPU and memory usage per plugin, and a Web Worker-based sandbox for true isolation in browser environments.

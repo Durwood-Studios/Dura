@@ -1,0 +1,754 @@
+---
+title: "Build a Chaos Engineering Toolkit"
+description: "Create a chaos engineering framework that injects latency, kills processes, corrupts responses, and manages experiments with rollback."
+slug: "chaos-engineering"
+difficulty: "advanced"
+estimatedMinutes: 180
+steps: 10
+tags: ["chaos", "reliability", "testing", "node", "sre"]
+---
+
+## Overview
+
+Chaos engineering is the discipline of proactively injecting failures into systems to expose weaknesses before they cause outages. Companies like Netflix, Amazon, and Google run chaos experiments continuously to build confidence in their infrastructure. In this tutorial, you will build a chaos engineering toolkit in TypeScript that can inject network latency, kill processes, corrupt HTTP responses, schedule experiments, and roll back when safety thresholds are breached.
+
+This is not a toy project. The toolkit you build follows the same principles as production chaos tools: define steady state, hypothesize, run experiments, minimize blast radius, and always have a kill switch. You will learn process management, HTTP proxying, signal handling, and how to build safe automation around inherently dangerous operations.
+
+Everything runs on Node.js with zero external dependencies beyond the standard library, making it fully cross-platform across macOS, Windows, and Linux.
+
+## Step 1: Project Setup
+
+```bash
+mkdir chaos-toolkit && cd chaos-toolkit
+npm init -y
+npm install -D typescript @types/node
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir -p src/attacks src/core
+```
+
+Update `package.json`:
+
+```json
+{
+  "scripts": {
+    "build": "tsc",
+    "chaos": "tsc && node dist/cli.js"
+  }
+}
+```
+
+## Step 2: Core Types and Configuration
+
+Create `src/core/types.ts`:
+
+```typescript
+export type AttackType =
+  | "latency"
+  | "process-kill"
+  | "response-corrupt"
+  | "cpu-stress"
+  | "dns-block";
+
+export interface AttackConfig {
+  type: AttackType;
+  duration: number;
+  intensity: number;
+  target: string;
+  parameters: Record<string, string | number | boolean>;
+}
+
+export interface Experiment {
+  id: string;
+  name: string;
+  description: string;
+  attacks: AttackConfig[];
+  steadyStateCheck: HealthCheck;
+  rollbackOnFailure: boolean;
+  maxDuration: number;
+}
+
+export interface HealthCheck {
+  url: string;
+  expectedStatus: number;
+  timeoutMs: number;
+  intervalMs: number;
+  failureThreshold: number;
+}
+
+export interface ExperimentResult {
+  experimentId: string;
+  startedAt: string;
+  endedAt: string;
+  status: "completed" | "rolled-back" | "aborted";
+  healthChecksPassed: number;
+  healthChecksFailed: number;
+  attacks: AttackResult[];
+}
+
+export interface AttackResult {
+  type: AttackType;
+  startedAt: string;
+  endedAt: string;
+  status: "completed" | "rolled-back";
+}
+```
+
+## Step 3: Safety Controller
+
+The safety controller is the kill switch. It monitors health checks and aborts experiments when thresholds are breached.
+
+Create `src/core/safety.ts`:
+
+```typescript
+import type { HealthCheck, ExperimentResult } from "./types.js";
+
+export class SafetyController {
+  private isRunning: boolean = false;
+  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private consecutiveFailures: number = 0;
+  private totalPassed: number = 0;
+  private totalFailed: number = 0;
+  private abortCallback: (() => void) | null = null;
+
+  constructor(private readonly healthCheck: HealthCheck) {}
+
+  start(onAbort: () => void): void {
+    this.isRunning = true;
+    this.abortCallback = onAbort;
+    this.consecutiveFailures = 0;
+
+    this.intervalId = setInterval(() => {
+      void this.check();
+    }, this.healthCheck.intervalMs);
+
+    console.log(
+      `[SAFETY] Monitoring ${this.healthCheck.url} every ${this.healthCheck.intervalMs}ms`
+    );
+  }
+
+  stop(): { passed: number; failed: number } {
+    this.isRunning = false;
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    return { passed: this.totalPassed, failed: this.totalFailed };
+  }
+
+  private async check(): Promise<void> {
+    if (!this.isRunning) return;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.healthCheck.timeoutMs);
+
+    try {
+      const response = await fetch(this.healthCheck.url, { signal: controller.signal });
+
+      if (response.status === this.healthCheck.expectedStatus) {
+        this.consecutiveFailures = 0;
+        this.totalPassed++;
+      } else {
+        this.handleFailure(`status ${response.status}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown error";
+      this.handleFailure(message);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private handleFailure(reason: string): void {
+    this.consecutiveFailures++;
+    this.totalFailed++;
+    console.log(
+      `[SAFETY] Health check failed (${this.consecutiveFailures}/${this.healthCheck.failureThreshold}): ${reason}`
+    );
+
+    if (this.consecutiveFailures >= this.healthCheck.failureThreshold) {
+      console.log("[SAFETY] Threshold breached. Triggering abort.");
+      this.stop();
+      this.abortCallback?.();
+    }
+  }
+}
+```
+
+## Step 4: Latency Injection Attack
+
+Create `src/attacks/latency.ts` using an HTTP proxy that adds configurable delay:
+
+```typescript
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import type { AttackConfig } from "../core/types.js";
+
+export class LatencyAttack {
+  private server: ReturnType<typeof createServer> | null = null;
+
+  async start(config: AttackConfig): Promise<() => void> {
+    const delayMs = Number(config.parameters["delayMs"] ?? 500);
+    const proxyPort = Number(config.parameters["proxyPort"] ?? 9876);
+    const targetUrl = new URL(config.target);
+
+    this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      setTimeout(() => {
+        const proxyReq = httpRequest(
+          {
+            hostname: targetUrl.hostname,
+            port: targetUrl.port || 80,
+            path: req.url,
+            method: req.method,
+            headers: req.headers,
+          },
+          (proxyRes) => {
+            res.writeHead(proxyRes.statusCode ?? 500, proxyRes.headers);
+            proxyRes.pipe(res);
+          }
+        );
+
+        proxyReq.on("error", (error) => {
+          console.error(`[LATENCY] Proxy error: ${error.message}`);
+          res.writeHead(502);
+          res.end("Bad Gateway");
+        });
+
+        req.pipe(proxyReq);
+      }, delayMs);
+    });
+
+    await new Promise<void>((resolve) => {
+      this.server!.listen(proxyPort, () => {
+        console.log(`[LATENCY] Injecting ${delayMs}ms delay on port ${proxyPort}`);
+        resolve();
+      });
+    });
+
+    return (): void => {
+      this.server?.close();
+      console.log("[LATENCY] Attack stopped.");
+    };
+  }
+}
+```
+
+## Step 5: Process Kill Attack
+
+Create `src/attacks/process-kill.ts`:
+
+```typescript
+import { execSync } from "node:child_process";
+import { platform } from "node:os";
+import type { AttackConfig } from "../core/types.js";
+
+export class ProcessKillAttack {
+  async start(config: AttackConfig): Promise<() => void> {
+    const processName = config.target;
+    const signal = String(config.parameters["signal"] ?? "SIGTERM");
+    const intervalMs = Number(config.parameters["intervalMs"] ?? 0);
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    const killProcess = (): void => {
+      try {
+        const os = platform();
+        let pids: string[];
+
+        if (os === "win32") {
+          const output = execSync(`tasklist /FI "IMAGENAME eq ${processName}" /FO CSV /NH`, {
+            encoding: "utf8",
+          });
+          pids = output
+            .split("\n")
+            .filter((line) => line.includes(processName))
+            .map((line) => {
+              const match = line.match(/"(\d+)"/);
+              return match ? match[1] : "";
+            })
+            .filter(Boolean);
+
+          for (const pid of pids) {
+            execSync(`taskkill /PID ${pid} /F`);
+            console.log(`[KILL] Terminated PID ${pid} (${processName})`);
+          }
+        } else {
+          const output = execSync(`pgrep -f "${processName}" || true`, { encoding: "utf8" });
+          pids = output.trim().split("\n").filter(Boolean);
+
+          for (const pid of pids) {
+            try {
+              process.kill(parseInt(pid, 10), signal as NodeJS.Signals);
+              console.log(`[KILL] Sent ${signal} to PID ${pid} (${processName})`);
+            } catch (error) {
+              const msg = error instanceof Error ? error.message : "unknown";
+              console.error(`[KILL] Failed to kill PID ${pid}: ${msg}`);
+            }
+          }
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "unknown";
+        console.error(`[KILL] Error: ${msg}`);
+      }
+    };
+
+    killProcess();
+
+    if (intervalMs > 0) {
+      intervalId = setInterval(killProcess, intervalMs);
+    }
+
+    return (): void => {
+      if (intervalId) clearInterval(intervalId);
+      console.log("[KILL] Attack stopped.");
+    };
+  }
+}
+```
+
+## Step 6: Response Corruption Attack
+
+Create `src/attacks/response-corrupt.ts`:
+
+```typescript
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import type { AttackConfig } from "../core/types.js";
+
+export class ResponseCorruptAttack {
+  private server: ReturnType<typeof createServer> | null = null;
+
+  async start(config: AttackConfig): Promise<() => void> {
+    const corruptionRate = Number(config.parameters["rate"] ?? 0.5);
+    const proxyPort = Number(config.parameters["proxyPort"] ?? 9877);
+    const targetUrl = new URL(config.target);
+
+    this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      const proxyReq = httpRequest(
+        {
+          hostname: targetUrl.hostname,
+          port: targetUrl.port || 80,
+          path: req.url,
+          method: req.method,
+          headers: req.headers,
+        },
+        (proxyRes) => {
+          if (Math.random() < corruptionRate) {
+            const corruptionType = Math.random();
+
+            if (corruptionType < 0.33) {
+              res.writeHead(500, { "content-type": "text/plain" });
+              res.end("Internal Server Error (chaos)");
+              console.log(`[CORRUPT] Returned 500 for ${req.url}`);
+            } else if (corruptionType < 0.66) {
+              res.writeHead(200, { "content-type": "application/json" });
+              res.end('{"error": "corrupted", "chaos": true}');
+              console.log(`[CORRUPT] Corrupted body for ${req.url}`);
+            } else {
+              res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
+              const chunks: Buffer[] = [];
+              proxyRes.on("data", (chunk: Buffer) => chunks.push(chunk));
+              proxyRes.on("end", () => {
+                const body = Buffer.concat(chunks);
+                const corrupted = Buffer.from(body.toString().split("").reverse().join(""));
+                res.end(corrupted);
+                console.log(`[CORRUPT] Reversed body for ${req.url}`);
+              });
+            }
+          } else {
+            res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
+            proxyRes.pipe(res);
+          }
+        }
+      );
+
+      proxyReq.on("error", (error) => {
+        res.writeHead(502);
+        res.end(`Proxy error: ${error.message}`);
+      });
+
+      req.pipe(proxyReq);
+    });
+
+    await new Promise<void>((resolve) => {
+      this.server!.listen(proxyPort, () => {
+        console.log(
+          `[CORRUPT] Corrupting ${Math.round(corruptionRate * 100)}% of responses on port ${proxyPort}`
+        );
+        resolve();
+      });
+    });
+
+    return (): void => {
+      this.server?.close();
+      console.log("[CORRUPT] Attack stopped.");
+    };
+  }
+}
+```
+
+## Step 7: CPU Stress Attack
+
+Create `src/attacks/cpu-stress.ts`:
+
+```typescript
+import { cpus } from "node:os";
+import { Worker, isMainThread, parentPort } from "node:worker_threads";
+import type { AttackConfig } from "../core/types.js";
+
+const WORKER_CODE = `
+const { parentPort } = require("node:worker_threads");
+function burn() {
+  const end = Date.now() + 100;
+  while (Date.now() < end) {
+    Math.random() * Math.random();
+  }
+  if (parentPort) {
+    parentPort.once("message", (msg) => {
+      if (msg === "stop") process.exit(0);
+      burn();
+    });
+    parentPort.postMessage("tick");
+  }
+}
+burn();
+`;
+
+export class CpuStressAttack {
+  private workers: Worker[] = [];
+
+  async start(config: AttackConfig): Promise<() => void> {
+    const corePercent = Number(config.parameters["corePercent"] ?? 50);
+    const numCores = cpus().length;
+    const workerCount = Math.max(1, Math.round(numCores * (corePercent / 100)));
+
+    console.log(`[CPU] Stressing ${workerCount}/${numCores} cores`);
+
+    for (let i = 0; i < workerCount; i++) {
+      const worker = new Worker(WORKER_CODE, { eval: true });
+
+      worker.on("message", () => {
+        worker.postMessage("continue");
+      });
+
+      worker.on("error", (error) => {
+        console.error(`[CPU] Worker error: ${error.message}`);
+      });
+
+      this.workers.push(worker);
+    }
+
+    return (): void => {
+      for (const worker of this.workers) {
+        worker.postMessage("stop");
+        worker.terminate();
+      }
+      this.workers = [];
+      console.log("[CPU] Attack stopped.");
+    };
+  }
+}
+```
+
+## Step 8: Experiment Runner
+
+Create `src/core/runner.ts`:
+
+```typescript
+import { SafetyController } from "./safety.js";
+import { LatencyAttack } from "../attacks/latency.js";
+import { ProcessKillAttack } from "../attacks/process-kill.js";
+import { ResponseCorruptAttack } from "../attacks/response-corrupt.js";
+import { CpuStressAttack } from "../attacks/cpu-stress.js";
+import type { Experiment, ExperimentResult, AttackConfig, AttackResult } from "./types.js";
+
+type StopFunction = () => void;
+
+async function startAttack(config: AttackConfig): Promise<StopFunction> {
+  switch (config.type) {
+    case "latency":
+      return new LatencyAttack().start(config);
+    case "process-kill":
+      return new ProcessKillAttack().start(config);
+    case "response-corrupt":
+      return new ResponseCorruptAttack().start(config);
+    case "cpu-stress":
+      return new CpuStressAttack().start(config);
+    default:
+      throw new Error(`Unknown attack type: ${config.type}`);
+  }
+}
+
+export async function runExperiment(experiment: Experiment): Promise<ExperimentResult> {
+  console.log(`\n=== Starting experiment: ${experiment.name} ===`);
+  console.log(`Description: ${experiment.description}`);
+  console.log(`Attacks: ${experiment.attacks.length}, Max duration: ${experiment.maxDuration}s\n`);
+
+  const safety = new SafetyController(experiment.steadyStateCheck);
+  const stopFunctions: StopFunction[] = [];
+  const attackResults: AttackResult[] = [];
+  let wasAborted = false;
+
+  const cleanup = (): void => {
+    for (const stop of stopFunctions) {
+      try {
+        stop();
+      } catch (error) {
+        console.error("[RUNNER] Error during cleanup:", error);
+      }
+    }
+  };
+
+  // Graceful shutdown on Ctrl+C
+  const sigHandler = (): void => {
+    console.log("\n[RUNNER] Received interrupt. Cleaning up...");
+    wasAborted = true;
+    cleanup();
+    safety.stop();
+  };
+  process.on("SIGINT", sigHandler);
+  process.on("SIGTERM", sigHandler);
+
+  const startedAt = new Date().toISOString();
+
+  safety.start(() => {
+    console.log("[RUNNER] Safety abort triggered. Rolling back all attacks.");
+    wasAborted = true;
+    cleanup();
+  });
+
+  for (const attackConfig of experiment.attacks) {
+    if (wasAborted) break;
+
+    const attackStart = new Date().toISOString();
+    console.log(`[RUNNER] Starting ${attackConfig.type} attack...`);
+
+    try {
+      const stop = await startAttack(attackConfig);
+      stopFunctions.push(stop);
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, attackConfig.duration * 1000);
+      });
+
+      stop();
+      attackResults.push({
+        type: attackConfig.type,
+        startedAt: attackStart,
+        endedAt: new Date().toISOString(),
+        status: "completed",
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "unknown";
+      console.error(`[RUNNER] Attack failed: ${msg}`);
+      attackResults.push({
+        type: attackConfig.type,
+        startedAt: attackStart,
+        endedAt: new Date().toISOString(),
+        status: "rolled-back",
+      });
+    }
+  }
+
+  const { passed, failed } = safety.stop();
+  process.removeListener("SIGINT", sigHandler);
+  process.removeListener("SIGTERM", sigHandler);
+
+  const result: ExperimentResult = {
+    experimentId: experiment.id,
+    startedAt,
+    endedAt: new Date().toISOString(),
+    status: wasAborted ? "rolled-back" : "completed",
+    healthChecksPassed: passed,
+    healthChecksFailed: failed,
+    attacks: attackResults,
+  };
+
+  console.log(`\n=== Experiment ${result.status} ===`);
+  console.log(`Health checks: ${passed} passed, ${failed} failed`);
+  console.log(`Attacks: ${attackResults.length} executed\n`);
+
+  return result;
+}
+```
+
+## Step 9: CLI Interface
+
+Create `src/cli.ts`:
+
+```typescript
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { runExperiment } from "./core/runner.js";
+import type { Experiment, ExperimentResult } from "./core/types.js";
+
+function printUsage(): void {
+  console.log(`
+Chaos Engineering Toolkit
+
+Usage:
+  npm run chaos -- run <experiment.json>    Run an experiment
+  npm run chaos -- validate <experiment.json>  Validate experiment config
+  npm run chaos -- example                  Print example experiment JSON
+`);
+}
+
+function printExample(): void {
+  const example: Experiment = {
+    id: "exp-001",
+    name: "API Latency Test",
+    description: "Inject 500ms latency and verify the frontend degrades gracefully",
+    attacks: [
+      {
+        type: "latency",
+        duration: 30,
+        intensity: 1,
+        target: "http://localhost:3000",
+        parameters: { delayMs: 500, proxyPort: 9876 },
+      },
+    ],
+    steadyStateCheck: {
+      url: "http://localhost:3000/health",
+      expectedStatus: 200,
+      timeoutMs: 5000,
+      intervalMs: 3000,
+      failureThreshold: 3,
+    },
+    rollbackOnFailure: true,
+    maxDuration: 60,
+  };
+
+  console.log(JSON.stringify(example, null, 2));
+}
+
+function validateExperiment(experiment: unknown): experiment is Experiment {
+  const exp = experiment as Record<string, unknown>;
+
+  if (!exp["id"] || !exp["name"] || !exp["attacks"] || !exp["steadyStateCheck"]) {
+    console.error("Missing required fields: id, name, attacks, steadyStateCheck");
+    return false;
+  }
+
+  if (!Array.isArray(exp["attacks"]) || (exp["attacks"] as unknown[]).length === 0) {
+    console.error("Attacks must be a non-empty array");
+    return false;
+  }
+
+  console.log("Experiment configuration is valid.");
+  return true;
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const command = args[0];
+
+  switch (command) {
+    case "run": {
+      const filePath = resolve(args[1]);
+      if (!existsSync(filePath)) {
+        console.error(`File not found: ${filePath}`);
+        process.exit(1);
+      }
+      const raw = readFileSync(filePath, "utf8");
+      const experiment: unknown = JSON.parse(raw);
+
+      if (!validateExperiment(experiment)) {
+        process.exit(1);
+      }
+
+      const result = await runExperiment(experiment);
+      const outputPath = `chaos-result-${Date.now()}.json`;
+      writeFileSync(outputPath, JSON.stringify(result, null, 2));
+      console.log(`Results saved to ${outputPath}`);
+      break;
+    }
+
+    case "validate": {
+      const filePath = resolve(args[1]);
+      const raw = readFileSync(filePath, "utf8");
+      validateExperiment(JSON.parse(raw));
+      break;
+    }
+
+    case "example":
+      printExample();
+      break;
+
+    default:
+      printUsage();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error("Fatal:", error instanceof Error ? error.message : error);
+  process.exit(1);
+});
+```
+
+## Step 10: Run Your First Experiment
+
+Create a simple test target server and experiment file. First, create `test-server.js` in the project root:
+
+```javascript
+const http = require("node:http");
+let requestCount = 0;
+
+const server = http.createServer((req, res) => {
+  requestCount++;
+  if (req.url === "/health") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", requests: requestCount }));
+  } else {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("Hello from test server");
+  }
+});
+
+server.listen(3333, () => console.log("Test server on :3333"));
+```
+
+Create `experiment.json`:
+
+```json
+{
+  "id": "exp-local-001",
+  "name": "Local Latency Test",
+  "description": "Inject 200ms latency into local test server",
+  "attacks": [
+    {
+      "type": "latency",
+      "duration": 15,
+      "intensity": 1,
+      "target": "http://localhost:3333",
+      "parameters": { "delayMs": 200, "proxyPort": 9876 }
+    }
+  ],
+  "steadyStateCheck": {
+    "url": "http://localhost:3333/health",
+    "expectedStatus": 200,
+    "timeoutMs": 3000,
+    "intervalMs": 2000,
+    "failureThreshold": 3
+  },
+  "rollbackOnFailure": true,
+  "maxDuration": 30
+}
+```
+
+Run the experiment:
+
+```bash
+# Terminal 1: Start test server
+node test-server.js
+
+# Terminal 2: Run chaos experiment
+npm run chaos -- run experiment.json
+```
+
+You will see the safety controller monitoring health, the latency attack injecting delays, and a final report with pass/fail counts. Try modifying the experiment to use higher latency, combine multiple attacks, or lower the failure threshold to trigger an automatic rollback. The toolkit's architecture makes it straightforward to add new attack types by implementing a class with a `start` method that returns a cleanup function.

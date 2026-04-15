@@ -1,0 +1,571 @@
+---
+title: "Build an Autocomplete Engine"
+description: "Create a trie-based autocomplete with ranked suggestions, debounced input, keyboard navigation, and match highlighting."
+slug: "autocomplete"
+difficulty: "intermediate"
+estimatedMinutes: 150
+steps: 8
+tags: ["search", "trie", "react", "ux", "algorithms"]
+---
+
+## Overview
+
+Autocomplete is one of the most impactful UI patterns on the web. Google processes billions of autocomplete suggestions daily. A good autocomplete reduces keystrokes, guides users toward valid queries, and makes your application feel fast and intelligent.
+
+In this tutorial, you will build an autocomplete engine from the ground up. The core uses a trie data structure for prefix matching, with frequency-based ranking so popular results appear first. The frontend uses React with debounced input to avoid excessive lookups, full keyboard navigation for accessibility, and highlighted matching text so users can see why each result was suggested.
+
+No external libraries beyond React. The trie and all algorithms are implemented from scratch.
+
+## Step 1: Implement the Trie
+
+A trie (prefix tree) stores strings character by character, sharing common prefixes. This makes prefix searches extremely fast.
+
+```typescript
+// src/trie.ts
+interface TrieNode {
+  children: Map<string, TrieNode>;
+  isEnd: boolean;
+  frequency: number;
+  word: string | null;
+}
+
+function createNode(): TrieNode {
+  return { children: new Map(), isEnd: false, frequency: 0, word: null };
+}
+
+export class Trie {
+  private root: TrieNode = createNode();
+  private size = 0;
+
+  insert(word: string, frequency: number = 1): void {
+    let node = this.root;
+    const lower = word.toLowerCase();
+
+    for (const char of lower) {
+      if (!node.children.has(char)) {
+        node.children.set(char, createNode());
+      }
+      node = node.children.get(char)!;
+    }
+
+    if (!node.isEnd) this.size++;
+    node.isEnd = true;
+    node.frequency += frequency;
+    node.word = word; // Preserve original casing
+  }
+
+  search(prefix: string, limit: number = 10): Array<{ word: string; frequency: number }> {
+    let node = this.root;
+    const lower = prefix.toLowerCase();
+
+    for (const char of lower) {
+      if (!node.children.has(char)) return [];
+      node = node.children.get(char)!;
+    }
+
+    const results: Array<{ word: string; frequency: number }> = [];
+    this.collect(node, results);
+
+    return results.sort((a, b) => b.frequency - a.frequency).slice(0, limit);
+  }
+
+  private collect(node: TrieNode, results: Array<{ word: string; frequency: number }>): void {
+    if (node.isEnd && node.word) {
+      results.push({ word: node.word, frequency: node.frequency });
+    }
+    for (const child of node.children.values()) {
+      this.collect(child, results);
+    }
+  }
+
+  has(word: string): boolean {
+    let node = this.root;
+    for (const char of word.toLowerCase()) {
+      if (!node.children.has(char)) return false;
+      node = node.children.get(char)!;
+    }
+    return node.isEnd;
+  }
+
+  getSize(): number {
+    return this.size;
+  }
+}
+```
+
+## Step 2: Add Fuzzy Matching
+
+Exact prefix matching misses typos. Add edit-distance-based fuzzy matching as a fallback.
+
+```typescript
+// src/fuzzy.ts
+export function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1, // deletion
+        dp[i][j - 1] + 1, // insertion
+        dp[i - 1][j - 1] + cost // substitution
+      );
+    }
+  }
+
+  return dp[m][n];
+}
+
+export function fuzzySearch(
+  query: string,
+  candidates: string[],
+  maxDistance: number = 2,
+  limit: number = 10
+): string[] {
+  const lower = query.toLowerCase();
+  const scored = candidates
+    .map((c) => ({ word: c, distance: levenshtein(lower, c.toLowerCase()) }))
+    .filter((s) => s.distance <= maxDistance)
+    .sort((a, b) => a.distance - b.distance);
+
+  return scored.slice(0, limit).map((s) => s.word);
+}
+```
+
+## Step 3: Build the Autocomplete Engine
+
+Combine the trie with fuzzy matching and recent search history.
+
+```typescript
+// src/engine.ts
+import { Trie } from "./trie.js";
+import { fuzzySearch } from "./fuzzy.js";
+
+export interface Suggestion {
+  text: string;
+  score: number;
+  source: "prefix" | "fuzzy" | "recent";
+}
+
+export class AutocompleteEngine {
+  private trie: Trie = new Trie();
+  private allWords: string[] = [];
+  private recentSearches: string[] = [];
+  private maxRecent = 20;
+
+  loadDictionary(entries: Array<{ word: string; frequency?: number }>): void {
+    for (const entry of entries) {
+      this.trie.insert(entry.word, entry.frequency ?? 1);
+      this.allWords.push(entry.word);
+    }
+  }
+
+  addRecent(query: string): void {
+    this.recentSearches = this.recentSearches.filter((s) => s !== query);
+    this.recentSearches.unshift(query);
+    if (this.recentSearches.length > this.maxRecent) {
+      this.recentSearches.pop();
+    }
+  }
+
+  suggest(query: string, limit: number = 8): Suggestion[] {
+    if (query.length === 0) {
+      return this.recentSearches.slice(0, limit).map((text, i) => ({
+        text,
+        score: 100 - i,
+        source: "recent" as const,
+      }));
+    }
+
+    const suggestions: Map<string, Suggestion> = new Map();
+
+    // Prefix matches from trie (highest priority)
+    const prefixResults = this.trie.search(query, limit);
+    for (const result of prefixResults) {
+      suggestions.set(result.word.toLowerCase(), {
+        text: result.word,
+        score: result.frequency * 10,
+        source: "prefix",
+      });
+    }
+
+    // Fuzzy matches as fallback
+    if (suggestions.size < limit && query.length >= 3) {
+      const fuzzyResults = fuzzySearch(query, this.allWords, 2, limit);
+      for (const word of fuzzyResults) {
+        const key = word.toLowerCase();
+        if (!suggestions.has(key)) {
+          suggestions.set(key, { text: word, score: 1, source: "fuzzy" });
+        }
+      }
+    }
+
+    // Boost recent searches
+    for (const recent of this.recentSearches) {
+      const key = recent.toLowerCase();
+      if (key.startsWith(query.toLowerCase()) && suggestions.has(key)) {
+        const existing = suggestions.get(key)!;
+        existing.score += 50;
+        existing.source = "recent";
+      }
+    }
+
+    return Array.from(suggestions.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+}
+```
+
+## Step 4: Create the Debounce Hook
+
+Avoid firing a search on every keystroke. Wait until the user pauses typing.
+
+```typescript
+// src/hooks/useDebounce.ts
+import { useState, useEffect } from "react";
+
+export function useDebounce<T>(value: T, delayMs: number): T {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedValue(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+
+  return debouncedValue;
+}
+```
+
+## Step 5: Build the Highlight Component
+
+Show users why each suggestion matched by highlighting the matching portion.
+
+```tsx
+// src/components/Highlight.tsx
+interface HighlightProps {
+  text: string;
+  query: string;
+}
+
+export function Highlight({ text, query }: HighlightProps): JSX.Element {
+  if (query.length === 0) return <span>{text}</span>;
+
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  const index = lowerText.indexOf(lowerQuery);
+
+  if (index === -1) return <span>{text}</span>;
+
+  const before = text.slice(0, index);
+  const match = text.slice(index, index + query.length);
+  const after = text.slice(index + query.length);
+
+  return (
+    <span>
+      {before}
+      <mark
+        style={{ background: "#fef08a", fontWeight: 600, borderRadius: "2px", padding: "0 1px" }}
+      >
+        {match}
+      </mark>
+      {after}
+    </span>
+  );
+}
+```
+
+## Step 6: Build the Autocomplete Component
+
+The main component with input, dropdown, and full keyboard navigation.
+
+```tsx
+// src/components/Autocomplete.tsx
+"use client";
+
+import { useState, useRef, useEffect, useCallback } from "react";
+import { AutocompleteEngine, Suggestion } from "../engine.js";
+import { useDebounce } from "../hooks/useDebounce.js";
+import { Highlight } from "./Highlight.js";
+
+interface AutocompleteProps {
+  engine: AutocompleteEngine;
+  placeholder?: string;
+  onSelect: (value: string) => void;
+}
+
+export function Autocomplete({
+  engine,
+  placeholder = "Search...",
+  onSelect,
+}: AutocompleteProps): JSX.Element {
+  const [query, setQuery] = useState("");
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [isOpen, setIsOpen] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  const debouncedQuery = useDebounce(query, 150);
+
+  useEffect(() => {
+    const results = engine.suggest(debouncedQuery);
+    setSuggestions(results);
+    setActiveIndex(-1);
+    setIsOpen(results.length > 0);
+  }, [debouncedQuery, engine]);
+
+  const selectItem = useCallback(
+    (text: string) => {
+      setQuery(text);
+      setIsOpen(false);
+      engine.addRecent(text);
+      onSelect(text);
+      inputRef.current?.blur();
+    },
+    [engine, onSelect]
+  );
+
+  function handleKeyDown(e: React.KeyboardEvent): void {
+    if (!isOpen) {
+      if (e.key === "ArrowDown") {
+        setIsOpen(true);
+        e.preventDefault();
+      }
+      return;
+    }
+
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        setActiveIndex((prev) => Math.min(prev + 1, suggestions.length - 1));
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        setActiveIndex((prev) => Math.max(prev - 1, -1));
+        break;
+      case "Enter":
+        e.preventDefault();
+        if (activeIndex >= 0) selectItem(suggestions[activeIndex].text);
+        else if (query) selectItem(query);
+        break;
+      case "Escape":
+        setIsOpen(false);
+        setActiveIndex(-1);
+        break;
+    }
+  }
+
+  // Scroll active item into view
+  useEffect(() => {
+    if (activeIndex >= 0 && listRef.current) {
+      const item = listRef.current.children[activeIndex] as HTMLElement;
+      item?.scrollIntoView({ block: "nearest" });
+    }
+  }, [activeIndex]);
+
+  const sourceIcons: Record<string, string> = {
+    prefix: "",
+    fuzzy: "~",
+    recent: "clock",
+  };
+
+  return (
+    <div style={{ position: "relative", width: "100%", maxWidth: "480px" }}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onFocus={() => suggestions.length > 0 && setIsOpen(true)}
+        onBlur={() => setTimeout(() => setIsOpen(false), 150)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        role="combobox"
+        aria-expanded={isOpen}
+        aria-autocomplete="list"
+        aria-activedescendant={activeIndex >= 0 ? `suggestion-${activeIndex}` : undefined}
+        style={{
+          width: "100%",
+          padding: "12px 16px",
+          fontSize: "16px",
+          border: "2px solid #e2e8f0",
+          borderRadius: "8px",
+          outline: "none",
+        }}
+      />
+      {isOpen && (
+        <ul
+          ref={listRef}
+          role="listbox"
+          style={{
+            position: "absolute",
+            top: "100%",
+            left: 0,
+            right: 0,
+            marginTop: "4px",
+            background: "white",
+            border: "1px solid #e2e8f0",
+            borderRadius: "8px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+            listStyle: "none",
+            padding: "4px",
+            maxHeight: "320px",
+            overflowY: "auto",
+          }}
+        >
+          {suggestions.map((s, i) => (
+            <li
+              key={s.text}
+              id={`suggestion-${i}`}
+              role="option"
+              aria-selected={i === activeIndex}
+              onMouseDown={() => selectItem(s.text)}
+              onMouseEnter={() => setActiveIndex(i)}
+              style={{
+                padding: "10px 12px",
+                cursor: "pointer",
+                borderRadius: "6px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                background: i === activeIndex ? "#f1f5f9" : "transparent",
+              }}
+            >
+              <span style={{ fontSize: "12px", color: "#94a3b8", width: "16px" }}>
+                {sourceIcons[s.source]}
+              </span>
+              <Highlight text={s.text} query={query} />
+              {s.source === "fuzzy" && (
+                <span style={{ marginLeft: "auto", fontSize: "11px", color: "#94a3b8" }}>
+                  fuzzy match
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+## Step 7: Load Real Data
+
+Populate the engine with a dictionary of programming terms.
+
+```typescript
+// src/data.ts
+export const programmingTerms = [
+  { word: "JavaScript", frequency: 100 },
+  { word: "TypeScript", frequency: 95 },
+  { word: "React", frequency: 90 },
+  { word: "Redux", frequency: 60 },
+  { word: "React Router", frequency: 55 },
+  { word: "React Native", frequency: 50 },
+  { word: "Node.js", frequency: 85 },
+  { word: "Next.js", frequency: 80 },
+  { word: "Nest.js", frequency: 40 },
+  { word: "Python", frequency: 88 },
+  { word: "PostgreSQL", frequency: 70 },
+  { word: "Prisma", frequency: 45 },
+  { word: "GraphQL", frequency: 55 },
+  { word: "Git", frequency: 75 },
+  { word: "GitHub", frequency: 72 },
+  { word: "Docker", frequency: 65 },
+  { word: "Kubernetes", frequency: 50 },
+  { word: "Tailwind CSS", frequency: 68 },
+  { word: "Svelte", frequency: 35 },
+  { word: "SvelteKit", frequency: 30 },
+  { word: "Vue.js", frequency: 60 },
+  { word: "Vite", frequency: 55 },
+  { word: "Webpack", frequency: 45 },
+  { word: "Rust", frequency: 50 },
+  { word: "Go", frequency: 55 },
+  { word: "Ruby", frequency: 40 },
+  { word: "Rails", frequency: 38 },
+  { word: "AWS", frequency: 70 },
+  { word: "Azure", frequency: 50 },
+  { word: "Vercel", frequency: 48 },
+  { word: "Supabase", frequency: 42 },
+  { word: "Firebase", frequency: 52 },
+  { word: "MongoDB", frequency: 55 },
+  { word: "Redis", frequency: 50 },
+  { word: "SQLite", frequency: 45 },
+  { word: "Elasticsearch", frequency: 40 },
+  { word: "Express.js", frequency: 60 },
+  { word: "Fastify", frequency: 30 },
+  { word: "Deno", frequency: 35 },
+  { word: "Bun", frequency: 30 },
+];
+```
+
+## Step 8: Wire It All Together
+
+Create the app entry point that initializes the engine and renders the component.
+
+```tsx
+// src/App.tsx
+import { useState, useMemo } from "react";
+import { AutocompleteEngine } from "./engine.js";
+import { Autocomplete } from "./components/Autocomplete.js";
+import { programmingTerms } from "./data.js";
+
+export function App(): JSX.Element {
+  const [selected, setSelected] = useState<string | null>(null);
+
+  const engine = useMemo(() => {
+    const e = new AutocompleteEngine();
+    e.loadDictionary(programmingTerms);
+    return e;
+  }, []);
+
+  return (
+    <div
+      style={{
+        padding: "4rem 2rem",
+        maxWidth: "600px",
+        margin: "0 auto",
+        fontFamily: "sans-serif",
+      }}
+    >
+      <h1 style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>Autocomplete Engine</h1>
+      <p style={{ color: "#64748b", marginBottom: "2rem" }}>
+        Type to search {programmingTerms.length} programming terms. Try "react", "type", or a typo
+        like "javscript".
+      </p>
+
+      <Autocomplete engine={engine} placeholder="Search technologies..." onSelect={setSelected} />
+
+      {selected && (
+        <div
+          style={{ marginTop: "2rem", padding: "1rem", background: "#f8fafc", borderRadius: "8px" }}
+        >
+          Selected: <strong>{selected}</strong>
+        </div>
+      )}
+
+      <div style={{ marginTop: "3rem", fontSize: "14px", color: "#94a3b8" }}>
+        <p>Features:</p>
+        <ul style={{ marginTop: "0.5rem", paddingLeft: "1.5rem" }}>
+          <li>Trie-based prefix matching with frequency ranking</li>
+          <li>Fuzzy matching via Levenshtein distance (3+ chars)</li>
+          <li>Recent search history (shown on empty input)</li>
+          <li>Keyboard navigation (Up/Down/Enter/Escape)</li>
+          <li>150ms debounce to reduce computation</li>
+          <li>Accessible: ARIA roles, combobox pattern</li>
+        </ul>
+      </div>
+    </div>
+  );
+}
+```
+
+Run `npm run dev` and start typing. Prefix matches appear instantly, ranked by frequency. Type "javscript" (missing the 'a') and fuzzy matching suggests "JavaScript". Select a result and search again to see it boosted by recent history. Use arrow keys and Enter to navigate entirely by keyboard.
+
+The trie handles prefix lookups in O(k) time where k is the query length, making it suitable for dictionaries with hundreds of thousands of entries. For even larger datasets, you could add server-side search with pagination, or replace the trie with a finite state transducer for compressed storage.

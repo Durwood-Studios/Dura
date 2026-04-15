@@ -1,0 +1,625 @@
+---
+title: "Build a Git History Visualizer"
+description: "Create an interactive web app that parses git log output and renders a visual commit graph with branches, zoom, and pan."
+slug: "git-visualizer"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["git", "visualization", "react", "d3", "developer-tools"]
+---
+
+## Overview
+
+Understanding a repository's history through `git log` output alone is like reading a novel as a series of bullet points. In this tutorial, you will build a web-based Git history visualizer that parses real git log data and renders an interactive commit graph using D3.js. The graph shows branches, merges, commit details, and supports zoom and pan for navigating large histories.
+
+The tool runs entirely in the browser after initial data parsing. You will build a Node.js script that extracts structured commit data from any git repository, then a React frontend that renders the graph with D3. The result is a developer tool you can use on any project.
+
+This project teaches you git internals (commits, refs, parent relationships), graph layout algorithms, SVG rendering with D3, and interactive pan/zoom mechanics.
+
+## Step 1: Project Setup
+
+Create the project with Vite and install dependencies:
+
+```bash
+npm create vite@latest git-visualizer -- --template react-ts
+cd git-visualizer
+npm install d3
+npm install -D @types/d3
+```
+
+Set up the directory structure:
+
+```bash
+mkdir -p src/components src/utils src/types scripts
+```
+
+## Step 2: Git Log Parser Script
+
+Create `scripts/parse-repo.ts` to extract structured data from any git repository:
+
+```typescript
+import { execSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+interface CommitData {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: string;
+  date: string;
+  message: string;
+  refs: string[];
+}
+
+interface RepoData {
+  commits: CommitData[];
+  branches: string[];
+  generatedAt: string;
+}
+
+function parseRepo(repoPath: string): RepoData {
+  const cwd = resolve(repoPath);
+
+  const logOutput = execSync('git log --all --format="%H|%h|%P|%an|%aI|%s|%D" --topo-order', {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 50 * 1024 * 1024,
+  });
+
+  const commits: CommitData[] = logOutput
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const parts = line.split("|");
+      const refs = parts[6]
+        ? parts[6]
+            .split(",")
+            .map((r) => r.trim())
+            .filter(Boolean)
+        : [];
+
+      return {
+        hash: parts[0],
+        shortHash: parts[1],
+        parents: parts[2] ? parts[2].split(" ") : [],
+        author: parts[3],
+        date: parts[4],
+        message: parts[5],
+        refs,
+      };
+    });
+
+  const branchOutput = execSync("git branch -a --format='%(refname:short)'", {
+    cwd,
+    encoding: "utf8",
+  });
+
+  const branches = branchOutput.trim().split("\n").filter(Boolean);
+
+  return {
+    commits,
+    branches,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+const targetRepo = process.argv[2] || ".";
+const data = parseRepo(targetRepo);
+const outputPath = resolve("src/data/repo.json");
+writeFileSync(outputPath, JSON.stringify(data, null, 2));
+console.log(`Parsed ${data.commits.length} commits, ${data.branches.length} branches`);
+```
+
+Run it against any repo:
+
+```bash
+mkdir -p src/data
+npx tsx scripts/parse-repo.ts /path/to/your/repo
+```
+
+## Step 3: Type Definitions
+
+Create `src/types/graph.ts`:
+
+```typescript
+export interface CommitNode {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: string;
+  date: string;
+  message: string;
+  refs: string[];
+  x: number;
+  y: number;
+  column: number;
+}
+
+export interface CommitEdge {
+  source: string;
+  target: string;
+  sourceX: number;
+  sourceY: number;
+  targetX: number;
+  targetY: number;
+}
+
+export interface GraphLayout {
+  nodes: CommitNode[];
+  edges: CommitEdge[];
+  width: number;
+  height: number;
+}
+```
+
+## Step 4: Graph Layout Algorithm
+
+Create `src/utils/layout.ts` to assign x/y positions to commits:
+
+```typescript
+import type { CommitNode, CommitEdge, GraphLayout } from "../types/graph";
+
+interface RawCommit {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: string;
+  date: string;
+  message: string;
+  refs: string[];
+}
+
+const ROW_HEIGHT = 60;
+const COLUMN_WIDTH = 30;
+const PADDING_LEFT = 200;
+const PADDING_TOP = 40;
+
+export function computeLayout(commits: RawCommit[]): GraphLayout {
+  const activeColumns: (string | null)[] = [];
+  const nodeMap = new Map<string, CommitNode>();
+
+  function findOrCreateColumn(hash: string): number {
+    const existing = activeColumns.indexOf(hash);
+    if (existing !== -1) return existing;
+
+    const emptySlot = activeColumns.indexOf(null);
+    if (emptySlot !== -1) {
+      activeColumns[emptySlot] = hash;
+      return emptySlot;
+    }
+
+    activeColumns.push(hash);
+    return activeColumns.length - 1;
+  }
+
+  const nodes: CommitNode[] = commits.map((commit, index) => {
+    const column = findOrCreateColumn(commit.hash);
+    activeColumns[column] = null;
+
+    if (commit.parents.length > 0) {
+      activeColumns[column] = commit.parents[0];
+    }
+
+    for (let i = 1; i < commit.parents.length; i++) {
+      findOrCreateColumn(commit.parents[i]);
+    }
+
+    const node: CommitNode = {
+      ...commit,
+      x: PADDING_LEFT + column * COLUMN_WIDTH,
+      y: PADDING_TOP + index * ROW_HEIGHT,
+      column,
+    };
+
+    nodeMap.set(commit.hash, node);
+    return node;
+  });
+
+  const edges: CommitEdge[] = [];
+  for (const node of nodes) {
+    for (const parentHash of node.parents) {
+      const parent = nodeMap.get(parentHash);
+      if (parent) {
+        edges.push({
+          source: node.hash,
+          target: parentHash,
+          sourceX: node.x,
+          sourceY: node.y,
+          targetX: parent.x,
+          targetY: parent.y,
+        });
+      }
+    }
+  }
+
+  const maxColumn = Math.max(...nodes.map((n) => n.column), 0);
+  const width = PADDING_LEFT + (maxColumn + 2) * COLUMN_WIDTH + 600;
+  const height = PADDING_TOP + nodes.length * ROW_HEIGHT + 40;
+
+  return { nodes, edges, width, height };
+}
+```
+
+## Step 5: Color Assignment
+
+Create `src/utils/colors.ts` to give each branch a consistent color:
+
+```typescript
+const BRANCH_COLORS = [
+  "#6366f1",
+  "#10b981",
+  "#f59e0b",
+  "#ef4444",
+  "#8b5cf6",
+  "#06b6d4",
+  "#ec4899",
+  "#84cc16",
+  "#f97316",
+  "#14b8a6",
+];
+
+const colorCache = new Map<number, string>();
+
+export function getColumnColor(column: number): string {
+  if (colorCache.has(column)) {
+    return colorCache.get(column)!;
+  }
+  const color = BRANCH_COLORS[column % BRANCH_COLORS.length];
+  colorCache.set(column, color);
+  return color;
+}
+```
+
+## Step 6: SVG Edge Rendering
+
+Create `src/components/Edges.tsx`:
+
+```typescript
+import React from "react";
+import type { CommitEdge } from "../types/graph";
+import { getColumnColor } from "../utils/colors";
+
+interface EdgesProps {
+  edges: CommitEdge[];
+  nodeMap: Map<string, { column: number }>;
+}
+
+export function Edges({ edges, nodeMap }: EdgesProps): React.ReactElement {
+  return (
+    <g>
+      {edges.map((edge) => {
+        const sourceNode = nodeMap.get(edge.source);
+        const column = sourceNode?.column ?? 0;
+        const color = getColumnColor(column);
+
+        if (edge.sourceX === edge.targetX) {
+          return (
+            <line
+              key={`${edge.source}-${edge.target}`}
+              x1={edge.sourceX}
+              y1={edge.sourceY}
+              x2={edge.targetX}
+              y2={edge.targetY}
+              stroke={color}
+              strokeWidth={2}
+              opacity={0.6}
+            />
+          );
+        }
+
+        const midY = (edge.sourceY + edge.targetY) / 2;
+        const path = `M ${edge.sourceX} ${edge.sourceY} C ${edge.sourceX} ${midY}, ${edge.targetX} ${midY}, ${edge.targetX} ${edge.targetY}`;
+
+        return (
+          <path
+            key={`${edge.source}-${edge.target}`}
+            d={path}
+            fill="none"
+            stroke={color}
+            strokeWidth={2}
+            opacity={0.6}
+          />
+        );
+      })}
+    </g>
+  );
+}
+```
+
+## Step 7: Commit Node Component
+
+Create `src/components/CommitNodes.tsx`:
+
+```typescript
+import React from "react";
+import type { CommitNode } from "../types/graph";
+import { getColumnColor } from "../utils/colors";
+
+interface CommitNodesProps {
+  nodes: CommitNode[];
+  selectedHash: string | null;
+  onSelect: (hash: string) => void;
+}
+
+export function CommitNodes({ nodes, selectedHash, onSelect }: CommitNodesProps): React.ReactElement {
+  return (
+    <g>
+      {nodes.map((node) => {
+        const color = getColumnColor(node.column);
+        const isSelected = node.hash === selectedHash;
+        const isMerge = node.parents.length > 1;
+
+        return (
+          <g key={node.hash} onClick={() => onSelect(node.hash)} style={{ cursor: "pointer" }}>
+            <circle
+              cx={node.x}
+              cy={node.y}
+              r={isMerge ? 7 : 5}
+              fill={isSelected ? "#ffffff" : color}
+              stroke={isSelected ? color : "none"}
+              strokeWidth={isSelected ? 3 : 0}
+            />
+            <text
+              x={node.x + 20}
+              y={node.y - 8}
+              fill="#94a3b8"
+              fontSize={11}
+              fontFamily="monospace"
+            >
+              {node.shortHash}
+            </text>
+            <text
+              x={node.x + 20}
+              y={node.y + 8}
+              fill="#e2e8f0"
+              fontSize={13}
+            >
+              {node.message.slice(0, 60)}{node.message.length > 60 ? "..." : ""}
+            </text>
+            {node.refs.length > 0 && (
+              <g>
+                {node.refs.map((ref, i) => (
+                  <g key={ref} transform={`translate(${node.x + 20 + i * 100}, ${node.y + 16})`}>
+                    <rect
+                      width={ref.length * 7 + 12}
+                      height={18}
+                      rx={4}
+                      fill={color}
+                      opacity={0.2}
+                    />
+                    <text x={6} y={13} fill={color} fontSize={10} fontFamily="monospace">
+                      {ref}
+                    </text>
+                  </g>
+                ))}
+              </g>
+            )}
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+```
+
+## Step 8: Interactive Graph with Zoom and Pan
+
+Create `src/components/Graph.tsx`:
+
+```typescript
+import React, { useRef, useEffect, useState, useMemo } from "react";
+import * as d3 from "d3";
+import { CommitNodes } from "./CommitNodes";
+import { Edges } from "./Edges";
+import type { GraphLayout, CommitNode } from "../types/graph";
+
+interface GraphProps {
+  layout: GraphLayout;
+  onSelectCommit: (node: CommitNode | null) => void;
+}
+
+export function Graph({ layout, onSelectCommit }: GraphProps): React.ReactElement {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const gRef = useRef<SVGGElement>(null);
+  const [selectedHash, setSelectedHash] = useState<string | null>(null);
+
+  const nodeMap = useMemo(() => {
+    const map = new Map<string, { column: number }>();
+    layout.nodes.forEach((n) => map.set(n.hash, { column: n.column }));
+    return map;
+  }, [layout.nodes]);
+
+  useEffect(() => {
+    if (!svgRef.current || !gRef.current) return;
+
+    const svg = d3.select(svgRef.current);
+    const g = d3.select(gRef.current);
+
+    const zoom = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.1, 3])
+      .on("zoom", (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
+        g.attr("transform", event.transform.toString());
+      });
+
+    svg.call(zoom);
+
+    return () => {
+      svg.on(".zoom", null);
+    };
+  }, []);
+
+  function handleSelect(hash: string): void {
+    setSelectedHash(hash === selectedHash ? null : hash);
+    const node = layout.nodes.find((n) => n.hash === hash) ?? null;
+    onSelectCommit(hash === selectedHash ? null : node);
+  }
+
+  return (
+    <svg
+      ref={svgRef}
+      width="100%"
+      height="100%"
+      style={{ background: "#0f172a" }}
+    >
+      <g ref={gRef}>
+        <Edges edges={layout.edges} nodeMap={nodeMap} />
+        <CommitNodes
+          nodes={layout.nodes}
+          selectedHash={selectedHash}
+          onSelect={handleSelect}
+        />
+      </g>
+    </svg>
+  );
+}
+```
+
+## Step 9: Commit Detail Panel
+
+Create `src/components/CommitDetail.tsx`:
+
+```typescript
+import React from "react";
+import type { CommitNode } from "../types/graph";
+
+interface CommitDetailProps {
+  commit: CommitNode | null;
+}
+
+export function CommitDetail({ commit }: CommitDetailProps): React.ReactElement | null {
+  if (!commit) return null;
+
+  const date = new Date(commit.date);
+  const formatted = date.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  return (
+    <div style={{
+      position: "absolute",
+      right: 0,
+      top: 0,
+      width: 360,
+      height: "100%",
+      background: "#1e293b",
+      borderLeft: "1px solid #334155",
+      padding: 24,
+      overflowY: "auto",
+    }}>
+      <h3 style={{ color: "#f1f5f9", margin: "0 0 16px", fontSize: 16, fontWeight: 700 }}>
+        Commit Details
+      </h3>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ color: "#64748b", fontSize: 11, textTransform: "uppercase" }}>Hash</label>
+        <p style={{ color: "#e2e8f0", fontFamily: "monospace", fontSize: 13, margin: "4px 0 0" }}>
+          {commit.hash}
+        </p>
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ color: "#64748b", fontSize: 11, textTransform: "uppercase" }}>Author</label>
+        <p style={{ color: "#e2e8f0", fontSize: 14, margin: "4px 0 0" }}>{commit.author}</p>
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ color: "#64748b", fontSize: 11, textTransform: "uppercase" }}>Date</label>
+        <p style={{ color: "#e2e8f0", fontSize: 14, margin: "4px 0 0" }}>{formatted}</p>
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ color: "#64748b", fontSize: 11, textTransform: "uppercase" }}>Message</label>
+        <p style={{ color: "#e2e8f0", fontSize: 14, margin: "4px 0 0", lineHeight: 1.6 }}>
+          {commit.message}
+        </p>
+      </div>
+      {commit.refs.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ color: "#64748b", fontSize: 11, textTransform: "uppercase" }}>Refs</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+            {commit.refs.map((ref) => (
+              <span key={ref} style={{
+                background: "rgba(99,102,241,0.2)",
+                color: "#818cf8",
+                padding: "2px 8px",
+                borderRadius: 4,
+                fontSize: 12,
+                fontFamily: "monospace",
+              }}>
+                {ref}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {commit.parents.length > 0 && (
+        <div>
+          <label style={{ color: "#64748b", fontSize: 11, textTransform: "uppercase" }}>Parents</label>
+          <div style={{ marginTop: 4 }}>
+            {commit.parents.map((parent) => (
+              <p key={parent} style={{
+                color: "#94a3b8",
+                fontFamily: "monospace",
+                fontSize: 12,
+                margin: "2px 0",
+              }}>
+                {parent.slice(0, 8)}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+## Step 10: Wire Everything Together
+
+Update `src/App.tsx`:
+
+```typescript
+import React, { useState, useMemo } from "react";
+import { Graph } from "./components/Graph";
+import { CommitDetail } from "./components/CommitDetail";
+import { computeLayout } from "./utils/layout";
+import type { CommitNode } from "./types/graph";
+import repoData from "./data/repo.json";
+
+export default function App(): React.ReactElement {
+  const [selectedCommit, setSelectedCommit] = useState<CommitNode | null>(null);
+
+  const layout = useMemo(() => computeLayout(repoData.commits), []);
+
+  return (
+    <div style={{ width: "100vw", height: "100vh", position: "relative", overflow: "hidden" }}>
+      <div style={{
+        position: "absolute",
+        top: 16,
+        left: 16,
+        zIndex: 10,
+        color: "#f1f5f9",
+      }}>
+        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Git History</h1>
+        <p style={{ fontSize: 12, color: "#64748b", margin: "4px 0 0" }}>
+          {repoData.commits.length} commits &middot; {repoData.branches.length} branches
+        </p>
+      </div>
+      <Graph layout={layout} onSelectCommit={setSelectedCommit} />
+      <CommitDetail commit={selectedCommit} />
+    </div>
+  );
+}
+```
+
+Start the dev server and test with your parsed repository data:
+
+```bash
+npm run dev
+```
+
+Open the browser and you will see your repository's commit history rendered as an interactive graph. Scroll to zoom, click and drag to pan, and click any commit node to see its details in the side panel. Merge commits appear as larger circles, and branch refs are shown as colored labels.
+
+To visualize a different repository, run the parser script again with a new path and refresh the page. For production use, consider adding a search box that filters commits by message or author, a timeline slider for navigating large histories, and a diff viewer that shows changed files when selecting a commit.

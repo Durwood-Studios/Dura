@@ -1,0 +1,659 @@
+---
+title: "Build a Full-Text Search Engine"
+description: "Create a full-text search engine with an inverted index, tokenization, TF-IDF ranking, query parsing, and fuzzy matching."
+slug: "search-engine"
+difficulty: "intermediate"
+estimatedMinutes: 210
+steps: 10
+tags: ["search", "indexing", "full-text", "node", "algorithms"]
+---
+
+## Overview
+
+Every time you search a codebase, a documentation site, or a product catalog, a search engine is tokenizing your query, matching it against an index, and ranking results by relevance. Understanding how this works demystifies tools like Elasticsearch and Algolia, and gives you the ability to build fast, local search for your own projects.
+
+In this tutorial, you will build a full-text search engine from scratch in TypeScript. You will implement tokenization and stemming, construct an inverted index, rank results using TF-IDF (Term Frequency-Inverse Document Frequency), parse multi-word queries with boolean operators, and add fuzzy matching for typo tolerance. The entire engine runs in-memory with optional persistence to disk.
+
+## Step 1: Project Setup
+
+```bash
+mkdir search-engine && cd search-engine
+npm init -y
+npm install -D typescript @types/node ts-node
+npx tsc --init --strict --esModuleInterop --outDir dist --rootDir src
+```
+
+Add `"type": "module"` to `package.json`. Create the source directory:
+
+```bash
+mkdir -p src
+```
+
+## Step 2: Build the Tokenizer
+
+Create `src/tokenizer.ts`. Tokenization breaks text into searchable terms:
+
+```typescript
+const STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "but",
+  "by",
+  "for",
+  "if",
+  "in",
+  "into",
+  "is",
+  "it",
+  "no",
+  "not",
+  "of",
+  "on",
+  "or",
+  "such",
+  "that",
+  "the",
+  "their",
+  "then",
+  "there",
+  "these",
+  "they",
+  "this",
+  "to",
+  "was",
+  "will",
+  "with",
+]);
+
+/** Naive Porter-style suffix stripping for English */
+export function stem(word: string): string {
+  if (word.length < 4) return word;
+
+  let result = word;
+  if (result.endsWith("ing") && result.length > 5) {
+    result = result.slice(0, -3);
+  } else if (result.endsWith("tion")) {
+    result = result.slice(0, -4) + "te";
+  } else if (result.endsWith("ed") && result.length > 4) {
+    result = result.slice(0, -2);
+  } else if (result.endsWith("ly") && result.length > 4) {
+    result = result.slice(0, -2);
+  } else if (result.endsWith("ies")) {
+    result = result.slice(0, -3) + "y";
+  } else if (result.endsWith("es") && result.length > 4) {
+    result = result.slice(0, -2);
+  } else if (result.endsWith("s") && !result.endsWith("ss") && result.length > 3) {
+    result = result.slice(0, -1);
+  }
+
+  return result;
+}
+
+export function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 1 && !STOP_WORDS.has(word))
+    .map(stem);
+}
+```
+
+Stop word removal eliminates noise. Stemming reduces words to their root so "running", "runs", and "ran" match the same documents. This is a simplified stemmer — production systems use the full Porter or Snowball algorithm.
+
+## Step 3: Construct the Inverted Index
+
+Create `src/index.ts`. An inverted index maps each term to the documents containing it:
+
+```typescript
+import { tokenize } from "./tokenizer.js";
+
+export interface Document {
+  id: string;
+  title: string;
+  body: string;
+  [key: string]: unknown;
+}
+
+interface Posting {
+  docId: string;
+  termFrequency: number;
+  positions: number[];
+}
+
+interface IndexEntry {
+  documentFrequency: number;
+  postings: Map<string, Posting>;
+}
+
+export class InvertedIndex {
+  private index: Map<string, IndexEntry> = new Map();
+  private documents: Map<string, Document> = new Map();
+  private documentCount = 0;
+
+  addDocument(doc: Document): void {
+    if (this.documents.has(doc.id)) {
+      this.removeDocument(doc.id);
+    }
+
+    this.documents.set(doc.id, doc);
+    this.documentCount++;
+
+    const fullText = `${doc.title} ${doc.title} ${doc.body}`;
+    const tokens = tokenize(fullText);
+
+    const termPositions: Map<string, number[]> = new Map();
+    for (let i = 0; i < tokens.length; i++) {
+      const term = tokens[i];
+      if (!termPositions.has(term)) {
+        termPositions.set(term, []);
+      }
+      termPositions.get(term)!.push(i);
+    }
+
+    for (const [term, positions] of termPositions) {
+      if (!this.index.has(term)) {
+        this.index.set(term, { documentFrequency: 0, postings: new Map() });
+      }
+      const entry = this.index.get(term)!;
+      entry.documentFrequency++;
+      entry.postings.set(doc.id, {
+        docId: doc.id,
+        termFrequency: positions.length / tokens.length,
+        positions,
+      });
+    }
+  }
+
+  removeDocument(docId: string): void {
+    if (!this.documents.has(docId)) return;
+
+    for (const [term, entry] of this.index) {
+      if (entry.postings.has(docId)) {
+        entry.postings.delete(docId);
+        entry.documentFrequency--;
+        if (entry.documentFrequency === 0) {
+          this.index.delete(term);
+        }
+      }
+    }
+
+    this.documents.delete(docId);
+    this.documentCount--;
+  }
+
+  getPosting(term: string): IndexEntry | undefined {
+    return this.index.get(term);
+  }
+
+  getDocument(docId: string): Document | undefined {
+    return this.documents.get(docId);
+  }
+
+  getDocumentCount(): number {
+    return this.documentCount;
+  }
+
+  getTerms(): string[] {
+    return [...this.index.keys()];
+  }
+}
+```
+
+The title is indexed twice so title matches rank higher — a simple form of field boosting. Each posting stores the term frequency (for TF-IDF) and positions (for phrase queries or proximity ranking).
+
+## Step 4: Implement TF-IDF Scoring
+
+Create `src/scoring.ts`:
+
+```typescript
+import type { InvertedIndex } from "./index.js";
+
+interface ScoredResult {
+  docId: string;
+  score: number;
+  termScores: Map<string, number>;
+}
+
+/**
+ * Compute IDF: log(N / df) where N is total documents
+ * and df is the number of documents containing the term.
+ */
+function idf(documentCount: number, documentFrequency: number): number {
+  if (documentFrequency === 0) return 0;
+  return Math.log(1 + documentCount / documentFrequency);
+}
+
+/**
+ * Score documents for a set of query terms using TF-IDF.
+ */
+export function scoreTfIdf(index: InvertedIndex, queryTerms: string[]): ScoredResult[] {
+  const scores: Map<string, ScoredResult> = new Map();
+  const N = index.getDocumentCount();
+
+  for (const term of queryTerms) {
+    const entry = index.getPosting(term);
+    if (!entry) continue;
+
+    const termIdf = idf(N, entry.documentFrequency);
+
+    for (const [docId, posting] of entry.postings) {
+      if (!scores.has(docId)) {
+        scores.set(docId, { docId, score: 0, termScores: new Map() });
+      }
+      const result = scores.get(docId)!;
+      const tfIdfScore = posting.termFrequency * termIdf;
+      result.score += tfIdfScore;
+      result.termScores.set(term, tfIdfScore);
+    }
+  }
+
+  return [...scores.values()].sort((a, b) => b.score - a.score);
+}
+```
+
+TF-IDF balances two signals: how often a term appears in a document (TF — more is better) and how rare the term is across all documents (IDF — rarer is more distinctive). A document about "quantum" scores higher for that query than one about "the" because "quantum" has a much higher IDF.
+
+## Step 5: Parse Boolean Queries
+
+Create `src/query.ts` to support AND, OR, and NOT operators:
+
+```typescript
+import { tokenize, stem } from "./tokenizer.js";
+
+export type QueryNode =
+  | { type: "term"; value: string }
+  | { type: "and"; left: QueryNode; right: QueryNode }
+  | { type: "or"; left: QueryNode; right: QueryNode }
+  | { type: "not"; operand: QueryNode };
+
+export function parseQuery(input: string): QueryNode {
+  const tokens = input.trim().split(/\s+/);
+  const nodes: QueryNode[] = [];
+  let i = 0;
+
+  while (i < tokens.length) {
+    const token = tokens[i];
+
+    if (token.toUpperCase() === "NOT" && i + 1 < tokens.length) {
+      i++;
+      const term = stem(tokens[i].toLowerCase().replace(/[^\w]/g, ""));
+      nodes.push({ type: "not", operand: { type: "term", value: term } });
+    } else if (token.toUpperCase() === "AND" || token.toUpperCase() === "OR") {
+      // Handled in combination phase
+      nodes.push({ type: "term", value: token.toUpperCase() });
+    } else {
+      const stemmed = stem(token.toLowerCase().replace(/[^\w]/g, ""));
+      if (stemmed.length > 1) {
+        nodes.push({ type: "term", value: stemmed });
+      }
+    }
+    i++;
+  }
+
+  // Combine with AND/OR operators
+  if (nodes.length === 0) {
+    return { type: "term", value: "" };
+  }
+
+  let result = nodes[0];
+  let j = 1;
+  while (j < nodes.length) {
+    const current = nodes[j];
+    if (current.type === "term" && (current.value === "AND" || current.value === "OR")) {
+      if (j + 1 < nodes.length) {
+        const operator = current.value.toLowerCase() as "and" | "or";
+        result = { type: operator, left: result, right: nodes[j + 1] };
+        j += 2;
+      } else {
+        j++;
+      }
+    } else {
+      // Default: implicit AND
+      result = { type: "and", left: result, right: current };
+      j++;
+    }
+  }
+
+  return result;
+}
+
+export function extractTerms(node: QueryNode): string[] {
+  switch (node.type) {
+    case "term":
+      return node.value ? [node.value] : [];
+    case "and":
+    case "or":
+      return [...extractTerms(node.left), ...extractTerms(node.right)];
+    case "not":
+      return extractTerms(node.operand);
+  }
+}
+```
+
+Multiple words without operators default to AND — all terms must be present. "javascript OR typescript" matches documents with either term. "javascript NOT framework" matches documents about javascript that do not mention frameworks.
+
+## Step 6: Add Fuzzy Matching
+
+Create `src/fuzzy.ts` using Levenshtein distance:
+
+```typescript
+export function levenshteinDistance(a: string, b: string): number {
+  const matrix: number[][] = [];
+
+  for (let i = 0; i <= a.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= b.length; j++) {
+    matrix[0][j] = j;
+  }
+
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1, // deletion
+        matrix[i][j - 1] + 1, // insertion
+        matrix[i - 1][j - 1] + cost // substitution
+      );
+    }
+  }
+
+  return matrix[a.length][b.length];
+}
+
+export function findFuzzyMatches(
+  query: string,
+  terms: string[],
+  maxDistance: number = 2
+): string[] {
+  const matches: Array<{ term: string; distance: number }> = [];
+
+  for (const term of terms) {
+    // Skip if lengths differ too much
+    if (Math.abs(term.length - query.length) > maxDistance) continue;
+
+    const distance = levenshteinDistance(query, term);
+    if (distance <= maxDistance && distance > 0) {
+      matches.push({ term, distance });
+    }
+  }
+
+  return matches.sort((a, b) => a.distance - b.distance).map((m) => m.term);
+}
+```
+
+Levenshtein distance counts the minimum edits (insertions, deletions, substitutions) to transform one string into another. "javscript" is distance 1 from "javascript", so fuzzy matching catches the typo.
+
+## Step 7: Assemble the Search Engine
+
+Create `src/engine.ts`:
+
+```typescript
+import { InvertedIndex } from "./index.js";
+import type { Document } from "./index.js";
+import { tokenize } from "./tokenizer.js";
+import { scoreTfIdf } from "./scoring.js";
+import { parseQuery, extractTerms } from "./query.js";
+import { findFuzzyMatches } from "./fuzzy.js";
+
+export interface SearchResult {
+  document: Document;
+  score: number;
+  matchedTerms: string[];
+}
+
+export interface SearchOptions {
+  fuzzy?: boolean;
+  maxResults?: number;
+  minScore?: number;
+}
+
+export class SearchEngine {
+  private index = new InvertedIndex();
+
+  addDocuments(docs: Document[]): void {
+    for (const doc of docs) {
+      this.index.addDocument(doc);
+    }
+  }
+
+  removeDocument(docId: string): void {
+    this.index.removeDocument(docId);
+  }
+
+  search(query: string, options: SearchOptions = {}): SearchResult[] {
+    const { fuzzy = true, maxResults = 20, minScore = 0.001 } = options;
+
+    const parsed = parseQuery(query);
+    let terms = extractTerms(parsed);
+
+    // Expand terms with fuzzy matches
+    if (fuzzy) {
+      const allTerms = this.index.getTerms();
+      const expanded: string[] = [];
+      for (const term of terms) {
+        expanded.push(term);
+        const fuzzyMatches = findFuzzyMatches(term, allTerms, 1);
+        expanded.push(...fuzzyMatches.slice(0, 3));
+      }
+      terms = [...new Set(expanded)];
+    }
+
+    const scored = scoreTfIdf(this.index, terms);
+
+    // Apply NOT filter
+    const notTerms = this.extractNotTerms(parsed);
+    const notDocIds = new Set<string>();
+    for (const term of notTerms) {
+      const posting = this.index.getPosting(term);
+      if (posting) {
+        for (const docId of posting.postings.keys()) {
+          notDocIds.add(docId);
+        }
+      }
+    }
+
+    return scored
+      .filter((r) => r.score >= minScore && !notDocIds.has(r.docId))
+      .slice(0, maxResults)
+      .map((r) => ({
+        document: this.index.getDocument(r.docId)!,
+        score: r.score,
+        matchedTerms: [...r.termScores.keys()],
+      }));
+  }
+
+  private extractNotTerms(node: ReturnType<typeof parseQuery>): string[] {
+    if (node.type === "not") return extractTerms(node.operand);
+    if (node.type === "and" || node.type === "or") {
+      return [...this.extractNotTerms(node.left), ...this.extractNotTerms(node.right)];
+    }
+    return [];
+  }
+
+  getStats(): { documentCount: number; termCount: number } {
+    return {
+      documentCount: this.index.getDocumentCount(),
+      termCount: this.index.getTerms().length,
+    };
+  }
+}
+```
+
+## Step 8: Build an Interactive CLI
+
+Create `src/cli.ts`:
+
+```typescript
+import { createInterface } from "node:readline";
+import { SearchEngine } from "./engine.js";
+
+const engine = new SearchEngine();
+
+// Seed with sample documents
+engine.addDocuments([
+  {
+    id: "1",
+    title: "Introduction to JavaScript",
+    body: "JavaScript is a programming language used for web development. It supports functions, closures, and prototype-based inheritance.",
+  },
+  {
+    id: "2",
+    title: "TypeScript Handbook",
+    body: "TypeScript adds static types to JavaScript. It includes interfaces, generics, and type inference for better developer experience.",
+  },
+  {
+    id: "3",
+    title: "React Components",
+    body: "React uses a component-based architecture. Components can be functions or classes that return JSX describing the UI.",
+  },
+  {
+    id: "4",
+    title: "Node.js Server Guide",
+    body: "Node.js runs JavaScript on the server. It uses an event-driven, non-blocking I/O model that makes it lightweight and efficient.",
+  },
+  {
+    id: "5",
+    title: "CSS Layout Techniques",
+    body: "Modern CSS offers flexbox and grid for layout. Flexbox handles one-dimensional layouts while grid manages two-dimensional arrangements.",
+  },
+  {
+    id: "6",
+    title: "Database Design Patterns",
+    body: "Relational databases use tables with foreign keys. NoSQL databases offer flexible schemas for document, key-value, and graph data.",
+  },
+  {
+    id: "7",
+    title: "REST API Best Practices",
+    body: "RESTful APIs use HTTP methods for CRUD operations. Good API design includes versioning, pagination, and proper error responses.",
+  },
+  {
+    id: "8",
+    title: "Testing Strategies",
+    body: "Unit tests verify individual functions. Integration tests check component interactions. End-to-end tests validate complete user workflows.",
+  },
+]);
+
+const stats = engine.getStats();
+console.log(`Search engine loaded: ${stats.documentCount} documents, ${stats.termCount} terms`);
+console.log("Type a query and press Enter. Type 'exit' to quit.\n");
+
+const rl = createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  prompt: "search> ",
+});
+
+rl.prompt();
+
+rl.on("line", (line) => {
+  const query = line.trim();
+  if (query === "exit") {
+    rl.close();
+    return;
+  }
+  if (!query) {
+    rl.prompt();
+    return;
+  }
+
+  console.time("search");
+  const results = engine.search(query);
+  console.timeEnd("search");
+
+  if (results.length === 0) {
+    console.log("No results found.\n");
+  } else {
+    for (const result of results) {
+      const score = result.score.toFixed(4);
+      console.log(`  [${score}] ${result.document.title}`);
+      console.log(`           ${result.document.body.slice(0, 100)}...`);
+      console.log(`           Matched: ${result.matchedTerms.join(", ")}\n`);
+    }
+  }
+
+  rl.prompt();
+});
+
+rl.on("close", () => {
+  console.log("Goodbye.");
+  process.exit(0);
+});
+```
+
+## Step 9: Add Index Persistence
+
+Create `src/persistence.ts`:
+
+```typescript
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import type { Document } from "./index.js";
+
+export interface SerializedIndex {
+  documents: Document[];
+  indexedAt: string;
+}
+
+export async function saveIndex(documents: Document[], filePath: string): Promise<void> {
+  const dir = path.dirname(filePath);
+  await mkdir(dir, { recursive: true });
+
+  const data: SerializedIndex = {
+    documents,
+    indexedAt: new Date().toISOString(),
+  };
+
+  await writeFile(filePath, JSON.stringify(data), "utf-8");
+}
+
+export async function loadIndex(filePath: string): Promise<Document[]> {
+  try {
+    const raw = await readFile(filePath, "utf-8");
+    const data = JSON.parse(raw) as SerializedIndex;
+    return data.documents;
+  } catch {
+    return [];
+  }
+}
+```
+
+We serialize documents and rebuild the index on load. This is simpler than serializing the inverted index itself and ensures the index structure is always consistent.
+
+## Step 10: Run and Benchmark
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "start": "npx ts-node --esm src/cli.ts",
+    "build": "tsc"
+  }
+}
+```
+
+Run the search engine:
+
+```bash
+npm start
+```
+
+Try these queries to exercise different features:
+
+- `javascript` — basic single-term search
+- `javascript typescript` — implicit AND, finds documents mentioning both
+- `javascript OR css` — OR query, finds documents with either term
+- `javascript NOT server` — excludes server-related documents
+- `javscript` — fuzzy match catches the typo
+- `component architecture` — matches the React document via both terms
+
+Observe how TF-IDF rankings change: searching "javascript" ranks the JavaScript introduction highest because the term appears most frequently there. Searching "server javascript" boosts the Node.js guide because "server" has a higher IDF than "javascript" (fewer documents contain it), making it a stronger relevance signal.
+
+Performance characteristics: indexing 8 documents is instant. For thousands of documents, the inverted index still returns results in under a millisecond because lookups are O(1) hash map access. The bottleneck shifts to scoring and sorting, which is O(n log n) where n is the number of matching documents.

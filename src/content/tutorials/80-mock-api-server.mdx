@@ -1,0 +1,626 @@
+---
+title: "Build a Mock API Server"
+description: "Create a mock API server that defines endpoints in JSON, generates realistic fake data, simulates latency and errors, and hot-reloads configuration changes."
+slug: "mock-api-server"
+difficulty: "beginner"
+estimatedMinutes: 120
+steps: 8
+tags: ["api", "mock", "testing", "node", "development"]
+---
+
+## Overview
+
+Frontend developers often need an API before the backend team finishes building one. Mock servers solve this by letting you define endpoints in a configuration file and serve realistic fake data instantly. In this tutorial you will build a mock API server that reads endpoint definitions from JSON, generates fake data using templates, simulates network latency and error responses, and hot-reloads when you edit the configuration file.
+
+No external fake data libraries are needed — you will build a lightweight data generator from scratch.
+
+**Prerequisites:** Node.js 18+, basic TypeScript, a terminal.
+
+## Step 1: Project Setup
+
+```bash
+mkdir mock-api-server && cd mock-api-server
+npm init -y
+npm install express
+npm install typescript tsx @types/node @types/express --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir src
+```
+
+Scripts in `package.json`:
+
+```json
+{
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  }
+}
+```
+
+## Step 2: Define the Configuration Schema
+
+Create `src/types.ts` with the shape of the mock configuration file.
+
+```typescript
+// src/types.ts
+export interface MockConfig {
+  port?: number;
+  baseUrl?: string;
+  defaults?: EndpointDefaults;
+  endpoints: EndpointDefinition[];
+}
+
+export interface EndpointDefaults {
+  delay?: number;
+  headers?: Record<string, string>;
+}
+
+export interface EndpointDefinition {
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  status?: number;
+  delay?: number;
+  headers?: Record<string, string>;
+  response?: unknown;
+  template?: DataTemplate;
+  errorRate?: number; // 0-1, probability of returning an error
+  errorStatus?: number;
+  errorBody?: unknown;
+}
+
+export interface DataTemplate {
+  type: "object" | "array";
+  count?: number; // for arrays
+  minCount?: number;
+  maxCount?: number;
+  properties?: Record<string, FieldTemplate>;
+}
+
+export interface FieldTemplate {
+  type: "string" | "number" | "boolean" | "date" | "uuid" | "email" | "name" | "sentence" | "pick";
+  min?: number;
+  max?: number;
+  options?: unknown[];
+  prefix?: string;
+}
+```
+
+## Step 3: Build the Fake Data Generator
+
+Create `src/generator.ts`. This generates realistic data from field templates without any external library.
+
+```typescript
+// src/generator.ts
+import * as crypto from "node:crypto";
+import { DataTemplate, FieldTemplate } from "./types.js";
+
+const FIRST_NAMES = [
+  "Alice",
+  "Bob",
+  "Charlie",
+  "Diana",
+  "Eve",
+  "Frank",
+  "Grace",
+  "Henry",
+  "Ivy",
+  "Jack",
+  "Karen",
+  "Leo",
+  "Mia",
+  "Noah",
+  "Olivia",
+  "Paul",
+  "Quinn",
+  "Ruby",
+];
+
+const LAST_NAMES = [
+  "Smith",
+  "Johnson",
+  "Williams",
+  "Brown",
+  "Jones",
+  "Garcia",
+  "Miller",
+  "Davis",
+  "Wilson",
+  "Moore",
+  "Taylor",
+  "Anderson",
+  "Thomas",
+  "Jackson",
+  "White",
+];
+
+const WORDS = [
+  "the",
+  "quick",
+  "brown",
+  "fox",
+  "jumps",
+  "over",
+  "lazy",
+  "dog",
+  "a",
+  "fast",
+  "red",
+  "car",
+  "drives",
+  "through",
+  "quiet",
+  "town",
+  "she",
+  "writes",
+  "elegant",
+  "code",
+  "every",
+  "single",
+  "day",
+  "they",
+  "build",
+  "amazing",
+  "tools",
+  "for",
+  "modern",
+  "teams",
+];
+
+const DOMAINS = ["example.com", "test.org", "mock.dev", "demo.io", "sample.net"];
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function generateField(template: FieldTemplate): unknown {
+  switch (template.type) {
+    case "string": {
+      const prefix = template.prefix ?? "";
+      return `${prefix}${crypto.randomBytes(4).toString("hex")}`;
+    }
+    case "number":
+      return randomInt(template.min ?? 0, template.max ?? 1000);
+    case "boolean":
+      return Math.random() > 0.5;
+    case "date": {
+      const start = new Date(2020, 0, 1).getTime();
+      const end = new Date(2025, 11, 31).getTime();
+      return new Date(randomInt(start, end)).toISOString().split("T")[0];
+    }
+    case "uuid":
+      return crypto.randomUUID();
+    case "email": {
+      const first = pick(FIRST_NAMES).toLowerCase();
+      const last = pick(LAST_NAMES).toLowerCase();
+      return `${first}.${last}@${pick(DOMAINS)}`;
+    }
+    case "name":
+      return `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`;
+    case "sentence": {
+      const length = randomInt(5, 12);
+      const words = Array.from({ length }, () => pick(WORDS));
+      words[0] = words[0].charAt(0).toUpperCase() + words[0].slice(1);
+      return words.join(" ") + ".";
+    }
+    case "pick":
+      return template.options ? pick(template.options) : null;
+    default:
+      return null;
+  }
+}
+
+function generateObject(properties: Record<string, FieldTemplate>): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
+  for (const [key, template] of Object.entries(properties)) {
+    obj[key] = generateField(template);
+  }
+  return obj;
+}
+
+export function generateFromTemplate(template: DataTemplate): unknown {
+  if (template.type === "object") {
+    return generateObject(template.properties ?? {});
+  }
+
+  if (template.type === "array") {
+    const count = template.count ?? randomInt(template.minCount ?? 1, template.maxCount ?? 10);
+    return Array.from({ length: count }, () => generateObject(template.properties ?? {}));
+  }
+
+  return null;
+}
+```
+
+## Step 4: Build the Configuration Loader with Hot Reload
+
+Create `src/config-loader.ts`. This watches the config file for changes and reloads endpoints automatically.
+
+```typescript
+// src/config-loader.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { MockConfig } from "./types.js";
+
+type ConfigCallback = (config: MockConfig) => void;
+
+export class ConfigLoader {
+  private configPath: string;
+  private config: MockConfig | null = null;
+  private watcher: fs.FSWatcher | null = null;
+  private onChange: ConfigCallback | null = null;
+
+  constructor(configPath: string) {
+    this.configPath = path.resolve(configPath);
+  }
+
+  load(): MockConfig {
+    try {
+      const raw = fs.readFileSync(this.configPath, "utf-8");
+      this.config = JSON.parse(raw) as MockConfig;
+      return this.config;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to load config from ${this.configPath}: ${message}`);
+    }
+  }
+
+  watch(callback: ConfigCallback): void {
+    this.onChange = callback;
+
+    // Debounce file system events
+    let timeout: NodeJS.Timeout | null = null;
+
+    this.watcher = fs.watch(this.configPath, () => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        try {
+          const newConfig = this.load();
+          console.log("\x1b[33mConfig reloaded\x1b[0m");
+          if (this.onChange) this.onChange(newConfig);
+        } catch (error) {
+          console.error("Failed to reload config:", error);
+        }
+      }, 200);
+    });
+  }
+
+  stop(): void {
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+  }
+
+  getConfig(): MockConfig | null {
+    return this.config;
+  }
+}
+```
+
+## Step 5: Build the Route Factory
+
+Create `src/route-factory.ts`. This converts endpoint definitions into Express route handlers.
+
+```typescript
+// src/route-factory.ts
+import { Request, Response, Router } from "express";
+import { EndpointDefinition, EndpointDefaults } from "./types.js";
+import { generateFromTemplate } from "./generator.js";
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createHandler(endpoint: EndpointDefinition, defaults: EndpointDefaults) {
+  return async (_req: Request, res: Response): Promise<void> => {
+    // Simulate latency
+    const delayMs = endpoint.delay ?? defaults.delay ?? 0;
+    if (delayMs > 0) {
+      await delay(delayMs);
+    }
+
+    // Simulate errors
+    if (endpoint.errorRate && Math.random() < endpoint.errorRate) {
+      const errorStatus = endpoint.errorStatus ?? 500;
+      const errorBody = endpoint.errorBody ?? { error: "Simulated error" };
+      res.status(errorStatus).json(errorBody);
+      return;
+    }
+
+    // Set headers
+    const headers = { ...defaults.headers, ...endpoint.headers };
+    for (const [key, value] of Object.entries(headers)) {
+      res.set(key, value);
+    }
+
+    const status = endpoint.status ?? 200;
+
+    // Generate response from template or use static response
+    if (endpoint.template) {
+      const data = generateFromTemplate(endpoint.template);
+      res.status(status).json(data);
+    } else if (endpoint.response !== undefined) {
+      res.status(status).json(endpoint.response);
+    } else {
+      res.status(status).json({ message: "OK" });
+    }
+  };
+}
+
+export function buildRouter(endpoints: EndpointDefinition[], defaults: EndpointDefaults): Router {
+  const router = Router();
+
+  for (const endpoint of endpoints) {
+    const handler = createHandler(endpoint, defaults);
+    const method = endpoint.method.toLowerCase() as "get" | "post" | "put" | "patch" | "delete";
+
+    router[method](endpoint.path, handler);
+    console.log(
+      `  \x1b[36m${endpoint.method}\x1b[0m ${endpoint.path}${
+        endpoint.delay ? ` (${endpoint.delay}ms delay)` : ""
+      }${endpoint.errorRate ? ` (${endpoint.errorRate * 100}% error rate)` : ""}`
+    );
+  }
+
+  return router;
+}
+```
+
+## Step 6: Build the Server with Hot Reload
+
+Create `src/server.ts`. The server rebuilds routes whenever the config file changes.
+
+```typescript
+// src/server.ts
+import express, { Express } from "express";
+import { ConfigLoader } from "./config-loader.js";
+import { buildRouter } from "./route-factory.js";
+import { MockConfig } from "./types.js";
+
+const configPath = process.argv[2] ?? "mock-config.json";
+const loader = new ConfigLoader(configPath);
+
+let currentRouter = express.Router();
+
+function applyConfig(app: Express, config: MockConfig): void {
+  const baseUrl = config.baseUrl ?? "";
+  const defaults = config.defaults ?? {};
+
+  console.log("\n\x1b[1mRegistered endpoints:\x1b[0m");
+  currentRouter = buildRouter(config.endpoints, defaults);
+
+  // Remove old mock routes and add new ones
+  // Express does not support removing middleware, so we use a wrapper
+  app._mockRouter = currentRouter;
+
+  if (baseUrl) {
+    console.log(`\nBase URL: ${baseUrl}`);
+  }
+}
+
+function createApp(config: MockConfig): Express {
+  const app = express();
+  const baseUrl = config.baseUrl ?? "";
+
+  app.use(express.json());
+
+  // Log requests
+  app.use((req, _res, next) => {
+    console.log(`\x1b[2m${new Date().toISOString()}\x1b[0m ${req.method} ${req.path}`);
+    next();
+  });
+
+  // Dynamic router wrapper — always delegates to the latest router
+  app.use(baseUrl, (req, res, next) => {
+    const router = (app as Express & { _mockRouter?: express.Router })._mockRouter;
+    if (router) {
+      router(req, res, next);
+    } else {
+      next();
+    }
+  });
+
+  // Info endpoint
+  app.get("/__mock/info", (_req, res) => {
+    const config = loader.getConfig();
+    res.json({
+      endpoints: config?.endpoints.length ?? 0,
+      configPath,
+    });
+  });
+
+  // 404 handler
+  app.use((_req, res) => {
+    res.status(404).json({
+      error: "Not found",
+      message: "This endpoint is not defined in the mock configuration.",
+    });
+  });
+
+  return app;
+}
+
+function main(): void {
+  const config = loader.load();
+  const port = config.port ?? 3000;
+  const app = createApp(config);
+
+  applyConfig(app, config);
+
+  // Watch for config changes
+  loader.watch((newConfig) => {
+    applyConfig(app, newConfig);
+  });
+
+  app.listen(port, () => {
+    console.log(`\n\x1b[32mMock API server running on http://localhost:${port}\x1b[0m`);
+    console.log(`Config: ${configPath}`);
+    console.log("Watching for changes...\n");
+  });
+}
+
+main();
+```
+
+## Step 7: Create a Sample Configuration
+
+Create `mock-config.json` in the project root:
+
+```json
+{
+  "port": 3000,
+  "baseUrl": "/api",
+  "defaults": {
+    "delay": 100,
+    "headers": {
+      "X-Mock-Server": "true"
+    }
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/users",
+      "template": {
+        "type": "array",
+        "minCount": 5,
+        "maxCount": 15,
+        "properties": {
+          "id": { "type": "uuid" },
+          "name": { "type": "name" },
+          "email": { "type": "email" },
+          "role": { "type": "pick", "options": ["admin", "editor", "viewer"] },
+          "createdAt": { "type": "date" }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/users/:id",
+      "template": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "uuid" },
+          "name": { "type": "name" },
+          "email": { "type": "email" },
+          "bio": { "type": "sentence" },
+          "role": { "type": "pick", "options": ["admin", "editor", "viewer"] },
+          "postsCount": { "type": "number", "min": 0, "max": 100 }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/users",
+      "status": 201,
+      "response": {
+        "message": "User created",
+        "id": "mock-id-001"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/posts",
+      "delay": 300,
+      "template": {
+        "type": "array",
+        "count": 10,
+        "properties": {
+          "id": { "type": "uuid" },
+          "title": { "type": "sentence" },
+          "author": { "type": "name" },
+          "published": { "type": "boolean" },
+          "createdAt": { "type": "date" }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/health",
+      "delay": 0,
+      "response": { "status": "ok" }
+    },
+    {
+      "method": "GET",
+      "path": "/flaky",
+      "errorRate": 0.5,
+      "errorStatus": 503,
+      "errorBody": { "error": "Service temporarily unavailable" },
+      "response": { "data": "success" }
+    }
+  ]
+}
+```
+
+## Step 8: Test the Server
+
+Start the mock server:
+
+```bash
+npm run dev
+```
+
+Test the endpoints:
+
+```bash
+# List users (generates random data each time)
+curl http://localhost:3000/api/users | jq
+
+# Get a single user
+curl http://localhost:3000/api/users/123 | jq
+
+# Create a user (returns static response)
+curl -X POST http://localhost:3000/api/posts \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Test User"}'
+
+# Get posts (300ms simulated delay)
+curl http://localhost:3000/api/posts | jq
+
+# Hit the flaky endpoint (50% chance of 503 error)
+curl http://localhost:3000/api/flaky
+curl http://localhost:3000/api/flaky
+curl http://localhost:3000/api/flaky
+
+# Check server info
+curl http://localhost:3000/__mock/info
+```
+
+Now try hot reload. While the server is running, open `mock-config.json` and add a new endpoint:
+
+```json
+{
+  "method": "GET",
+  "path": "/products",
+  "template": {
+    "type": "array",
+    "count": 5,
+    "properties": {
+      "id": { "type": "uuid" },
+      "name": { "type": "string", "prefix": "Product-" },
+      "price": { "type": "number", "min": 10, "max": 500 }
+    }
+  }
+}
+```
+
+Save the file. The server logs "Config reloaded" and the new endpoint is immediately available:
+
+```bash
+curl http://localhost:3000/api/products | jq
+```
+
+No restart needed. This makes the mock server a productive companion for frontend development — define the API contract in JSON, get a working server instantly, and iterate as the real API evolves.
+
+**Extend ideas:**
+
+- Add request logging to a file for debugging frontend requests.
+- Support response templates that echo back request body fields: `"response": {"received": "{{body.name}}"}`.
+- Add CORS headers configuration for browser-based frontends.
+- Support loading multiple config files from a directory.
+- Add a web UI that shows all registered endpoints and lets you test them.

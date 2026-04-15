@@ -1,0 +1,351 @@
+---
+title: "Build a Link Shortener CLI"
+description: "Create a CLI tool that shortens URLs using a free API, stores history locally in JSON, and copies results to the clipboard cross-platform."
+slug: "link-shortener-cli"
+difficulty: "beginner"
+estimatedMinutes: 120
+steps: 8
+tags: ["cli", "node", "api", "beginner", "tools"]
+---
+
+## Overview
+
+Short links are everywhere — they look clean in docs, fit in tweets, and are easy to share verbally. In this tutorial you will build a command-line tool that shortens URLs via the free CleanURI API, stores a local history of all shortened links, and copies the result to your clipboard automatically. The tool works on macOS, Windows, and Linux without any platform-specific dependencies.
+
+By the end you will have a single-file CLI you can install globally with `npm link` and use from any terminal.
+
+**Prerequisites:** Node.js 18+, basic TypeScript, a terminal.
+
+## Step 1: Project Setup
+
+```bash
+mkdir link-shortener && cd link-shortener
+npm init -y
+npm install typescript tsx --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+mkdir src
+```
+
+Update `package.json`:
+
+```json
+{
+  "bin": {
+    "shorten": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc"
+  }
+}
+```
+
+## Step 2: Build the URL Validator
+
+Create `src/validate.ts`. Never trust user input — validate the URL before sending it anywhere.
+
+```typescript
+// src/validate.ts
+export function isValidUrl(input: string): boolean {
+  try {
+    const url = new URL(input);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+```
+
+## Step 3: Build the Shortener Client
+
+Create `src/shortener.ts`. This calls the free CleanURI API. If that service is down, the architecture makes it trivial to swap in another provider.
+
+```typescript
+// src/shortener.ts
+interface ShortenResult {
+  shortUrl: string;
+  originalUrl: string;
+}
+
+interface CleanUriResponse {
+  result_url: string;
+}
+
+export async function shortenUrl(url: string): Promise<ShortenResult> {
+  const response = await fetch("https://cleanuri.com/api/v1/shorten", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ url }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`API error (${response.status}): ${text}`);
+  }
+
+  const data = (await response.json()) as CleanUriResponse;
+  return {
+    shortUrl: data.result_url,
+    originalUrl: url,
+  };
+}
+```
+
+## Step 4: Build the History Store
+
+Create `src/history.ts`. Links are stored in a JSON file inside the user's home directory so they persist across sessions.
+
+```typescript
+// src/history.ts
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+
+interface HistoryEntry {
+  original: string;
+  short: string;
+  createdAt: string;
+}
+
+function getHistoryPath(): string {
+  return path.join(os.homedir(), ".link-shortener-history.json");
+}
+
+function loadHistory(): HistoryEntry[] {
+  const filePath = getHistoryPath();
+  if (!fs.existsSync(filePath)) return [];
+
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    return JSON.parse(raw) as HistoryEntry[];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(entries: HistoryEntry[]): void {
+  fs.writeFileSync(getHistoryPath(), JSON.stringify(entries, null, 2));
+}
+
+export function addToHistory(original: string, short: string): void {
+  const entries = loadHistory();
+  entries.push({
+    original,
+    short,
+    createdAt: new Date().toISOString(),
+  });
+  saveHistory(entries);
+}
+
+export function getHistory(): HistoryEntry[] {
+  return loadHistory();
+}
+
+export function clearHistory(): void {
+  saveHistory([]);
+}
+
+export function searchHistory(query: string): HistoryEntry[] {
+  const entries = loadHistory();
+  const lower = query.toLowerCase();
+  return entries.filter(
+    (e) => e.original.toLowerCase().includes(lower) || e.short.toLowerCase().includes(lower)
+  );
+}
+```
+
+## Step 5: Build Cross-Platform Clipboard Support
+
+Create `src/clipboard.ts`. This uses platform-native commands — no npm packages needed.
+
+```typescript
+// src/clipboard.ts
+import { execSync } from "node:child_process";
+import * as os from "node:os";
+
+export function copyToClipboard(text: string): boolean {
+  try {
+    const platform = os.platform();
+
+    if (platform === "darwin") {
+      execSync("pbcopy", { input: text });
+    } else if (platform === "win32") {
+      execSync("clip", { input: text });
+    } else {
+      // Linux: try xclip, fall back to xsel
+      try {
+        execSync("xclip -selection clipboard", { input: text });
+      } catch {
+        execSync("xsel --clipboard --input", { input: text });
+      }
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+```
+
+## Step 6: Build the Output Formatter
+
+Create `src/format.ts` for clean console output.
+
+```typescript
+// src/format.ts
+const GREEN = "\x1b[32m";
+const CYAN = "\x1b[36m";
+const DIM = "\x1b[2m";
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+
+interface HistoryEntry {
+  original: string;
+  short: string;
+  createdAt: string;
+}
+
+export function formatSuccess(shortUrl: string, copied: boolean): string {
+  const clipboardNote = copied ? " (copied to clipboard)" : "";
+  return `${GREEN}${BOLD}${shortUrl}${RESET}${DIM}${clipboardNote}${RESET}`;
+}
+
+export function formatHistory(entries: HistoryEntry[]): string {
+  if (entries.length === 0) return "No links in history.";
+
+  const lines = entries.map((entry, index) => {
+    const date = new Date(entry.createdAt).toLocaleDateString();
+    return `${DIM}${index + 1}.${RESET} ${CYAN}${entry.short}${RESET}\n   ${DIM}${entry.original} (${date})${RESET}`;
+  });
+
+  return `${BOLD}Link History${RESET}\n\n${lines.join("\n\n")}`;
+}
+
+export function formatError(message: string): string {
+  return `\x1b[31mError: ${message}${RESET}`;
+}
+```
+
+## Step 7: Build the CLI
+
+Create `src/cli.ts` tying everything together with subcommands.
+
+```typescript
+#!/usr/bin/env node
+// src/cli.ts
+import { isValidUrl } from "./validate.js";
+import { shortenUrl } from "./shortener.js";
+import { addToHistory, getHistory, clearHistory, searchHistory } from "./history.js";
+import { copyToClipboard } from "./clipboard.js";
+import { formatSuccess, formatHistory, formatError } from "./format.js";
+
+function printUsage(): void {
+  console.log(`
+Usage: shorten <url>            Shorten a URL
+       shorten history          Show link history
+       shorten search <query>   Search history
+       shorten clear            Clear history
+       shorten --help           Show this help
+  `);
+}
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+
+  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+    printUsage();
+    return;
+  }
+
+  const command = args[0];
+
+  if (command === "history") {
+    const entries = getHistory();
+    console.log(formatHistory(entries));
+    return;
+  }
+
+  if (command === "clear") {
+    clearHistory();
+    console.log("History cleared.");
+    return;
+  }
+
+  if (command === "search") {
+    const query = args[1];
+    if (!query) {
+      console.log(formatError("Please provide a search query."));
+      process.exit(1);
+    }
+    const results = searchHistory(query);
+    console.log(formatHistory(results));
+    return;
+  }
+
+  // Default: treat as URL to shorten
+  const url = command;
+
+  if (!isValidUrl(url)) {
+    console.log(formatError("Invalid URL. Must start with http:// or https://"));
+    process.exit(1);
+  }
+
+  try {
+    const result = await shortenUrl(url);
+    const copied = copyToClipboard(result.shortUrl);
+    addToHistory(result.originalUrl, result.shortUrl);
+    console.log(formatSuccess(result.shortUrl, copied));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(formatError(message));
+    process.exit(1);
+  }
+}
+
+main().catch((error) => {
+  console.error("Unexpected error:", error);
+  process.exit(1);
+});
+```
+
+## Step 8: Test and Install Globally
+
+Test directly:
+
+```bash
+npx tsx src/cli.ts https://developer.mozilla.org/en-US/docs/Web/JavaScript
+```
+
+You should see a shortened URL printed and automatically copied to your clipboard. Test the other commands:
+
+```bash
+npx tsx src/cli.ts history
+npx tsx src/cli.ts search mozilla
+npx tsx src/cli.ts clear
+```
+
+To install globally so you can type `shorten` from anywhere:
+
+```bash
+npm run build
+npm link
+```
+
+Now use it from any directory:
+
+```bash
+shorten https://github.com
+shorten history
+```
+
+To unlink later: `npm unlink -g link-shortener`.
+
+**Extend ideas:**
+
+- Add a `--qr` flag that generates a QR code in the terminal using Unicode block characters.
+- Support custom aliases: `shorten https://example.com my-alias`.
+- Add an `--open` flag that opens the short link in the default browser.
+- Export history to CSV with `shorten export`.
+- Add rate limiting detection and retry with exponential backoff.
+
+The tool is small enough to read in one sitting but covers real-world patterns: API integration, local persistence, cross-platform system calls, and clean CLI design.

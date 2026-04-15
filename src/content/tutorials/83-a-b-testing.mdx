@@ -1,0 +1,632 @@
+---
+title: "Build an A/B Testing Platform"
+description: "Create an experimentation platform with random assignment, event tracking, statistical significance, and a results dashboard."
+slug: "a-b-testing"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["testing", "analytics", "experimentation", "react", "statistics"]
+---
+
+## Overview
+
+A/B testing is how modern products make data-driven decisions. Instead of guessing whether a green button converts better than a blue one, you show each variant to a random subset of users and measure the difference. If the result is statistically significant, you have evidence rather than opinions.
+
+In this tutorial, you will build a complete A/B testing platform: experiment definitions with variants, deterministic user assignment using hashing, an event tracking system, a statistical significance calculator using the chi-squared test, and a React dashboard that displays live results.
+
+No external analytics services required. Everything runs locally with Node.js and React.
+
+## Step 1: Define the Data Models
+
+Experiments have variants, users get assigned to one variant, and events track what they do.
+
+```typescript
+// src/types.ts
+export interface Variant {
+  id: string;
+  name: string;
+  weight: number; // 0-100, percentage of traffic
+}
+
+export interface Experiment {
+  id: string;
+  name: string;
+  description: string;
+  variants: Variant[];
+  status: "draft" | "running" | "paused" | "completed";
+  startDate: string | null;
+  endDate: string | null;
+  targetMetric: string;
+}
+
+export interface Assignment {
+  experimentId: string;
+  userId: string;
+  variantId: string;
+  timestamp: string;
+}
+
+export interface TrackingEvent {
+  id: string;
+  experimentId: string;
+  userId: string;
+  variantId: string;
+  eventName: string;
+  value: number;
+  timestamp: string;
+}
+
+export interface ExperimentResult {
+  variantId: string;
+  variantName: string;
+  participants: number;
+  conversions: number;
+  conversionRate: number;
+  isSignificant: boolean;
+  pValue: number;
+}
+```
+
+## Step 2: Build the Experiment Store
+
+Store experiments, assignments, and events in memory with JSON persistence.
+
+```typescript
+// src/store.ts
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { Experiment, Assignment, TrackingEvent } from "./types.js";
+
+export class ExperimentStore {
+  private experiments: Map<string, Experiment> = new Map();
+  private assignments: Assignment[] = [];
+  private events: TrackingEvent[] = [];
+  private dataDir: string;
+
+  constructor(dataDir: string = "./data") {
+    this.dataDir = dataDir;
+    mkdirSync(dataDir, { recursive: true });
+    this.load();
+  }
+
+  createExperiment(experiment: Experiment): void {
+    this.experiments.set(experiment.id, experiment);
+    this.save();
+  }
+
+  getExperiment(id: string): Experiment | undefined {
+    return this.experiments.get(id);
+  }
+
+  listExperiments(): Experiment[] {
+    return Array.from(this.experiments.values());
+  }
+
+  addAssignment(assignment: Assignment): void {
+    this.assignments.push(assignment);
+    this.save();
+  }
+
+  getAssignment(experimentId: string, userId: string): Assignment | undefined {
+    return this.assignments.find((a) => a.experimentId === experimentId && a.userId === userId);
+  }
+
+  trackEvent(event: TrackingEvent): void {
+    this.events.push(event);
+    this.save();
+  }
+
+  getEvents(experimentId: string): TrackingEvent[] {
+    return this.events.filter((e) => e.experimentId === experimentId);
+  }
+
+  getAssignments(experimentId: string): Assignment[] {
+    return this.assignments.filter((a) => a.experimentId === experimentId);
+  }
+
+  private load(): void {
+    try {
+      const data = JSON.parse(readFileSync(join(this.dataDir, "ab-data.json"), "utf-8"));
+      for (const exp of data.experiments ?? []) this.experiments.set(exp.id, exp);
+      this.assignments = data.assignments ?? [];
+      this.events = data.events ?? [];
+    } catch {
+      // Fresh start
+    }
+  }
+
+  private save(): void {
+    writeFileSync(
+      join(this.dataDir, "ab-data.json"),
+      JSON.stringify(
+        {
+          experiments: Array.from(this.experiments.values()),
+          assignments: this.assignments,
+          events: this.events,
+        },
+        null,
+        2
+      )
+    );
+  }
+}
+```
+
+## Step 3: Deterministic User Assignment
+
+Users must always see the same variant. Use a hash function for deterministic, reproducible assignment.
+
+```typescript
+// src/assignment.ts
+import { createHash } from "node:crypto";
+import { Experiment, Variant, Assignment } from "./types.js";
+import { ExperimentStore } from "./store.js";
+
+function hashToNumber(input: string): number {
+  const hash = createHash("sha256").update(input).digest("hex");
+  return parseInt(hash.substring(0, 8), 16) / 0xffffffff;
+}
+
+export function assignVariant(
+  store: ExperimentStore,
+  experiment: Experiment,
+  userId: string
+): Assignment {
+  const existing = store.getAssignment(experiment.id, userId);
+  if (existing) return existing;
+
+  const hashValue = hashToNumber(`${experiment.id}:${userId}`);
+
+  let cumulative = 0;
+  let selectedVariant: Variant = experiment.variants[0];
+
+  for (const variant of experiment.variants) {
+    cumulative += variant.weight / 100;
+    if (hashValue <= cumulative) {
+      selectedVariant = variant;
+      break;
+    }
+  }
+
+  const assignment: Assignment = {
+    experimentId: experiment.id,
+    userId,
+    variantId: selectedVariant.id,
+    timestamp: new Date().toISOString(),
+  };
+
+  store.addAssignment(assignment);
+  return assignment;
+}
+```
+
+## Step 4: Event Tracking
+
+Track user actions so you can measure which variant performs better.
+
+```typescript
+// src/tracking.ts
+import { TrackingEvent } from "./types.js";
+import { ExperimentStore } from "./store.js";
+
+export function trackConversion(
+  store: ExperimentStore,
+  experimentId: string,
+  userId: string,
+  eventName: string,
+  value: number = 1
+): TrackingEvent | null {
+  const assignment = store.getAssignment(experimentId, userId);
+  if (!assignment) {
+    console.warn(`User ${userId} not assigned to experiment ${experimentId}`);
+    return null;
+  }
+
+  const event: TrackingEvent = {
+    id: crypto.randomUUID(),
+    experimentId,
+    userId,
+    variantId: assignment.variantId,
+    eventName,
+    value,
+    timestamp: new Date().toISOString(),
+  };
+
+  store.trackEvent(event);
+  return event;
+}
+```
+
+## Step 5: Statistical Significance Calculator
+
+Use the chi-squared test to determine if the difference between variants is statistically significant.
+
+```typescript
+// src/statistics.ts
+export interface VariantStats {
+  participants: number;
+  conversions: number;
+}
+
+// Chi-squared test for independence (2xN contingency table)
+export function chiSquaredTest(variants: VariantStats[]): number {
+  const totalParticipants = variants.reduce((s, v) => s + v.participants, 0);
+  const totalConversions = variants.reduce((s, v) => s + v.conversions, 0);
+  const totalNonConversions = totalParticipants - totalConversions;
+
+  if (totalParticipants === 0 || totalConversions === 0) return 1;
+
+  let chiSquared = 0;
+  for (const variant of variants) {
+    const expectedConversions = (variant.participants * totalConversions) / totalParticipants;
+    const expectedNon = (variant.participants * totalNonConversions) / totalParticipants;
+
+    if (expectedConversions > 0) {
+      chiSquared += Math.pow(variant.conversions - expectedConversions, 2) / expectedConversions;
+    }
+    const nonConversions = variant.participants - variant.conversions;
+    if (expectedNon > 0) {
+      chiSquared += Math.pow(nonConversions - expectedNon, 2) / expectedNon;
+    }
+  }
+
+  // Approximate p-value from chi-squared with df=variants.length-1
+  const df = variants.length - 1;
+  return chiSquaredPValue(chiSquared, df);
+}
+
+// Approximation of the chi-squared survival function
+function chiSquaredPValue(x: number, df: number): number {
+  if (x <= 0) return 1;
+  // Use the regularized incomplete gamma function approximation
+  const k = df / 2;
+  const t = x / 2;
+  let sum = 0;
+  let term = Math.exp(-t);
+  for (let i = 0; i < k; i++) {
+    if (i > 0) term *= t / i;
+    sum += term;
+  }
+  return Math.min(1, Math.max(0, sum));
+}
+
+export function isSignificant(pValue: number, alpha: number = 0.05): boolean {
+  return pValue < alpha;
+}
+```
+
+## Step 6: Results Aggregation
+
+Combine assignments and events into a result summary for each variant.
+
+```typescript
+// src/results.ts
+import { ExperimentResult, Experiment } from "./types.js";
+import { ExperimentStore } from "./store.js";
+import { chiSquaredTest, isSignificant, VariantStats } from "./statistics.js";
+
+export function computeResults(store: ExperimentStore, experiment: Experiment): ExperimentResult[] {
+  const assignments = store.getAssignments(experiment.id);
+  const events = store.getEvents(experiment.id);
+  const targetEvents = events.filter((e) => e.eventName === experiment.targetMetric);
+
+  const variantStats: Map<string, VariantStats> = new Map();
+  const convertedUsers: Set<string> = new Set();
+
+  for (const event of targetEvents) convertedUsers.add(event.userId);
+
+  for (const variant of experiment.variants) {
+    const variantAssignments = assignments.filter((a) => a.variantId === variant.id);
+    const conversions = variantAssignments.filter((a) => convertedUsers.has(a.userId)).length;
+    variantStats.set(variant.id, { participants: variantAssignments.length, conversions });
+  }
+
+  const statsArray = Array.from(variantStats.values());
+  const pValue = chiSquaredTest(statsArray);
+
+  return experiment.variants.map((variant) => {
+    const stats = variantStats.get(variant.id) ?? { participants: 0, conversions: 0 };
+    return {
+      variantId: variant.id,
+      variantName: variant.name,
+      participants: stats.participants,
+      conversions: stats.conversions,
+      conversionRate: stats.participants > 0 ? stats.conversions / stats.participants : 0,
+      isSignificant: isSignificant(pValue),
+      pValue,
+    };
+  });
+}
+```
+
+## Step 7: Build the API Server
+
+Create an HTTP API to manage experiments, assign users, and track events.
+
+```typescript
+// src/server.ts
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { ExperimentStore } from "./store.js";
+import { assignVariant } from "./assignment.js";
+import { trackConversion } from "./tracking.js";
+import { computeResults } from "./results.js";
+import { Experiment } from "./types.js";
+
+const store = new ExperimentStore();
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let body = "";
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString();
+    });
+    req.on("end", () => resolve(body));
+  });
+}
+
+function json(res: ServerResponse, data: unknown, status: number = 200): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(data));
+}
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+
+  try {
+    if (req.method === "POST" && url.pathname === "/experiments") {
+      const body = JSON.parse(await readBody(req)) as Experiment;
+      body.status = "running";
+      body.startDate = new Date().toISOString();
+      store.createExperiment(body);
+      json(res, body, 201);
+    } else if (req.method === "GET" && url.pathname === "/experiments") {
+      json(res, store.listExperiments());
+    } else if (req.method === "POST" && url.pathname === "/assign") {
+      const { experimentId, userId } = JSON.parse(await readBody(req));
+      const experiment = store.getExperiment(experimentId);
+      if (!experiment) {
+        json(res, { error: "Experiment not found" }, 404);
+        return;
+      }
+      const assignment = assignVariant(store, experiment, userId);
+      json(res, assignment);
+    } else if (req.method === "POST" && url.pathname === "/track") {
+      const { experimentId, userId, eventName, value } = JSON.parse(await readBody(req));
+      const event = trackConversion(store, experimentId, userId, eventName, value);
+      if (!event) {
+        json(res, { error: "User not assigned" }, 400);
+        return;
+      }
+      json(res, event);
+    } else if (req.method === "GET" && url.pathname.startsWith("/results/")) {
+      const experimentId = url.pathname.split("/")[2];
+      const experiment = store.getExperiment(experimentId);
+      if (!experiment) {
+        json(res, { error: "Experiment not found" }, 404);
+        return;
+      }
+      json(res, computeResults(store, experiment));
+    } else {
+      json(res, { error: "Not found" }, 404);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Internal error";
+    json(res, { error: message }, 500);
+  }
+});
+
+const PORT = parseInt(process.env.PORT ?? "3456");
+server.listen(PORT, () => console.log(`A/B testing server on http://localhost:${PORT}`));
+```
+
+## Step 8: Seed Sample Data
+
+Generate realistic test data to populate the dashboard.
+
+```typescript
+// src/seed.ts
+import { ExperimentStore } from "./store.js";
+import { assignVariant } from "./assignment.js";
+import { trackConversion } from "./tracking.js";
+
+const store = new ExperimentStore();
+
+const experiment = {
+  id: "exp-button-color",
+  name: "CTA Button Color",
+  description: "Test green vs blue vs red call-to-action button",
+  variants: [
+    { id: "control", name: "Green (Control)", weight: 34 },
+    { id: "blue", name: "Blue", weight: 33 },
+    { id: "red", name: "Red", weight: 33 },
+  ],
+  status: "running" as const,
+  startDate: new Date().toISOString(),
+  endDate: null,
+  targetMetric: "click",
+};
+
+store.createExperiment(experiment);
+
+// Simulate 1000 users with different conversion rates per variant
+const conversionRates: Record<string, number> = {
+  control: 0.12,
+  blue: 0.15,
+  red: 0.09,
+};
+
+for (let i = 0; i < 1000; i++) {
+  const userId = `user-${i.toString().padStart(4, "0")}`;
+  const assignment = assignVariant(store, experiment, userId);
+  const rate = conversionRates[assignment.variantId] ?? 0.1;
+
+  if (Math.random() < rate) {
+    trackConversion(store, experiment.id, userId, "click");
+  }
+}
+
+console.log("Seeded experiment with 1000 users.");
+```
+
+## Step 9: Build the Results Dashboard
+
+A React component that fetches and displays experiment results.
+
+```tsx
+// src/components/Dashboard.tsx
+import { useState, useEffect } from "react";
+
+interface Result {
+  variantId: string;
+  variantName: string;
+  participants: number;
+  conversions: number;
+  conversionRate: number;
+  isSignificant: boolean;
+  pValue: number;
+}
+
+export function Dashboard({ experimentId }: { experimentId: string }): JSX.Element {
+  const [results, setResults] = useState<Result[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`/results/${experimentId}`)
+      .then((res) => res.json())
+      .then((data: Result[]) => {
+        setResults(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error(err);
+        setLoading(false);
+      });
+  }, [experimentId]);
+
+  if (loading) return <div>Loading results...</div>;
+
+  const best = results.reduce((a, b) => (a.conversionRate > b.conversionRate ? a : b));
+
+  return (
+    <div style={{ fontFamily: "sans-serif", padding: "2rem" }}>
+      <h1>Experiment Results</h1>
+      <p>
+        Significance: {results[0]?.isSignificant ? "YES" : "NOT YET"} (p=
+        {results[0]?.pValue.toFixed(4)})
+      </p>
+      <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        <thead>
+          <tr>
+            <th style={{ textAlign: "left", padding: "8px", borderBottom: "2px solid #ccc" }}>
+              Variant
+            </th>
+            <th style={{ textAlign: "right", padding: "8px", borderBottom: "2px solid #ccc" }}>
+              Users
+            </th>
+            <th style={{ textAlign: "right", padding: "8px", borderBottom: "2px solid #ccc" }}>
+              Conversions
+            </th>
+            <th style={{ textAlign: "right", padding: "8px", borderBottom: "2px solid #ccc" }}>
+              Rate
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {results.map((r) => (
+            <tr
+              key={r.variantId}
+              style={{ background: r.variantId === best.variantId ? "#e6ffe6" : "transparent" }}
+            >
+              <td style={{ padding: "8px", borderBottom: "1px solid #eee" }}>
+                {r.variantName} {r.variantId === best.variantId && " (winner)"}
+              </td>
+              <td style={{ textAlign: "right", padding: "8px", borderBottom: "1px solid #eee" }}>
+                {r.participants}
+              </td>
+              <td style={{ textAlign: "right", padding: "8px", borderBottom: "1px solid #eee" }}>
+                {r.conversions}
+              </td>
+              <td style={{ textAlign: "right", padding: "8px", borderBottom: "1px solid #eee" }}>
+                {(r.conversionRate * 100).toFixed(2)}%
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ marginTop: "1rem" }}>
+        {results.map((r) => (
+          <div key={r.variantId} style={{ marginBottom: "0.5rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <span style={{ width: "120px" }}>{r.variantName}</span>
+              <div style={{ background: "#eee", height: "24px", flex: 1, borderRadius: "4px" }}>
+                <div
+                  style={{
+                    background: r.variantId === best.variantId ? "#22c55e" : "#3b82f6",
+                    height: "100%",
+                    width: `${r.conversionRate * 100 * 5}%`,
+                    borderRadius: "4px",
+                    transition: "width 0.3s",
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+## Step 10: Client-Side SDK
+
+Build a lightweight SDK that applications embed to participate in experiments.
+
+```typescript
+// src/sdk.ts
+const API_BASE = "http://localhost:3456";
+
+export class ABClient {
+  private cache: Map<string, string> = new Map();
+
+  constructor(private userId: string) {}
+
+  async getVariant(experimentId: string): Promise<string> {
+    const cached = this.cache.get(experimentId);
+    if (cached) return cached;
+
+    const res = await fetch(`${API_BASE}/assign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ experimentId, userId: this.userId }),
+    });
+
+    const data = await res.json();
+    this.cache.set(experimentId, data.variantId);
+    return data.variantId;
+  }
+
+  async track(experimentId: string, eventName: string, value: number = 1): Promise<void> {
+    await fetch(`${API_BASE}/track`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        experimentId,
+        userId: this.userId,
+        eventName,
+        value,
+      }),
+    });
+  }
+}
+
+// Usage:
+// const ab = new ABClient("user-123");
+// const variant = await ab.getVariant("exp-button-color");
+// if (variant === "blue") showBlueButton();
+// ab.track("exp-button-color", "click");
+```
+
+Run `npx tsx src/seed.ts` to generate data, then `npx tsx src/server.ts` to start the API. Hit `http://localhost:3456/results/exp-button-color` to see which variant is winning and whether the difference is statistically significant.
+
+You now have a functioning A/B testing platform. Next steps include multi-armed bandit allocation, segmentation by user properties, and integration with feature flag systems.

@@ -1,0 +1,586 @@
+---
+title: "Build a Chatbot Framework"
+description: "Create a typed chatbot framework with intent detection, entity extraction, conversation flow, context management, and fallback handling."
+slug: "chat-bot-framework"
+difficulty: "intermediate"
+estimatedMinutes: 180
+steps: 10
+tags: ["chatbot", "nlp", "node", "typescript", "framework"]
+---
+
+## Overview
+
+Chatbots power everything from customer support to developer tools. In this tutorial you will build a typed chatbot framework from scratch in TypeScript. The framework supports intent detection via keyword and pattern matching, entity extraction, multi-turn conversation flows with context, and graceful fallback handling. No external NLP service is required — everything runs locally.
+
+By the end you will have a reusable `Bot` class that can be embedded in any Node.js application, a CLI chat interface for testing, and a clear architecture you can extend with machine-learning classifiers later.
+
+**Prerequisites:** Node.js 18+, basic TypeScript knowledge, a terminal.
+
+## Step 1: Project Setup
+
+Create the project directory and initialize it.
+
+```bash
+mkdir chatbot-framework && cd chatbot-framework
+npm init -y
+npm install typescript tsx --save-dev
+npx tsc --init --strict --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir dist --rootDir src
+```
+
+Create the source directory structure:
+
+```bash
+mkdir -p src/{core,intents,entities,flows}
+```
+
+Update `package.json` scripts:
+
+```json
+{
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc",
+    "start": "node dist/cli.js"
+  }
+}
+```
+
+## Step 2: Define Core Types
+
+Create `src/core/types.ts` with the types that drive the entire framework.
+
+```typescript
+// src/core/types.ts
+export interface Intent {
+  name: string;
+  confidence: number;
+}
+
+export interface Entity {
+  type: string;
+  value: string;
+  raw: string;
+  start: number;
+  end: number;
+}
+
+export interface Message {
+  text: string;
+  timestamp: Date;
+  sender: "user" | "bot";
+}
+
+export interface Context {
+  currentFlow: string | null;
+  stepIndex: number;
+  data: Record<string, unknown>;
+  history: Message[];
+}
+
+export interface BotResponse {
+  text: string;
+  context: Context;
+}
+
+export interface IntentMatcher {
+  name: string;
+  match(input: string): number; // returns confidence 0-1
+}
+
+export interface EntityExtractor {
+  type: string;
+  extract(input: string): Entity[];
+}
+
+export interface FlowStep {
+  prompt: string;
+  entityKey?: string;
+  validate?: (input: string) => boolean;
+  errorMessage?: string;
+}
+
+export interface Flow {
+  name: string;
+  trigger: string; // intent name that starts this flow
+  steps: FlowStep[];
+  onComplete: (data: Record<string, unknown>) => string;
+}
+```
+
+## Step 3: Build the Intent Detector
+
+Create `src/core/intent-detector.ts`. This uses keyword scoring and regex patterns to rank intents by confidence.
+
+```typescript
+// src/core/intent-detector.ts
+import { Intent, IntentMatcher } from "./types.js";
+
+export class KeywordIntentMatcher implements IntentMatcher {
+  name: string;
+  private keywords: string[];
+  private patterns: RegExp[];
+
+  constructor(name: string, keywords: string[], patterns: RegExp[] = []) {
+    this.name = name;
+    this.keywords = keywords.map((k) => k.toLowerCase());
+    this.patterns = patterns;
+  }
+
+  match(input: string): number {
+    const lower = input.toLowerCase();
+
+    // Pattern match gets highest confidence
+    for (const pattern of this.patterns) {
+      if (pattern.test(lower)) return 0.95;
+    }
+
+    // Keyword scoring: fraction of keywords found
+    const found = this.keywords.filter((kw) => lower.includes(kw));
+    if (found.length === 0) return 0;
+
+    return Math.min(found.length / this.keywords.length, 0.9);
+  }
+}
+
+export class IntentDetector {
+  private matchers: IntentMatcher[] = [];
+
+  register(matcher: IntentMatcher): void {
+    this.matchers.push(matcher);
+  }
+
+  detect(input: string): Intent[] {
+    return this.matchers
+      .map((m) => ({ name: m.name, confidence: m.match(input) }))
+      .filter((i) => i.confidence > 0.1)
+      .sort((a, b) => b.confidence - a.confidence);
+  }
+
+  bestMatch(input: string): Intent | null {
+    const intents = this.detect(input);
+    return intents.length > 0 ? intents[0] : null;
+  }
+}
+```
+
+## Step 4: Build the Entity Extractor
+
+Create `src/core/entity-extractor.ts`. Built-in extractors handle emails, numbers, dates, and URLs. You can register custom extractors.
+
+```typescript
+// src/core/entity-extractor.ts
+import { Entity, EntityExtractor } from "./types.js";
+
+export class RegexEntityExtractor implements EntityExtractor {
+  type: string;
+  private pattern: RegExp;
+
+  constructor(type: string, pattern: RegExp) {
+    this.type = type;
+    // Ensure the global flag is set for matchAll
+    this.pattern = new RegExp(pattern.source, "gi");
+  }
+
+  extract(input: string): Entity[] {
+    const entities: Entity[] = [];
+    for (const match of input.matchAll(this.pattern)) {
+      entities.push({
+        type: this.type,
+        value: match[0],
+        raw: match[0],
+        start: match.index ?? 0,
+        end: (match.index ?? 0) + match[0].length,
+      });
+    }
+    return entities;
+  }
+}
+
+export class EntityRegistry {
+  private extractors: EntityExtractor[] = [];
+
+  register(extractor: EntityExtractor): void {
+    this.extractors.push(extractor);
+  }
+
+  extractAll(input: string): Entity[] {
+    return this.extractors.flatMap((e) => e.extract(input));
+  }
+
+  extractByType(input: string, type: string): Entity[] {
+    return this.extractors.filter((e) => e.type === type).flatMap((e) => e.extract(input));
+  }
+}
+
+// Built-in extractors
+export const emailExtractor = new RegexEntityExtractor(
+  "email",
+  /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
+);
+
+export const numberExtractor = new RegexEntityExtractor("number", /\b\d+(?:\.\d+)?\b/);
+
+export const urlExtractor = new RegexEntityExtractor("url", /https?:\/\/[^\s]+/);
+```
+
+## Step 5: Build the Context Manager
+
+Create `src/core/context.ts`. The context tracks conversation history, the active flow, and accumulated data.
+
+```typescript
+// src/core/context.ts
+import { Context, Message } from "./types.js";
+
+export function createContext(): Context {
+  return {
+    currentFlow: null,
+    stepIndex: 0,
+    data: {},
+    history: [],
+  };
+}
+
+export function addMessage(context: Context, text: string, sender: "user" | "bot"): Context {
+  const message: Message = { text, timestamp: new Date(), sender };
+  return {
+    ...context,
+    history: [...context.history, message],
+  };
+}
+
+export function setFlowData(context: Context, key: string, value: unknown): Context {
+  return {
+    ...context,
+    data: { ...context.data, [key]: value },
+  };
+}
+
+export function advanceStep(context: Context): Context {
+  return { ...context, stepIndex: context.stepIndex + 1 };
+}
+
+export function resetFlow(context: Context): Context {
+  return {
+    ...context,
+    currentFlow: null,
+    stepIndex: 0,
+    data: {},
+  };
+}
+
+export function startFlow(context: Context, flowName: string): Context {
+  return {
+    ...context,
+    currentFlow: flowName,
+    stepIndex: 0,
+    data: {},
+  };
+}
+```
+
+## Step 6: Build the Flow Engine
+
+Create `src/core/flow-engine.ts`. The flow engine drives multi-step conversations, validates input at each step, and calls the completion handler.
+
+```typescript
+// src/core/flow-engine.ts
+import { Flow, Context, BotResponse } from "./types.js";
+import { advanceStep, resetFlow, setFlowData } from "./context.js";
+
+export class FlowEngine {
+  private flows: Map<string, Flow> = new Map();
+
+  register(flow: Flow): void {
+    this.flows.set(flow.name, flow);
+  }
+
+  getFlowForIntent(intentName: string): Flow | undefined {
+    for (const flow of this.flows.values()) {
+      if (flow.trigger === intentName) return flow;
+    }
+    return undefined;
+  }
+
+  processStep(input: string, context: Context): BotResponse | null {
+    if (!context.currentFlow) return null;
+
+    const flow = this.flows.get(context.currentFlow);
+    if (!flow) return null;
+
+    const step = flow.steps[context.stepIndex];
+    if (!step) return null;
+
+    // Validate current input
+    if (step.validate && !step.validate(input)) {
+      return {
+        text: step.errorMessage ?? "Sorry, that doesn't look right. Please try again.",
+        context,
+      };
+    }
+
+    // Store data if this step collects an entity
+    let updatedContext = context;
+    if (step.entityKey) {
+      updatedContext = setFlowData(updatedContext, step.entityKey, input);
+    }
+
+    // Advance to next step
+    updatedContext = advanceStep(updatedContext);
+
+    // Check if flow is complete
+    if (updatedContext.stepIndex >= flow.steps.length) {
+      const result = flow.onComplete(updatedContext.data);
+      return { text: result, context: resetFlow(updatedContext) };
+    }
+
+    // Prompt for next step
+    const nextStep = flow.steps[updatedContext.stepIndex];
+    return { text: nextStep.prompt, context: updatedContext };
+  }
+}
+```
+
+## Step 7: Build the Bot Core
+
+Create `src/core/bot.ts`. This ties intent detection, entity extraction, flow management, and fallback handling together.
+
+```typescript
+// src/core/bot.ts
+import { BotResponse, Context } from "./types.js";
+import { IntentDetector } from "./intent-detector.js";
+import { EntityRegistry } from "./entity-extractor.js";
+import { FlowEngine } from "./flow-engine.js";
+import { createContext, addMessage, startFlow } from "./context.js";
+
+export interface FallbackHandler {
+  (input: string, context: Context): string;
+}
+
+export class Bot {
+  readonly intents: IntentDetector;
+  readonly entities: EntityRegistry;
+  readonly flows: FlowEngine;
+  private context: Context;
+  private fallback: FallbackHandler;
+
+  constructor() {
+    this.intents = new IntentDetector();
+    this.entities = new EntityRegistry();
+    this.flows = new FlowEngine();
+    this.context = createContext();
+    this.fallback = () => "I'm not sure I understand. Could you rephrase that?";
+  }
+
+  setFallback(handler: FallbackHandler): void {
+    this.fallback = handler;
+  }
+
+  reset(): void {
+    this.context = createContext();
+  }
+
+  process(input: string): string {
+    this.context = addMessage(this.context, input, "user");
+
+    // If we are inside a flow, continue it
+    if (this.context.currentFlow) {
+      const flowResponse = this.flows.processStep(input, this.context);
+      if (flowResponse) {
+        this.context = addMessage(flowResponse.context, flowResponse.text, "bot");
+        return flowResponse.text;
+      }
+    }
+
+    // Detect intent
+    const intent = this.intents.bestMatch(input);
+
+    if (intent && intent.confidence > 0.3) {
+      // Check if a flow is triggered
+      const flow = this.flows.getFlowForIntent(intent.name);
+      if (flow) {
+        this.context = startFlow(this.context, flow.name);
+        const firstStep = flow.steps[0];
+        const prompt = firstStep.prompt;
+        this.context = addMessage(this.context, prompt, "bot");
+        return prompt;
+      }
+    }
+
+    // Fallback
+    const reply = this.fallback(input, this.context);
+    this.context = addMessage(this.context, reply, "bot");
+    return reply;
+  }
+
+  getContext(): Context {
+    return { ...this.context };
+  }
+}
+```
+
+## Step 8: Create Sample Intents and Flows
+
+Create `src/intents/defaults.ts` with example intent matchers, and `src/flows/defaults.ts` with a sample order flow.
+
+```typescript
+// src/intents/defaults.ts
+import { KeywordIntentMatcher } from "../core/intent-detector.js";
+
+export const greetingIntent = new KeywordIntentMatcher(
+  "greeting",
+  ["hello", "hi", "hey", "good morning", "good afternoon"],
+  [/^(hi|hello|hey)\b/i]
+);
+
+export const orderIntent = new KeywordIntentMatcher(
+  "order",
+  ["order", "buy", "purchase", "get"],
+  [/i('d| would) like to (order|buy)/i]
+);
+
+export const helpIntent = new KeywordIntentMatcher(
+  "help",
+  ["help", "support", "assist", "issue", "problem"],
+  [/i need help/i, /can you help/i]
+);
+
+export const farewellIntent = new KeywordIntentMatcher(
+  "farewell",
+  ["bye", "goodbye", "see you", "later", "quit"],
+  [/^(bye|goodbye|quit|exit)\b/i]
+);
+```
+
+```typescript
+// src/flows/defaults.ts
+import { Flow } from "../core/types.js";
+
+export const orderFlow: Flow = {
+  name: "order-flow",
+  trigger: "order",
+  steps: [
+    { prompt: "What product would you like to order?", entityKey: "product" },
+    {
+      prompt: "How many would you like?",
+      entityKey: "quantity",
+      validate: (input) => /^\d+$/.test(input.trim()),
+      errorMessage: "Please enter a valid number.",
+    },
+    { prompt: "What is your shipping address?", entityKey: "address" },
+  ],
+  onComplete: (data) =>
+    `Order confirmed! ${data.quantity}x ${data.product} will be shipped to ${data.address}. Thank you!`,
+};
+```
+
+## Step 9: Build the CLI Interface
+
+Create `src/cli.ts` — a readline-based chat loop that works on every platform.
+
+```typescript
+// src/cli.ts
+import * as readline from "node:readline";
+import { Bot } from "./core/bot.js";
+import { greetingIntent, orderIntent, helpIntent, farewellIntent } from "./intents/defaults.js";
+import { orderFlow } from "./flows/defaults.js";
+import { emailExtractor, numberExtractor, urlExtractor } from "./core/entity-extractor.js";
+
+function createDemoBot(): Bot {
+  const bot = new Bot();
+
+  // Register intents
+  bot.intents.register(greetingIntent);
+  bot.intents.register(orderIntent);
+  bot.intents.register(helpIntent);
+  bot.intents.register(farewellIntent);
+
+  // Register entity extractors
+  bot.entities.register(emailExtractor);
+  bot.entities.register(numberExtractor);
+  bot.entities.register(urlExtractor);
+
+  // Register flows
+  bot.flows.register(orderFlow);
+
+  // Custom fallback with entity awareness
+  bot.setFallback((input, context) => {
+    const entities = bot.entities.extractAll(input);
+    if (entities.length > 0) {
+      const summary = entities.map((e) => `${e.type}: ${e.value}`).join(", ");
+      return `I found these in your message: ${summary}. How can I help with that?`;
+    }
+    return "I'm not sure what you mean. Type 'help' to see what I can do.";
+  });
+
+  return bot;
+}
+
+const bot = createDemoBot();
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+console.log("Chatbot Framework Demo (type 'quit' to exit)\n");
+
+function prompt(): void {
+  rl.question("You: ", (input) => {
+    const trimmed = input.trim();
+    if (!trimmed) {
+      prompt();
+      return;
+    }
+    if (/^(quit|exit)$/i.test(trimmed)) {
+      console.log("Bot: Goodbye!");
+      rl.close();
+      return;
+    }
+    const reply = bot.process(trimmed);
+    console.log(`Bot: ${reply}\n`);
+    prompt();
+  });
+}
+
+prompt();
+```
+
+## Step 10: Test and Extend
+
+Run the bot:
+
+```bash
+npm run dev
+```
+
+Try these conversations:
+
+```
+You: Hello
+Bot: I'm not sure what you mean. Type 'help' to see what I can do.
+
+You: I'd like to order something
+Bot: What product would you like to order?
+
+You: TypeScript Handbook
+Bot: How many would you like?
+
+You: three
+Bot: Please enter a valid number.
+
+You: 3
+Bot: What is your shipping address?
+
+You: 123 Main St
+Bot: Order confirmed! 3x TypeScript Handbook will be shipped to 123 Main St. Thank you!
+```
+
+To add the greeting response, register a handler for that intent. The framework is modular — add new `IntentMatcher` classes backed by TF-IDF, cosine similarity, or an external LLM API. Swap `KeywordIntentMatcher` for a `MLIntentMatcher` without changing any other code.
+
+**Extend ideas:**
+
+- Add a `MiddlewareStack` that preprocesses every message (spell check, profanity filter, language detection).
+- Persist context to a JSON file so conversations survive restarts.
+- Add a WebSocket transport so the same bot serves a browser client.
+- Implement confidence thresholds per intent so greetings need lower confidence than destructive actions.
+
+The architecture separates detection, extraction, flow, and transport cleanly — each can be tested and replaced independently.
