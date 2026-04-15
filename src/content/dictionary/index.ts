@@ -3,6 +3,7 @@ import { WEB_BACKEND_TERMS } from "./batch-web-backend";
 import { SYSTEMS_AI_TERMS } from "./batch-systems-ai";
 import { ADVANCED_PROFESSIONAL_TERMS } from "./batch-advanced-professional";
 import { CTO_GAPS_TERMS } from "./batch-cto-gaps";
+import { EXPANSION_TERMS } from "./batch-expansion";
 
 /**
  * Verified dictionary. Core terms inline, expansion batches imported.
@@ -265,23 +266,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["url", "dns"],
   },
-  {
-    slug: "dns",
-    term: "DNS",
-    aliases: ["domain name system"],
-    category: "networking",
-    phaseIds: ["0"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "The internet's phone book — turns names like dura.dev into the numbers computers need.",
-      intermediate:
-        "A distributed system that translates domain names into IP addresses. Resolvers walk a hierarchy from root servers to TLD servers to authoritative servers. Results are cached for the TTL the authoritative server specifies.",
-      advanced:
-        "Defined in RFC 1034/1035. Hierarchical, eventually consistent, with cache TTLs that govern propagation. Records include A (IPv4), AAAA (IPv6), CNAME (alias), MX (mail), TXT, and SRV. DNSSEC adds cryptographic signatures over zone data.",
-    },
-    seeAlso: ["http", "url"],
-  },
+  // dns: defined in Phase 5 section below
   {
     slug: "url",
     term: "URL",
@@ -762,175 +747,15 @@ const CORE_TERMS: DictionaryTerm[] = [
   },
 
   // ── Phase 2: Web Development ─────────────────────────────────────────────
-  {
-    slug: "html",
-    term: "HTML",
-    aliases: ["hypertext markup language"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "The language that gives web pages their structure — headings, paragraphs, links, images, and forms.",
-      intermediate:
-        "A markup language of nested elements. Each element is an opening tag, content, and a closing tag. Browsers parse HTML into the DOM tree. Semantic elements (<article>, <nav>, <main>) convey meaning beyond visual appearance.",
-      advanced:
-        "Defined by the WHATWG HTML Living Standard. Parsed by a tokenizer that handles malformed markup with a prescribed error-recovery algorithm. The resulting DOM is an interface between the document and JavaScript via the Web IDL specification.",
-    },
-    examples: [
-      {
-        language: "html",
-        code: '<!DOCTYPE html>\n<html lang="en">\n  <head><title>Page</title></head>\n  <body><h1>Hello</h1></body>\n</html>',
-      },
-    ],
-    seeAlso: ["dom", "css"],
-  },
-  {
-    slug: "css",
-    term: "CSS",
-    aliases: ["cascading style sheets"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner: "The language that controls how HTML looks — colors, fonts, sizes, and layout.",
-      intermediate:
-        "A stylesheet language that selects DOM elements and applies visual properties. Rules cascade: when multiple rules match, specificity and source order determine which wins. The box model defines how elements take up space.",
-      advanced:
-        "A declarative language evaluated by the browser's style system. The cascade is a deterministic algorithm combining specificity (inline > ID > class > element), importance (!important), and document order. Computed values resolve relative units; used values apply layout constraints.",
-    },
-    examples: [
-      {
-        language: "css",
-        code: ".button {\n  background: #10b981;\n  padding: 8px 16px;\n  border-radius: 8px;\n}",
-      },
-    ],
-    seeAlso: ["html", "selector", "flexbox"],
-  },
-  {
-    slug: "selector",
-    term: "CSS Selector",
-    aliases: ["selector"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "The part of a CSS rule that picks which elements to style — like `.button` or `h1`.",
-      intermediate:
-        "A pattern that matches elements in the DOM. Types: element (`p`), class (`.card`), ID (`#header`), attribute (`[type='text']`), pseudo-class (`:hover`), pseudo-element (`::before`), and combinators (` `, `>`, `+`, `~`) for relationships.",
-      advanced:
-        "Evaluated right-to-left by the style engine for efficiency. Specificity is calculated as a three-number tuple (ID, class/attr/pseudo-class, element/pseudo-element). `!important` overrides specificity; the specificity of `:is()` and `:not()` comes from their most specific argument.",
-    },
-    seeAlso: ["css"],
-  },
-  {
-    slug: "flexbox",
-    term: "Flexbox",
-    aliases: ["flex", "flexible box"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A CSS layout mode that lines items up in a row or column and handles spacing and alignment automatically.",
-      intermediate:
-        "A one-dimensional layout model. `display: flex` on a container makes its children flex items. `justify-content` distributes items along the main axis; `align-items` aligns them on the cross axis. `gap` adds space between items.",
-      advanced:
-        "Items are sized by the flex algorithm: each item starts at its flex-basis, then flex-grow distributes remaining space proportionally, and flex-shrink absorbs overflow. The `flex` shorthand is `grow shrink basis`.",
-    },
-    seeAlso: ["css", "grid", "responsive"],
-  },
-  {
-    slug: "grid",
-    term: "CSS Grid",
-    aliases: ["css grid", "grid layout"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A CSS layout system that lets you place items in rows AND columns at the same time.",
-      intermediate:
-        "A two-dimensional layout model. `display: grid` with `grid-template-columns` defines columns. The `fr` unit distributes remaining space proportionally. Items can span multiple cells with `grid-column` and `grid-row`.",
-      advanced:
-        "Grid creates a formatting context with explicit and implicit tracks. `auto-fill` and `auto-fit` with `minmax()` enable responsive layouts without media queries. Subgrid (now widely supported) lets nested grids align to parent tracks.",
-    },
-    seeAlso: ["css", "flexbox", "responsive"],
-  },
-  {
-    slug: "responsive",
-    term: "Responsive Design",
-    aliases: ["responsive web design", "RWD"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner: "Building websites that look good on any screen size — phone, tablet, and desktop.",
-      intermediate:
-        "Designing UIs that adapt to viewport size using fluid layouts, flexible images, and media queries. The mobile-first approach writes base styles for small screens and adds complexity with min-width breakpoints.",
-      advanced:
-        "Beyond media queries: CSS Grid's `auto-fill/auto-fit + minmax()` creates intrinsically responsive layouts. Container queries (`@container`) scope breakpoints to the component's own size. `clamp()` smoothly interpolates values between minimum and maximum viewport widths.",
-    },
-    seeAlso: ["media-query", "flexbox", "grid"],
-  },
-  {
-    slug: "media-query",
-    term: "Media Query",
-    aliases: ["@media"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A CSS rule that only applies when the screen matches certain conditions — like 'only on screens wider than 768px'.",
-      intermediate:
-        "An `@media` block with conditions. `@media (min-width: 768px)` matches tablets and above. Conditions include width, height, orientation, hover capability, color scheme (prefers-color-scheme: dark), and reduced motion.",
-      advanced:
-        "Part of the CSS Media Queries Level 4 spec. The 'range' syntax (`@media (width >= 768px)`) is now widely supported and more readable than legacy min/max forms. Container queries (`@container`) are often preferable to media queries for component-level responsiveness.",
-    },
-    seeAlso: ["responsive", "css"],
-  },
-  {
-    slug: "dom",
-    term: "DOM",
-    aliases: ["document object model"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "The browser's live map of your webpage — a tree of objects JavaScript can read and change.",
-      intermediate:
-        "A language-neutral API that represents an HTML document as a tree of nodes. JavaScript can query (`querySelector`), create (`createElement`), update (`textContent`, `classList`), and delete (`removeChild`) nodes. Changes to the DOM are immediately reflected in what the browser renders.",
-      advanced:
-        "Defined by the WHATWG DOM Living Standard. The DOM is a tree of `Node` objects — `Element`, `Text`, `Comment`, `DocumentFragment`, etc. Mutations queue microtasks (MutationObserver) and may trigger layout (reflow) and paint (repaint) passes in the browser rendering pipeline.",
-    },
-    examples: [
-      {
-        language: "javascript",
-        code: "const btn = document.querySelector('#save');\nbtn.textContent = 'Saved!';\nbtn.classList.add('success');",
-      },
-    ],
-    seeAlso: ["html", "event", "reflow"],
-  },
-  {
-    slug: "event",
-    term: "DOM Event",
-    aliases: ["event", "browser event"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A signal the browser sends when something happens — a click, a keypress, a form submission — so your JavaScript can respond.",
-      intermediate:
-        "An object representing a user action or browser occurrence. Attached with `addEventListener(type, handler)`. The event object carries `.target` (element that fired it), `.type`, and type-specific properties. Events bubble up the DOM tree by default.",
-      advanced:
-        "Events propagate in three phases: capture (root → target), at-target, and bubble (target → root). `addEventListener(type, fn, {capture: true})` fires during capture. `stopPropagation()` halts traversal; `stopImmediatePropagation()` also prevents other listeners on the same node.",
-    },
-    seeAlso: ["dom", "bubbling"],
-  },
+  // html: defined in batch-web-backend.ts
+  // css: defined in batch-web-backend.ts
+  // selector: defined in batch-web-backend.ts
+  // flexbox: defined in batch-web-backend.ts
+  // grid: defined in batch-web-backend.ts
+  // responsive: defined in batch-web-backend.ts
+  // media-query: defined in batch-web-backend.ts
+  // dom: defined in batch-web-backend.ts
+  // event: defined in batch-web-backend.ts
   {
     slug: "bubbling",
     term: "Event Bubbling",
@@ -971,63 +796,9 @@ const CORE_TERMS: DictionaryTerm[] = [
     ],
     seeAlso: ["promise", "async-await", "http"],
   },
-  {
-    slug: "jsx",
-    term: "JSX",
-    aliases: ["javascript xml"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "An HTML-like syntax you write inside JavaScript to describe what a React component should display.",
-      intermediate:
-        "A syntax extension compiled by build tools into `React.createElement()` calls. Allows HTML-like markup in JS files. Differences from HTML: `className` instead of `class`, `htmlFor` instead of `for`, camelCase event names (`onClick`), and all tags must be closed.",
-      advanced:
-        "Transpiled by Babel/SWC using the JSX transform. The modern transform (React 17+) imports `jsx` from 'react/jsx-runtime' automatically without requiring `import React`. JSX can represent any component — not just HTML elements. TSX is JSX in TypeScript files.",
-    },
-    examples: [
-      {
-        language: "jsx",
-        code: 'function Greeting({ name }) {\n  return <h1 className="title">Hello, {name}!</h1>;\n}',
-      },
-    ],
-    seeAlso: ["component", "props", "virtual-dom"],
-  },
-  {
-    slug: "component",
-    term: "React Component",
-    aliases: ["component"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A reusable piece of UI written as a function — takes in data and returns what to display.",
-      intermediate:
-        "A function that accepts props and returns JSX. Components compose: use them like HTML tags inside other components. React calls the function each time state or props change, producing a new virtual DOM tree to diff against the previous one.",
-      advanced:
-        "In Next.js App Router, components are Server Components by default (rendered on the server, zero client JS). Adding 'use client' marks a component as a Client Component (rendered on both server and client, hydrated in the browser). The two types have different capabilities and import rules.",
-    },
-    seeAlso: ["jsx", "props", "state", "server-component"],
-  },
-  {
-    slug: "props",
-    term: "Props",
-    aliases: ["properties"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "Data passed into a React component from its parent — like arguments to a function.",
-      intermediate:
-        "An object of named values passed to a component via JSX attributes. Props are read-only inside the component — only the parent that passes them can change them. The `children` prop holds any JSX nested between the component's opening and closing tags.",
-      advanced:
-        "Immutable from the component's perspective. React compares old and new props during reconciliation to decide if a component needs re-rendering. `React.memo()` wraps a component to skip re-renders when props are shallowly equal. Prop types can be enforced with TypeScript generics or PropTypes at runtime.",
-    },
-    seeAlso: ["component", "state", "jsx"],
-  },
+  // jsx: defined in batch-web-backend.ts
+  // component: defined in batch-web-backend.ts
+  // props: defined in batch-web-backend.ts
   {
     slug: "state",
     term: "State (React)",
@@ -1096,57 +867,9 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["hook", "state", "useState"],
   },
-  {
-    slug: "virtual-dom",
-    term: "Virtual DOM",
-    aliases: ["vdom"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "React's in-memory copy of the webpage structure — React compares it to the real DOM and only updates what changed.",
-      intermediate:
-        "A lightweight JavaScript object tree mirroring the DOM. On each render, React diffs the new virtual DOM against the previous one (reconciliation) and applies only the necessary real DOM mutations. This batching makes updates efficient.",
-      advanced:
-        "React 18's Fiber architecture replaces the synchronous vdom diff with an interruptible work loop. Rendering is split into two phases: the render phase (pure, can be interrupted) and the commit phase (applies mutations, synchronous). Concurrent features like `useTransition` mark lower-priority updates that Fiber can deprioritize.",
-    },
-    seeAlso: ["dom", "component", "reconciliation"],
-  },
-  {
-    slug: "reconciliation",
-    term: "Reconciliation",
-    aliases: ["diffing"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "React's process of comparing the old and new UI trees to figure out the minimum set of real DOM changes needed.",
-      intermediate:
-        "React's diffing algorithm. It compares element types first: same type → update props; different type → unmount old, mount new. The `key` prop lets React match list items across renders even if they reorder.",
-      advanced:
-        "O(n) heuristic reconciler (not optimal O(n³) tree edit distance). Assumes: (1) elements of different types produce different trees; (2) keys hint identity across renders. React 18's Fiber breaks the diff work into small units that can be paused, aborted, or resumed.",
-    },
-    seeAlso: ["virtual-dom", "key-prop", "component"],
-  },
-  {
-    slug: "server-component",
-    term: "Server Component",
-    aliases: ["RSC", "React Server Component"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A React component that runs only on the server — it can read databases and files directly, and sends HTML to the browser with zero JavaScript.",
-      intermediate:
-        "Default in Next.js App Router. Can use `async`/`await`, access env vars, and call databases — none of which is exposed to the client. Cannot use `useState`, `useEffect`, or event handlers. Data is serialized and sent as RSC payload.",
-      advanced:
-        "Part of React's server rendering architecture. RSC payload is a serialized component tree (not HTML). Client components hydrate independently. Server and client components can be interleaved, but a client component cannot import a server component as a child — it must receive it via `children` or a slot prop.",
-    },
-    seeAlso: ["client-component", "ssr", "component"],
-  },
+  // virtual-dom: defined in batch-web-backend.ts
+  // reconciliation: defined in batch-web-backend.ts
+  // server-component: defined in batch-web-backend.ts
   {
     slug: "client-component",
     term: "Client Component",
@@ -1197,23 +920,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["route", "app-router", "server-component"],
   },
-  {
-    slug: "middleware",
-    term: "Middleware",
-    aliases: ["middleware.ts"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "Code that runs on every incoming request before it reaches your page — used for checking auth or redirecting.",
-      intermediate:
-        "In Next.js, defined in `middleware.ts` at the project root. Runs at the edge before the matched route. Can rewrite URLs, redirect, set headers, or return a response. Configured to match specific paths with the `matcher` export.",
-      advanced:
-        "Executes in the Edge Runtime (V8 isolates, not Node.js) for low latency. Cannot use Node.js APIs. Reads cookies and headers via `NextRequest`; sets them on `NextResponse`. Common patterns: auth token validation, geolocation-based redirects, A/B testing via cookie.",
-    },
-    seeAlso: ["route", "api-route", "deployment"],
-  },
+  // middleware: defined in Phase 4 section below
   {
     slug: "api-route",
     term: "API Route",
@@ -1231,23 +938,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["middleware", "server-component", "deployment"],
   },
-  {
-    slug: "deployment",
-    term: "Deployment",
-    aliases: ["deploy", "shipping"],
-    category: "web",
-    phaseIds: ["2"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "The process of taking your code from your computer and putting it on a server so other people can use it.",
-      intermediate:
-        "For Next.js: `npm run build` produces the `.next` output. `next start` serves it with Node.js. Vercel connects to your git repo and auto-deploys on every push — preview deployments for PRs, production on main. Environment variables are set in the platform dashboard.",
-      advanced:
-        "Next.js supports three output modes: default (Node.js server), `output: 'standalone'` (self-contained Docker-friendly bundle), and `output: 'export'` (fully static, no server). Vercel uses ISR via its KV-backed cache; self-hosted ISR requires a cache handler implementation.",
-    },
-    seeAlso: ["ssr", "middleware", "api-route"],
-  },
+  // deployment: defined in Phase 4 section below
   {
     slug: "ssr",
     term: "SSR",
@@ -1619,29 +1310,7 @@ const CORE_TERMS: DictionaryTerm[] = [
 
   // ─── Phase 4: Backend Engineering ────────────────────────────────────────
 
-  {
-    slug: "nodejs",
-    term: "Node.js",
-    aliases: ["node", "node.js"],
-    category: "backend",
-    phaseIds: ["4"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A runtime that lets you run JavaScript outside the browser — on a server or your laptop.",
-      intermediate:
-        "Built on V8 with an event-driven, non-blocking I/O model. Single-threaded but handles many concurrent operations via the event loop. npm gives access to millions of packages.",
-      advanced:
-        "libuv wraps OS async I/O primitives (epoll, kqueue, IOCP). Worker threads (worker_threads module) add true parallelism for CPU-bound work. Cluster module forks OS processes to use all CPU cores.",
-    },
-    examples: [
-      {
-        language: "js",
-        code: "const fs = require('fs/promises'); const data = await fs.readFile('data.json', 'utf8');",
-      },
-    ],
-    seeAlso: ["event-loop", "middleware"],
-  },
+  // nodejs: defined in batch-web-backend.ts
   {
     slug: "event-loop",
     term: "Event Loop",
@@ -1745,23 +1414,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     ],
     seeAlso: ["bcrypt", "rest"],
   },
-  {
-    slug: "bcrypt",
-    term: "bcrypt",
-    aliases: ["password hashing"],
-    category: "backend",
-    phaseIds: ["4"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A function that converts a password into a scrambled string that can't be reversed — so you never store raw passwords.",
-      intermediate:
-        "Adaptive hash function with a cost factor (work factor) that controls how slow it runs. Slow-by-design resists brute force. Each hash includes a random salt to prevent rainbow table attacks.",
-      advanced:
-        "Cost factor doubles work per increment. bcrypt truncates at 72 bytes — pre-hash with SHA-256 for longer passwords. Argon2id (winner of Password Hashing Competition) is the modern successor.",
-    },
-    seeAlso: ["jwt"],
-  },
+  // bcrypt: defined in batch-web-backend.ts
   {
     slug: "sql",
     term: "SQL",
@@ -1978,23 +1631,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["docker", "container", "compose"],
   },
-  {
-    slug: "ci-cd",
-    term: "CI/CD",
-    aliases: ["continuous integration", "continuous delivery", "continuous deployment"],
-    category: "backend",
-    phaseIds: ["4"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "An automated system that tests and deploys your code every time you push — so you catch bugs early and ship faster.",
-      intermediate:
-        "CI: run tests, lint, type-check on every push. CD: automatically deploy to staging or production when CI passes. Tools: GitHub Actions, CircleCI, Jenkins. Pipelines defined as YAML.",
-      advanced:
-        "Trunk-based development + feature flags enables continuous deployment without long-lived branches. Canary deployments route a small percentage of traffic to new code before full rollout. Rollback = re-deploy the previous image.",
-    },
-    seeAlso: ["pipeline", "deployment"],
-  },
+  // ci-cd: defined in batch-advanced-professional.ts
   {
     slug: "pipeline",
     term: "Deployment Pipeline",
@@ -2134,23 +1771,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["process", "mutex", "concurrency"],
   },
-  {
-    slug: "virtual-memory",
-    term: "Virtual Memory",
-    aliases: ["virtual address space", "paging"],
-    category: "systems",
-    phaseIds: ["5"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A technique that gives each process the illusion of having its own large block of memory, even though RAM is shared and limited.",
-      intermediate:
-        "The MMU translates virtual addresses to physical addresses via a page table. Pages not in RAM trigger a page fault — the OS loads the page from disk (swap). Enables isolation, overcommitment, and memory-mapped files.",
-      advanced:
-        "x86-64 uses 4-level page tables (PML4 → PDPT → PD → PT → physical). TLB caches recent translations — a TLB miss is expensive. Huge pages (2MB/1GB) reduce TLB pressure for large allocations. mmap() maps files directly into the address space.",
-    },
-    seeAlso: ["kernel", "process", "page-fault"],
-  },
+  // virtual-memory: defined in batch-systems-ai.ts
   {
     slug: "mutex",
     term: "Mutex",
@@ -2219,23 +1840,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["tcp", "datagram", "websocket"],
   },
-  {
-    slug: "http2",
-    term: "HTTP/2",
-    aliases: ["http2", "h2"],
-    category: "networking",
-    phaseIds: ["5"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A faster version of HTTP that can send multiple requests at once over one connection instead of one at a time.",
-      intermediate:
-        "Binary framing instead of text. Multiplexing: multiple streams over one TCP connection — no head-of-line blocking at the HTTP layer. Header compression via HPACK. Server push (deprecated in practice). Requires TLS in browsers.",
-      advanced:
-        "HTTP/2 solves application-layer HOL blocking but TCP still has transport-layer HOL blocking — a lost packet stalls all streams. HTTP/3 (QUIC) eliminates this by multiplexing over independent UDP streams. HTTP/2 prioritization (stream weight/dependency) was rarely implemented correctly by servers.",
-    },
-    seeAlso: ["tcp", "tls", "http-protocol"],
-  },
+  // http2: defined in batch-systems-ai.ts
   {
     slug: "tls",
     term: "TLS",
@@ -2321,23 +1926,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["lsm-tree", "index", "storage-engine"],
   },
-  {
-    slug: "lsm-tree",
-    term: "LSM-Tree",
-    aliases: ["log-structured merge tree", "lsm"],
-    category: "database-internals",
-    phaseIds: ["5"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "A storage structure optimized for high write throughput — it buffers writes in memory and periodically merges sorted files on disk.",
-      intermediate:
-        "Writes go to an in-memory memtable. When full, it's flushed as an immutable SSTable. Background compaction merges SSTables — maintaining sorted order and removing tombstones. Used by RocksDB, Cassandra, LevelDB.",
-      advanced:
-        "Write amplification: data is written multiple times during compaction. Read amplification: a read may scan multiple SSTables before finding the value (Bloom filters reduce this). Space amplification: multiple versions of the same key exist until compacted. Leveled compaction minimizes space; tiered maximizes write throughput.",
-    },
-    seeAlso: ["b-tree", "storage-engine", "wal"],
-  },
+  // lsm-tree: defined in batch-systems-ai.ts
   {
     slug: "wal",
     term: "Write-Ahead Log",
@@ -2406,23 +1995,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     },
     seeAlso: ["replication", "partitioning", "hotspot"],
   },
-  {
-    slug: "vpc",
-    term: "VPC",
-    aliases: ["virtual private cloud"],
-    category: "cloud",
-    phaseIds: ["5"],
-    lessonIds: [],
-    definitions: {
-      beginner:
-        "Your own private network inside the cloud — isolated from other customers, with you in control of subnets, routing, and firewalls.",
-      intermediate:
-        "You define CIDR range (e.g., 10.0.0.0/16), divide into subnets (public: has internet gateway route; private: uses NAT gateway). Security groups act as instance-level firewalls. NACLs act at subnet level. VPC peering connects two VPCs.",
-      advanced:
-        "Transit Gateway connects many VPCs and on-premises networks via a central hub — replacing full-mesh peering. PrivateLink exposes a service privately without traffic crossing the internet. Flow Logs capture all VPC traffic metadata for security auditing and debugging.",
-    },
-    seeAlso: ["cdn", "terraform", "load-balancer"],
-  },
+  // vpc: defined in batch-systems-ai.ts
   {
     slug: "cdn",
     term: "CDN",
@@ -3654,6 +3227,7 @@ export const DICTIONARY: DictionaryTerm[] = [
   ...SYSTEMS_AI_TERMS,
   ...ADVANCED_PROFESSIONAL_TERMS,
   ...CTO_GAPS_TERMS,
+  ...EXPANSION_TERMS,
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(
