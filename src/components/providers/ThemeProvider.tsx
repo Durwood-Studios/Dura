@@ -21,6 +21,7 @@ function applyTheme(theme: Theme): void {
 
 export function ThemeProvider({ children }: { children: React.ReactNode }): React.ReactElement {
   const theme = usePreferencesStore((s) => s.prefs.theme);
+  const fontSize = usePreferencesStore((s) => s.prefs.fontSize);
   const highContrast = usePreferencesStore((s) => s.prefs.highContrast);
   const dyslexiaFont = usePreferencesStore((s) => s.prefs.dyslexiaFont);
   const hydrated = usePreferencesStore((s) => s.hydrated);
@@ -39,12 +40,20 @@ export function ThemeProvider({ children }: { children: React.ReactNode }): Reac
     }
   }, [theme]);
 
-  // Apply accessibility classes to <html>
+  // Apply accessibility + font size classes to <html>
   useEffect(() => {
     if (typeof document === "undefined") return;
     document.documentElement.classList.toggle("dura-high-contrast", highContrast);
     document.documentElement.classList.toggle("dura-dyslexia", dyslexiaFont);
-  }, [highContrast, dyslexiaFont]);
+    // Font size classes for lesson prose
+    document.documentElement.classList.remove(
+      "dura-font-sm",
+      "dura-font-md",
+      "dura-font-lg",
+      "dura-font-xl"
+    );
+    document.documentElement.classList.add(`dura-font-${fontSize}`);
+  }, [highContrast, dyslexiaFont, fontSize]);
 
   // React to system theme changes when in "system" mode
   useEffect(() => {

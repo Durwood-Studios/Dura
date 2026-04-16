@@ -142,6 +142,7 @@ export function DashboardClient(): React.ReactElement {
   const [data, setData] = useState<DashboardData | null>(null);
   const [comebackDismissed, setComebackDismissed] = useState(false);
   const showStreak = usePreferencesStore((s) => s.prefs.showStreak);
+  const dailyGoalMinutes = usePreferencesStore((s) => s.prefs.dailyGoalMinutes);
 
   useEffect(() => {
     void loadDashboard().then(setData);
@@ -356,10 +357,29 @@ export function DashboardClient(): React.ReactElement {
           <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">
             You&apos;re averaging {avgMinutesPerDay} minute{avgMinutesPerDay !== 1 ? "s" : ""} per
             day
+            {dailyGoalMinutes > 0 && ` (goal: ${dailyGoalMinutes} min)`}
             {weeksToNextPhase !== null && nextPhase
               ? `. At this pace, you'll finish ${nextPhase.title} in ~${weeksToNextPhase} week${weeksToNextPhase !== 1 ? "s" : ""}.`
               : ""}
           </p>
+        )}
+        {dailyGoalMinutes > 0 && avgMinutesPerDay > 0 && (
+          <div className="mt-2 flex items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--color-border)]">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all",
+                  avgMinutesPerDay >= dailyGoalMinutes ? "dura-progress" : "bg-amber-400"
+                )}
+                style={{
+                  width: `${Math.min(100, Math.round((avgMinutesPerDay / dailyGoalMinutes) * 100))}%`,
+                }}
+              />
+            </div>
+            <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
+              {Math.round((avgMinutesPerDay / dailyGoalMinutes) * 100)}%
+            </span>
+          </div>
         )}
       </div>
 

@@ -176,11 +176,15 @@ export function SettingsClient(): React.ReactElement {
 
       {/* ── Notifications ──────────────────────────────────────────── */}
       <Section title="Notifications">
-        <SettingRow label="Sound effects" hint="Completion chimes and timer pings">
+        <SettingRow
+          label="Sound effects"
+          hint="Enable audio feedback for completions and timers (coming soon)"
+        >
           <Toggle value={prefs.soundEnabled} onChange={(v) => save({ soundEnabled: v })} />
         </SettingRow>
         <p className="text-[11px] text-[var(--color-text-muted)]">
-          Review and streak reminders will arrive in a future update.
+          Sound effects and reminder notifications are planned for a future update. This toggle
+          saves your preference so it&apos;s ready when they arrive.
         </p>
       </Section>
 
