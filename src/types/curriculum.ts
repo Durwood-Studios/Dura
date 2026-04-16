@@ -15,7 +15,11 @@ export interface LessonMeta {
   standards: {
     cs2023?: string[];
     swebok?: string[];
+    bloom?: string;
     sfia?: string;
+    dreyfus?: string;
+    csta?: string[];
+    apcs?: string[];
   };
   vocabulary: string[];
   order: number;
