@@ -19,7 +19,13 @@ const TABS = [
 export function MobileBottomTabs(): React.ReactElement {
   const pathname = usePathname();
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-30 flex h-16 border-t border-[var(--color-border)] bg-[var(--color-bg-surface)]/95 backdrop-blur-xl lg:hidden">
+    <nav
+      className="fixed inset-x-0 bottom-0 z-30 flex border-t border-[var(--color-border)] bg-[var(--color-bg-surface)]/95 backdrop-blur-xl lg:hidden"
+      style={{
+        paddingBottom: "env(safe-area-inset-bottom, 0px)",
+        height: "calc(64px + env(safe-area-inset-bottom, 0px))",
+      }}
+    >
       {TABS.map(({ href, label, icon: Icon }) => {
         const active = pathname === href || pathname.startsWith(href + "/");
         return (

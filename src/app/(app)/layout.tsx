@@ -28,7 +28,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
         <div className="flex min-w-0 flex-1 flex-col">
           <TopBar />
           <Breadcrumbs />
-          <main id="main-content" className="flex-1 pb-20 lg:pb-0">
+          <main id="main-content" className="flex-1 pb-24 lg:pb-0">
             <RestReminder />
             <PageTransition>{children}</PageTransition>
           </main>

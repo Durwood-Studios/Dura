@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { DM_Sans, JetBrains_Mono, Instrument_Serif } from "next/font/google";
 import { ThemeProvider, themeBootstrapScript } from "@/components/providers/ThemeProvider";
 import { AnalyticsProvider } from "@/components/providers/AnalyticsProvider";
@@ -22,6 +22,13 @@ const instrumentSerif = Instrument_Serif({
   weight: ["400"],
   style: ["italic", "normal"],
 });
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+  viewportFit: "cover",
+};
 
 export const metadata: Metadata = {
   metadataBase: new URL(
