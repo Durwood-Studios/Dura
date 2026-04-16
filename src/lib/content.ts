@@ -22,6 +22,8 @@ export interface LessonFrontmatter {
     dreyfus?: DreyfusStage;
   };
   vocabulary?: string[];
+  learningOutcomes?: string[];
+  prerequisites?: string[];
 }
 
 export interface LoadedLesson {
@@ -109,6 +111,8 @@ export async function loadLesson(
       },
       vocabulary: fm.vocabulary ?? [],
       order: fm.order ?? 0,
+      learningOutcomes: fm.learningOutcomes,
+      prerequisites: fm.prerequisites,
     };
 
     return { meta, frontmatter: fm, body: content, filePath };

@@ -19,6 +19,10 @@ export interface LessonMeta {
   };
   vocabulary: string[];
   order: number;
+  /** Specific, measurable outcomes. "After this lesson you can: ..." */
+  learningOutcomes?: string[];
+  /** Lesson IDs that should be completed before this one. */
+  prerequisites?: string[];
 }
 
 export interface Module {
