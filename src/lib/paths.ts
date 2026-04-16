@@ -4,7 +4,7 @@ export const LEARNING_PATHS: Record<PathId, LearningPath> = {
   foundation: {
     id: "foundation",
     name: "Foundation",
-    description: "Complete journey from zero to CTO-ready.",
+    description: "Complete journey from zero to engineering leadership.",
     targetAudience: "Complete beginner",
     estimatedHours: 2850,
     phases: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],

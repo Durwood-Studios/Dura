@@ -15,7 +15,7 @@
 
 ---
 
-A free, open-source learning platform that takes anyone from absolute zero to CTO-ready through mastery-gated, standards-backed engineering education. 406 lessons across 10 phases, 500+ dictionary terms, 35 how-to guides, 100 project tutorials — all offline-capable, all free forever.
+A free, open-source learning platform that takes anyone from absolute zero to engineering leadership through mastery-gated, standards-backed engineering education. 406 lessons across 10 phases, 500+ dictionary terms, 35 how-to guides, 100 project tutorials — all offline-capable, all free forever.
 
 ## Features
 

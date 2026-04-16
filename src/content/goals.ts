@@ -29,7 +29,7 @@ export const GOALS: TrackGoal[] = [
     id: "specialize-ai",
     question: "I want to specialize in AI",
     description:
-      "Dive deep into embeddings, RAG, fine-tuning, and production AI systems — the fastest-growing area in engineering.",
+      "Learn embeddings, RAG, fine-tuning, and production AI systems. Requires strong programming fundamentals first.",
     roleIds: ["ai-ml"],
     icon: "Brain",
   },

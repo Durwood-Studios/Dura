@@ -7,7 +7,7 @@ import { TipButton } from "@/components/support/TipButton";
 export const metadata: Metadata = buildMetadata({
   title: "About",
   description:
-    "DURA is an open-source learning platform that takes anyone from absolute zero to CTO-ready through mastery-gated, standards-backed engineering education.",
+    "DURA is an open-source learning platform that takes anyone from absolute zero to engineering leadership through mastery-gated, standards-backed education.",
   path: "/about",
 });
 
@@ -22,8 +22,9 @@ export default function AboutPage(): React.ReactElement {
           Engineering education, hardened by design.
         </h1>
         <p className="mt-4 text-lg leading-relaxed text-[var(--color-text-secondary)]">
-          DURA takes anyone from absolute zero to CTO-ready. No shortcuts. No promises. Just the
-          means — verified through hardened skills testing — for those willing to do the work.
+          DURA takes anyone from absolute zero toward engineering leadership. No shortcuts. No
+          promises. Just the means — verified through hardened skills testing — for those willing to
+          do the work.
         </p>
       </header>
 

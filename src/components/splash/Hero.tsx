@@ -68,7 +68,8 @@ export function Hero(): React.ReactElement {
           transition={{ duration: 0.6, ease: "easeOut", delay: 0.2 }}
           className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-[#525252] sm:text-lg dark:text-[#a0a0a8]"
         >
-          From absolute zero to CTO-ready. 10 phases. 2,850 hours. Standards-backed. Free forever.
+          From absolute zero to engineering leadership. 10 phases. 2,850 hours. Standards-backed.
+          Free forever.
         </motion.p>
 
         <motion.div

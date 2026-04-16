@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 export const SITE_NAME = "DURA";
 export const SITE_TAGLINE = "Engineering education, hardened by design.";
 export const SITE_DESCRIPTION =
-  "From absolute zero to CTO-ready. 10 phases. 2,850 hours. Standards-backed. Free forever.";
+  "From absolute zero to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.";
 
 export const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL ??

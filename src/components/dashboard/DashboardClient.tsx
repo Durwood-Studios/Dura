@@ -107,19 +107,17 @@ function getGreeting(): string {
 /** Streak message that escalates with streak length */
 function getStreakMessage(days: number): string | null {
   if (days <= 0) return null;
-  if (days === 1) return "First day. Let's go.";
-  if (days < 7) return `${days} day streak — building momentum`;
-  if (days === 7) return "A full week. You're building a habit.";
-  if (days < 14) return `${days} day streak — building momentum`;
-  if (days === 14) return "Two weeks strong.";
-  if (days < 21) return `${days} day streak — building momentum`;
-  if (days === 21) return "21 days — they say it takes this long to form a habit.";
-  if (days < 30) return `${days} day streak — building momentum`;
-  if (days === 30) return "30 days straight. This is becoming who you are.";
-  if (days < 60) return `${days} day streak — building momentum`;
-  if (days === 60) return "60 days. Most people never get here.";
-  if (days < 100) return `${days} day streak — building momentum`;
-  return "100+ days. This isn't discipline — it's identity.";
+  if (days === 1) return "Day one. Good start.";
+  if (days < 7) return `${days} days consistent`;
+  if (days === 7) return "A full week of showing up.";
+  if (days < 14) return `${days} days consistent`;
+  if (days === 14) return "Two solid weeks.";
+  if (days < 30) return `${days} days consistent`;
+  if (days === 30) return "A month of steady work.";
+  if (days < 60) return `${days} days consistent`;
+  if (days === 60) return "Two months. Real commitment.";
+  if (days < 100) return `${days} days consistent`;
+  return `${days} days. Remarkable consistency.`;
 }
 
 const COMEBACK_STORAGE_KEY = "dura-comeback-dismissed";

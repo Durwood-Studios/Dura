@@ -10,9 +10,9 @@ const Standards = dynamic(() => import("@/components/splash/Standards").then((m)
 const CTA = dynamic(() => import("@/components/splash/CTA").then((m) => m.CTA));
 
 export const metadata: Metadata = {
-  title: "DURA — Zero to CTO, Free Forever",
+  title: "DURA — Engineering Education, Free Forever",
   description:
-    "An open-source learning management system that takes you from absolute beginner to CTO-ready. 10 phases, 400+ lessons, offline-first.",
+    "An open-source learning platform that takes you from absolute beginner to engineering leadership. 10 phases, 400+ lessons, offline-first.",
 };
 
 export default function Home(): React.ReactElement {

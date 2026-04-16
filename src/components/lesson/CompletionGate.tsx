@@ -33,22 +33,22 @@ const XP_TWEEN_MS = 1000;
 const MILESTONE_MESSAGES: Record<number, string> = {
   1: "Your first lesson. The hardest step is done.",
   5: "Five down. You're finding your rhythm.",
-  10: "Double digits. Most people never get here.",
-  25: "25 lessons. You're not dabbling anymore — you're learning.",
-  50: "50 lessons. You know more than you think.",
-  100: "100 lessons. Most people quit at 3. You didn't.",
-  200: "200 lessons. You're in the top 1% of learners who stick with it.",
-  300: "300 lessons. At this point, you're not just learning — you're becoming.",
-  400: "Almost there. 400 lessons of pure determination.",
+  10: "Double digits. Solid foundation building.",
+  25: "25 lessons in. You're not dabbling anymore — you're learning.",
+  50: "50 lessons. The fundamentals are becoming second nature.",
+  100: "100 lessons. Look how far you've come.",
+  200: "200 lessons. Real, compounding knowledge.",
+  300: "300 lessons. The depth of understanding shows.",
+  400: "400 lessons. The finish line is in sight.",
 };
 
 const DEFAULT_MESSAGES = [
-  "Another one done. Keep going.",
-  "Progress is progress, no matter the speed.",
-  "You showed up. That's what matters.",
-  "Small steps still move you forward.",
-  "Consistency beats intensity. Always.",
-  "One more brick in the foundation.",
+  "Done. On to the next.",
+  "Progress, at your own pace.",
+  "Another piece of the foundation.",
+  "Solid work.",
+  "Knowledge compounds.",
+  "One step further.",
 ];
 
 /** Pick a milestone or rotating encouragement message. */
