@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { motion } from "motion/react";
 import {
   Sprout,
@@ -143,74 +144,75 @@ export function PhaseGrid(): React.ReactElement {
 
         <div className="mt-16 grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-3">
           {PHASES.map((phase, i) => (
-            <motion.article
-              key={phase.number}
-              initial={{ opacity: 0, y: 16 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.5, delay: i * 0.05, ease: "easeOut" }}
-              className="group relative overflow-hidden rounded-xl border border-[#E5E5E5] bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-shadow duration-200 hover:shadow-[0_4px_12px_rgba(0,0,0,0.08)] dark:border-white/8 dark:bg-white/[0.03] dark:shadow-none dark:hover:shadow-[0_4px_12px_rgba(0,0,0,0.3)]"
-            >
-              {/* Color bar */}
-              <div
-                aria-hidden
-                className="absolute inset-x-0 top-0 h-1"
-                style={{ background: phase.color }}
-              />
-
-              <div className="flex items-center gap-3">
+            <Link key={phase.number} href={`/paths/${phase.number}`} className="block">
+              <motion.article
+                initial={{ opacity: 0, y: 16 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true, margin: "-50px" }}
+                transition={{ duration: 0.5, delay: i * 0.05, ease: "easeOut" }}
+                className="group relative overflow-hidden rounded-xl border border-[#E5E5E5] bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-shadow duration-200 hover:shadow-[0_4px_12px_rgba(0,0,0,0.08)] dark:border-white/8 dark:bg-white/[0.03] dark:shadow-none dark:hover:shadow-[0_4px_12px_rgba(0,0,0,0.3)]"
+              >
+                {/* Color bar */}
                 <div
-                  className="flex h-9 w-9 items-center justify-center rounded-lg text-[#171717] dark:text-[#f0f0f0]"
-                  style={{ background: `${phase.color}33` }}
-                >
-                  {phase.icon}
-                </div>
-                <span className="font-mono text-xs tracking-wide text-[#A3A3A3] uppercase dark:text-[#6b6b75]">
-                  Phase {phase.number}
-                </span>
-              </div>
-              <h3 className="mt-4 text-lg font-semibold text-[#171717] dark:text-[#f0f0f0]">
-                {phase.title}
-              </h3>
-              <p className="mt-1 text-sm text-[#525252] dark:text-[#a0a0a8]">{phase.subtitle}</p>
+                  aria-hidden
+                  className="absolute inset-x-0 top-0 h-1"
+                  style={{ background: phase.color }}
+                />
 
-              {/* "Explore" slide-in on hover */}
-              <div className="mt-3 h-5 overflow-hidden">
-                <span
-                  className="inline-flex items-center gap-1 text-sm font-medium opacity-100 transition-all duration-200 motion-reduce:transition-none sm:translate-x-[-10px] sm:opacity-0 sm:group-hover:translate-x-0 sm:group-hover:opacity-100"
-                  style={{ color: phase.color }}
-                >
-                  Explore
-                  <span
-                    aria-hidden
-                    className="transition-transform duration-200 group-hover:translate-x-0.5"
+                <div className="flex items-center gap-3">
+                  <div
+                    className="flex h-9 w-9 items-center justify-center rounded-lg text-[#171717] dark:text-[#f0f0f0]"
+                    style={{ background: `${phase.color}33` }}
                   >
-                    &rarr;
+                    {phase.icon}
+                  </div>
+                  <span className="font-mono text-xs tracking-wide text-[#A3A3A3] uppercase dark:text-[#6b6b75]">
+                    Phase {phase.number}
                   </span>
-                </span>
-              </div>
+                </div>
+                <h3 className="mt-4 text-lg font-semibold text-[#171717] dark:text-[#f0f0f0]">
+                  {phase.title}
+                </h3>
+                <p className="mt-1 text-sm text-[#525252] dark:text-[#a0a0a8]">{phase.subtitle}</p>
 
-              <dl className="mt-3 flex gap-0 overflow-hidden rounded-lg border-t border-[#F0F0F0] pt-0 font-mono text-xs text-[#525252] dark:border-white/5 dark:text-[#a0a0a8]">
-                <div className="flex-1 bg-[#FAFAFA] px-3 py-3 dark:bg-white/[0.02]">
-                  <dt className="text-[#A3A3A3] dark:text-[#6b6b75]">Hours</dt>
-                  <dd className="mt-0.5 font-medium text-[#171717] dark:text-[#f0f0f0]">
-                    {phase.hours}
-                  </dd>
+                {/* "Explore" slide-in on hover */}
+                <div className="mt-3 h-5 overflow-hidden">
+                  <span
+                    className="inline-flex items-center gap-1 text-sm font-medium opacity-100 transition-all duration-200 motion-reduce:transition-none sm:translate-x-[-10px] sm:opacity-0 sm:group-hover:translate-x-0 sm:group-hover:opacity-100"
+                    style={{ color: phase.color }}
+                  >
+                    Explore
+                    <span
+                      aria-hidden
+                      className="transition-transform duration-200 group-hover:translate-x-0.5"
+                    >
+                      &rarr;
+                    </span>
+                  </span>
                 </div>
-                <div className="flex-1 px-3 py-3">
-                  <dt className="text-[#A3A3A3] dark:text-[#6b6b75]">Modules</dt>
-                  <dd className="mt-0.5 font-medium text-[#171717] dark:text-[#f0f0f0]">
-                    {phase.modules}
-                  </dd>
-                </div>
-                <div className="flex-1 bg-[#FAFAFA] px-3 py-3 dark:bg-white/[0.02]">
-                  <dt className="text-[#A3A3A3] dark:text-[#6b6b75]">Lessons</dt>
-                  <dd className="mt-0.5 font-medium text-[#171717] dark:text-[#f0f0f0]">
-                    {phase.lessons}
-                  </dd>
-                </div>
-              </dl>
-            </motion.article>
+
+                <dl className="mt-3 flex gap-0 overflow-hidden rounded-lg border-t border-[#F0F0F0] pt-0 font-mono text-xs text-[#525252] dark:border-white/5 dark:text-[#a0a0a8]">
+                  <div className="flex-1 bg-[#FAFAFA] px-3 py-3 dark:bg-white/[0.02]">
+                    <dt className="text-[#A3A3A3] dark:text-[#6b6b75]">Hours</dt>
+                    <dd className="mt-0.5 font-medium text-[#171717] dark:text-[#f0f0f0]">
+                      {phase.hours}
+                    </dd>
+                  </div>
+                  <div className="flex-1 px-3 py-3">
+                    <dt className="text-[#A3A3A3] dark:text-[#6b6b75]">Modules</dt>
+                    <dd className="mt-0.5 font-medium text-[#171717] dark:text-[#f0f0f0]">
+                      {phase.modules}
+                    </dd>
+                  </div>
+                  <div className="flex-1 bg-[#FAFAFA] px-3 py-3 dark:bg-white/[0.02]">
+                    <dt className="text-[#A3A3A3] dark:text-[#6b6b75]">Lessons</dt>
+                    <dd className="mt-0.5 font-medium text-[#171717] dark:text-[#f0f0f0]">
+                      {phase.lessons}
+                    </dd>
+                  </div>
+                </dl>
+              </motion.article>
+            </Link>
           ))}
         </div>
       </div>
