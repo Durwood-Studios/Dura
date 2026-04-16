@@ -209,7 +209,7 @@ export function AdminDashboard(): React.ReactElement {
             icon={GraduationCap}
           />
           <StatCard label="How-To Guides" value={35} icon={BookOpen} />
-          <StatCard label="Tutorials" value={20} icon={GraduationCap} />
+          <StatCard label="Tutorials" value={100} icon={GraduationCap} />
         </div>
       </Section>
 

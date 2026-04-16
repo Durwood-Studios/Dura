@@ -15,7 +15,7 @@
 
 ---
 
-A free, open-source learning platform that takes anyone from absolute zero to CTO-ready through mastery-gated, standards-backed engineering education. 406 lessons across 10 phases, 500+ dictionary terms, 35 how-to guides, 20 project tutorials — all offline-capable, all free forever.
+A free, open-source learning platform that takes anyone from absolute zero to CTO-ready through mastery-gated, standards-backed engineering education. 406 lessons across 10 phases, 500+ dictionary terms, 35 how-to guides, 100 project tutorials — all offline-capable, all free forever.
 
 ## Features
 
@@ -26,7 +26,7 @@ A free, open-source learning platform that takes anyone from absolute zero to CT
 - **500+ dictionary terms** — 3-tier definitions, individually indexed for SEO
 - **Code sandboxes** — write and run JavaScript, TypeScript, React in-browser
 - **35 how-to guides** — practical, step-by-step problem-solving
-- **20 project tutorials** — build real, deployable artifacts
+- **100 project tutorials** — build real, deployable artifacts across 12 career tracks
 - **Skill assessment** — 35-question placement test with adaptive paths
 - **Certificates** — verified, shareable, downloadable as PDF
 - **6 study modes** — Standard, Bite-sized, Focus, Sprint, Review, Challenge
@@ -67,7 +67,7 @@ Next.js 15 · React 19 · TypeScript · Tailwind v4 · Zustand · IndexedDB · S
 | 8     | Professional Practice    | 35      |
 | 9     | CTO Track                | 60      |
 
-Plus 35 how-to guides, 20 project tutorials, and an [AI Engineering Competency Framework](https://dura.vercel.app/standards/ai-engineering).
+Plus 35 how-to guides, 100 project tutorials, and an [AI Engineering Competency Framework](https://dura.vercel.app/standards/ai-engineering).
 
 Standards: ACM CS2023 · SWEBOK v4 · SFIA 9
 
