@@ -10,6 +10,8 @@ import { CommandPalette } from "@/components/nav/CommandPalette";
 import { LenisProvider } from "@/components/providers/LenisProvider";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { RestReminder } from "@/components/study/RestReminder";
+import { InstallPrompt } from "@/components/pwa/InstallPrompt";
+import { OfflineIndicator } from "@/components/pwa/OfflineIndicator";
 
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
@@ -37,6 +39,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
         <ToastLayer />
         <TipButton />
         <CommandPalette />
+        <InstallPrompt />
+        <OfflineIndicator />
       </LenisProvider>
     </div>
   );

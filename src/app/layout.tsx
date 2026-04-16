@@ -61,7 +61,14 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <meta name="theme-color" content="#10B981" />
+        <meta name="theme-color" content="#10B981" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#08080d" media="(prefers-color-scheme: dark)" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+        <meta name="apple-mobile-web-app-title" content="DURA" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="application-name" content="DURA" />
+        <meta name="format-detection" content="telephone=no" />
         <link rel="icon" href="/favicon.ico" sizes="48x48" />
         <link rel="icon" href="/favicon.png" type="image/png" sizes="32x32" />
         <link rel="apple-touch-icon" href="/icons/icon-192x192.png" />
