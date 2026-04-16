@@ -12,6 +12,7 @@ import { PageTransition } from "@/components/motion/PageTransition";
 import { RestReminder } from "@/components/study/RestReminder";
 import { InstallPrompt } from "@/components/pwa/InstallPrompt";
 import { OfflineIndicator } from "@/components/pwa/OfflineIndicator";
+import { NotificationScheduler } from "@/components/pwa/NotificationScheduler";
 
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
@@ -41,6 +42,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
         <CommandPalette />
         <InstallPrompt />
         <OfflineIndicator />
+        <NotificationScheduler />
       </LenisProvider>
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
 import {
   Download,
@@ -16,6 +16,13 @@ import { ThemeToggle } from "@/components/providers/ThemeToggle";
 import { clearAllData, exportAllData } from "@/lib/clearAllData";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
+import {
+  isSupported as notificationsSupported,
+  isEnabled as notificationsEnabled,
+  hasPermission as notificationsHavePermission,
+  requestPermission,
+  disableNotifications,
+} from "@/lib/notifications";
 import type { FontSize, StudyMode } from "@/types/preferences";
 
 const FONT_SIZES: { value: FontSize; label: string }[] = [
@@ -176,6 +183,7 @@ export function SettingsClient(): React.ReactElement {
 
       {/* ── Notifications ──────────────────────────────────────────── */}
       <Section title="Notifications">
+        <NotificationToggle />
         <SettingRow
           label="Sound effects"
           hint="Enable audio feedback for completions and timers (coming soon)"
@@ -183,8 +191,8 @@ export function SettingsClient(): React.ReactElement {
           <Toggle value={prefs.soundEnabled} onChange={(v) => save({ soundEnabled: v })} />
         </SettingRow>
         <p className="text-[11px] text-[var(--color-text-muted)]">
-          Sound effects and reminder notifications are planned for a future update. This toggle
-          saves your preference so it&apos;s ready when they arrive.
+          Notifications work when DURA is open or recently used. They check your local data — streak
+          status, due flashcards, daily goal progress — and remind you gently. No server required.
         </p>
       </Section>
 
@@ -375,6 +383,47 @@ function SettingRow({
       </div>
       <div className="shrink-0">{children}</div>
     </div>
+  );
+}
+
+function NotificationToggle(): React.ReactElement {
+  const [enabled, setEnabled] = useState(false);
+  const [supported, setSupported] = useState(false);
+
+  useEffect(() => {
+    setSupported(notificationsSupported());
+    setEnabled(notificationsEnabled() && notificationsHavePermission());
+  }, []);
+
+  const handleToggle = async (): Promise<void> => {
+    if (enabled) {
+      disableNotifications();
+      setEnabled(false);
+    } else {
+      const granted = await requestPermission();
+      setEnabled(granted);
+    }
+  };
+
+  if (!supported) {
+    return (
+      <SettingRow label="Push notifications" hint="Not supported in this browser">
+        <Toggle value={false} onChange={() => {}} />
+      </SettingRow>
+    );
+  }
+
+  return (
+    <SettingRow
+      label="Push notifications"
+      hint={
+        enabled
+          ? "Streak reminders, due flashcards, and daily goal nudges"
+          : "Get gentle reminders about streaks, flashcards, and goals"
+      }
+    >
+      <Toggle value={enabled} onChange={() => void handleToggle()} />
+    </SettingRow>
   );
 }
 
