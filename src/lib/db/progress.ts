@@ -99,6 +99,17 @@ export async function putPhaseProgress(progress: PhaseProgress): Promise<void> {
   }
 }
 
+export async function getCompletedLessonCount(): Promise<number> {
+  try {
+    const db = await getDB();
+    const all = await db.getAll("progress");
+    return all.filter((r) => r.completedAt !== null).length;
+  } catch (error) {
+    console.error("[progress] getCompletedLessonCount failed", error);
+    return 0;
+  }
+}
+
 export async function getAllPhaseProgress(): Promise<PhaseProgress[]> {
   try {
     const db = await getDB();

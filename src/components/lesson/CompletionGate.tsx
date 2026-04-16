@@ -7,6 +7,7 @@ import { useProgressStore } from "@/stores/progress";
 import { XP_AWARDS, levelFromXP } from "@/lib/xp";
 import { track } from "@/lib/analytics";
 import { getDueCards } from "@/lib/db/flashcards";
+import { getCompletedLessonCount } from "@/lib/db/progress";
 import { getTotalXP } from "@/lib/db/xp";
 import { awardXPWithToast } from "@/lib/xp-manager";
 import { extendStreak } from "@/lib/streak-manager";
@@ -28,6 +29,33 @@ interface CompletionGateProps {
 const SCROLL_REQUIRED = 85;
 const TIME_REQUIRED_RATIO = 0.7;
 const XP_TWEEN_MS = 1000;
+
+const MILESTONE_MESSAGES: Record<number, string> = {
+  1: "Your first lesson. The hardest step is done.",
+  5: "Five down. You're finding your rhythm.",
+  10: "Double digits. Most people never get here.",
+  25: "25 lessons. You're not dabbling anymore — you're learning.",
+  50: "50 lessons. You know more than you think.",
+  100: "100 lessons. Most people quit at 3. You didn't.",
+  200: "200 lessons. You're in the top 1% of learners who stick with it.",
+  300: "300 lessons. At this point, you're not just learning — you're becoming.",
+  400: "Almost there. 400 lessons of pure determination.",
+};
+
+const DEFAULT_MESSAGES = [
+  "Another one done. Keep going.",
+  "Progress is progress, no matter the speed.",
+  "You showed up. That's what matters.",
+  "Small steps still move you forward.",
+  "Consistency beats intensity. Always.",
+  "One more brick in the foundation.",
+];
+
+/** Pick a milestone or rotating encouragement message. */
+function getCompletionMessage(count: number): string {
+  if (MILESTONE_MESSAGES[count]) return MILESTONE_MESSAGES[count];
+  return DEFAULT_MESSAGES[count % DEFAULT_MESSAGES.length];
+}
 
 function useTween(target: number, durationMs: number, run: boolean): number {
   const [value, setValue] = useState(0);
@@ -72,6 +100,7 @@ export function CompletionGate({
   const [previousLevel, setPreviousLevel] = useState<number | null>(null);
   const [newLevel, setNewLevel] = useState<number | null>(null);
   const [dueAfter, setDueAfter] = useState<number>(0);
+  const [completionMessage, setCompletionMessage] = useState<string>("");
   const [streakDays, setStreakDays] = useState<number>(0);
   const [streakExtended, setStreakExtended] = useState<boolean>(false);
   const mountedRef = useRef(true);
@@ -102,10 +131,13 @@ export function CompletionGate({
     }
   }, [completed, celebrating]);
 
-  // After celebrating, fetch due card count for the review prompt.
+  // After celebrating, fetch due card count and completed lesson count.
   useEffect(() => {
     if (!celebrating) return;
     void getDueCards().then((cards) => setDueAfter(cards.length));
+    void getCompletedLessonCount().then((count) =>
+      setCompletionMessage(getCompletionMessage(count))
+    );
   }, [celebrating]);
 
   const onComplete = async () => {
@@ -163,6 +195,14 @@ export function CompletionGate({
         >
           Lesson complete
         </h2>
+        {completionMessage && (
+          <p
+            className="mt-2 font-serif text-base text-[var(--color-text-secondary)] italic opacity-0"
+            style={{ animation: "celebrate-in 400ms ease-out 0.45s forwards" }}
+          >
+            {completionMessage}
+          </p>
+        )}
         <p
           className="mt-2 font-mono text-2xl font-semibold text-emerald-600 opacity-0"
           style={{ animation: "celebrate-in 400ms ease-out 0.6s forwards" }}

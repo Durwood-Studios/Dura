@@ -41,25 +41,25 @@ const TIERS: TipTier[] = [
   {
     label: "Coffee",
     amount: "$5",
-    hint: "Caffeine for a lesson draft",
+    hint: "Buy me a coffee while I write your next lesson",
     envKey: "NEXT_PUBLIC_TIP_LINK_COFFEE",
   },
   {
     label: "Lunch",
     amount: "$15",
-    hint: "An hour of writing time",
+    hint: "Fund a late-night debugging session",
     envKey: "NEXT_PUBLIC_TIP_LINK_LUNCH",
   },
   {
     label: "Boost",
     amount: "$50",
-    hint: "A whole afternoon of work",
+    hint: "Fuel a full weekend of content creation",
     envKey: "NEXT_PUBLIC_TIP_LINK_BOOST",
   },
   {
     label: "Custom",
     amount: "$",
-    hint: "Any amount you feel right",
+    hint: "Name your own — every dollar keeps DURA free",
     envKey: "NEXT_PUBLIC_TIP_LINK_CUSTOM",
   },
 ];
