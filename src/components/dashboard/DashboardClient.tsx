@@ -13,7 +13,7 @@ import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { LevelBadge } from "@/components/gamification/LevelBadge";
 import { cn, formatMinutes } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { TOTAL_LESSONS, getPhase } from "@/content/phases";
+import { TOTAL_LESSONS, PHASES, getPhase } from "@/content/phases";
 import type { LessonProgress } from "@/types/curriculum";
 
 interface DashboardData {
@@ -25,6 +25,8 @@ interface DashboardData {
   nextDue: number | null;
   streak: StreakState;
   lastLesson: LessonProgress | null;
+  earliestStartedAt: number | null;
+  completedPhaseIds: Set<string>;
 }
 
 async function loadDashboard(): Promise<DashboardData> {
@@ -47,6 +49,22 @@ async function loadDashboard(): Promise<DashboardData> {
     }
     const lastLesson =
       allProgress.slice().sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0] ?? null;
+    const earliestStartedAt =
+      allProgress.length > 0
+        ? Math.min(...allProgress.map((p) => p.startedAt).filter((t) => t > 0))
+        : null;
+
+    // Determine which phases are fully completed
+    const completedByPhase = new Map<string, number>();
+    for (const p of completed) {
+      completedByPhase.set(p.phaseId, (completedByPhase.get(p.phaseId) ?? 0) + 1);
+    }
+    const completedPhaseIds = new Set<string>();
+    for (const phase of PHASES) {
+      if ((completedByPhase.get(phase.id) ?? 0) >= phase.lessonCount) {
+        completedPhaseIds.add(phase.id);
+      }
+    }
 
     return {
       totalXp,
@@ -57,6 +75,8 @@ async function loadDashboard(): Promise<DashboardData> {
       nextDue,
       streak,
       lastLesson,
+      earliestStartedAt,
+      completedPhaseIds,
     };
   } catch (error) {
     console.error("[dashboard] load failed", error);
@@ -69,15 +89,50 @@ async function loadDashboard(): Promise<DashboardData> {
       nextDue: null,
       streak: INITIAL_STREAK,
       lastLesson: null,
+      earliestStartedAt: null,
+      completedPhaseIds: new Set<string>(),
     };
   }
 }
 
+/** Time-of-day greeting based on local clock */
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour <= 11) return "Good morning";
+  if (hour >= 12 && hour <= 16) return "Good afternoon";
+  if (hour >= 17 && hour <= 20) return "Good evening";
+  return "Late night session?";
+}
+
+/** Streak message that escalates with streak length */
+function getStreakMessage(days: number): string | null {
+  if (days <= 0) return null;
+  if (days === 1) return "First day. Let's go.";
+  if (days < 7) return `${days} day streak — building momentum`;
+  if (days === 7) return "A full week. You're building a habit.";
+  if (days < 14) return `${days} day streak — building momentum`;
+  if (days === 14) return "Two weeks strong.";
+  if (days < 21) return `${days} day streak — building momentum`;
+  if (days === 21) return "21 days — they say it takes this long to form a habit.";
+  if (days < 30) return `${days} day streak — building momentum`;
+  if (days === 30) return "30 days straight. This is becoming who you are.";
+  if (days < 60) return `${days} day streak — building momentum`;
+  if (days === 60) return "60 days. Most people never get here.";
+  if (days < 100) return `${days} day streak — building momentum`;
+  return "100+ days. This isn't discipline — it's identity.";
+}
+
+const COMEBACK_STORAGE_KEY = "dura-comeback-dismissed";
+
 export function DashboardClient(): React.ReactElement {
   const [data, setData] = useState<DashboardData | null>(null);
+  const [comebackDismissed, setComebackDismissed] = useState(false);
 
   useEffect(() => {
     void loadDashboard().then(setData);
+    if (sessionStorage.getItem(COMEBACK_STORAGE_KEY)) {
+      setComebackDismissed(true);
+    }
   }, []);
 
   if (!data) {
@@ -135,8 +190,58 @@ export function DashboardClient(): React.ReactElement {
   const completionPercent =
     TOTAL_LESSONS > 0 ? Math.round((data.completedCount / TOTAL_LESSONS) * 100) : 0;
 
+  // Journey day counter
+  const journeyDays =
+    data.earliestStartedAt !== null
+      ? Math.max(1, Math.ceil((Date.now() - data.earliestStartedAt) / 86_400_000))
+      : 1;
+
+  // Comeback detection: last activity > 7 days ago
+  const lastActivityMs = data.lastLesson?.startedAt ?? 0;
+  const daysSinceLastActivity = lastActivityMs > 0 ? (Date.now() - lastActivityMs) / 86_400_000 : 0;
+  const showComeback = lastActivityMs > 0 && daysSinceLastActivity > 7 && !comebackDismissed;
+
+  function dismissComeback(): void {
+    sessionStorage.setItem(COMEBACK_STORAGE_KEY, "1");
+    setComebackDismissed(true);
+  }
+
+  // Pace acknowledgment
+  const avgMinutesPerDay =
+    data.earliestStartedAt !== null && journeyDays > 0
+      ? Math.round(data.totalTimeMs / 60_000 / journeyDays)
+      : 0;
+
+  // Next incomplete phase estimate
+  const currentPhaseId = data.lastLesson?.phaseId ?? "0";
+  const nextPhase = PHASES.find(
+    (p) => !data.completedPhaseIds.has(p.id) && p.order >= Number(currentPhaseId)
+  );
+  const weeksToNextPhase =
+    nextPhase && avgMinutesPerDay > 0
+      ? Math.ceil((nextPhase.estimatedHours * 60) / avgMinutesPerDay / 7)
+      : null;
+
+  const streakMessage = getStreakMessage(data.streak.current);
+
   return (
     <div className="flex flex-col gap-6">
+      {/* ── Comeback banner ─────────────────────────────────────────── */}
+      {showComeback && (
+        <div className="flex items-center justify-between rounded-xl border-l-4 border-emerald-500 bg-[var(--color-bg-surface)] px-5 py-4">
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            Welcome back. Your progress is right where you left it.
+          </p>
+          <button
+            onClick={dismissComeback}
+            className="ml-4 shrink-0 rounded-md px-2 py-1 text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-bg-surface-hover)] hover:text-[var(--color-text-secondary)]"
+            aria-label="Dismiss welcome back message"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* ── Welcome section ─────────────────────────────────────────── */}
       <div className="dura-card relative overflow-hidden p-6">
         {/* Subtle gradient background accent */}
@@ -146,21 +251,29 @@ export function DashboardClient(): React.ReactElement {
             <LevelBadge level={level.level} size="lg" />
             <div>
               <h1 className="text-2xl font-semibold text-[var(--color-text-primary)]">
-                Welcome back
+                {getGreeting()}
               </h1>
               <p className="text-sm text-[var(--color-text-secondary)]">
                 Level {level.level} &middot; {level.current} / {level.needed} XP to next level
               </p>
+              <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
+                Day {journeyDays.toLocaleString()} of your engineering journey
+              </p>
             </div>
           </div>
-          <div className="ml-auto flex items-center gap-4">
+          <div className="ml-auto flex flex-col items-end gap-1">
             {data.streak.current > 0 && (
-              <div className="flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1.5 dark:bg-amber-500/10">
-                <StreakFlame days={data.streak.current} />
-                <span className="text-sm font-semibold text-amber-600 dark:text-amber-400">
-                  {data.streak.current} day streak
-                </span>
-              </div>
+              <>
+                <div className="flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1.5 dark:bg-amber-500/10">
+                  <StreakFlame days={data.streak.current} />
+                  <span className="text-sm font-semibold text-amber-600 dark:text-amber-400">
+                    {data.streak.current} day streak
+                  </span>
+                </div>
+                {streakMessage && (
+                  <span className="text-xs text-[var(--color-text-muted)]">{streakMessage}</span>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -216,6 +329,15 @@ export function DashboardClient(): React.ReactElement {
           {data.completedCount} of {TOTAL_LESSONS} lessons completed
           {data.inProgressCount > 0 && ` · ${data.inProgressCount} in progress`}
         </p>
+        {avgMinutesPerDay > 0 && (
+          <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">
+            You&apos;re averaging {avgMinutesPerDay} minute{avgMinutesPerDay !== 1 ? "s" : ""} per
+            day
+            {weeksToNextPhase !== null && nextPhase
+              ? `. At this pace, you'll finish ${nextPhase.title} in ~${weeksToNextPhase} week${weeksToNextPhase !== 1 ? "s" : ""}.`
+              : ""}
+          </p>
+        )}
       </div>
 
       <div className="dura-divider" />

@@ -1,15 +1,34 @@
 import Link from "next/link";
+import { AikenWeather } from "./AikenWeather";
+
+/** Seasonal gradient colors for the footer top border */
+function getSeasonalGradient(): string {
+  const month = new Date().getMonth();
+  if (month >= 2 && month <= 4) {
+    // Spring: emerald
+    return "linear-gradient(90deg, transparent 10%, #10B981 40%, #6ee7b7 60%, transparent 90%)";
+  }
+  if (month >= 5 && month <= 7) {
+    // Summer: amber/warm
+    return "linear-gradient(90deg, transparent 10%, #f59e0b 40%, #fbbf24 60%, transparent 90%)";
+  }
+  if (month >= 8 && month <= 10) {
+    // Fall: orange
+    return "linear-gradient(90deg, transparent 10%, #f97316 40%, #fb923c 60%, transparent 90%)";
+  }
+  // Winter: cyan/cool
+  return "linear-gradient(90deg, transparent 10%, #06b6d4 40%, #67e8f9 60%, transparent 90%)";
+}
 
 export function Footer(): React.ReactElement {
   return (
     <footer className="relative border-t border-[#E5E5E5] bg-[#FAFAFA] px-6 py-10 dark:border-white/8 dark:bg-[#08080d]">
-      {/* Gradient top border overlay */}
+      {/* Gradient top border overlay — shifts by season */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-x-0 top-0 h-px"
         style={{
-          background:
-            "linear-gradient(90deg, transparent 10%, #10B981 40%, #06B6D4 60%, transparent 90%)",
+          background: getSeasonalGradient(),
         }}
       />
 
@@ -24,6 +43,7 @@ export function Footer(): React.ReactElement {
           <div className="mt-1 text-xs text-[#A3A3A3] dark:text-[#6b6b75]">
             Made with care in pursuit of better engineering education
           </div>
+          <AikenWeather />
         </div>
         <nav className="flex flex-wrap justify-center gap-6 sm:justify-end">
           <Link

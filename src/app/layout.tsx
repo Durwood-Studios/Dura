@@ -68,6 +68,11 @@ export default function RootLayout({
         <link rel="manifest" href="/manifest.json" />
         <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
         <script
+          dangerouslySetInnerHTML={{
+            __html: `console.log('%c\\u{1F44B} Hey, you found the console. You\\'re going to do great in Phase 1.','color:#10b981;font-size:14px;font-weight:bold;padding:8px 0;');console.log('%cDURA is open source: https://github.com/Durwood-Studios/Dura','color:#525252;font-size:12px;');`,
+          }}
+        />
+        <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{
             __html: JSON.stringify({
@@ -88,6 +93,12 @@ export default function RootLayout({
       <body
         className={`${dmSans.variable} ${jetbrainsMono.variable} ${instrumentSerif.variable} antialiased`}
       >
+        <span
+          dangerouslySetInnerHTML={{
+            __html:
+              "<!-- You're reading the source. That's exactly the kind of curiosity DURA is built for. github.com/Durwood-Studios/Dura -->",
+          }}
+        />
         <ThemeProvider>
           <AnalyticsProvider>{children}</AnalyticsProvider>
         </ThemeProvider>
