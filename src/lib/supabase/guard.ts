@@ -1,31 +1,31 @@
 /**
- * Supabase Free Tier Guard
+ * Supabase Tier Guard — Dynamic Limits with Circuit Breaker
  *
  * Every Supabase call in DURA goes through this module. It provides:
  *
  * 1. **Graceful degradation** — if Supabase is down, rate-limited, or
- *    the free tier limit is hit, the app continues working from IDB.
+ *    a tier limit is hit, the app continues working from IDB.
  *
  * 2. **Automatic circuit breaker** — after N consecutive failures, stop
  *    trying for a cooldown period instead of hammering a dead service.
  *
- * 3. **Cost tier awareness** — tracks usage patterns and warns before
- *    hitting limits. Designed for the free tier with hooks for upgrading.
- *
- * Free tier limits (as of 2026):
- * - Database: 500MB storage
- * - Auth: 50,000 MAU
- * - Storage: 1GB files, 2GB bandwidth/month
- * - Edge Functions: 500,000 invocations/month
- * - Realtime: 200 concurrent connections
- * - API: 500 requests/second
+ * 3. **Dynamic tier switching** — admin can switch between Free/Pro/Team/Enterprise
+ *    tiers. Limits update site-wide immediately. Persisted to localStorage.
  *
  * DURA's rule: the app MUST work fully without Supabase. Every feature
  * that uses Supabase has an IDB fallback. This guard ensures that
  * Supabase failures never break the user experience.
  */
 
-type SupabaseFeature = "auth" | "database" | "storage" | "realtime" | "edge-functions" | "search";
+export type SupabaseFeature =
+  | "auth"
+  | "database"
+  | "storage"
+  | "realtime"
+  | "edge-functions"
+  | "search";
+
+export type SupabaseTier = "free" | "pro" | "team" | "enterprise";
 
 interface CircuitState {
   failures: number;
@@ -34,46 +34,127 @@ interface CircuitState {
   openedAt: number;
 }
 
-interface UsageMetrics {
+export interface UsageMetrics {
   apiCalls: number;
   storageBytesUsed: number;
   realtimeConnections: number;
-  resetAt: number; // Start of current billing period
+  resetAt: number;
 }
 
-// Circuit breaker config per feature
-const CIRCUIT_CONFIG: Record<SupabaseFeature, { maxFailures: number; cooldownMs: number }> = {
-  auth: { maxFailures: 3, cooldownMs: 60_000 }, // 1 min cooldown
-  database: { maxFailures: 5, cooldownMs: 30_000 }, // 30s cooldown
-  storage: { maxFailures: 3, cooldownMs: 120_000 }, // 2 min cooldown
-  realtime: { maxFailures: 3, cooldownMs: 300_000 }, // 5 min cooldown
-  "edge-functions": { maxFailures: 3, cooldownMs: 60_000 },
-  search: { maxFailures: 5, cooldownMs: 60_000 },
+export interface TierLimits {
+  apiCallsPerSecond: number;
+  storageMB: number;
+  storageBandwidthMB: number;
+  realtimeConnections: number;
+  edgeFunctionInvocations: number;
+  databaseMB: number;
+  monthlyActiveUsers: number;
+  syncIntervalMs: number;
+  maxCircuitCooldownMs: number;
+}
+
+// ─── Tier Definitions ──────────────────────────────────────────────────
+
+const TIER_LIMITS: Record<SupabaseTier, TierLimits> = {
+  free: {
+    apiCallsPerSecond: 500,
+    storageMB: 1_024,
+    storageBandwidthMB: 2_048,
+    realtimeConnections: 200,
+    edgeFunctionInvocations: 500_000,
+    databaseMB: 500,
+    monthlyActiveUsers: 50_000,
+    syncIntervalMs: 30_000,
+    maxCircuitCooldownMs: 300_000,
+  },
+  pro: {
+    apiCallsPerSecond: 1_000,
+    storageMB: 100_000,
+    storageBandwidthMB: 200_000,
+    realtimeConnections: 500,
+    edgeFunctionInvocations: 2_000_000,
+    databaseMB: 8_000,
+    monthlyActiveUsers: 100_000,
+    syncIntervalMs: 15_000,
+    maxCircuitCooldownMs: 60_000,
+  },
+  team: {
+    apiCallsPerSecond: 3_000,
+    storageMB: 100_000,
+    storageBandwidthMB: 200_000,
+    realtimeConnections: 2_000,
+    edgeFunctionInvocations: 5_000_000,
+    databaseMB: 16_000,
+    monthlyActiveUsers: 500_000,
+    syncIntervalMs: 10_000,
+    maxCircuitCooldownMs: 30_000,
+  },
+  enterprise: {
+    apiCallsPerSecond: 10_000,
+    storageMB: 1_000_000,
+    storageBandwidthMB: 1_000_000,
+    realtimeConnections: 10_000,
+    edgeFunctionInvocations: 50_000_000,
+    databaseMB: 256_000,
+    monthlyActiveUsers: 1_000_000,
+    syncIntervalMs: 5_000,
+    maxCircuitCooldownMs: 15_000,
+  },
 };
 
-// Free tier limits
-const FREE_TIER_LIMITS = {
-  apiCallsPerSecond: 500,
-  storageMB: 1024,
-  storageBandwidthMB: 2048,
-  realtimeConnections: 200,
-  edgeFunctionInvocations: 500_000,
-  databaseMB: 500,
-  monthlyActiveUsers: 50_000,
-} as const;
+const TIER_META: Record<SupabaseTier, { name: string; price: string; color: string }> = {
+  free: { name: "Free", price: "$0/mo", color: "#a3a3a3" },
+  pro: { name: "Pro", price: "$25/mo", color: "#10b981" },
+  team: { name: "Team", price: "$599/mo", color: "#06b6d4" },
+  enterprise: { name: "Enterprise", price: "Custom", color: "#8b5cf6" },
+};
 
-// In-memory circuit state (resets on page reload — intentional)
-const circuits: Map<SupabaseFeature, CircuitState> = new Map();
+// Circuit breaker config per feature — scales with tier
+function getCircuitConfig(
+  tier: SupabaseTier
+): Record<SupabaseFeature, { maxFailures: number; cooldownMs: number }> {
+  const maxCooldown = TIER_LIMITS[tier].maxCircuitCooldownMs;
+  return {
+    auth: { maxFailures: 3, cooldownMs: Math.min(60_000, maxCooldown) },
+    database: { maxFailures: 5, cooldownMs: Math.min(30_000, maxCooldown) },
+    storage: { maxFailures: 3, cooldownMs: Math.min(120_000, maxCooldown) },
+    realtime: { maxFailures: 3, cooldownMs: maxCooldown },
+    "edge-functions": { maxFailures: 3, cooldownMs: Math.min(60_000, maxCooldown) },
+    search: { maxFailures: 5, cooldownMs: Math.min(60_000, maxCooldown) },
+  };
+}
 
-// Usage tracking (persists to sessionStorage for the current session)
-const usage: UsageMetrics = loadUsage();
+// ─── Persistence ───────────────────────────────────────────────────────
+
+const TIER_STORAGE_KEY = "dura-supabase-tier";
+const USAGE_STORAGE_KEY = "dura-supabase-usage";
+
+function loadTier(): SupabaseTier {
+  if (typeof window === "undefined") return "free";
+  try {
+    const stored = localStorage.getItem(TIER_STORAGE_KEY);
+    if (stored && stored in TIER_LIMITS) return stored as SupabaseTier;
+  } catch {
+    // ignore
+  }
+  return "free";
+}
+
+function saveTier(tier: SupabaseTier): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(TIER_STORAGE_KEY, tier);
+  } catch {
+    // ignore
+  }
+}
 
 function loadUsage(): UsageMetrics {
   if (typeof window === "undefined") {
     return { apiCalls: 0, storageBytesUsed: 0, realtimeConnections: 0, resetAt: Date.now() };
   }
   try {
-    const raw = sessionStorage.getItem("dura-supabase-usage");
+    const raw = sessionStorage.getItem(USAGE_STORAGE_KEY);
     if (raw) return JSON.parse(raw) as UsageMetrics;
   } catch {
     // ignore
@@ -84,11 +165,17 @@ function loadUsage(): UsageMetrics {
 function saveUsage(): void {
   if (typeof window === "undefined") return;
   try {
-    sessionStorage.setItem("dura-supabase-usage", JSON.stringify(usage));
+    sessionStorage.setItem(USAGE_STORAGE_KEY, JSON.stringify(usage));
   } catch {
     // ignore
   }
 }
+
+// ─── State ─────────────────────────────────────────────────────────────
+
+let currentTier: SupabaseTier = loadTier();
+const circuits: Map<SupabaseFeature, CircuitState> = new Map();
+const usage: UsageMetrics = loadUsage();
 
 function getCircuit(feature: SupabaseFeature): CircuitState {
   if (!circuits.has(feature)) {
@@ -97,12 +184,51 @@ function getCircuit(feature: SupabaseFeature): CircuitState {
   return circuits.get(feature)!;
 }
 
+// ─── Tier Management ───────────────────────────────────────────────────
+
+/** Get the current Supabase tier. */
+export function getCurrentTier(): SupabaseTier {
+  return currentTier;
+}
+
+/** Get limits for the current tier. */
+export function getCurrentLimits(): TierLimits {
+  return TIER_LIMITS[currentTier];
+}
+
+/** Get all available tiers with metadata. */
+export function getAllTiers(): {
+  id: SupabaseTier;
+  name: string;
+  price: string;
+  color: string;
+  limits: TierLimits;
+  active: boolean;
+}[] {
+  return (Object.keys(TIER_LIMITS) as SupabaseTier[]).map((id) => ({
+    id,
+    ...TIER_META[id],
+    limits: TIER_LIMITS[id],
+    active: id === currentTier,
+  }));
+}
+
 /**
- * Check if a Supabase feature is available (circuit closed).
- * If the circuit is open but cooldown has passed, half-open it (allow one attempt).
+ * Switch the Supabase tier. Updates limits site-wide immediately.
+ * Resets all circuit breakers on tier change (new limits = fresh start).
+ * Persists to localStorage so the setting survives page reloads.
  */
+export function setTier(tier: SupabaseTier): void {
+  currentTier = tier;
+  saveTier(tier);
+  circuits.clear(); // Fresh start with new limits
+  console.info(`[supabase-guard] Tier switched to "${tier}". Limits updated, circuits reset.`);
+}
+
+// ─── Circuit Breaker ───────────────────────────────────────────────────
+
+/** Check if a Supabase feature is available (circuit closed). */
 export function isFeatureAvailable(feature: SupabaseFeature): boolean {
-  // If Supabase env vars aren't set, nothing is available
   if (typeof window !== "undefined" && !process.env.NEXT_PUBLIC_SUPABASE_URL) {
     return false;
   }
@@ -110,10 +236,9 @@ export function isFeatureAvailable(feature: SupabaseFeature): boolean {
   const circuit = getCircuit(feature);
   if (!circuit.open) return true;
 
-  const config = CIRCUIT_CONFIG[feature];
+  const config = getCircuitConfig(currentTier)[feature];
   const elapsed = Date.now() - circuit.openedAt;
   if (elapsed >= config.cooldownMs) {
-    // Half-open: allow one attempt
     circuit.open = false;
     circuit.failures = 0;
     return true;
@@ -122,9 +247,7 @@ export function isFeatureAvailable(feature: SupabaseFeature): boolean {
   return false;
 }
 
-/**
- * Record a successful Supabase call. Resets the circuit breaker.
- */
+/** Record a successful Supabase call. */
 export function recordSuccess(feature: SupabaseFeature): void {
   const circuit = getCircuit(feature);
   circuit.failures = 0;
@@ -133,68 +256,51 @@ export function recordSuccess(feature: SupabaseFeature): void {
   saveUsage();
 }
 
-/**
- * Record a failed Supabase call. May open the circuit breaker.
- */
+/** Record a failed Supabase call. May open the circuit breaker. */
 export function recordFailure(feature: SupabaseFeature, error?: unknown): void {
   const circuit = getCircuit(feature);
   circuit.failures++;
   circuit.lastFailure = Date.now();
 
-  const config = CIRCUIT_CONFIG[feature];
+  const config = getCircuitConfig(currentTier)[feature];
   if (circuit.failures >= config.maxFailures) {
     circuit.open = true;
     circuit.openedAt = Date.now();
     console.warn(
       `[supabase-guard] Circuit OPEN for "${feature}" after ${circuit.failures} failures. ` +
-        `Cooldown: ${config.cooldownMs / 1000}s. Error:`,
+        `Tier: ${currentTier}. Cooldown: ${config.cooldownMs / 1000}s. Error:`,
       error
     );
   }
 }
 
-/**
- * Check if we're approaching a free tier limit.
- * Returns a warning message if close, null if fine.
- */
-export function checkFreeTierWarning(): string | null {
-  // This is a heuristic — we can't know exact server-side usage from the client.
-  // We track client-side calls as a proxy.
+// ─── Usage Monitoring ──────────────────────────────────────────────────
+
+/** Check if approaching tier limits. Returns warning message or null. */
+export function checkTierWarning(): string | null {
+  const limits = TIER_LIMITS[currentTier];
   const sessionMinutes = (Date.now() - usage.resetAt) / 60_000;
   if (sessionMinutes < 1) return null;
 
   const callsPerMinute = usage.apiCalls / sessionMinutes;
   const estimatedDailyCalls = callsPerMinute * 60 * 24;
 
-  // Warn if we'd exceed 80% of the API limit extrapolated over a day
-  if (estimatedDailyCalls > FREE_TIER_LIMITS.apiCallsPerSecond * 60 * 0.8) {
-    return "High API usage detected. Consider reducing sync frequency.";
+  if (estimatedDailyCalls > limits.apiCallsPerSecond * 60 * 0.8) {
+    return `High API usage on ${TIER_META[currentTier].name} tier. Consider upgrading or reducing sync frequency.`;
   }
 
   return null;
 }
 
-/**
- * Wraps a Supabase call with circuit breaker + graceful degradation.
- * If the circuit is open or the call fails, returns the fallback value.
- *
- * Usage:
- * ```ts
- * const data = await guardedCall(
- *   "database",
- *   () => supabase.from("profiles").select().single(),
- *   null // fallback if Supabase is unavailable
- * );
- * ```
- */
+// ─── Guarded Calls ─────────────────────────────────────────────────────
+
+/** Wraps a Supabase call with circuit breaker. Returns fallback on failure. */
 export async function guardedCall<T>(
   feature: SupabaseFeature,
   fn: () => Promise<T>,
   fallback: T
 ): Promise<T> {
-  if (!isFeatureAvailable(feature)) {
-    return fallback;
-  }
+  if (!isFeatureAvailable(feature)) return fallback;
 
   try {
     const result = await fn();
@@ -207,26 +313,22 @@ export async function guardedCall<T>(
   }
 }
 
-/**
- * Same as guardedCall but for Supabase responses that use { data, error } pattern.
- * Automatically checks the error field and records accordingly.
- */
+/** Guarded call for Supabase { data, error } responses. */
 export async function guardedQuery<T>(
   feature: SupabaseFeature,
   fn: () => Promise<{ data: T | null; error: { message: string; code?: string } | null }>,
   fallback: T
 ): Promise<T> {
-  if (!isFeatureAvailable(feature)) {
-    return fallback;
-  }
+  if (!isFeatureAvailable(feature)) return fallback;
 
   try {
     const { data, error } = await fn();
 
     if (error) {
-      // Check for specific rate limit / quota errors
       if (isQuotaError(error)) {
-        console.warn(`[supabase-guard] Free tier limit hit for "${feature}": ${error.message}`);
+        console.warn(
+          `[supabase-guard] Tier limit hit for "${feature}" on ${currentTier}: ${error.message}`
+        );
         recordFailure(feature, error);
         return fallback;
       }
@@ -245,9 +347,6 @@ export async function guardedQuery<T>(
   }
 }
 
-/**
- * Detect if an error is a quota/rate limit error.
- */
 function isQuotaError(error: { message: string; code?: string }): boolean {
   const msg = error.message.toLowerCase();
   return (
@@ -257,14 +356,13 @@ function isQuotaError(error: { message: string; code?: string }): boolean {
     msg.includes("limit exceeded") ||
     msg.includes("429") ||
     error.code === "429" ||
-    error.code === "PGRST116" // PostgREST resource limit
+    error.code === "PGRST116"
   );
 }
 
-/**
- * Get the current status of all circuit breakers.
- * Useful for the admin dashboard.
- */
+// ─── Admin Helpers ─────────────────────────────────────────────────────
+
+/** Get circuit breaker status for all features. */
 export function getCircuitStatus(): Record<
   SupabaseFeature,
   { available: boolean; failures: number; open: boolean }
@@ -289,16 +387,21 @@ export function getCircuitStatus(): Record<
   return status as Record<SupabaseFeature, { available: boolean; failures: number; open: boolean }>;
 }
 
-/**
- * Get current usage metrics for the session.
- */
-export function getUsageMetrics(): UsageMetrics & { freeTierLimits: typeof FREE_TIER_LIMITS } {
-  return { ...usage, freeTierLimits: FREE_TIER_LIMITS };
+/** Get usage metrics + current tier limits. */
+export function getUsageMetrics(): UsageMetrics & {
+  tier: SupabaseTier;
+  tierName: string;
+  limits: TierLimits;
+} {
+  return {
+    ...usage,
+    tier: currentTier,
+    tierName: TIER_META[currentTier].name,
+    limits: TIER_LIMITS[currentTier],
+  };
 }
 
-/**
- * Reset all circuits. Useful for "retry now" button in admin.
- */
+/** Reset all circuit breakers. */
 export function resetAllCircuits(): void {
   circuits.clear();
 }

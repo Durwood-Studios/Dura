@@ -11,6 +11,10 @@ import {
   ExternalLink,
   BookOpen,
   GraduationCap,
+  Shield,
+  RefreshCw,
+  Check,
+  AlertTriangle,
 } from "lucide-react";
 import { PHASES, TOTAL_LESSONS, TOTAL_MODULES, TOTAL_HOURS } from "@/content/phases";
 import { DICTIONARY } from "@/content/dictionary";
@@ -18,6 +22,15 @@ import { ALL_QUESTIONS } from "@/content/questions";
 import type { AnalyticsEvent } from "@/types/analytics";
 import { getDB } from "@/lib/db";
 import { clearAllData, exportAllData } from "@/lib/clearAllData";
+import {
+  getAllTiers,
+  setTier,
+  getCurrentTier,
+  getCircuitStatus,
+  getUsageMetrics,
+  resetAllCircuits,
+  type SupabaseTier,
+} from "@/lib/supabase/guard";
 
 const IDB_STORES = [
   "progress",
@@ -316,6 +329,181 @@ export function AdminDashboard(): React.ReactElement {
           </div>
         </div>
       </Section>
+
+      {/* Supabase Tier & Circuit Breaker */}
+      <SupabaseTierPanel />
     </div>
+  );
+}
+
+function SupabaseTierPanel(): React.ReactElement {
+  const [activeTier, setActiveTier] = useState<SupabaseTier>(getCurrentTier());
+  const [circuits, setCircuits] = useState(getCircuitStatus());
+  const [metrics, setMetrics] = useState(getUsageMetrics());
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCircuits(getCircuitStatus());
+      setMetrics(getUsageMetrics());
+    }, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const handleTierChange = (tier: SupabaseTier): void => {
+    setTier(tier);
+    setActiveTier(tier);
+    setCircuits(getCircuitStatus());
+    setMetrics(getUsageMetrics());
+  };
+
+  const handleResetCircuits = (): void => {
+    resetAllCircuits();
+    setCircuits(getCircuitStatus());
+  };
+
+  const tiers = getAllTiers();
+  const currentLimits = metrics.limits;
+
+  return (
+    <>
+      <Section title="Supabase Tier" icon={Shield}>
+        <p className="mb-4 text-xs text-[var(--color-text-secondary)]">
+          Switch tiers to update rate limits, sync intervals, and circuit breaker tolerances
+          site-wide. This setting persists across page reloads.
+        </p>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {tiers.map((tier) => (
+            <button
+              key={tier.id}
+              type="button"
+              onClick={() => handleTierChange(tier.id)}
+              className={`relative rounded-xl border-2 p-4 text-left transition ${
+                tier.id === activeTier
+                  ? "border-emerald-500 bg-emerald-500/5"
+                  : "border-[var(--color-border)] hover:border-[var(--color-text-muted)]"
+              }`}
+            >
+              {tier.id === activeTier && (
+                <Check className="absolute top-2 right-2 h-4 w-4 text-emerald-500" />
+              )}
+              <div className="mb-2 h-2 w-8 rounded-full" style={{ background: tier.color }} />
+              <p className="text-sm font-semibold text-[var(--color-text-primary)]">{tier.name}</p>
+              <p className="font-mono text-xs text-[var(--color-text-muted)]">{tier.price}</p>
+            </button>
+          ))}
+        </div>
+
+        {/* Current limits table */}
+        <div className="mt-6 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-[var(--color-border)] text-left text-[var(--color-text-muted)]">
+                <th className="pb-2 font-medium">Resource</th>
+                <th className="pb-2 font-medium">Limit</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono text-[var(--color-text-secondary)]">
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <td className="py-1.5">Database</td>
+                <td className="py-1.5">{(currentLimits.databaseMB / 1000).toFixed(1)} GB</td>
+              </tr>
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <td className="py-1.5">Storage</td>
+                <td className="py-1.5">{(currentLimits.storageMB / 1000).toFixed(0)} GB</td>
+              </tr>
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <td className="py-1.5">Bandwidth</td>
+                <td className="py-1.5">
+                  {(currentLimits.storageBandwidthMB / 1000).toFixed(0)} GB/mo
+                </td>
+              </tr>
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <td className="py-1.5">Realtime connections</td>
+                <td className="py-1.5">{currentLimits.realtimeConnections.toLocaleString()}</td>
+              </tr>
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <td className="py-1.5">Edge Functions</td>
+                <td className="py-1.5">
+                  {(currentLimits.edgeFunctionInvocations / 1000).toFixed(0)}K/mo
+                </td>
+              </tr>
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <td className="py-1.5">API rate</td>
+                <td className="py-1.5">{currentLimits.apiCallsPerSecond.toLocaleString()} req/s</td>
+              </tr>
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <td className="py-1.5">Monthly active users</td>
+                <td className="py-1.5">{(currentLimits.monthlyActiveUsers / 1000).toFixed(0)}K</td>
+              </tr>
+              <tr>
+                <td className="py-1.5">Sync interval</td>
+                <td className="py-1.5">{currentLimits.syncIntervalMs / 1000}s</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </Section>
+
+      {/* Circuit Breaker Status */}
+      <Section title="Circuit Breakers" icon={AlertTriangle}>
+        <div className="mb-3 flex items-center justify-between">
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            Auto-refreshes every 5 seconds. Open circuits fall back to IndexedDB.
+          </p>
+          <button
+            type="button"
+            onClick={handleResetCircuits}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-subtle)]"
+          >
+            <RefreshCw className="h-3 w-3" />
+            Reset All
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {Object.entries(circuits).map(([feature, state]) => (
+            <div
+              key={feature}
+              className={`rounded-lg border p-3 ${
+                state.open
+                  ? "border-rose-300 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/20"
+                  : state.failures > 0
+                    ? "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20"
+                    : "border-[var(--color-border)] bg-[var(--color-bg-surface)]"
+              }`}
+            >
+              <p className="mb-1 text-[10px] font-medium tracking-wider text-[var(--color-text-muted)] uppercase">
+                {feature}
+              </p>
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    state.open
+                      ? "bg-rose-500"
+                      : state.failures > 0
+                        ? "bg-amber-500"
+                        : "bg-emerald-500"
+                  }`}
+                />
+                <span className="font-mono text-xs text-[var(--color-text-primary)]">
+                  {state.open ? "OPEN" : state.failures > 0 ? `${state.failures} fail` : "OK"}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Session usage */}
+        <div className="mt-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-3">
+          <p className="mb-1 text-[10px] font-medium tracking-wider text-[var(--color-text-muted)] uppercase">
+            Session Usage
+          </p>
+          <p className="font-mono text-sm text-[var(--color-text-primary)]">
+            {metrics.apiCalls.toLocaleString()} API calls
+            <span className="mx-2 text-[var(--color-text-muted)]">&middot;</span>
+            Tier: {metrics.tierName}
+          </p>
+        </div>
+      </Section>
+    </>
   );
 }
