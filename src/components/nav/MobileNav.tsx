@@ -20,6 +20,7 @@ import {
   Wrench,
   Swords,
   Signpost,
+  Sparkles,
 } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
@@ -28,9 +29,9 @@ import { cn } from "@/lib/utils";
 const TABS = [
   { href: "/dashboard", label: "Home", icon: LayoutDashboard },
   { href: "/paths", label: "Learn", icon: BookOpen },
-  { href: "/review", label: "Review", icon: Repeat },
-  { href: "/dictionary", label: "Dict", icon: BookMarked },
-  { href: "/stats", label: "Stats", icon: BarChart3 },
+  { href: "/review", label: "Practice", icon: Repeat },
+  { href: "/tracks", label: "Tracks", icon: Signpost },
+  { href: "/stats", label: "Progress", icon: BarChart3 },
 ] as const;
 
 export function MobileBottomTabs(): React.ReactElement {
@@ -82,28 +83,28 @@ interface DrawerSection {
 
 const DRAWER_SECTIONS: DrawerSection[] = [
   {
-    title: "Learn",
+    title: "Get Started",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-      { href: "/paths", label: "Curriculum", icon: BookOpen },
-      { href: "/tracks", label: "Career Tracks", icon: Signpost },
       { href: "/assess", label: "Skill Assessment", icon: Compass },
+      { href: "/tracks", label: "Career Tracks", icon: Signpost },
+    ],
+  },
+  {
+    title: "Learn",
+    items: [
+      { href: "/paths", label: "Curriculum", icon: BookOpen },
+      { href: "/howto", label: "How-To Guides", icon: Lightbulb },
+      { href: "/tutorials", label: "Tutorials", icon: Wrench },
+      { href: "/discover", label: "Discovery Center", icon: Sparkles },
     ],
   },
   {
     title: "Practice",
     items: [
       { href: "/review", label: "Flashcards", icon: Repeat },
-      { href: "/challenge", label: "Challenge Mode", icon: Swords },
+      { href: "/challenge", label: "Challenge", icon: Swords },
       { href: "/sandbox", label: "Code Sandbox", icon: Code2 },
-    ],
-  },
-  {
-    title: "Resources",
-    items: [
-      { href: "/dictionary", label: "Dictionary", icon: BookMarked },
-      { href: "/howto", label: "How-To Guides", icon: Lightbulb },
-      { href: "/tutorials", label: "Tutorials", icon: Wrench },
     ],
   },
   {
@@ -117,6 +118,7 @@ const DRAWER_SECTIONS: DrawerSection[] = [
   {
     title: "",
     items: [
+      { href: "/dictionary", label: "Dictionary", icon: BookMarked },
       { href: "/teach", label: "Teacher Tools", icon: GraduationCap },
       { href: "/settings", label: "Settings", icon: Settings },
     ],

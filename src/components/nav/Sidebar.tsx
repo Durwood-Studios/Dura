@@ -18,6 +18,8 @@ import {
   Wrench,
   Compass,
   Signpost,
+  Sparkles,
+  Swords,
   Zap,
   Flame,
 } from "lucide-react";
@@ -28,39 +30,46 @@ import { getTotalXP } from "@/lib/db/xp";
 import { getCurrentStreak } from "@/lib/streak-manager";
 import { isStreakAlive } from "@/lib/streak";
 
-/** Navigation groups with visual separators between them */
+/** Navigation groups organised by journey stage */
 const NAV_GROUPS = [
+  {
+    label: "Get Started",
+    items: [
+      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { href: "/assess", label: "Skill Assessment", icon: Compass },
+      { href: "/tracks", label: "Career Tracks", icon: Signpost },
+    ],
+  },
   {
     label: "Learn",
     items: [
-      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-      { href: "/assess", label: "Assess", icon: Compass },
-      { href: "/paths", label: "Paths", icon: BookOpen },
-      { href: "/tracks", label: "Career Tracks", icon: Signpost },
-      { href: "/review", label: "Review", icon: Repeat },
+      { href: "/paths", label: "Curriculum", icon: BookOpen },
+      { href: "/howto", label: "How-To Guides", icon: Lightbulb },
+      { href: "/tutorials", label: "Tutorials", icon: Wrench },
+      { href: "/discover", label: "Discovery Center", icon: Sparkles },
     ],
   },
   {
     label: "Practice",
     items: [
-      { href: "/dictionary", label: "Dictionary", icon: BookMarked },
-      { href: "/sandbox", label: "Sandbox", icon: Code2 },
+      { href: "/review", label: "Flashcards", icon: Repeat },
+      { href: "/challenge", label: "Challenge", icon: Swords },
+      { href: "/sandbox", label: "Code Sandbox", icon: Code2 },
+    ],
+  },
+  {
+    label: "Progress",
+    items: [
+      { href: "/stats", label: "Statistics", icon: BarChart3 },
       { href: "/goals", label: "Goals", icon: Target },
+      { href: "/verify", label: "Certificates", icon: ShieldCheck },
     ],
   },
   {
-    label: "Resources",
+    label: "",
     items: [
-      { href: "/stats", label: "Stats", icon: BarChart3 },
-      { href: "/howto", label: "How-To", icon: Lightbulb },
-      { href: "/tutorials", label: "Tutorials", icon: Wrench },
-    ],
-  },
-  {
-    label: "More",
-    items: [
-      { href: "/verify", label: "Verify", icon: ShieldCheck },
-      { href: "/teach", label: "Teach", icon: GraduationCap },
+      { href: "/dictionary", label: "Dictionary", icon: BookMarked },
+      { href: "/teach", label: "Teacher Tools", icon: GraduationCap },
       { href: "/settings", label: "Settings", icon: Settings },
     ],
   },
@@ -114,9 +123,11 @@ export function Sidebar(): React.ReactElement {
         {NAV_GROUPS.map((group, groupIdx) => (
           <div key={group.label}>
             {groupIdx > 0 && <div className="dura-divider mx-2 my-2.5" />}
-            <span className="mb-1 block px-3 pt-1 text-[10px] font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
-              {group.label}
-            </span>
+            {group.label && (
+              <span className="mb-1 block px-3 pt-1 text-[10px] font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+                {group.label}
+              </span>
+            )}
             {group.items.map(({ href, label, icon: Icon }) => {
               const active = pathname === href || pathname.startsWith(href + "/");
               return (
