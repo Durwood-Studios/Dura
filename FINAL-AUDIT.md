@@ -1,8 +1,8 @@
 # DURA Final Pre-Supabase Audit
 
-> Generated: April 15, 2026
-> Commit: ~180 on main
-> Build: 532+ static pages, zero errors
+> Last updated: April 15, 2026
+> Commits: 220+ on main
+> Build: 551+ static pages, zero errors
 
 ---
 
@@ -72,7 +72,7 @@
 | Lessons                     | 406   | ~406   | PASS                                       |
 | Dictionary terms            | 500   | 500+   | PASS                                       |
 | How-to guides               | 35    | 25-35  | PASS                                       |
-| Tutorials                   | 20    | 15-20  | PASS                                       |
+| Tutorials                   | 100   | 50-100 | PASS                                       |
 | Questions                   | 514   | 500+   | PASS                                       |
 | Duplicate slugs             | 0     | 0      | PASS                                       |
 | Lessons without interactive | 15    | <20    | P2 — acceptable for intro/overview lessons |

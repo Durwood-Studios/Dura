@@ -12,7 +12,7 @@
 
 ## Vision
 
-DURA is an open-source, offline-capable learning platform that takes anyone from absolute zero to CTO-ready through mastery-gated, standards-backed engineering education.
+DURA is an open-source, offline-capable learning platform that takes anyone from absolute zero to engineering leadership through mastery-gated, standards-backed engineering education.
 
 It does not promise shortcuts. It provides the means — verified through hardened skills testing — for those willing to do the work.
 
