@@ -4,21 +4,16 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { Menu, X } from "lucide-react";
 
-interface NavLink {
-  href: string;
-  label: string;
-}
-
-const LINKS: ReadonlyArray<NavLink> = [
-  { href: "/paths", label: "Paths" },
-  { href: "/dictionary", label: "Dictionary" },
+const LINKS = [
   { href: "/about", label: "About" },
-];
+  { href: "/open-source", label: "Open Source" },
+  { href: "/install", label: "Install" },
+  { href: "/tracks", label: "Career Tracks" },
+] as const;
 
 export function Nav(): React.ReactElement {
   const [isOpen, setIsOpen] = useState(false);
 
-  // Lock body scroll while the mobile menu is open
   useEffect(() => {
     if (isOpen) {
       const original = document.body.style.overflow;
@@ -29,7 +24,6 @@ export function Nav(): React.ReactElement {
     }
   }, [isOpen]);
 
-  // Close menu on Escape
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent): void => {
@@ -40,75 +34,73 @@ export function Nav(): React.ReactElement {
   }, [isOpen]);
 
   return (
-    <header className="fixed inset-x-0 top-0 z-50 border-b border-[#E5E5E5]/60 bg-[#FAFAFA]/80 backdrop-blur-md">
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-6">
+    <header className="fixed inset-x-0 top-0 z-50 border-b border-[#E5E5E5]/60 bg-[#FAFAFA]/80 backdrop-blur-md dark:border-white/5 dark:bg-[#08080d]/80">
+      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
         <Link
           href="/"
-          className="text-lg font-semibold tracking-tight text-[#171717]"
+          className="bg-gradient-to-r from-[#10B981] to-[#06B6D4] bg-clip-text text-lg font-semibold tracking-tight text-transparent"
           onClick={() => setIsOpen(false)}
         >
           DURA
         </Link>
 
-        <nav className="hidden items-center gap-8 text-sm text-[#525252] sm:flex">
+        {/* Desktop links */}
+        <nav className="hidden items-center gap-6 text-sm text-[#525252] sm:flex dark:text-[#a0a0a8]">
           {LINKS.map((link) => (
             <Link
               key={link.href}
               href={link.href}
-              className="transition-colors hover:text-[#171717]"
-            >
-              {link.label}
-            </Link>
-          ))}
-        </nav>
-
-        <div className="flex items-center gap-2">
-          <Link
-            href="/paths"
-            className="hidden h-9 items-center justify-center rounded-lg bg-[#10B981] px-4 text-sm font-medium text-white transition-all hover:bg-[#059669] sm:inline-flex"
-          >
-            Start
-          </Link>
-          <button
-            type="button"
-            aria-label={isOpen ? "Close menu" : "Open menu"}
-            aria-expanded={isOpen}
-            aria-controls="mobile-nav-panel"
-            onClick={() => setIsOpen((v) => !v)}
-            className="inline-flex h-12 w-12 items-center justify-center rounded-lg text-[#171717] transition-colors hover:bg-[#F0F0F0] sm:hidden"
-          >
-            {isOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-          </button>
-        </div>
-      </div>
-
-      {/* Mobile menu panel */}
-      <div
-        id="mobile-nav-panel"
-        className={`overflow-hidden border-t border-[#E5E5E5]/60 bg-[#FAFAFA] transition-[max-height,opacity] duration-300 ease-out sm:hidden ${
-          isOpen ? "max-h-96 opacity-100" : "pointer-events-none max-h-0 opacity-0"
-        }`}
-      >
-        <nav className="flex flex-col gap-1 px-6 py-4">
-          {LINKS.map((link) => (
-            <Link
-              key={link.href}
-              href={link.href}
-              onClick={() => setIsOpen(false)}
-              className="flex h-12 items-center rounded-lg px-3 text-base text-[#525252] transition-colors hover:bg-white hover:text-[#171717]"
+              className="transition-colors hover:text-[#171717] dark:hover:text-white"
             >
               {link.label}
             </Link>
           ))}
           <Link
-            href="/paths"
-            onClick={() => setIsOpen(false)}
-            className="mt-2 flex h-12 items-center justify-center rounded-lg bg-[#10B981] px-4 text-base font-medium text-white transition-all hover:bg-[#059669]"
+            href="/dashboard"
+            className="inline-flex h-9 items-center justify-center rounded-lg bg-[#10B981] px-5 text-sm font-medium text-white transition hover:bg-[#059669]"
           >
             Start Learning
           </Link>
         </nav>
+
+        {/* Mobile hamburger */}
+        <button
+          type="button"
+          aria-label={isOpen ? "Close menu" : "Open menu"}
+          aria-expanded={isOpen}
+          onClick={() => setIsOpen((v) => !v)}
+          className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-[#171717] transition hover:bg-[#F0F0F0] sm:hidden dark:text-white dark:hover:bg-white/10"
+        >
+          {isOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+        </button>
       </div>
+
+      {/* Mobile menu — clean, vertical, no redundancy */}
+      {isOpen && (
+        <div className="border-t border-[#E5E5E5]/60 bg-[#FAFAFA] sm:hidden dark:border-white/5 dark:bg-[#08080d]">
+          <nav className="flex flex-col px-6 py-4">
+            {LINKS.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                onClick={() => setIsOpen(false)}
+                className="flex h-12 items-center text-base text-[#525252] transition-colors hover:text-[#171717] dark:text-[#a0a0a8] dark:hover:text-white"
+              >
+                {link.label}
+              </Link>
+            ))}
+            <div className="mt-3 border-t border-[#E5E5E5]/60 pt-4 dark:border-white/5">
+              <Link
+                href="/dashboard"
+                onClick={() => setIsOpen(false)}
+                className="flex h-12 items-center justify-center rounded-lg bg-[#10B981] text-base font-medium text-white transition hover:bg-[#059669]"
+              >
+                Start Learning
+              </Link>
+            </div>
+          </nav>
+        </div>
+      )}
     </header>
   );
 }
