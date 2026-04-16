@@ -65,6 +65,12 @@ export function Footer(): React.ReactElement {
             Open Source
           </Link>
           <Link
+            href="/install"
+            className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
+          >
+            Install App
+          </Link>
+          <Link
             href="/privacy"
             className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
           >
