@@ -3,7 +3,24 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
-import { X, LayoutDashboard, BookOpen, Repeat, BookMarked, BarChart3 } from "lucide-react";
+import {
+  X,
+  LayoutDashboard,
+  BookOpen,
+  Repeat,
+  BookMarked,
+  BarChart3,
+  Compass,
+  Code2,
+  Target,
+  ShieldCheck,
+  GraduationCap,
+  Settings,
+  Lightbulb,
+  Wrench,
+  Swords,
+  Signpost,
+} from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
 import { cn } from "@/lib/utils";
@@ -52,48 +69,56 @@ export function MobileBottomTabs(): React.ReactElement {
   );
 }
 
-interface DrawerLink {
+interface DrawerItem {
   href: string;
   label: string;
+  icon: React.ComponentType<{ className?: string }>;
 }
 
-interface DrawerGroup {
-  section: string;
-  links: DrawerLink[];
+interface DrawerSection {
+  title: string;
+  items: DrawerItem[];
 }
 
-const DRAWER_GROUPS: DrawerGroup[] = [
+const DRAWER_SECTIONS: DrawerSection[] = [
   {
-    section: "Learn",
-    links: [
-      { href: "/dashboard", label: "Dashboard" },
-      { href: "/paths", label: "Paths" },
-      { href: "/howto", label: "How-To" },
-      { href: "/tutorials", label: "Tutorials" },
+    title: "Learn",
+    items: [
+      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { href: "/paths", label: "Curriculum", icon: BookOpen },
+      { href: "/tracks", label: "Career Tracks", icon: Signpost },
+      { href: "/assess", label: "Skill Assessment", icon: Compass },
     ],
   },
   {
-    section: "Practice",
-    links: [
-      { href: "/review", label: "Review" },
-      { href: "/challenge", label: "Challenge" },
-      { href: "/sandbox", label: "Sandbox" },
+    title: "Practice",
+    items: [
+      { href: "/review", label: "Flashcards", icon: Repeat },
+      { href: "/challenge", label: "Challenge Mode", icon: Swords },
+      { href: "/sandbox", label: "Code Sandbox", icon: Code2 },
     ],
   },
   {
-    section: "Reference",
-    links: [
-      { href: "/dictionary", label: "Dictionary" },
-      { href: "/stats", label: "Stats" },
-      { href: "/goals", label: "Goals" },
+    title: "Resources",
+    items: [
+      { href: "/dictionary", label: "Dictionary", icon: BookMarked },
+      { href: "/howto", label: "How-To Guides", icon: Lightbulb },
+      { href: "/tutorials", label: "Tutorials", icon: Wrench },
     ],
   },
   {
-    section: "More",
-    links: [
-      { href: "/verify", label: "Verify" },
-      { href: "/teach", label: "Teach" },
-      { href: "/settings", label: "Settings" },
+    title: "Progress",
+    items: [
+      { href: "/stats", label: "Statistics", icon: BarChart3 },
+      { href: "/goals", label: "Goals", icon: Target },
+      { href: "/verify", label: "Certificates", icon: ShieldCheck },
+    ],
+  },
+  {
+    title: "",
+    items: [
+      { href: "/teach", label: "Teacher Tools", icon: GraduationCap },
+      { href: "/settings", label: "Settings", icon: Settings },
     ],
   },
 ];
@@ -126,9 +151,15 @@ export function MobileDrawer(): React.ReactElement | null {
         onClick={() => close(false)}
         className="absolute inset-0 bg-black/40"
       />
-      <div className="absolute inset-y-0 left-0 flex w-72 flex-col bg-[var(--color-bg-surface)] px-4 py-4 shadow-xl">
-        <div className="mb-4 flex items-center justify-between">
-          <span className="text-xl font-semibold">DURA</span>
+      <div
+        className="absolute inset-y-0 left-0 flex w-72 flex-col bg-[var(--color-bg-surface)] shadow-xl"
+        style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4">
+          <span className="bg-gradient-to-r from-[#10B981] to-[#06B6D4] bg-clip-text text-xl font-semibold text-transparent">
+            DURA
+          </span>
           <button
             type="button"
             onClick={() => close(false)}
@@ -138,14 +169,20 @@ export function MobileDrawer(): React.ReactElement | null {
             <X className="h-5 w-5" />
           </button>
         </div>
-        <nav className="flex flex-col gap-1 overflow-y-auto">
-          {DRAWER_GROUPS.map((group, gi) => (
-            <div key={group.section}>
-              {gi > 0 && <div className="mx-3 my-2 border-t border-[var(--color-border)]" />}
-              <p className="px-3 pt-3 pb-1 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
-                {group.section}
-              </p>
-              {group.links.map(({ href, label }) => {
+
+        {/* Navigation */}
+        <nav className="flex-1 overflow-y-auto px-3 pb-4">
+          {DRAWER_SECTIONS.map((section, si) => (
+            <div key={section.title || si} className="mb-1">
+              {section.title && (
+                <p className="mt-4 mb-1 px-3 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+                  {section.title}
+                </p>
+              )}
+              {!section.title && si > 0 && (
+                <div className="mx-3 my-3 border-t border-[var(--color-border)]" />
+              )}
+              {section.items.map(({ href, label, icon: Icon }) => {
                 const active = pathname === href || pathname.startsWith(href + "/");
                 return (
                   <Link
@@ -153,19 +190,36 @@ export function MobileDrawer(): React.ReactElement | null {
                     href={href}
                     onClick={() => close(false)}
                     className={cn(
-                      "rounded-lg px-3 py-2 text-sm font-medium transition",
+                      "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition",
                       active
-                        ? "border-l-2 border-l-emerald-500 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                        ? "bg-emerald-500/10 font-medium text-emerald-600 dark:text-emerald-400"
                         : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
                     )}
                   >
+                    <Icon
+                      className={cn(
+                        "h-4 w-4 shrink-0",
+                        active ? "text-emerald-500" : "text-[var(--color-text-muted)]"
+                      )}
+                      aria-hidden
+                    />
                     {label}
+                    {href === "/review" && (
+                      <ReviewBadge className="ml-auto h-5 min-w-[20px] text-[10px]" />
+                    )}
                   </Link>
                 );
               })}
             </div>
           ))}
         </nav>
+
+        {/* Footer */}
+        <div className="border-t border-[var(--color-border)] px-5 py-3">
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            Free forever. Offline-first. Open source.
+          </p>
+        </div>
       </div>
     </div>
   );
