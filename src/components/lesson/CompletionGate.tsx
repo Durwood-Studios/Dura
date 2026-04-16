@@ -24,6 +24,8 @@ interface CompletionGateProps {
   hasQuiz?: boolean;
   nextHref?: string;
   nextTitle?: string;
+  /** Vocabulary terms from the lesson frontmatter. Shown on completion. */
+  vocabulary?: string[];
 }
 
 const SCROLL_REQUIRED = 85;
@@ -31,24 +33,24 @@ const TIME_REQUIRED_RATIO = 0.7;
 const XP_TWEEN_MS = 1000;
 
 const MILESTONE_MESSAGES: Record<number, string> = {
-  1: "Your first lesson. The hardest step is done.",
-  5: "Five down. You're finding your rhythm.",
-  10: "Double digits. Solid foundation building.",
-  25: "25 lessons in. You're not dabbling anymore — you're learning.",
-  50: "50 lessons. The fundamentals are becoming second nature.",
-  100: "100 lessons. Look how far you've come.",
-  200: "200 lessons. Real, compounding knowledge.",
-  300: "300 lessons. The depth of understanding shows.",
-  400: "400 lessons. The finish line is in sight.",
+  1: "First lesson complete. You know things now that you didn't an hour ago.",
+  5: "Five lessons. The concepts are starting to connect.",
+  10: "Ten lessons in. Your vocabulary has grown.",
+  25: "25 lessons. These ideas are yours now.",
+  50: "50 lessons. You can explain things you couldn't before.",
+  100: "100 lessons. The foundation is real.",
+  200: "200 lessons. You're reading code differently now.",
+  300: "300 lessons. The patterns are becoming intuitive.",
+  400: "400 lessons. Nearly the full picture.",
 };
 
 const DEFAULT_MESSAGES = [
-  "Done. On to the next.",
-  "Progress, at your own pace.",
-  "Another piece of the foundation.",
-  "Solid work.",
-  "Knowledge compounds.",
-  "One step further.",
+  "Lesson complete.",
+  "New knowledge, locked in.",
+  "Another concept understood.",
+  "That's one more thing you can build with.",
+  "Filed away. It'll connect to something later.",
+  "Done. The next one builds on this.",
 ];
 
 /** Pick a milestone or rotating encouragement message. */
@@ -82,6 +84,7 @@ export function CompletionGate({
   hasQuiz = true,
   nextHref,
   nextTitle,
+  vocabulary = [],
 }: CompletionGateProps): React.ReactElement {
   const scrollPercent = useProgressStore((s) => s.scrollPercent);
   const timeSpentMs = useProgressStore((s) => s.timeSpentMs);
@@ -183,7 +186,7 @@ export function CompletionGate({
     const shareUrl = current
       ? `${SITE_URL}/paths/${current.phaseId}/${current.moduleId}/${current.lessonId}`
       : SITE_URL;
-    const shareText = `I just completed "${lessonTitle}" on DURA 🧠`;
+    const shareText = `Just learned about ${lessonTitle} on DURA`;
 
     return (
       <section className="my-12 overflow-hidden rounded-2xl border border-emerald-200 bg-[var(--color-bg-accent)] p-8 text-center">
@@ -203,9 +206,27 @@ export function CompletionGate({
             {completionMessage}
           </p>
         )}
+        {vocabulary.length > 0 && (
+          <div
+            className="mx-auto mt-4 max-w-md opacity-0"
+            style={{ animation: "celebrate-in 400ms ease-out 0.55s forwards" }}
+          >
+            <p className="mb-2 text-xs font-medium text-[var(--color-text-muted)]">You now know</p>
+            <div className="flex flex-wrap justify-center gap-1.5">
+              {vocabulary.slice(0, 6).map((term) => (
+                <span
+                  key={term}
+                  className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
+                >
+                  {term}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
         <p
-          className="mt-2 font-mono text-2xl font-semibold text-emerald-600 opacity-0"
-          style={{ animation: "celebrate-in 400ms ease-out 0.6s forwards" }}
+          className="mt-3 font-mono text-2xl font-semibold text-emerald-600 opacity-0"
+          style={{ animation: "celebrate-in 400ms ease-out 0.7s forwards" }}
         >
           +{xp} XP
         </p>

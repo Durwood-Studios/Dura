@@ -73,6 +73,7 @@ export async function LessonReader({
         hasQuiz={hasQuiz}
         nextHref={next?.href}
         nextTitle={next?.title}
+        vocabulary={meta.vocabulary}
       />
     </article>
   );
