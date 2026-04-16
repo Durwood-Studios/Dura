@@ -47,8 +47,9 @@ export function CertificateList(): React.ReactElement {
         <h2 className="mt-4 text-xl font-semibold text-[var(--color-text-primary)]">
           No certificates yet
         </h2>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          Complete a phase verification test to earn your first certificate.
+        <p className="mx-auto mt-2 max-w-sm text-sm text-[var(--color-text-secondary)]">
+          Certificates are earned by passing phase verification tests. Each one is cryptographically
+          verified and shareable. Complete your first phase to earn one.
         </p>
         <Link
           href="/paths/0"

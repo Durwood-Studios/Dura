@@ -21,23 +21,31 @@ export default function RootError({
         Something went wrong
       </h1>
       <p className="max-w-md text-[var(--color-text-secondary)]">
-        We hit an unexpected error. Your progress is safe — it&apos;s stored locally on your device.
+        We hit an unexpected error. Your progress is safe — everything is stored locally on your
+        device.
       </p>
       <div className="flex gap-3">
         <button
           onClick={reset}
-          className="rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600"
+          className="rounded-lg bg-emerald-500 px-6 py-3 text-sm font-semibold text-white shadow-md transition hover:bg-emerald-600"
         >
           Try again
         </button>
         <Link
           href="/dashboard"
-          className="rounded-lg border border-[var(--color-border)] px-5 py-2.5 text-sm font-semibold text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-surface)]"
+          className="rounded-lg border border-[var(--color-border)] px-6 py-3 text-sm font-semibold text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-surface)]"
         >
           Back to Dashboard
         </Link>
       </div>
-      <p className="mt-8 font-mono text-[10px] text-[var(--color-text-muted)]">DURA</p>
+      <p className="mt-6 text-xs text-[var(--color-text-muted)]">
+        If this keeps happening,{" "}
+        <Link href="/settings" className="text-emerald-500 hover:underline">
+          export your data from Settings
+        </Link>{" "}
+        as a backup.
+      </p>
+      <p className="mt-4 font-mono text-[10px] text-[var(--color-text-muted)]">DURA</p>
     </div>
   );
 }

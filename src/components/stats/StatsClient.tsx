@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Trophy, BookOpen, Clock, Award } from "lucide-react";
+import Link from "next/link";
+import { Trophy, BookOpen, Clock, Award, Sparkles } from "lucide-react";
 import { getDB } from "@/lib/db";
 import { getTotalXP, getXPBySource } from "@/lib/db/xp";
 import { getAllCards } from "@/lib/db/flashcards";
@@ -123,6 +124,29 @@ export function StatsClient(): React.ReactElement {
         {Array.from({ length: 4 }, (_, i) => (
           <Skeleton key={i} className="h-28" />
         ))}
+      </div>
+    );
+  }
+
+  // Empty state — fresh user with no activity
+  const isEmpty = data.totalXp === 0 && data.completedCount === 0 && data.deckSize === 0;
+  if (isEmpty) {
+    return (
+      <div className="mx-auto max-w-lg rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-12 text-center">
+        <Sparkles className="mx-auto h-12 w-12 text-emerald-500" aria-hidden />
+        <h2 className="mt-4 text-xl font-semibold text-[var(--color-text-primary)]">
+          Your learning data lives here
+        </h2>
+        <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+          Complete your first lesson and watch this page come alive. Every lesson, flashcard review,
+          and assessment adds to your story.
+        </p>
+        <Link
+          href="/paths/0"
+          className="mt-6 inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600"
+        >
+          Start Phase 0
+        </Link>
       </div>
     );
   }

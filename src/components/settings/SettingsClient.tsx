@@ -1,8 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import Link from "next/link";
-import { Download, Trash2, AlertTriangle, Shield, Accessibility, Keyboard } from "lucide-react";
+import {
+  Download,
+  Trash2,
+  AlertTriangle,
+  Shield,
+  Accessibility,
+  Keyboard,
+  Check,
+} from "lucide-react";
 import { usePreferencesStore } from "@/stores/preferences";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
 import { clearAllData, exportAllData } from "@/lib/clearAllData";
@@ -38,6 +46,23 @@ export function SettingsClient(): React.ReactElement {
   const prefs = usePreferencesStore((s) => s.prefs);
   const update = usePreferencesStore((s) => s.update);
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const confirmSave = useCallback(() => {
+    setSaved(true);
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(() => setSaved(false), 1500);
+  }, []);
+
+  /** Wrap update calls to show the save indicator */
+  const save = useCallback(
+    (patch: Parameters<typeof update>[0]) => {
+      void update(patch);
+      confirmSave();
+    },
+    [update, confirmSave]
+  );
 
   const handleExport = async (): Promise<void> => {
     const json = await exportAllData();
@@ -69,7 +94,7 @@ export function SettingsClient(): React.ReactElement {
               <button
                 key={f.value}
                 type="button"
-                onClick={() => void update({ fontSize: f.value })}
+                onClick={() => save({ fontSize: f.value })}
                 className={cn(
                   "rounded-md px-2.5 py-1.5 text-xs font-medium transition",
                   prefs.fontSize === f.value
@@ -87,13 +112,13 @@ export function SettingsClient(): React.ReactElement {
       {/* ── Accessibility ──────────────────────────────────────────── */}
       <Section title="Accessibility" icon={<Accessibility className="h-4 w-4 text-emerald-500" />}>
         <SettingRow label="Reduced motion" hint="Disable animations site-wide">
-          <Toggle value={prefs.reducedMotion} onChange={(v) => void update({ reducedMotion: v })} />
+          <Toggle value={prefs.reducedMotion} onChange={(v) => save({ reducedMotion: v })} />
         </SettingRow>
         <SettingRow label="High contrast" hint="Increase text contrast and border visibility">
-          <Toggle value={prefs.highContrast} onChange={(v) => void update({ highContrast: v })} />
+          <Toggle value={prefs.highContrast} onChange={(v) => save({ highContrast: v })} />
         </SettingRow>
         <SettingRow label="Dyslexia-friendly font" hint="Switch to OpenDyslexic for body text">
-          <Toggle value={prefs.dyslexiaFont} onChange={(v) => void update({ dyslexiaFont: v })} />
+          <Toggle value={prefs.dyslexiaFont} onChange={(v) => save({ dyslexiaFont: v })} />
         </SettingRow>
       </Section>
 
@@ -106,7 +131,7 @@ export function SettingsClient(): React.ReactElement {
                 key={m.value}
                 type="button"
                 onClick={() => {
-                  void update({ studyMode: m.value });
+                  save({ studyMode: m.value });
                   void track("study_mode_changed", { to: m.value });
                 }}
                 className={cn(
@@ -132,21 +157,21 @@ export function SettingsClient(): React.ReactElement {
             onChange={(e) => {
               const val = Number(e.target.value);
               if (!Number.isNaN(val) && val >= 5 && val <= 240) {
-                void update({ dailyGoalMinutes: val });
+                save({ dailyGoalMinutes: val });
               }
             }}
             className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-sm text-[var(--color-text-primary)]"
           />
         </SettingRow>
         <SettingRow label="Strict gating" hint="Require mastery gates to advance between modules">
-          <Toggle value={prefs.strictGating} onChange={(v) => void update({ strictGating: v })} />
+          <Toggle value={prefs.strictGating} onChange={(v) => save({ strictGating: v })} />
         </SettingRow>
       </Section>
 
       {/* ── Notifications ──────────────────────────────────────────── */}
       <Section title="Notifications">
         <SettingRow label="Sound effects" hint="Completion chimes and timer pings">
-          <Toggle value={prefs.soundEnabled} onChange={(v) => void update({ soundEnabled: v })} />
+          <Toggle value={prefs.soundEnabled} onChange={(v) => save({ soundEnabled: v })} />
         </SettingRow>
         <p className="text-[11px] text-[var(--color-text-muted)]">
           Review and streak reminders will arrive in a future update.
@@ -249,6 +274,14 @@ export function SettingsClient(): React.ReactElement {
           </p>
         </div>
       </Section>
+
+      {/* ── Save confirmation toast ──────────────────────────────────── */}
+      {saved && (
+        <div className="fixed bottom-6 left-1/2 z-40 flex -translate-x-1/2 animate-in items-center gap-1.5 rounded-full bg-emerald-500 px-4 py-2 text-sm font-medium text-white shadow-lg duration-200 fade-in">
+          <Check className="h-3.5 w-3.5" />
+          Saved
+        </div>
+      )}
 
       {/* ── Confirm clear modal ────────────────────────────────────── */}
       {confirmingClear && (

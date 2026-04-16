@@ -270,16 +270,17 @@ export function PhaseTest({
 
   if (status === "cooldown") {
     return (
-      <section className="my-8 rounded-2xl border border-amber-200 bg-amber-50/40 p-6">
+      <section className="my-8 rounded-2xl border border-amber-200 bg-amber-50/40 p-6 dark:border-amber-900 dark:bg-amber-950/20">
         <div className="flex items-start gap-3">
           <Clock className="mt-1 h-5 w-5 text-amber-600" aria-hidden />
           <div className="flex-1">
-            <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">
-              Cooldown active
-            </h3>
+            <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">Review time</h3>
             <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-              You can retake the verification test in{" "}
+              Use this time to revisit the modules you found challenging. You can retake in{" "}
               <span className="font-mono">{cooldownRemaining}</span>.
+            </p>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              The concepts aren&apos;t going anywhere — take it at your pace.
             </p>
           </div>
         </div>
@@ -385,22 +386,44 @@ export function PhaseTest({
 
   if (status === "results" && resultRecord) {
     const passed = resultRecord.score >= ASSESSMENT_PASSING_SCORE;
+    const pct = Math.round(resultRecord.score * 100);
+    const isClose = pct >= 70 && pct < 80;
+    const isFar = pct < 50;
+
+    // Identify strong and weak areas from question tags
+    const questionMap = new Map(questions.map((q) => [q.id, q]));
+    const tagStats = new Map<string, { correct: number; total: number }>();
+    for (const r of resultRecord.results) {
+      for (const tag of questionMap.get(r.questionId)?.tags ?? []) {
+        const cur = tagStats.get(tag) ?? { correct: 0, total: 0 };
+        cur.total++;
+        if (r.correct) cur.correct++;
+        tagStats.set(tag, cur);
+      }
+    }
+    const strongTags = Array.from(tagStats.entries())
+      .filter(([, s]) => s.total > 0 && s.correct / s.total >= 0.8)
+      .map(([tag]) => tag);
+    const weakTags = Array.from(tagStats.entries())
+      .filter(([, s]) => s.total > 0 && s.correct / s.total < 0.6)
+      .map(([tag]) => tag);
+
     return (
       <section
         className={cn(
           "relative my-8 overflow-hidden rounded-2xl border p-6 text-center",
           passed
             ? "border-emerald-200 bg-[var(--color-bg-accent)]"
-            : "border-rose-200 bg-rose-50/40"
+            : "border-amber-200 bg-amber-50/30 dark:border-amber-900 dark:bg-amber-950/20"
         )}
       >
         <Confetti active={passed} />
         <h3 className="text-2xl font-semibold text-[var(--color-text-primary)]">
-          {passed ? `${phaseTitle} — Verified` : "Not quite there"}
+          {passed ? `${phaseTitle} — Verified` : "Not quite — keep going"}
         </h3>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          {resultRecord.correctCount}/{questions.length} correct ·{" "}
-          {Math.round(resultRecord.score * 100)}%
+          {resultRecord.correctCount}/{questions.length} correct · {pct}%
+          {!passed && " — you need 80% to verify this phase."}
         </p>
         {passed && certificate ? (
           <Link
@@ -410,9 +433,55 @@ export function PhaseTest({
             View certificate
           </Link>
         ) : (
-          <p className="mt-4 text-sm text-rose-700">
-            You need 80% to verify this phase. Try again in 24 hours.
-          </p>
+          <div className="mx-auto mt-4 max-w-md text-left">
+            {strongTags.length > 0 && (
+              <div className="mb-3">
+                <p className="text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                  Strong areas
+                </p>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {strongTags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {weakTags.length > 0 && (
+              <div className="mb-3">
+                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                  Needs review
+                </p>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {weakTags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {isClose && (
+              <p className="text-sm font-medium text-amber-700 dark:text-amber-400">
+                Almost there — a few concepts to solidify.
+              </p>
+            )}
+            {isFar && (
+              <p className="text-sm text-[var(--color-text-secondary)]">
+                This phase covers a lot of ground. Review the modules you found challenging.
+              </p>
+            )}
+            <p className="mt-2 text-center text-xs text-[var(--color-text-muted)]">
+              Take some time to review, then try again. The concepts aren&apos;t going anywhere.
+            </p>
+          </div>
         )}
       </section>
     );

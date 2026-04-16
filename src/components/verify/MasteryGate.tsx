@@ -246,15 +246,13 @@ export function MasteryGate({
 
   if (status === "cooldown") {
     return (
-      <section className="my-8 rounded-2xl border border-amber-200 bg-amber-50/40 p-6">
+      <section className="my-8 rounded-2xl border border-amber-200 bg-amber-50/40 p-6 dark:border-amber-900 dark:bg-amber-950/20">
         <div className="flex items-start gap-3">
           <Clock className="mt-1 h-5 w-5 text-amber-600" aria-hidden />
           <div className="flex-1">
-            <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">
-              Cooldown active
-            </h3>
+            <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">Review time</h3>
             <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-              You can retake this assessment in{" "}
+              Use this time to revisit the concepts you missed. You can retake in{" "}
               <span className="font-mono">{cooldownRemaining}</span>.
             </p>
             {latestResult && (
@@ -355,26 +353,68 @@ export function MasteryGate({
 
   if (status === "results" && resultRecord) {
     const passed = resultRecord.score >= ASSESSMENT_PASSING_SCORE;
+    const pct = Math.round(resultRecord.score * 100);
+    const isClose = pct >= 70 && pct < 80;
+    const isFar = pct < 50;
+
+    // Collect tags from incorrect answers for review guidance
+    const questionMap = new Map(questions.map((q) => [q.id, q]));
+    const wrongTags = resultRecord.results
+      .filter((r) => !r.correct)
+      .flatMap((r) => questionMap.get(r.questionId)?.tags ?? []);
+    const uniqueWrongTags = Array.from(new Set(wrongTags));
+
     return (
       <section
         className={cn(
           "my-8 rounded-2xl border p-6",
           passed
             ? "border-emerald-200 bg-[var(--color-bg-accent)]"
-            : "border-rose-200 bg-rose-50/40"
+            : "border-amber-200 bg-amber-50/30 dark:border-amber-900 dark:bg-amber-950/20"
         )}
       >
         <h3 className="text-2xl font-semibold text-[var(--color-text-primary)]">
-          {passed ? "Module Unlocked 🏆" : "Almost there"}
+          {passed ? "Module Unlocked" : "Not quite — but that's okay"}
         </h3>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          {resultRecord.correctCount}/{questions.length} correct ·{" "}
-          {Math.round(resultRecord.score * 100)}%
+          You scored {pct}%. {!passed && `You need 80% to advance.`}
         </p>
-        {!passed && (
-          <p className="mt-2 text-sm text-rose-700">
-            You need 80% to advance. Try again in 24 hours.
+        {passed && (
+          <p className="mt-2 text-sm text-emerald-700 dark:text-emerald-400">
+            {resultRecord.correctCount}/{questions.length} correct. Well done.
           </p>
+        )}
+        {!passed && (
+          <div className="mt-3 flex flex-col gap-2">
+            <p className="text-sm text-[var(--color-text-secondary)]">
+              That&apos;s not failure — it&apos;s feedback. Here&apos;s what to focus on:
+            </p>
+            {uniqueWrongTags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {uniqueWrongTags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
+            {isClose && (
+              <p className="text-sm font-medium text-amber-700 dark:text-amber-400">
+                You&apos;re close. A review session would help.
+              </p>
+            )}
+            {isFar && (
+              <p className="text-sm text-[var(--color-text-secondary)]">
+                Consider revisiting the lessons in this module before retrying.
+              </p>
+            )}
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              Take some time to review, then try again. The concepts aren&apos;t going anywhere.
+            </p>
+          </div>
         )}
         <button
           type="button"

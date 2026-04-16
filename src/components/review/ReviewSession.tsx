@@ -58,16 +58,26 @@ export function ReviewSession(): React.ReactElement {
         <h2 className="mt-4 text-2xl font-semibold text-[var(--color-text-primary)]">
           All caught up
         </h2>
-        <p className="mt-2 text-[var(--color-text-secondary)]">
-          {nextDue
-            ? `Your next review is ${formatRelative(nextDue)}.`
-            : "You don't have any flashcards yet — add some from a lesson."}
-        </p>
+        {nextDue ? (
+          <p className="mt-2 text-[var(--color-text-secondary)]">
+            Your next review is {formatRelative(nextDue)}. Come back then to keep your memory fresh.
+          </p>
+        ) : (
+          <>
+            <p className="mt-2 text-[var(--color-text-secondary)]">
+              Flashcards are created automatically as you complete lessons. Each lesson adds
+              vocabulary to your review deck.
+            </p>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+              Your first cards will be ready to review the day after your first lesson.
+            </p>
+          </>
+        )}
         <Link
           href="/paths/0/0-1/01"
           className="mt-6 inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600"
         >
-          Add cards from a lesson
+          {nextDue ? "Keep learning" : "Start your first lesson"}
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>
