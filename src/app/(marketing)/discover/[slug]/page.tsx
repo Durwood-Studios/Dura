@@ -144,6 +144,29 @@ const ROOMS: Record<string, Room> = {
       },
     ],
   },
+  "first-steps": {
+    name: "First Steps",
+    tagline: "For the youngest explorers",
+    emoji: "\u{1F9F8}",
+    color: "#fb923c",
+    activities: [
+      {
+        slug: "shape-sorter",
+        name: "Shape Sorter",
+        description: "Sort the shapes by color.",
+      },
+      {
+        slug: "counting-blocks",
+        name: "Counting Blocks",
+        description: "Click the right number of blocks.",
+      },
+      {
+        slug: "color-mixer",
+        name: "Color Mixer",
+        description: "Mix colors with sliders.",
+      },
+    ],
+  },
 };
 
 const VALID_SLUGS = Object.keys(ROOMS);

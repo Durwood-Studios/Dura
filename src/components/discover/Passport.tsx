@@ -42,6 +42,12 @@ const ROOMS: Room[] = [
     color: "#34d399",
     activities: ["bug-detective", "logic-gates", "story-builder"],
   },
+  {
+    slug: "first-steps",
+    name: "First Steps",
+    color: "#fb923c",
+    activities: ["shape-sorter", "counting-blocks", "color-mixer"],
+  },
 ];
 
 const ALL_ACTIVITIES = ROOMS.flatMap((room) =>

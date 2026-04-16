@@ -60,6 +60,14 @@ const ROOMS: Room[] = [
     color: "#34d399",
     activityCount: 3,
   },
+  {
+    slug: "first-steps",
+    name: "First Steps",
+    tagline: "For the youngest explorers",
+    emoji: "\u{1F9F8}",
+    color: "#fb923c",
+    activityCount: 3,
+  },
 ];
 
 export default function DiscoverPage(): React.ReactElement {

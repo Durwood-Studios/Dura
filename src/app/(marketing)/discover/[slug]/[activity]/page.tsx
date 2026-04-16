@@ -199,6 +199,37 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
       { loading: () => <ActivitySkeleton /> }
     ),
   },
+
+  // First Steps room
+  "shape-sorter": {
+    title: "Shape Sorter",
+    description: "Sort the shapes by color.",
+    roomSlug: "first-steps",
+    roomName: "First Steps",
+    Component: dynamic(
+      () => import("@/components/discover/ShapeSorter").then((m) => m.ShapeSorter),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
+  "counting-blocks": {
+    title: "Counting Blocks",
+    description: "Click the right number of blocks.",
+    roomSlug: "first-steps",
+    roomName: "First Steps",
+    Component: dynamic(
+      () => import("@/components/discover/CountingBlocks").then((m) => m.CountingBlocks),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
+  "color-mixer": {
+    title: "Color Mixer",
+    description: "Mix colors with sliders.",
+    roomSlug: "first-steps",
+    roomName: "First Steps",
+    Component: dynamic(() => import("@/components/discover/ColorMixer").then((m) => m.ColorMixer), {
+      loading: () => <ActivitySkeleton />,
+    }),
+  },
 };
 
 /** Room-to-activities mapping for generateStaticParams. */
@@ -208,6 +239,7 @@ const ROOM_ACTIVITIES: Record<string, string[]> = {
   "internet-explorer": ["network-post-office", "dns-phonebook", "website-builder"],
   "pattern-factory": ["pattern-machine", "fractal-tree", "music-beats", "tile-designer"],
   "bug-lab": ["bug-detective", "logic-gates", "story-builder"],
+  "first-steps": ["shape-sorter", "counting-blocks", "color-mixer"],
 };
 
 /** Pre-render all room+activity combinations at build time. */
