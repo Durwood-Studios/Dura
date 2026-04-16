@@ -16,6 +16,7 @@ export interface Preferences {
   soundEnabled: boolean;
   dailyGoalMinutes: number;
   strictGating: boolean;
+  showStreak: boolean;
   streak: StreakState;
   updatedAt: number;
 }
@@ -31,6 +32,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   soundEnabled: true,
   dailyGoalMinutes: 20,
   strictGating: false,
+  showStreak: true,
   streak: INITIAL_STREAK,
   updatedAt: 0,
 };

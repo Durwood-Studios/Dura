@@ -166,6 +166,12 @@ export function SettingsClient(): React.ReactElement {
         <SettingRow label="Strict gating" hint="Require mastery gates to advance between modules">
           <Toggle value={prefs.strictGating} onChange={(v) => save({ strictGating: v })} />
         </SettingRow>
+        <SettingRow
+          label="Show streak counter"
+          hint="Turn off if streaks feel pressuring. Missing a day changes nothing about what you've learned."
+        >
+          <Toggle value={prefs.showStreak} onChange={(v) => save({ showStreak: v })} />
+        </SettingRow>
       </Section>
 
       {/* ── Notifications ──────────────────────────────────────────── */}

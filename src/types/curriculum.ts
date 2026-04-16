@@ -23,6 +23,15 @@ export interface LessonMeta {
   learningOutcomes?: string[];
   /** Lesson IDs that should be completed before this one. */
   prerequisites?: string[];
+  /**
+   * How a professional thinks about this concept. Shown on lessons
+   * at "evaluate" or "create" bloom level. Bridges the gap between
+   * knowing something and applying it in professional context.
+   */
+  professionalContext?: string;
+  /** Whether this lesson contains a threshold concept — an idea that
+   * permanently transforms how the learner thinks about the field. */
+  thresholdConcept?: boolean;
 }
 
 export interface Module {

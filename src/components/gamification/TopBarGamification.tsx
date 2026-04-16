@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { getTotalXP } from "@/lib/db/xp";
 import { levelFromXP } from "@/lib/xp";
 import { getCurrentStreak } from "@/lib/streak-manager";
+import { usePreferencesStore } from "@/stores/preferences";
 import { LevelBadge } from "@/components/gamification/LevelBadge";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 
@@ -14,6 +15,7 @@ import { StreakFlame } from "@/components/gamification/StreakFlame";
 export function TopBarGamification(): React.ReactElement {
   const [level, setLevel] = useState(0);
   const [streakDays, setStreakDays] = useState(0);
+  const showStreak = usePreferencesStore((s) => s.prefs.showStreak);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,10 +35,12 @@ export function TopBarGamification(): React.ReactElement {
 
   return (
     <div className="hidden items-center gap-3 text-xs sm:flex">
-      <span className="flex items-center gap-1 text-[var(--color-text-secondary)]">
-        <StreakFlame days={streakDays} />
-        <span className="font-mono">{streakDays}d</span>
-      </span>
+      {showStreak && (
+        <span className="flex items-center gap-1 text-[var(--color-text-secondary)]">
+          <StreakFlame days={streakDays} />
+          <span className="font-mono">{streakDays}d</span>
+        </span>
+      )}
       <LevelBadge level={level} size="sm" />
     </div>
   );

@@ -6,18 +6,22 @@ import { BookOpen, Repeat, ArrowRight, Clock, Flame, Zap, Trophy } from "lucide-
 import { getDB } from "@/lib/db";
 import { getAllCards, getDueCards } from "@/lib/db/flashcards";
 import { levelProgress } from "@/lib/xp";
-import { getTotalXP } from "@/lib/db/xp";
+import { getTotalXP, getAllXPEvents } from "@/lib/db/xp";
 import { isStreakAlive, type StreakState, INITIAL_STREAK } from "@/lib/streak";
 import { getCurrentStreak } from "@/lib/streak-manager";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { LevelBadge } from "@/components/gamification/LevelBadge";
+import { usePreferencesStore } from "@/stores/preferences";
 import { cn, formatMinutes } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { TOTAL_LESSONS, PHASES, getPhase } from "@/content/phases";
+import { POINT_TYPE_MAP } from "@/types/xp";
 import type { LessonProgress } from "@/types/curriculum";
 
 interface DashboardData {
   totalXp: number;
+  activityPoints: number;
+  masteryPoints: number;
   completedCount: number;
   inProgressCount: number;
   totalTimeMs: number;
@@ -36,6 +40,14 @@ async function loadDashboard(): Promise<DashboardData> {
     const completed = allProgress.filter((p) => p.completedAt !== null);
     const inProgress = allProgress.filter((p) => p.completedAt === null);
     const totalXp = await getTotalXP();
+    const xpEvents = await getAllXPEvents();
+    let activityPoints = 0;
+    let masteryPoints = 0;
+    for (const evt of xpEvents) {
+      const pt = POINT_TYPE_MAP[evt.source];
+      if (pt === "mp") masteryPoints += evt.amount;
+      else activityPoints += evt.amount;
+    }
     const totalTimeMs = allProgress.reduce((sum, p) => sum + p.timeSpentMs, 0);
     const streak = await getCurrentStreak();
     const due = await getDueCards();
@@ -68,6 +80,8 @@ async function loadDashboard(): Promise<DashboardData> {
 
     return {
       totalXp,
+      activityPoints,
+      masteryPoints,
       completedCount: completed.length,
       inProgressCount: inProgress.length,
       totalTimeMs,
@@ -82,6 +96,8 @@ async function loadDashboard(): Promise<DashboardData> {
     console.error("[dashboard] load failed", error);
     return {
       totalXp: 0,
+      activityPoints: 0,
+      masteryPoints: 0,
       completedCount: 0,
       inProgressCount: 0,
       totalTimeMs: 0,
@@ -125,6 +141,7 @@ const COMEBACK_STORAGE_KEY = "dura-comeback-dismissed";
 export function DashboardClient(): React.ReactElement {
   const [data, setData] = useState<DashboardData | null>(null);
   const [comebackDismissed, setComebackDismissed] = useState(false);
+  const showStreak = usePreferencesStore((s) => s.prefs.showStreak);
 
   useEffect(() => {
     void loadDashboard().then(setData);
@@ -259,21 +276,23 @@ export function DashboardClient(): React.ReactElement {
               </p>
             </div>
           </div>
-          <div className="ml-auto flex flex-col items-end gap-1">
-            {data.streak.current > 0 && (
-              <>
-                <div className="flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1.5 dark:bg-amber-500/10">
-                  <StreakFlame days={data.streak.current} />
-                  <span className="text-sm font-semibold text-amber-600 dark:text-amber-400">
-                    {data.streak.current} day streak
-                  </span>
-                </div>
-                {streakMessage && (
-                  <span className="text-xs text-[var(--color-text-muted)]">{streakMessage}</span>
-                )}
-              </>
-            )}
-          </div>
+          {showStreak && (
+            <div className="ml-auto flex flex-col items-end gap-1">
+              {data.streak.current > 0 && (
+                <>
+                  <div className="flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1.5 dark:bg-amber-500/10">
+                    <StreakFlame days={data.streak.current} />
+                    <span className="text-sm font-semibold text-amber-600 dark:text-amber-400">
+                      {data.streak.current} day streak
+                    </span>
+                  </div>
+                  {streakMessage && (
+                    <span className="text-xs text-[var(--color-text-muted)]">{streakMessage}</span>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -281,18 +300,27 @@ export function DashboardClient(): React.ReactElement {
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
           icon={<Zap className="h-4 w-4" />}
-          label="Total XP"
-          value={data.totalXp.toLocaleString()}
-          hint={`Level ${level.level} — ${level.percent}% to next`}
+          label="Activity (AP)"
+          value={data.activityPoints.toLocaleString()}
+          hint="Lessons, quizzes, flashcards, sandbox"
           accentColor="emerald"
         />
         <StatCard
-          icon={<Flame className="h-4 w-4" />}
-          label="Streak"
-          value={`${data.streak.current}d`}
-          hint={streakAlive ? "Keep it going!" : "Start today"}
-          accentColor="amber"
+          icon={<Trophy className="h-4 w-4" />}
+          label="Mastery (MP)"
+          value={data.masteryPoints.toLocaleString()}
+          hint="Mastery gates & verifications"
+          accentColor="purple"
         />
+        {showStreak && (
+          <StatCard
+            icon={<Flame className="h-4 w-4" />}
+            label="Streak"
+            value={`${data.streak.current}d`}
+            hint={streakAlive ? "Keep it going!" : "Start today"}
+            accentColor="amber"
+          />
+        )}
         <StatCard
           icon={<Clock className="h-4 w-4" />}
           label="Time spent"
@@ -300,14 +328,11 @@ export function DashboardClient(): React.ReactElement {
           hint={data.inProgressCount ? `${data.inProgressCount} in progress` : "Dedicated learner"}
           accentColor="cyan"
         />
-        <StatCard
-          icon={<Trophy className="h-4 w-4" />}
-          label="Lessons"
-          value={`${data.completedCount}`}
-          hint={`${data.completedCount} of ${TOTAL_LESSONS} completed`}
-          accentColor="purple"
-        />
       </div>
+      <p className="text-[11px] text-[var(--color-text-muted)]">
+        AP tracks your effort and consistency. MP tracks proven competence. Only MP appears on
+        certificates.
+      </p>
 
       {/* ── Overall progress ────────────────────────────────────────── */}
       <div className="dura-card p-5">

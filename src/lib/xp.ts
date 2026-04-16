@@ -1,22 +1,34 @@
 /**
- * XP and leveling.
+ * Dual point system: Activity Points (AP) + Mastery Points (MP).
  *
- * level = floor(sqrt(totalXp / 100))
- * Award constants per planning doc:
- *   lesson:           50
- *   quiz pass:        10
- *   flashcard rated:   5
- *   sandbox challenge: 25
+ * AP = effort and consistency (lessons, reviews, sandbox, quizzes)
+ * MP = verified competence (mastery gates, phase verifications, module completions)
+ *
+ * AP level = floor(sqrt(totalAP / 100))
+ * MP is a direct sum — no level curve. Higher MP = more proven skills.
+ *
+ * Both are shown on the dashboard. Only MP goes on certificates/portfolios.
  */
 
-export const XP_AWARDS = {
+/** Activity Point awards (effort). */
+export const AP_AWARDS = {
   lesson: 50,
   quiz: 10,
   flashcard: 5,
   sandbox: 25,
-  phaseComplete: 500,
+} as const;
+
+/** Mastery Point awards (proof). */
+export const MP_AWARDS = {
   moduleComplete: 100,
   verification: 250,
+  phaseComplete: 500,
+} as const;
+
+/** Combined for backward compatibility. */
+export const XP_AWARDS = {
+  ...AP_AWARDS,
+  ...MP_AWARDS,
 } as const;
 
 export type XPSource = keyof typeof XP_AWARDS;
