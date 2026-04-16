@@ -67,6 +67,7 @@ Run these after the core migrations above:
 - `010-realtime.sql` — Presence tracking and activity feed table with auto-triggers
 - `011-vectors.sql` — pgvector extension for semantic search across all content
 - `012-auth-metadata.sql` — Instant preferences sync via auth user metadata
+- `013-moat-features.sql` — Difficulty calibration, community annotations, research analytics views
 
 ## Free Tier Limits & Graceful Degradation
 

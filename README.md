@@ -15,24 +15,27 @@
 
 ---
 
-A free, open-source learning platform that takes anyone from absolute zero to engineering leadership through mastery-gated, standards-backed engineering education. 406 lessons across 10 phases, 500+ dictionary terms, 35 how-to guides, 100 project tutorials — all offline-capable, all free forever.
+A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 406 lessons, 100 project tutorials, 500+ dictionary terms, 20 interactive Discovery activities, 12 career tracks — all offline-capable, all free forever.
 
 ## Features
 
+- **Discovery Center** — 6 rooms, 20 interactive activities for young learners (ages 5-12), zero data collection
 - **406 lessons** across 10 phases — Digital Literacy to CTO Track
+- **100 project tutorials** — build real, deployable artifacts across 12 career tracks
+- **35 how-to guides** — practical, step-by-step problem-solving
+- **12 career tracks** — Frontend, Backend, AI/ML, Security, DevOps, and 7 more with skill graphs
 - **Mastery-gated** — advance when you prove it, not when time passes
+- **Dual point system** — Activity Points (effort) and Mastery Points (proof), honestly separated
 - **Offline-first** — works without internet after first load
 - **Spaced repetition** — FSRS-5 flashcard system for long-term retention
 - **500+ dictionary terms** — 3-tier definitions, individually indexed for SEO
 - **Code sandboxes** — write and run JavaScript, TypeScript, React in-browser
-- **35 how-to guides** — practical, step-by-step problem-solving
-- **100 project tutorials** — build real, deployable artifacts across 12 career tracks
-- **Skill assessment** — 35-question placement test with adaptive paths
+- **Skill assessment** — 35-question placement test with adaptive path recommendations
 - **Certificates** — verified, shareable, downloadable as PDF
 - **6 study modes** — Standard, Bite-sized, Focus, Sprint, Review, Challenge
-- **Dark mode** — full theme support with FOUC prevention
-- **PWA** — installable, cached, fast
-- **Privacy-first** — no cookies, no tracking, no ads
+- **Accessibility** — high contrast, dyslexia font, reduced motion, site-wide font sizing
+- **PWA** — installable on Windows, Mac, Linux, iOS, Android with platform-specific install guides
+- **Privacy-first** — no cookies, no tracking, no ads, local-first data
 - **Free forever** — AGPLv3 licensed, no paywalls, no premium tiers
 
 ## Quick Start
@@ -67,20 +70,23 @@ Next.js 15 · React 19 · TypeScript · Tailwind v4 · Zustand · IndexedDB · S
 | 8     | Professional Practice    | 35      |
 | 9     | CTO Track                | 60      |
 
-Plus 35 how-to guides, 100 project tutorials, and an [AI Engineering Competency Framework](https://dura.vercel.app/standards/ai-engineering).
+Plus 35 how-to guides, 100 project tutorials, a [Discovery Center](https://dura.vercel.app/discover) for young learners, and an [AI Engineering Competency Framework](https://dura.vercel.app/standards/ai-engineering).
 
-Standards: ACM CS2023 · SWEBOK v4 · SFIA 9
+Standards: ACM CS2023 · SWEBOK v4 · SFIA 9 · CSTA K-12 · AP CS Principles · AP CS A · ISTE
 
 ## Project Structure
 
 ```
 src/
-  app/          — Next.js routes (43 routes)
+  app/          — Next.js routes (55+ routes)
   components/   — React components
-  content/      — MDX lessons, dictionary, howtos, tutorials
-  lib/          — Utilities, IDB, analytics, FSRS algorithm
+  content/      — MDX lessons, dictionary, howtos, tutorials, skills, roles
+  lib/          — Utilities, IDB, analytics, FSRS, sync engine
   stores/       — Zustand state management
   types/        — TypeScript interfaces
+supabase/
+  migrations/   — 13 SQL migrations (ready to run)
+  README.md     — Setup guide
 ```
 
 See [PLANNING.md](PLANNING.md) for full architecture documentation.
