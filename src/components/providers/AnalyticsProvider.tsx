@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { startAnalyticsLoop } from "@/lib/analytics";
 import { AnalyticsConsentBanner } from "@/components/consent/AnalyticsConsentBanner";
+import { StorageDurabilityWarning } from "@/components/storage/StorageDurabilityWarning";
 
 export function AnalyticsProvider({ children }: { children: React.ReactNode }): React.ReactElement {
   useEffect(() => {
@@ -13,6 +14,7 @@ export function AnalyticsProvider({ children }: { children: React.ReactNode }): 
   return (
     <>
       {children}
+      <StorageDurabilityWarning />
       <AnalyticsConsentBanner />
     </>
   );
