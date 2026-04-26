@@ -50,7 +50,8 @@ async function hydrate(stored: FlashCard | undefined): Promise<FlashCard | undef
     // Defensive: an `_e` field that doesn't carry the magic prefix is
     // corrupt or wasn't produced by us. Best-effort: drop the field
     // and return whatever plaintext fields we have.
-    const { _e: _drop, ...rest } = stored;
+    const rest = { ...stored };
+    delete rest._e;
     return rest as FlashCard;
   }
   const resolution = peekActiveKey();
@@ -63,7 +64,8 @@ async function hydrate(stored: FlashCard | undefined): Promise<FlashCard | undef
     );
   }
   const plaintext = (await decryptRecord(stored._e, resolution.key)) as FlashCardEnvelope;
-  const { _e: _drop, ...rest } = stored;
+  const rest = { ...stored };
+  delete rest._e;
   return { ...rest, front: plaintext.front, back: plaintext.back } as FlashCard;
 }
 

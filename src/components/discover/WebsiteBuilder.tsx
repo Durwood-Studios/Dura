@@ -143,7 +143,7 @@ export function WebsiteBuilder(): React.ReactElement {
       }
     }
     return lines.join("\n");
-  }, [blocks, getDef]);
+  }, [blocks]);
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col items-center gap-8 py-8">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Monitor, Smartphone, Download } from "lucide-react";
+import { Monitor, Smartphone } from "lucide-react";
 
 type Platform = "windows" | "macos" | "linux" | "android" | "ios" | "unknown";
 

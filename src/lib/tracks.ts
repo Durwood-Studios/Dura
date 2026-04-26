@@ -3,7 +3,7 @@ import { join } from "path";
 import matter from "gray-matter";
 import { ROLES } from "@/content/roles";
 import { GOALS } from "@/content/goals";
-import type { Role, TrackGoal } from "@/types/career-track";
+import type { Role } from "@/types/career-track";
 
 interface ContentMeta {
   slug: string;

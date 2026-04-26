@@ -18,6 +18,7 @@ import type { FlashCard } from "@/types/flashcard";
 import type { DuraDB } from "@/lib/db";
 
 // ─── Fake IDB store keyed by id ─────────────────────────────────────────────
+/* eslint-disable @typescript-eslint/no-unused-vars */
 function makeFakeDB(): DuraDB {
   const store = new Map<string, FlashCard>();
   const fake = {
@@ -38,6 +39,7 @@ function makeFakeDB(): DuraDB {
   };
   return fake as unknown as DuraDB;
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 const baseCard: FlashCard = {
   id: "card-A",
