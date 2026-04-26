@@ -47,7 +47,7 @@ const nextConfig: NextConfig = {
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob: https:",
               "font-src 'self' data:",
-              "connect-src 'self' https://*.supabase.co https://*.codesandbox.io wss://*.codesandbox.io",
+              "connect-src 'self' https://*.supabase.co https://*.codesandbox.io wss://*.codesandbox.io https://vitals.vercel-insights.com",
               "frame-src 'self' https://*.codesandbox.io https://*.csb.app",
               "worker-src 'self' blob:",
             ].join("; "),

@@ -11,6 +11,23 @@
  */
 const CONSENT_KEY = "dura:analytics:consent";
 
+/**
+ * Custom event broadcast on every consent state change. Lets in-tab
+ * subscribers (e.g. the Speed Insights loader, the analytics flush
+ * loop) react without polling. The native `storage` event only fires
+ * cross-tab, so we dispatch this one for same-tab grants/declines.
+ */
+export const CONSENT_CHANGED_EVENT = "dura:analytics-consent-changed";
+
+function dispatchConsentChanged(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.dispatchEvent(new Event(CONSENT_CHANGED_EVENT));
+  } catch {
+    // ignore — defensive against environments without dispatchEvent
+  }
+}
+
 export interface ConsentState {
   analyticsConsented: boolean;
   consentedAt: string | null;
@@ -67,6 +84,7 @@ export function grantAnalyticsConsent(): void {
   };
   try {
     localStorage.setItem(CONSENT_KEY, JSON.stringify(state));
+    dispatchConsentChanged();
   } catch (error) {
     console.error("[consent-gate] grant failed", error);
   }
@@ -80,6 +98,7 @@ export function declineAnalyticsConsent(): void {
   };
   try {
     localStorage.setItem(CONSENT_KEY, JSON.stringify(state));
+    dispatchConsentChanged();
   } catch (error) {
     console.error("[consent-gate] decline failed", error);
   }
@@ -89,6 +108,7 @@ export function revokeAnalyticsConsent(): void {
   if (typeof localStorage === "undefined") return;
   try {
     localStorage.removeItem(CONSENT_KEY);
+    dispatchConsentChanged();
   } catch (error) {
     console.error("[consent-gate] revoke failed", error);
   }
