@@ -1,4 +1,6 @@
 import { getDB } from "@/lib/db";
+import { resetDeviceSecret } from "@/lib/idb/encryption-key";
+import { clearActiveKey } from "@/lib/idb/active-key";
 
 /**
  * All IndexedDB object stores in the DURA database.
@@ -50,6 +52,19 @@ export async function clearAllData(): Promise<void> {
     }
   } catch (error) {
     console.error("[clearAllData] Failed to open IDB:", error);
+  }
+
+  // 1b. Reset the device secret + drop the in-memory key cache so any
+  // residual encrypted blobs (e.g. in OPFS shadow snapshots) become
+  // permanently unrecoverable. Required by the encryption wrapper's
+  // P5-A.2 contract — clearing learner data must invalidate cryptographic
+  // material too, otherwise an attacker who holds an old IDB snapshot
+  // could replay it under the same device secret.
+  try {
+    resetDeviceSecret();
+    clearActiveKey();
+  } catch (error) {
+    console.error("[clearAllData] Failed to reset encryption key material:", error);
   }
 
   // 2. Clear known localStorage keys

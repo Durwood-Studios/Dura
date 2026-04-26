@@ -1,11 +1,18 @@
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
+import {
+  getAllEncryptedFlashcards,
+  getEncryptedDueFlashcards,
+  getEncryptedFlashcard,
+  getEncryptedFlashcardsByLesson,
+  putEncryptedFlashcard,
+} from "@/lib/idb/encrypted-store";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
 
 export async function getCard(id: string): Promise<FlashCard | undefined> {
   try {
     const db = await getDB();
-    return await db.get("flashcards", id);
+    return await getEncryptedFlashcard(db, id);
   } catch (error) {
     console.error("[flashcards] getCard failed", error);
     return undefined;
@@ -15,7 +22,7 @@ export async function getCard(id: string): Promise<FlashCard | undefined> {
 export async function putCard(card: FlashCard): Promise<void> {
   try {
     const db = await getDB();
-    await db.put("flashcards", card);
+    await putEncryptedFlashcard(db, card);
     triggerShadowWrite();
   } catch (error) {
     console.error("[flashcards] putCard failed", error);
@@ -35,8 +42,7 @@ export async function deleteCard(id: string): Promise<void> {
 export async function getDueCards(now: number = Date.now()): Promise<FlashCard[]> {
   try {
     const db = await getDB();
-    const range = IDBKeyRange.upperBound(now);
-    return await db.getAllFromIndex("flashcards", "by-due", range);
+    return await getEncryptedDueFlashcards(db, now);
   } catch (error) {
     console.error("[flashcards] getDueCards failed", error);
     return [];
@@ -46,7 +52,7 @@ export async function getDueCards(now: number = Date.now()): Promise<FlashCard[]
 export async function getCardsByLesson(lessonId: string): Promise<FlashCard[]> {
   try {
     const db = await getDB();
-    return await db.getAllFromIndex("flashcards", "by-lesson", lessonId);
+    return await getEncryptedFlashcardsByLesson(db, lessonId);
   } catch (error) {
     console.error("[flashcards] getCardsByLesson failed", error);
     return [];
@@ -66,7 +72,7 @@ export async function getCardByTermSlug(slug: string): Promise<FlashCard | undef
 export async function getAllCards(): Promise<FlashCard[]> {
   try {
     const db = await getDB();
-    return await db.getAll("flashcards");
+    return await getAllEncryptedFlashcards(db);
   } catch (error) {
     console.error("[flashcards] getAllCards failed", error);
     return [];

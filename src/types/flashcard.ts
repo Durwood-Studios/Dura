@@ -17,6 +17,17 @@ export interface FlashCard {
   lapses: number;
   state: "new" | "learning" | "review" | "relearning";
   lastReview: number | null;
+  /**
+   * Encrypted envelope of {front, back} produced by the IDB encryption
+   * wrapper (src/lib/idb/encrypted-store.ts). Present only on records
+   * stored when an active encryption key was available. When present,
+   * the plaintext `front` and `back` fields are blanked at rest; the
+   * wrapper repopulates them on read. Public callers should never
+   * observe a non-empty `_e` because the wrapper hydrates the envelope
+   * before returning. Optional + ignored by sync/Supabase code paths
+   * (we send plaintext over TLS to Supabase; this field is local-only).
+   */
+  _e?: ArrayBuffer;
 }
 
 export interface ReviewLog {

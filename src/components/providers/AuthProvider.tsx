@@ -3,7 +3,24 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { fullSync, startBackgroundSync, stopBackgroundSync } from "@/lib/supabase/sync";
+import { resolveEncryptionKey } from "@/lib/idb/encryption-key";
+import { setActiveKey } from "@/lib/idb/active-key";
 import type { User } from "@supabase/supabase-js";
+
+/**
+ * Resolve and install the IDB encryption key for the current auth state.
+ * Anonymous users get the device-tier key; signed-in users get the
+ * auth-tier key. P5-A.2 — the IDB encryption wrapper reads peekActiveKey()
+ * synchronously on every flashcard read/write.
+ */
+async function installEncryptionKey(authUserId: string | null): Promise<void> {
+  try {
+    const resolution = await resolveEncryptionKey(authUserId);
+    setActiveKey(resolution);
+  } catch (err) {
+    console.error("[auth] Failed to resolve IDB encryption key:", err);
+  }
+}
 
 interface AuthContextValue {
   user: User | null;
@@ -40,6 +57,11 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
         setUser(initialUser);
         setLoading(false);
 
+        // Install the IDB encryption key as early as possible so the
+        // first flashcard read/write has a key in scope. Runs for both
+        // anonymous (device tier) and signed-in (auth tier) sessions.
+        void installEncryptionKey(initialUser?.id ?? null);
+
         if (initialUser && !syncTriggeredRef.current) {
           syncTriggeredRef.current = true;
           fullSync().catch((err: unknown) => {
@@ -50,6 +72,9 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       })
       .catch(() => {
         setLoading(false);
+        // Even on auth error, install the device-tier key so anonymous
+        // mode encryption still works.
+        void installEncryptionKey(null);
       });
 
     // Listen for auth changes
@@ -59,6 +84,10 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       const sessionUser = session?.user ?? null;
       setUser(sessionUser);
       setLoading(false);
+
+      // Re-install the encryption key on every auth change so
+      // sign-in / sign-out flips the key tier correctly.
+      void installEncryptionKey(sessionUser?.id ?? null);
 
       if (sessionUser) {
         // User signed in — trigger full sync and start background sync

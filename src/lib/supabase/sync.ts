@@ -11,6 +11,11 @@ import { syncGoals, fetchGoals } from "./queries/goals";
 import { syncCertificates, fetchCertificates } from "./queries/certificates";
 import { batchSyncAnalytics, syncXPEvents } from "./queries/analytics";
 import { isAnalyticsEnabled } from "@/lib/analytics/consent-gate";
+import {
+  getAllEncryptedFlashcards,
+  getEncryptedFlashcard,
+  putEncryptedFlashcard,
+} from "@/lib/idb/encrypted-store";
 import type { LessonProgress } from "@/types/curriculum";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
 import type { Goal } from "@/types/goal";
@@ -96,8 +101,10 @@ export async function pushChanges(): Promise<number> {
     pushed += unsyncedProgress.length;
   }
 
-  // Push all flashcards (client owns SRS state)
-  const allCards = await db.getAll("flashcards");
+  // Push all flashcards (client owns SRS state). Decrypt locally before
+  // sending plaintext upstream — Supabase stores in its own at-rest
+  // encryption (managed) and TLS protects in transit.
+  const allCards = await getAllEncryptedFlashcards(db);
   if (allCards.length > 0) {
     await syncFlashcards(userId, allCards);
     pushed += allCards.length;
@@ -177,16 +184,18 @@ export async function pullChanges(): Promise<{ pulled: number; conflicts: number
     pulled++;
   }
 
-  // Pull flashcards — remote is merged by taking the version with the latest lastReview
+  // Pull flashcards — remote is merged by taking the version with the
+  // latest lastReview. Reads/writes go through the encryption wrapper so
+  // the locally-stored copy stays at-rest-encrypted.
   const remoteCards = await fetchFlashcards(userId);
   for (const remote of remoteCards) {
-    const local = await db.get("flashcards", remote.id);
+    const local = await getEncryptedFlashcard(db, remote.id);
     if (local) {
       const merged = mergeFlashcard(local, remote);
       if (merged !== local) conflicts++;
-      await db.put("flashcards", merged);
+      await putEncryptedFlashcard(db, merged);
     } else {
-      await db.put("flashcards", remote);
+      await putEncryptedFlashcard(db, remote);
     }
     pulled++;
   }
