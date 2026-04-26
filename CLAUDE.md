@@ -354,3 +354,79 @@ npm run typecheck    # TypeScript check
 - Offline-first is not a feature — it is the architecture.
 - Admit what you don't know. Verify what you think you know.
 - Ship quality. There is no "we'll fix it later."
+
+---
+
+## Capability Boundary
+
+Permitted operations (Claude Code may do without asking):
+
+- Read any file in the repository
+- Write to: `src/components/**`, `src/hooks/**`, `src/lib/**` (non-high-risk paths only — see High-Risk Surfaces below)
+- Write to: `src/app/**` (non-auth, non-payment routes)
+- Write to: `tests/**`, `xDocs/**`, `standards/**`
+- Run: npm scripts, `git status`/`diff`/`log`, Vitest
+
+Prohibited operations (Claude Code must NOT do):
+
+- Modify `.env`, `.env.local`, or any secrets file
+- Modify this `CLAUDE.md` without explicit human instruction per change
+- Commit directly to `main` (always work on a short-lived branch when on a shared host)
+- Modify `CODEOWNERS`
+- Write or modify `supabase/migrations/**` without explicit instruction per migration
+- Apply any change directly to the live Supabase project (defer all Supabase work to `xDocs/active/<sprint>/staged/supabase/` per ADR 0001)
+
+---
+
+## High-Risk Surfaces
+
+The following paths require a named human reviewer before merge.
+Claude Code must flag any changes to these paths explicitly:
+
+- `src/lib/auth/**` (authentication)
+- `src/lib/crypto.ts` (cryptography)
+- `src/lib/supabase/queries/analytics.ts` (PII-adjacent)
+- `src/lib/supabase/sync.ts` (cross-device data integrity)
+- `supabase/migrations/**` (schema changes)
+- `src/lib/payments/**` (if created)
+- `next.config.ts` (CSP and security headers)
+- `CLAUDE.md`, `CODEOWNERS`, this set of paths in `standards/aindgs/capabilities.yaml`
+
+---
+
+## Review Triggers
+
+Before committing changes to high-risk surfaces, Claude Code must output:
+
+> ⚠️ HIGH-RISK SURFACE CHANGE: `<path>` — Human review required before merge.
+
+Before committing any migration: output a plain-English description of what the migration does and what data it touches.
+
+Before pushing a `package.json` change that adds, removes, or version-bumps a runtime dependency: output the change summary and wait for confirmation. Lock-file-only changes from `npm install` after an approved package.json edit are exempt.
+
+---
+
+## Provenance Format
+
+All commits containing AI-generated code must include the provenance tag in the commit message:
+
+```
+[AI: <agent> ~X%] <conventional-commit-subject> (<optional-standard-or-law>)
+```
+
+Where:
+
+- `<agent>` is the AI tool (`claude-code` for DURA today)
+- `~X%` is the approximate percentage of AI-generated lines in the commit. Honest estimate. `100%` = entirely AI-generated.
+- For commits with no AI involvement at all, the tag is **omitted** (so a future audit can distinguish "human-only" from "AI ~0% guidance")
+
+Full rationale and examples live in [`xDocs/decisions/0002-ai-provenance-format.md`](xDocs/decisions/0002-ai-provenance-format.md). The CI provenance gate (compliance Phase 4) will enforce the format on commits touching paths listed in CODEOWNERS as high-risk.
+
+---
+
+## Changelog
+
+| Date       | Change                                                                                                                      | Rationale                                         |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| 2026-04-25 | Added AINDGS-1.0 required sections (Capability Boundary, High-Risk Surfaces, Review Triggers, Provenance Format, Changelog) | Compliance Sprint Phase 1-D / AINDGS-R1 / R4 / R5 |
+| Inception  | Initial CLAUDE.md (Rules 0–7, Design System, Workflow)                                                                      | Project intelligence baseline                     |
