@@ -1,11 +1,14 @@
 import { getDB } from "@/lib/db";
 import { generateId } from "@/lib/utils";
+import { isAnalyticsEnabled } from "@/lib/analytics/consent-gate";
 import type { AnalyticsEvent, AnalyticsEventName } from "@/types/analytics";
 
 /**
  * Privacy-first analytics.
  *
  * - No PII, no cookies, no third parties.
+ * - Consent-gated: collection is a no-op until the user grants consent
+ *   via the analytics consent banner (PPLAS-R4 / GDPR Art. 7).
  * - Events are queued to IndexedDB, batch-synced every 5 seconds.
  * - Graceful failure: if anything throws, the app keeps working.
  */
@@ -21,6 +24,7 @@ export async function track(
   name: AnalyticsEventName,
   properties: EventProperties = {}
 ): Promise<void> {
+  if (!isAnalyticsEnabled()) return;
   try {
     const event: AnalyticsEvent = {
       id: generateId("evt"),
@@ -33,6 +37,20 @@ export async function track(
     await db.put("analytics", event);
   } catch (error) {
     console.error("[analytics] track failed", error);
+  }
+}
+
+/**
+ * Purge all queued analytics events. Called when the user revokes
+ * consent or declines after previously granting — events that were
+ * collected under prior consent must not be retained.
+ */
+export async function purgeAnalyticsQueue(): Promise<void> {
+  try {
+    const db = await getDB();
+    await db.clear("analytics");
+  } catch (error) {
+    console.error("[analytics] purge failed", error);
   }
 }
 
@@ -81,6 +99,7 @@ async function markSynced(ids: string[]): Promise<void> {
 export async function flush(
   sink: (events: AnalyticsEvent[]) => Promise<void> = async () => {}
 ): Promise<void> {
+  if (!isAnalyticsEnabled()) return;
   if (typeof navigator !== "undefined" && navigator.onLine === false) return;
   try {
     const batch = await getUnsyncedBatch(BATCH_SIZE);

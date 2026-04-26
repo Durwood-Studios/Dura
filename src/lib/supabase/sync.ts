@@ -5,6 +5,7 @@ import { syncFlashcards, fetchFlashcards, syncReviewLogs } from "./queries/flash
 import { syncGoals, fetchGoals } from "./queries/goals";
 import { syncCertificates, fetchCertificates } from "./queries/certificates";
 import { batchSyncAnalytics, syncXPEvents } from "./queries/analytics";
+import { isAnalyticsEnabled } from "@/lib/analytics/consent-gate";
 import type { LessonProgress } from "@/types/curriculum";
 import type { FlashCard } from "@/types/flashcard";
 import type { Goal } from "@/types/goal";
@@ -118,16 +119,21 @@ export async function pushChanges(): Promise<number> {
     pushed += allCerts.length;
   }
 
-  // Push unsynced analytics (append-only)
-  const unsyncedAnalytics = await db.getAllFromIndex("analytics", "by-synced", 0);
-  if (unsyncedAnalytics.length > 0) {
-    await batchSyncAnalytics(userId, unsyncedAnalytics);
-    const tx = db.transaction("analytics", "readwrite");
-    for (const event of unsyncedAnalytics) {
-      await tx.store.put({ ...event, synced: 1 });
+  // Push unsynced analytics (append-only) — gated by analytics consent.
+  // batchSyncAnalytics is itself a no-op when consent is off, but we
+  // also skip the IDB read + mark-synced loop here to avoid mutating
+  // local state on data that isn't transmitted.
+  if (isAnalyticsEnabled()) {
+    const unsyncedAnalytics = await db.getAllFromIndex("analytics", "by-synced", 0);
+    if (unsyncedAnalytics.length > 0) {
+      await batchSyncAnalytics(userId, unsyncedAnalytics);
+      const tx = db.transaction("analytics", "readwrite");
+      for (const event of unsyncedAnalytics) {
+        await tx.store.put({ ...event, synced: 1 });
+      }
+      await tx.done;
+      pushed += unsyncedAnalytics.length;
     }
-    await tx.done;
-    pushed += unsyncedAnalytics.length;
   }
 
   // Push XP events (append-only)
