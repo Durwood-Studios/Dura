@@ -13,7 +13,8 @@ import {
 } from "lucide-react";
 import { usePreferencesStore } from "@/stores/preferences";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
-import { clearAllData, exportAllData } from "@/lib/clearAllData";
+import { clearAllData } from "@/lib/clearAllData";
+import { downloadLearnerRecord } from "@/lib/learner-record/export";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 import {
@@ -72,14 +73,11 @@ export function SettingsClient(): React.ReactElement {
   );
 
   const handleExport = async (): Promise<void> => {
-    const json = await exportAllData();
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `dura-export-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      await downloadLearnerRecord();
+    } catch (err) {
+      console.error("[settings] Export failed:", err);
+    }
   };
 
   const handleClear = async (): Promise<void> => {
