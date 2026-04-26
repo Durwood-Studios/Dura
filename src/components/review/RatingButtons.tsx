@@ -84,24 +84,32 @@ export function RatingButtons({ card, visible, onRate }: RatingButtonsProps): Re
   }
 
   return (
-    <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div
+      className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4"
+      role="group"
+      aria-label="Rate this card"
+    >
       {RATINGS.map((r) => (
         <button
           key={r.value}
           type="button"
           onClick={() => onRate(r.value)}
+          aria-label={`${r.label} — next review in ${previews[r.value]} (keyboard shortcut ${r.key})`}
+          aria-keyshortcuts={r.key}
           className={cn(
-            "flex min-h-[64px] flex-col items-center justify-center rounded-xl border px-3 py-2 text-sm font-semibold transition",
+            "flex min-h-[64px] flex-col items-center justify-center rounded-xl border px-3 py-2 text-sm font-semibold transition focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 focus-visible:outline-none",
             r.classes
           )}
         >
-          <span className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1.5" aria-hidden>
             <kbd className="hidden rounded border border-current/30 px-1 py-0 font-mono text-[10px] opacity-70 sm:inline">
               {r.key}
             </kbd>
             {r.label}
           </span>
-          <span className="mt-0.5 font-mono text-[11px] opacity-80">{previews[r.value]}</span>
+          <span className="mt-0.5 font-mono text-[11px] opacity-80" aria-hidden>
+            {previews[r.value]}
+          </span>
         </button>
       ))}
     </div>
