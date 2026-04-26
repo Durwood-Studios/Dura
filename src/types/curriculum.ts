@@ -76,6 +76,12 @@ export interface LessonProgress {
   quizScore: number | null;
   xpEarned: number;
   synced: 0 | 1;
+  /**
+   * Encrypted envelope of the behavioral fields (everything except keypath
+   * + indexed fields). At-rest encryption per P5-A.3. Wrapper hydrates
+   * before returning to callers.
+   */
+  _e?: ArrayBuffer;
 }
 
 export interface ModuleProgress {
@@ -85,6 +91,12 @@ export interface ModuleProgress {
   totalLessons: number;
   masteryGatePassed: boolean;
   unlockedAt: number;
+  /**
+   * Encrypted envelope of the behavioral fields (everything except keypath
+   * + indexed fields). At-rest encryption per P5-A.3. Wrapper hydrates
+   * before returning to callers.
+   */
+  _e?: ArrayBuffer;
 }
 
 export interface PhaseProgress {

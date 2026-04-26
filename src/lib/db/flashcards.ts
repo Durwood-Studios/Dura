@@ -5,7 +5,9 @@ import {
   getEncryptedDueFlashcards,
   getEncryptedFlashcard,
   getEncryptedFlashcardsByLesson,
+  getEncryptedReviewLogsForCard,
   putEncryptedFlashcard,
+  putEncryptedReviewLog,
 } from "@/lib/idb/encrypted-store";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
 
@@ -82,7 +84,7 @@ export async function getAllCards(): Promise<FlashCard[]> {
 export async function logReview(log: ReviewLog): Promise<void> {
   try {
     const db = await getDB();
-    await db.put("reviewLogs", log);
+    await putEncryptedReviewLog(db, log);
     triggerShadowWrite();
   } catch (error) {
     console.error("[flashcards] logReview failed", error);
@@ -92,7 +94,7 @@ export async function logReview(log: ReviewLog): Promise<void> {
 export async function getReviewLogsForCard(cardId: string): Promise<ReviewLog[]> {
   try {
     const db = await getDB();
-    return await db.getAllFromIndex("reviewLogs", "by-card", cardId);
+    return await getEncryptedReviewLogsForCard(db, cardId);
   } catch (error) {
     console.error("[flashcards] getReviewLogsForCard failed", error);
     return [];

@@ -8,36 +8,65 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   getAllEncryptedFlashcards,
+  getAllEncryptedLessonProgress,
+  getAllEncryptedModuleProgress,
+  getAllEncryptedReviewLogs,
   getEncryptedFlashcard,
+  getEncryptedLessonProgress,
+  getEncryptedModuleProgress,
   putEncryptedFlashcard,
+  putEncryptedLessonProgress,
+  putEncryptedModuleProgress,
+  putEncryptedReviewLog,
 } from "@/lib/idb/encrypted-store";
 import { clearActiveKey, setActiveKey } from "@/lib/idb/active-key";
 import { forgetEncryptionKeys, isEncryptedRecord } from "@/lib/idb/encryption";
 import { resolveEncryptionKey, resetDeviceSecret } from "@/lib/idb/encryption-key";
-import type { FlashCard } from "@/types/flashcard";
+import type { FlashCard, ReviewLog } from "@/types/flashcard";
+import type { LessonProgress, ModuleProgress } from "@/types/curriculum";
 import type { DuraDB } from "@/lib/db";
 
-// ─── Fake IDB store keyed by id ─────────────────────────────────────────────
+// ─── Fake IDB stores keyed per object-store name ───────────────────────────
 /* eslint-disable @typescript-eslint/no-unused-vars */
+type AnyRecord = { [k: string]: unknown };
+type StoreKeyed = { id?: string; lessonId?: string; moduleId?: string } & AnyRecord;
+
+function keyFor(storeName: string, value: StoreKeyed): string {
+  if (storeName === "progress") return value.lessonId as string;
+  if (storeName === "moduleProgress") return value.moduleId as string;
+  return value.id as string;
+}
+
 function makeFakeDB(): DuraDB {
-  const store = new Map<string, FlashCard>();
+  const stores = new Map<string, Map<string, StoreKeyed>>();
+  const getStore = (name: string): Map<string, StoreKeyed> => {
+    let s = stores.get(name);
+    if (!s) {
+      s = new Map();
+      stores.set(name, s);
+    }
+    return s;
+  };
   const fake = {
-    async get(_storeName: string, id: string) {
-      return store.get(id);
+    async get(storeName: string, id: string) {
+      return getStore(storeName).get(id);
     },
-    async put(_storeName: string, value: FlashCard) {
-      store.set(value.id, value);
+    async put(storeName: string, value: StoreKeyed) {
+      getStore(storeName).set(keyFor(storeName, value), value);
     },
-    async getAll(_storeName: string) {
-      return [...store.values()];
+    async getAll(storeName: string) {
+      return [...getStore(storeName).values()];
     },
-    async getAllFromIndex(_storeName: string, _idx: string, _key: unknown) {
-      return [...store.values()];
+    async getAllFromIndex(storeName: string, _idx: string, _key: unknown) {
+      return [...getStore(storeName).values()];
     },
-    // Internal handle for assertions
-    __raw: store,
+    __stores: stores,
   };
   return fake as unknown as DuraDB;
+}
+
+function rawStore(db: DuraDB, name: string): Map<string, StoreKeyed> {
+  return (db as unknown as { __stores: Map<string, Map<string, StoreKeyed>> }).__stores.get(name)!;
 }
 /* eslint-enable @typescript-eslint/no-unused-vars */
 
@@ -77,7 +106,7 @@ describe("IDB encryption wrapper — flashcards", () => {
 
     // Internal: stored record is the unmodified plaintext
     // (cast through unknown to access the test handle)
-    const raw = (db as unknown as { __raw: Map<string, FlashCard> }).__raw.get("card-A")!;
+    const raw = rawStore(db, "flashcards").get("card-A") as unknown as FlashCard;
     expect(raw.front).toBe(baseCard.front);
     expect(raw.back).toBe(baseCard.back);
     expect(raw._e).toBeUndefined();
@@ -94,7 +123,7 @@ describe("IDB encryption wrapper — flashcards", () => {
     const db = makeFakeDB();
     await putEncryptedFlashcard(db, baseCard);
 
-    const raw = (db as unknown as { __raw: Map<string, FlashCard> }).__raw.get("card-A")!;
+    const raw = rawStore(db, "flashcards").get("card-A") as unknown as FlashCard;
     expect(raw.front).toBe("");
     expect(raw.back).toBe("");
     expect(raw._e).toBeDefined();
@@ -141,9 +170,7 @@ describe("IDB encryption wrapper — flashcards", () => {
     // Seed with plaintext (no key yet)
     const db = makeFakeDB();
     await putEncryptedFlashcard(db, baseCard);
-    expect(
-      (db as unknown as { __raw: Map<string, FlashCard> }).__raw.get("card-A")?._e
-    ).toBeUndefined();
+    expect((rawStore(db, "flashcards").get("card-A") as FlashCard | undefined)?._e).toBeUndefined();
 
     // Key arrives, write happens (e.g. FSRS update)
     const resolution = await resolveEncryptionKey(null);
@@ -151,7 +178,7 @@ describe("IDB encryption wrapper — flashcards", () => {
     const updated = { ...baseCard, reps: 1, due: 3_000_000 };
     await putEncryptedFlashcard(db, updated);
 
-    const raw = (db as unknown as { __raw: Map<string, FlashCard> }).__raw.get("card-A")!;
+    const raw = rawStore(db, "flashcards").get("card-A") as unknown as FlashCard;
     expect(raw._e).toBeDefined();
     expect(raw.front).toBe("");
   });
@@ -201,5 +228,189 @@ describe("IDB encryption wrapper — flashcards", () => {
     const db = makeFakeDB();
     const read = await getEncryptedFlashcard(db, "does-not-exist");
     expect(read).toBeUndefined();
+  });
+});
+
+// ─── P5-A.3: behavioral stores ──────────────────────────────────────────────
+
+const sampleReviewLog: ReviewLog = {
+  id: "log-1",
+  cardId: "card-A",
+  rating: "good",
+  reviewedAt: 1_500_000,
+  elapsedDays: 1,
+  scheduledDays: 4,
+  state: "review",
+};
+
+const sampleProgress: LessonProgress = {
+  lessonId: "lesson-1",
+  phaseId: "phase-0",
+  moduleId: "module-1",
+  startedAt: 1_000_000,
+  completedAt: 1_500_000,
+  scrollPercent: 90,
+  timeSpentMs: 540_000,
+  quizPassed: true,
+  quizScore: 0.9,
+  xpEarned: 100,
+  synced: 0,
+};
+
+const sampleModule: ModuleProgress = {
+  moduleId: "module-1",
+  phaseId: "phase-0",
+  completedLessons: 4,
+  totalLessons: 5,
+  masteryGatePassed: false,
+  unlockedAt: 1_000_000,
+};
+
+describe("IDB encryption wrapper — reviewLogs (P5-A.3)", () => {
+  beforeEach(() => {
+    resetDeviceSecret();
+    forgetEncryptionKeys();
+    clearActiveKey();
+  });
+  afterEach(() => {
+    resetDeviceSecret();
+    forgetEncryptionKeys();
+    clearActiveKey();
+  });
+
+  it("with key: encrypts behavioral fields, leaves id + cardId + reviewedAt plaintext (indexes work)", async () => {
+    setActiveKey(await resolveEncryptionKey(null));
+    const db = makeFakeDB();
+    await putEncryptedReviewLog(db, sampleReviewLog);
+
+    const raw = rawStore(db, "reviewLogs").get("log-1") as unknown as ReviewLog & {
+      _e?: ArrayBuffer;
+    };
+    expect(raw.id).toBe("log-1");
+    expect(raw.cardId).toBe("card-A");
+    expect(raw.reviewedAt).toBe(1_500_000);
+    expect(raw._e).toBeDefined();
+    expect(isEncryptedRecord(raw._e!)).toBe(true);
+    // Behavioral fields are not present in plaintext at rest
+    expect((raw as unknown as Record<string, unknown>).rating).toBeUndefined();
+    expect((raw as unknown as Record<string, unknown>).state).toBeUndefined();
+  });
+
+  it("hydrates a stored record back to the original ReviewLog shape", async () => {
+    setActiveKey(await resolveEncryptionKey(null));
+    const db = makeFakeDB();
+    await putEncryptedReviewLog(db, sampleReviewLog);
+    const all = await getAllEncryptedReviewLogs(db);
+    expect(all[0]).toEqual(sampleReviewLog);
+  });
+
+  it("legacy plaintext entries pass through (best-effort migration)", async () => {
+    const db = makeFakeDB();
+    await putEncryptedReviewLog(db, sampleReviewLog); // no key → plaintext
+    setActiveKey(await resolveEncryptionKey(null));
+    const all = await getAllEncryptedReviewLogs(db);
+    expect(all[0]).toEqual(sampleReviewLog);
+  });
+});
+
+describe("IDB encryption wrapper — lesson progress (P5-A.3)", () => {
+  beforeEach(() => {
+    resetDeviceSecret();
+    forgetEncryptionKeys();
+    clearActiveKey();
+  });
+  afterEach(() => {
+    resetDeviceSecret();
+    forgetEncryptionKeys();
+    clearActiveKey();
+  });
+
+  it("encrypts behavioral fields; keeps lessonId/phaseId/moduleId/synced plaintext for indexes", async () => {
+    setActiveKey(await resolveEncryptionKey(null));
+    const db = makeFakeDB();
+    await putEncryptedLessonProgress(db, sampleProgress);
+
+    const raw = rawStore(db, "progress").get("lesson-1") as unknown as LessonProgress & {
+      _e?: ArrayBuffer;
+    };
+    expect(raw.lessonId).toBe("lesson-1");
+    expect(raw.phaseId).toBe("phase-0");
+    expect(raw.moduleId).toBe("module-1");
+    expect(raw.synced).toBe(0);
+    expect(raw._e).toBeDefined();
+    expect((raw as unknown as Record<string, unknown>).timeSpentMs).toBeUndefined();
+    expect((raw as unknown as Record<string, unknown>).quizPassed).toBeUndefined();
+  });
+
+  it("round-trips a progress record through encrypted write + decrypted read", async () => {
+    setActiveKey(await resolveEncryptionKey(null));
+    const db = makeFakeDB();
+    await putEncryptedLessonProgress(db, sampleProgress);
+    const read = await getEncryptedLessonProgress(db, "lesson-1");
+    expect(read).toEqual(sampleProgress);
+  });
+
+  it("getAll hydrates a mixed encrypted + plaintext store", async () => {
+    const db = makeFakeDB();
+    // legacy plaintext
+    await putEncryptedLessonProgress(db, { ...sampleProgress, lessonId: "l-old" });
+    // encrypted
+    setActiveKey(await resolveEncryptionKey(null));
+    await putEncryptedLessonProgress(db, { ...sampleProgress, lessonId: "l-new", xpEarned: 200 });
+    const all = await getAllEncryptedLessonProgress(db);
+    const byId = new Map(all.map((p) => [p.lessonId, p]));
+    expect(byId.get("l-old")?.xpEarned).toBe(100);
+    expect(byId.get("l-new")?.xpEarned).toBe(200);
+  });
+});
+
+describe("IDB encryption wrapper — module progress (P5-A.3)", () => {
+  beforeEach(() => {
+    resetDeviceSecret();
+    forgetEncryptionKeys();
+    clearActiveKey();
+  });
+  afterEach(() => {
+    resetDeviceSecret();
+    forgetEncryptionKeys();
+    clearActiveKey();
+  });
+
+  it("encrypts mastery fields; keeps moduleId + phaseId plaintext for the by-phase index", async () => {
+    setActiveKey(await resolveEncryptionKey(null));
+    const db = makeFakeDB();
+    await putEncryptedModuleProgress(db, sampleModule);
+
+    const raw = rawStore(db, "moduleProgress").get("module-1") as unknown as ModuleProgress & {
+      _e?: ArrayBuffer;
+    };
+    expect(raw.moduleId).toBe("module-1");
+    expect(raw.phaseId).toBe("phase-0");
+    expect(raw._e).toBeDefined();
+    expect((raw as unknown as Record<string, unknown>).completedLessons).toBeUndefined();
+    expect((raw as unknown as Record<string, unknown>).masteryGatePassed).toBeUndefined();
+  });
+
+  it("round-trips through encrypted write + decrypted read", async () => {
+    setActiveKey(await resolveEncryptionKey(null));
+    const db = makeFakeDB();
+    await putEncryptedModuleProgress(db, sampleModule);
+    const read = await getEncryptedModuleProgress(db, "module-1");
+    expect(read).toEqual(sampleModule);
+  });
+
+  it("getAll hydrates a mixed encrypted + plaintext store", async () => {
+    const db = makeFakeDB();
+    await putEncryptedModuleProgress(db, { ...sampleModule, moduleId: "m-old" });
+    setActiveKey(await resolveEncryptionKey(null));
+    await putEncryptedModuleProgress(db, {
+      ...sampleModule,
+      moduleId: "m-new",
+      masteryGatePassed: true,
+    });
+    const all = await getAllEncryptedModuleProgress(db);
+    const byId = new Map(all.map((m) => [m.moduleId, m]));
+    expect(byId.get("m-old")?.masteryGatePassed).toBe(false);
+    expect(byId.get("m-new")?.masteryGatePassed).toBe(true);
   });
 });

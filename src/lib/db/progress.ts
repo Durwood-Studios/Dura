@@ -1,5 +1,16 @@
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
+import {
+  getAllEncryptedLessonProgress,
+  getAllEncryptedModuleProgress,
+  getEncryptedLessonProgress,
+  getEncryptedLessonProgressByModule,
+  getEncryptedLessonProgressByPhase,
+  getEncryptedModuleProgress,
+  getEncryptedUnsyncedLessonProgress,
+  putEncryptedLessonProgress,
+  putEncryptedModuleProgress,
+} from "@/lib/idb/encrypted-store";
 import type { LessonProgress, ModuleProgress, PhaseProgress } from "@/types/curriculum";
 
 /** Backfill defaults for fields added in later schema versions. */
@@ -14,7 +25,7 @@ function normalize<T extends LessonProgress | undefined>(record: T): T {
 export async function getLessonProgress(lessonId: string): Promise<LessonProgress | undefined> {
   try {
     const db = await getDB();
-    return normalize(await db.get("progress", lessonId));
+    return normalize(await getEncryptedLessonProgress(db, lessonId));
   } catch (error) {
     console.error("[progress] getLessonProgress failed", error);
     return undefined;
@@ -24,7 +35,7 @@ export async function getLessonProgress(lessonId: string): Promise<LessonProgres
 export async function putLessonProgress(progress: LessonProgress): Promise<void> {
   try {
     const db = await getDB();
-    await db.put("progress", progress);
+    await putEncryptedLessonProgress(db, progress);
     triggerShadowWrite();
   } catch (error) {
     console.error("[progress] putLessonProgress failed", error);
@@ -34,7 +45,7 @@ export async function putLessonProgress(progress: LessonProgress): Promise<void>
 export async function getProgressByPhase(phaseId: string): Promise<LessonProgress[]> {
   try {
     const db = await getDB();
-    const records = await db.getAllFromIndex("progress", "by-phase", phaseId);
+    const records = await getEncryptedLessonProgressByPhase(db, phaseId);
     return records.map((r) => normalize(r) as LessonProgress);
   } catch (error) {
     console.error("[progress] getProgressByPhase failed", error);
@@ -45,7 +56,7 @@ export async function getProgressByPhase(phaseId: string): Promise<LessonProgres
 export async function getProgressByModule(moduleId: string): Promise<LessonProgress[]> {
   try {
     const db = await getDB();
-    const records = await db.getAllFromIndex("progress", "by-module", moduleId);
+    const records = await getEncryptedLessonProgressByModule(db, moduleId);
     return records.map((r) => normalize(r) as LessonProgress);
   } catch (error) {
     console.error("[progress] getProgressByModule failed", error);
@@ -56,7 +67,7 @@ export async function getProgressByModule(moduleId: string): Promise<LessonProgr
 export async function getUnsyncedProgress(): Promise<LessonProgress[]> {
   try {
     const db = await getDB();
-    return await db.getAllFromIndex("progress", "by-synced", 0);
+    return await getEncryptedUnsyncedLessonProgress(db);
   } catch (error) {
     console.error("[progress] getUnsyncedProgress failed", error);
     return [];
@@ -66,7 +77,7 @@ export async function getUnsyncedProgress(): Promise<LessonProgress[]> {
 export async function getModuleProgress(moduleId: string): Promise<ModuleProgress | undefined> {
   try {
     const db = await getDB();
-    return await db.get("moduleProgress", moduleId);
+    return await getEncryptedModuleProgress(db, moduleId);
   } catch (error) {
     console.error("[progress] getModuleProgress failed", error);
     return undefined;
@@ -76,7 +87,7 @@ export async function getModuleProgress(moduleId: string): Promise<ModuleProgres
 export async function putModuleProgress(progress: ModuleProgress): Promise<void> {
   try {
     const db = await getDB();
-    await db.put("moduleProgress", progress);
+    await putEncryptedModuleProgress(db, progress);
     triggerShadowWrite();
   } catch (error) {
     console.error("[progress] putModuleProgress failed", error);
@@ -106,11 +117,21 @@ export async function putPhaseProgress(progress: PhaseProgress): Promise<void> {
 export async function getCompletedLessonCount(): Promise<number> {
   try {
     const db = await getDB();
-    const all = await db.getAll("progress");
+    const all = await getAllEncryptedLessonProgress(db);
     return all.filter((r) => r.completedAt !== null).length;
   } catch (error) {
     console.error("[progress] getCompletedLessonCount failed", error);
     return 0;
+  }
+}
+
+export async function getAllModuleProgress(): Promise<ModuleProgress[]> {
+  try {
+    const db = await getDB();
+    return await getAllEncryptedModuleProgress(db);
+  } catch (error) {
+    console.error("[progress] getAllModuleProgress failed", error);
+    return [];
   }
 }
 

@@ -38,4 +38,11 @@ export interface ReviewLog {
   elapsedDays: number;
   scheduledDays: number;
   state: FlashCard["state"];
+  /**
+   * Encrypted envelope of {rating, elapsedDays, scheduledDays, state}.
+   * See FlashCard._e — same pattern. Only the keypath (id) and indexed
+   * fields (cardId, reviewedAt) stay plaintext at rest so existing
+   * indexes keep working. P5-A.3.
+   */
+  _e?: ArrayBuffer;
 }
