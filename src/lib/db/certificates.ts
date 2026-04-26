@@ -1,10 +1,12 @@
 import { getDB } from "@/lib/db";
+import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { Certificate } from "@/types/assessment";
 
 export async function putCertificate(cert: Certificate): Promise<void> {
   try {
     const db = await getDB();
     await db.put("certificates", cert);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[certificates] putCertificate failed", error);
   }

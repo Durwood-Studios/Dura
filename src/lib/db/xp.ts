@@ -1,4 +1,5 @@
 import { getDB } from "@/lib/db";
+import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { XPEvent, XPEventSource } from "@/types/xp";
 
 /**
@@ -28,6 +29,7 @@ export async function awardXP(
       awardedAt: Date.now(),
     };
     await db.put("xp-events", event);
+    triggerShadowWrite();
     return event;
   } catch (error) {
     console.error("[xp] awardXP failed", error);

@@ -1,4 +1,5 @@
 import { getDB } from "@/lib/db";
+import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { LessonProgress, ModuleProgress, PhaseProgress } from "@/types/curriculum";
 
 /** Backfill defaults for fields added in later schema versions. */
@@ -24,6 +25,7 @@ export async function putLessonProgress(progress: LessonProgress): Promise<void>
   try {
     const db = await getDB();
     await db.put("progress", progress);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[progress] putLessonProgress failed", error);
   }
@@ -75,6 +77,7 @@ export async function putModuleProgress(progress: ModuleProgress): Promise<void>
   try {
     const db = await getDB();
     await db.put("moduleProgress", progress);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[progress] putModuleProgress failed", error);
   }
@@ -94,6 +97,7 @@ export async function putPhaseProgress(progress: PhaseProgress): Promise<void> {
   try {
     const db = await getDB();
     await db.put("phaseProgress", progress);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[progress] putPhaseProgress failed", error);
   }

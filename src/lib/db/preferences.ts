@@ -1,4 +1,5 @@
 import { getDB } from "@/lib/db";
+import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import { DEFAULT_PREFERENCES, type Preferences } from "@/types/preferences";
 import { INITIAL_STREAK } from "@/lib/streak";
 
@@ -28,6 +29,7 @@ export async function putPreferences(prefs: Preferences): Promise<void> {
   try {
     const db = await getDB();
     await db.put("preferences", { ...prefs, updatedAt: Date.now() });
+    triggerShadowWrite();
   } catch (error) {
     console.error("[preferences] putPreferences failed", error);
   }

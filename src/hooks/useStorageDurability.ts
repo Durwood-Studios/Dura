@@ -1,30 +1,32 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { restoreFromOPFSIfNeeded } from "@/lib/storage/restore";
+import { registerShadowWriteFlushers } from "@/lib/storage/shadow-write";
 
 /**
  * Storage durability status (LFLRS-R1).
  *
- * - `unknown`: initial state, before the persistence request resolves
+ * - `unknown`: initial state, before the bootstrap resolves
  * - `persistent`: the browser has granted persistent storage; data
  *   should survive eviction pressure
  * - `best-effort`: the browser uses best-effort storage; data can be
  *   evicted under quota pressure (Safari evicts after 7 days of no
- *   visit on non-installed PWAs)
+ *   visit on non-installed PWAs). The OPFS shadow layer still
+ *   protects against this — see src/lib/storage/.
  * - `unsupported`: navigator.storage.persist is not available in this
  *   environment
  */
 export type DurabilityStatus = "unknown" | "persistent" | "best-effort" | "unsupported";
 
 /**
- * Request persistent storage on mount and surface the result.
+ * Bootstrap local storage durability on mount:
+ *   1. Restore from OPFS shadow if IndexedDB is empty
+ *   2. Request persistent storage from the browser
+ *   3. Register shadow-write flushers (pagehide / visibilitychange / periodic)
  *
- * Closes LFLRS-R1: a learner with months of FSRS scheduling data
- * shouldn't lose it silently to browser eviction. Browsers grant
- * persistence based on user signals (PWA installation, bookmarks,
- * frequent visits). When persistence is denied, the app should
- * surface the durability risk so the user can install / bookmark
- * to harden their data.
+ * Returns the persistence status so a sibling component can warn the
+ * user when the browser declines persistence.
  */
 export function useStorageDurability(): DurabilityStatus {
   const [status, setStatus] = useState<DurabilityStatus>("unknown");
@@ -36,19 +38,32 @@ export function useStorageDurability(): DurabilityStatus {
     }
 
     let cancelled = false;
-    navigator.storage
-      .persist()
-      .then((persisted) => {
-        if (cancelled) return;
-        setStatus(persisted ? "persistent" : "best-effort");
-      })
-      .catch((error: unknown) => {
+    let unregisterFlushers: (() => void) | null = null;
+
+    (async () => {
+      try {
+        await restoreFromOPFSIfNeeded();
+      } catch (error) {
+        console.error("[storage-durability] restore failed", error);
+      }
+      if (cancelled) return;
+
+      try {
+        const persisted = await navigator.storage.persist();
+        if (!cancelled) setStatus(persisted ? "persistent" : "best-effort");
+      } catch (error) {
         console.error("[storage-durability] persist() failed", error);
         if (!cancelled) setStatus("best-effort");
-      });
+      }
+
+      if (!cancelled) {
+        unregisterFlushers = registerShadowWriteFlushers();
+      }
+    })();
 
     return () => {
       cancelled = true;
+      if (unregisterFlushers) unregisterFlushers();
     };
   }, []);
 

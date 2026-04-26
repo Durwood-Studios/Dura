@@ -1,4 +1,5 @@
 import { getDB } from "@/lib/db";
+import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { SkillAssessmentResult } from "@/types/skill-assessment";
 
 const STORE = "preferences";
@@ -42,6 +43,7 @@ export async function putSkillAssessment(result: SkillAssessmentResult): Promise
     const db = await getDB();
     const record = { id: KEY, data: result } as SkillAssessmentRecord;
     await db.put(STORE, record as never);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[skill-assessment] putSkillAssessment failed:", error);
   }

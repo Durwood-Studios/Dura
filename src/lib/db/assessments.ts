@@ -1,10 +1,12 @@
 import { getDB } from "@/lib/db";
+import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { AssessmentResult, AssessmentType } from "@/types/assessment";
 
 export async function putResult(result: AssessmentResult): Promise<void> {
   try {
     const db = await getDB();
     await db.put("assessment-results", result);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[assessments] putResult failed", error);
   }

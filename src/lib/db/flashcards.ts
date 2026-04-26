@@ -1,4 +1,5 @@
 import { getDB } from "@/lib/db";
+import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
 
 export async function getCard(id: string): Promise<FlashCard | undefined> {
@@ -15,6 +16,7 @@ export async function putCard(card: FlashCard): Promise<void> {
   try {
     const db = await getDB();
     await db.put("flashcards", card);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[flashcards] putCard failed", error);
   }
@@ -24,6 +26,7 @@ export async function deleteCard(id: string): Promise<void> {
   try {
     const db = await getDB();
     await db.delete("flashcards", id);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[flashcards] deleteCard failed", error);
   }
@@ -74,6 +77,7 @@ export async function logReview(log: ReviewLog): Promise<void> {
   try {
     const db = await getDB();
     await db.put("reviewLogs", log);
+    triggerShadowWrite();
   } catch (error) {
     console.error("[flashcards] logReview failed", error);
   }
