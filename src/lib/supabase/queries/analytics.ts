@@ -17,8 +17,11 @@ import type { XPEvent } from "@/types/xp";
  * even if a queue somehow exists.
  *
  * NOTE: XP events (syncXPEvents below) are NOT gated by analytics
- * consent. XP is part of the user's own learning record, owned and
- * exported by them — not behavioral telemetry.
+ * consent. AP (Activity Points) and MP (Mastery Points) are part of
+ * the user's own learning record — they're shown in the UI, included
+ * in exports, and earned through the user's own actions. They are not
+ * behavioral telemetry. A learner must always have access to their
+ * AP and MP across devices regardless of analytics preferences.
  */
 export async function batchSyncAnalytics(userId: string, events: AnalyticsEvent[]): Promise<void> {
   if (!isAnalyticsEnabled()) return;
@@ -51,6 +54,10 @@ export async function batchSyncAnalytics(userId: string, events: AnalyticsEvent[
  *
  * Strategy: insert-only with conflict skip on id. XP events are
  * immutable once awarded. The user_stats view aggregates totals.
+ *
+ * NOT consent-gated. AP/MP are the learner's own record — see the
+ * note on batchSyncAnalytics above. Do not add an isAnalyticsEnabled()
+ * check here without explicit human approval.
  */
 export async function syncXPEvents(userId: string, events: XPEvent[]): Promise<void> {
   try {

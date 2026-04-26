@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { startAnalyticsLoop } from "@/lib/analytics";
+import { AnalyticsConsentBanner } from "@/components/consent/AnalyticsConsentBanner";
 
 export function AnalyticsProvider({ children }: { children: React.ReactNode }): React.ReactElement {
   useEffect(() => {
@@ -9,5 +10,10 @@ export function AnalyticsProvider({ children }: { children: React.ReactNode }): 
     return stop;
   }, []);
 
-  return <>{children}</>;
+  return (
+    <>
+      {children}
+      <AnalyticsConsentBanner />
+    </>
+  );
 }
