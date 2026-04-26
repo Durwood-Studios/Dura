@@ -1,13 +1,18 @@
 import { getDB } from "@/lib/db";
 import { createClient } from "@/lib/supabase/client";
 import { syncLessonProgress, fetchLessonProgress } from "./queries/progress";
-import { syncFlashcards, fetchFlashcards, syncReviewLogs } from "./queries/flashcards";
+import {
+  syncFlashcards,
+  fetchFlashcards,
+  syncReviewLogs,
+  fetchReviewLogs,
+} from "./queries/flashcards";
 import { syncGoals, fetchGoals } from "./queries/goals";
 import { syncCertificates, fetchCertificates } from "./queries/certificates";
 import { batchSyncAnalytics, syncXPEvents } from "./queries/analytics";
 import { isAnalyticsEnabled } from "@/lib/analytics/consent-gate";
 import type { LessonProgress } from "@/types/curriculum";
-import type { FlashCard } from "@/types/flashcard";
+import type { FlashCard, ReviewLog } from "@/types/flashcard";
 import type { Goal } from "@/types/goal";
 
 interface SyncResult {
@@ -200,6 +205,20 @@ export async function pullChanges(): Promise<{ pulled: number; conflicts: number
     pulled++;
   }
 
+  // Pull review logs — G-Set semantics (append-only set; merge by id-union).
+  // Existing entries are NEVER overwritten on either side, even if a remote
+  // copy of an existing id has different field values (which shouldn't
+  // happen — review log entries are immutable by contract — but if it
+  // does, the local copy wins because the server is authoritative-on-write
+  // not authoritative-on-read for an append-only log).
+  const remoteLogs = await fetchReviewLogs(userId);
+  const localLogIds = new Set((await db.getAll("reviewLogs")).map((entry) => entry.id));
+  for (const remote of remoteLogs) {
+    if (localLogIds.has(remote.id)) continue;
+    await db.put("reviewLogs", remote);
+    pulled++;
+  }
+
   // Pull certificates — immutable, just add missing ones
   const remoteCerts = await fetchCertificates(userId);
   for (const remote of remoteCerts) {
@@ -214,6 +233,33 @@ export async function pullChanges(): Promise<{ pulled: number; conflicts: number
 }
 
 /**
+ * LFLRS-R6 idempotency contract.
+ *
+ * Every merge function below is pure, deterministic, and idempotent:
+ *   - merge(local, remote) === merge(merge(local, remote), remote)
+ *   - merge(newer-local, older-remote) preserves newer-local's monotonic fields
+ *   - merge(local, local) === local
+ *
+ * That property is what lets sync run on a 30s background interval without
+ * fearing accumulated drift, and what makes the same remote state apply
+ * the same way on every device. Tests in
+ * tests/learner-record/sync-idempotency.test.ts cover these invariants.
+ *
+ * Per the LFLRS standard, the operators per data type are:
+ *   - lesson progress: per-field max/OR over monotonic fields (LWW per field
+ *     with the field-value itself as the tiebreaker — `max` is its own LWW)
+ *   - flashcards: whole-record LWW with `lastReview` as the timestamp.
+ *     This is functionally equivalent to per-field LWW because FSRS-5
+ *     updates every field of the card atomically on every review — there
+ *     is no real-world flow that updates one field without the others.
+ *   - goals: monotonic per-field merge (achievedAt sticks once set; current
+ *     takes the max).
+ *   - review_log: G-Set union by id (append-only; existing ids never
+ *     replaced).
+ *   - certificates: G-Set union by id (immutable on first write).
+ */
+
+/**
  * Merge conflict resolution for lesson progress:
  * - completion: OR (if completed anywhere, mark completed)
  * - scrollPercent: keep highest
@@ -222,7 +268,7 @@ export async function pullChanges(): Promise<{ pulled: number; conflicts: number
  * - quizScore: keep highest
  * - xpEarned: keep highest
  */
-function mergeProgress(local: LessonProgress, remote: LessonProgress): LessonProgress {
+export function mergeProgress(local: LessonProgress, remote: LessonProgress): LessonProgress {
   return {
     lessonId: local.lessonId,
     phaseId: local.phaseId,
@@ -242,20 +288,39 @@ function mergeProgress(local: LessonProgress, remote: LessonProgress): LessonPro
 }
 
 /**
- * Merge flashcards: the version with the latest lastReview wins
- * (client owns SRS state, so most recent review is authoritative).
+ * Merge flashcards: whole-record LWW keyed by `lastReview`.
+ *
+ * Equivalent to per-field LWW because FSRS-5 updates every card field
+ * atomically on review — there is no flow that mutates one field without
+ * the others. Strictly-greater-than (not >=) on the timestamp guarantees
+ * that mergeFlashcard(x, x) === x for an unchanged remote, which is what
+ * makes repeated sync calls idempotent.
  */
-function mergeFlashcard(local: FlashCard, remote: FlashCard): FlashCard {
+export function mergeFlashcard(local: FlashCard, remote: FlashCard): FlashCard {
   const localReview = local.lastReview ?? 0;
   const remoteReview = remote.lastReview ?? 0;
   return remoteReview > localReview ? remote : local;
 }
 
 /**
+ * Merge review logs as a G-Set (grow-only set) keyed by id.
+ *
+ * Pure version of the inline merge in pullChanges() — kept exported so
+ * the idempotency test suite can exercise it directly. Preserves local
+ * order and appends only ids not already present locally.
+ */
+export function mergeReviewLog(local: ReviewLog[], remote: ReviewLog[]): ReviewLog[] {
+  const localIds = new Set(local.map((entry) => entry.id));
+  const novel = remote.filter((entry) => !localIds.has(entry.id));
+  if (novel.length === 0) return local;
+  return [...local, ...novel];
+}
+
+/**
  * Merge goals: once achieved stays achieved, otherwise latest progress wins.
  * We compare startedAt + current to determine which is more recent.
  */
-function mergeGoal(local: Goal, remote: Goal): Goal {
+export function mergeGoal(local: Goal, remote: Goal): Goal {
   // If either is achieved, preserve achievement
   const achievedAt = local.achievedAt ?? remote.achievedAt;
 

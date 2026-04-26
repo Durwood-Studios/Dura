@@ -79,6 +79,39 @@ export async function fetchFlashcards(userId: string): Promise<FlashCard[]> {
 }
 
 /**
+ * Fetch all review logs for a user from Supabase.
+ *
+ * Used by pullChanges() to replicate review history across devices.
+ * The server stores logs as a G-Set (append-only); duplicates are
+ * impossible because the table's primary key enforces id uniqueness
+ * and syncReviewLogs() does upsert-on-conflict-id (silently dedup).
+ */
+export async function fetchReviewLogs(userId: string): Promise<ReviewLog[]> {
+  try {
+    const supabase = createClient();
+    const { data, error } = await supabase.from("review_logs").select("*").eq("user_id", userId);
+
+    if (error) {
+      console.error("[fetchReviewLogs] Query error:", error.message);
+      throw error;
+    }
+
+    return (data ?? []).map((row) => ({
+      id: row.id as string,
+      cardId: row.card_id as string,
+      rating: row.rating as ReviewLog["rating"],
+      reviewedAt: new Date(row.reviewed_at as string).getTime(),
+      elapsedDays: Number(row.elapsed_days),
+      scheduledDays: Number(row.scheduled_days),
+      state: row.state as ReviewLog["state"],
+    }));
+  } catch (err) {
+    console.error("[fetchReviewLogs] Failed to fetch:", err);
+    throw err;
+  }
+}
+
+/**
  * Sync review logs to Supabase.
  *
  * Strategy: insert-only (review logs are append-only by nature).
