@@ -59,6 +59,14 @@ function getCompletionMessage(count: number): string {
   return DEFAULT_MESSAGES[count % DEFAULT_MESSAGES.length];
 }
 
+/** Format a millisecond duration as `M:SS`. Floors to whole seconds. */
+function formatTimeRemaining(ms: number): string {
+  const totalSeconds = Math.ceil(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
 function useTween(target: number, durationMs: number, run: boolean): number {
   const [value, setValue] = useState(0);
   const rafRef = useRef<number | null>(null);
@@ -94,10 +102,28 @@ export function CompletionGate({
   const current = useProgressStore((s) => s.current);
 
   const requiredMs = estimatedMinutes * 60_000 * TIME_REQUIRED_RATIO;
+  const requiredMinutes = Math.ceil(estimatedMinutes * TIME_REQUIRED_RATIO);
   const scrollOk = scrollPercent >= SCROLL_REQUIRED;
   const timeOk = timeSpentMs >= requiredMs;
   const quizOk = hasQuiz ? quizPassed : true;
   const ready = scrollOk && timeOk && quizOk;
+
+  const timeProgress = Math.min(1, timeSpentMs / requiredMs);
+  const timeRemainingMs = Math.max(0, requiredMs - timeSpentMs);
+
+  // Detect the false → true unlock transition so we can pulse the button
+  // and announce it for screen readers without firing on every render.
+  const wasReadyRef = useRef(false);
+  const [justUnlocked, setJustUnlocked] = useState(false);
+  useEffect(() => {
+    if (ready && !wasReadyRef.current) {
+      wasReadyRef.current = true;
+      setJustUnlocked(true);
+      const t = setTimeout(() => setJustUnlocked(false), 1200);
+      return () => clearTimeout(t);
+    }
+    if (!ready) wasReadyRef.current = false;
+  }, [ready]);
 
   const [celebrating, setCelebrating] = useState(false);
   const [previousLevel, setPreviousLevel] = useState<number | null>(null);
@@ -115,16 +141,19 @@ export function CompletionGate({
   }, []);
   const xp = useTween(XP_AWARDS.lesson, XP_TWEEN_MS, celebrating);
 
-  const checks = useMemo(
+  type Check = { label: string; done: boolean; subtitle?: string; progress?: number };
+  const checks = useMemo<Check[]>(
     () => [
       { label: `Read at least ${SCROLL_REQUIRED}% of the lesson`, done: scrollOk },
       {
-        label: `Spend at least ${Math.ceil(estimatedMinutes * TIME_REQUIRED_RATIO)} minutes`,
+        label: `Spend at least ${requiredMinutes} minutes`,
         done: timeOk,
+        subtitle: timeOk ? `Time logged.` : `${formatTimeRemaining(timeRemainingMs)} remaining`,
+        progress: timeProgress,
       },
       ...(hasQuiz ? [{ label: "Pass the quiz", done: quizPassed }] : []),
     ],
-    [scrollOk, timeOk, quizPassed, estimatedMinutes, hasQuiz]
+    [scrollOk, timeOk, quizPassed, requiredMinutes, timeRemainingMs, timeProgress, hasQuiz]
   );
 
   // If the lesson was already completed in a previous session, skip celebration animation.
@@ -281,12 +310,12 @@ export function CompletionGate({
       <h2 className="mb-3 text-xl font-semibold text-[var(--color-text-primary)]">
         Finish this lesson
       </h2>
-      <ul className="mb-4 flex flex-col gap-2">
+      <ul className="mb-4 flex flex-col gap-3">
         {checks.map((c) => (
-          <li key={c.label} className="flex items-center gap-2 text-sm">
+          <li key={c.label} className="flex items-start gap-2 text-sm">
             <span
               className={cn(
-                "flex h-5 w-5 items-center justify-center rounded-full border",
+                "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border transition-colors duration-300",
                 c.done
                   ? "border-emerald-500 bg-emerald-500 text-white"
                   : "border-[var(--color-border)] text-[var(--color-text-muted)]"
@@ -294,16 +323,42 @@ export function CompletionGate({
             >
               {c.done ? <Check className="h-3 w-3" /> : <Lock className="h-3 w-3" />}
             </span>
-            <span
-              className={
-                c.done ? "text-[var(--color-text-primary)]" : "text-[var(--color-text-secondary)]"
-              }
-            >
-              {c.label}
+            <span className="flex-1">
+              <span
+                className={
+                  c.done ? "text-[var(--color-text-primary)]" : "text-[var(--color-text-secondary)]"
+                }
+              >
+                {c.label}
+              </span>
+              {c.subtitle && (
+                <span
+                  className={cn(
+                    "ml-2 font-mono text-xs tabular-nums transition-colors duration-300",
+                    c.done ? "text-emerald-600" : "text-[var(--color-text-muted)]"
+                  )}
+                >
+                  {c.subtitle}
+                </span>
+              )}
+              {typeof c.progress === "number" && !c.done && (
+                <span
+                  className="mt-1.5 block h-1 w-full overflow-hidden rounded-full bg-[var(--color-bg-subtle)]"
+                  aria-hidden
+                >
+                  <span
+                    className="block h-full rounded-full bg-emerald-500 transition-[width] duration-1000 ease-linear"
+                    style={{ width: `${c.progress * 100}%` }}
+                  />
+                </span>
+              )}
             </span>
           </li>
         ))}
       </ul>
+      <p className="sr-only" aria-live="polite" role="status">
+        {ready ? "Lesson requirements complete. You can finish the lesson." : ""}
+      </p>
       <button
         type="button"
         onClick={() => void onComplete()}
@@ -312,7 +367,8 @@ export function CompletionGate({
           "rounded-lg px-5 py-2.5 text-sm font-semibold transition",
           ready
             ? "bg-emerald-500 text-white hover:bg-emerald-600"
-            : "cursor-not-allowed bg-[var(--color-bg-subtle)] text-[var(--color-text-muted)]"
+            : "cursor-not-allowed bg-[var(--color-bg-subtle)] text-[var(--color-text-muted)]",
+          justUnlocked && "gate-unlock-pulse"
         )}
       >
         {ready ? `Complete lesson (+${XP_AWARDS.lesson} XP)` : "Keep going"}
