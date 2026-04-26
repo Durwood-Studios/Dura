@@ -15,6 +15,7 @@ import { usePreferencesStore } from "@/stores/preferences";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
 import { clearAllData } from "@/lib/clearAllData";
 import { downloadLearnerRecord } from "@/lib/learner-record/export";
+import { AITransparencyDisclosure } from "@/components/about/AITransparencyDisclosure";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 import {
@@ -210,6 +211,11 @@ export function SettingsClient(): React.ReactElement {
           ))}
         </div>
       </Section>
+
+      {/* ── About / AI transparency (EU AI Act Art. 13/14) ─────────── */}
+      <div className="my-6">
+        <AITransparencyDisclosure />
+      </div>
 
       {/* ── Data ───────────────────────────────────────────────────── */}
       <Section title="Data">

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight, BookOpen, Wrench, ShieldCheck } from "lucide-react";
 import { buildMetadata } from "@/lib/og";
+import { AITransparencyDisclosure } from "@/components/about/AITransparencyDisclosure";
 
 export const metadata: Metadata = buildMetadata({
   title: "How it works",
@@ -83,6 +84,11 @@ export default function HowItWorksPage(): React.ReactElement {
           The goal is 90% retention. You see a card right before you would have forgotten it — not a
           day later, not a week earlier. The algorithm learns your rhythm.
         </p>
+      </section>
+
+      {/* AI transparency — EU AI Act Art. 13/14 */}
+      <section className="mb-12">
+        <AITransparencyDisclosure />
       </section>
 
       {/* Standards */}
