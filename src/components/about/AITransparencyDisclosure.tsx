@@ -56,9 +56,12 @@ export function AITransparencyDisclosure({
           <Eye className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
           <span>
             <strong className="text-[var(--color-text-primary)]">How to override it:</strong> the
-            scheduler is advisory — you are never blocked from any card. Visit a deck&apos;s page
-            and click <em>Study now</em> to review any card on demand, regardless of when FSRS would
-            have surfaced it. You can also change study modes (Standard / Review / Sprint /
+            scheduler is advisory — you are never blocked from any card. Open{" "}
+            <Link href="/review" className="underline">
+              Review
+            </Link>{" "}
+            from your dashboard to study any due card immediately, regardless of when FSRS would
+            have surfaced it next. You can also change study modes (Standard / Review / Sprint /
             Challenge) from Settings.
           </span>
         </li>

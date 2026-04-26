@@ -107,8 +107,15 @@ export async function clearAllData(): Promise<void> {
 }
 
 /**
- * Exports all user data as a JSON string.
- * Used for GDPR right to portability (Settings → Export Data).
+ * Raw IDB JSON dump of every store. Returns a single JSON string.
+ *
+ * NOTE: This is the LEGACY export path. The user-facing GDPR Art. 20
+ * portability export is now in `src/lib/learner-record/export.ts`
+ * (LFLRS-1.0 ZIP with JSON + xAPI + Markdown summary). This function
+ * survives because the AdminDashboard component uses it for raw
+ * debugging dumps that include EVERY store (preferences, dictionary
+ * cache, etc.) without any LFLRS projection. Don't call it from
+ * user-facing flows — use `downloadLearnerRecord()` instead.
  */
 export async function exportAllData(): Promise<string> {
   const db = await getDB();

@@ -20,7 +20,11 @@
 import JSZip from "jszip";
 import { getDB } from "@/lib/db";
 import { getLocalLearnerId } from "@/lib/learner-record/identity";
-import { toCanonicalCard, toCanonicalReviewLog } from "@/lib/learner-record/types";
+import {
+  toCanonicalCard,
+  toCanonicalIdAsync,
+  toCanonicalReviewLog,
+} from "@/lib/learner-record/types";
 import {
   masteryTransitionToXAPI,
   moduleProgressToCanonicalMastery,
@@ -84,11 +88,38 @@ export async function exportLearnerRecord(): Promise<LearnerExportBundle> {
     db.getAll("certificates"),
   ]);
 
-  // ── Build the canonical learner record ─────────────────────────────────
-  const canonicalCards = cards.map((card) =>
-    toCanonicalCard(card, card.lastReview ?? card.createdAt)
+  // ── Pre-compute real RFC 4122 v5 UUIDs for every stored id ─────────────
+  // The sync `toCanonicalId` produces a stable pseudo-UUID that's fine for
+  // in-app sync/merge but may not satisfy strict UUID validators in
+  // external LRSes. Here in the export pipeline we use Web Crypto's
+  // SHA-1 to derive real UUIDv5s, batched up front via Promise.all so the
+  // map() loops below stay synchronous.
+  const idUniverse = new Set<string>();
+  for (const c of cards) idUniverse.add(c.id);
+  for (const r of reviewLog) {
+    idUniverse.add(r.id);
+    idUniverse.add(r.cardId);
+  }
+  const idMap = new Map<string, string>(
+    await Promise.all(
+      [...idUniverse].map(async (id) => [id, await toCanonicalIdAsync(id)] as const)
+    )
   );
-  const canonicalReviewLog = reviewLog.map(toCanonicalReviewLog);
+  const canonicalize = (id: string): string => idMap.get(id) ?? id;
+
+  // ── Build the canonical learner record ─────────────────────────────────
+  const canonicalCards = cards.map((card) => {
+    const projected = toCanonicalCard(card, card.lastReview ?? card.createdAt);
+    return { ...projected, id: canonicalize(card.id) };
+  });
+  const canonicalReviewLog = reviewLog.map((entry) => {
+    const projected = toCanonicalReviewLog(entry);
+    return {
+      ...projected,
+      id: canonicalize(entry.id),
+      card_id: canonicalize(entry.cardId),
+    };
+  });
   const canonicalMastery = moduleProgress.map((m) =>
     moduleProgressToCanonicalMastery(m, m.unlockedAt > 0 ? m.unlockedAt : now)
   );

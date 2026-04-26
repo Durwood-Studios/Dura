@@ -91,7 +91,7 @@ export function ReviewSession(): React.ReactElement {
     const xp = total * XP_AWARDS.flashcard;
     const elapsedMs = startedAt ? Date.now() - startedAt : 0;
     return (
-      <div className="mx-auto max-w-xl py-16 text-center">
+      <div className="mx-auto max-w-xl py-16 text-center" role="status" aria-live="polite">
         <h2 className="text-3xl font-semibold text-[var(--color-text-primary)]">
           Session complete
         </h2>
@@ -127,6 +127,13 @@ export function ReviewSession(): React.ReactElement {
 
   return (
     <div className="mx-auto max-w-2xl py-12">
+      {/* WCAG 2.2 — announce per-card progress so screen-reader users
+          know where they are in the queue without scanning the visual
+          progress bar. Updates whenever `index` changes, which is the
+          single source of truth for "moved to next card." */}
+      <p className="sr-only" aria-live="polite" role="status">
+        Card {index + 1} of {queue.length}.
+      </p>
       <ReviewProgress
         current={index}
         total={queue.length}

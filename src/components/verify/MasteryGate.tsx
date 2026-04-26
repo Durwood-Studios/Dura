@@ -269,7 +269,11 @@ export function MasteryGate({
 
   if (status === "passed") {
     return (
-      <section className="my-8 rounded-2xl border border-emerald-200 bg-[var(--color-bg-accent)] p-6">
+      <section
+        className="my-8 rounded-2xl border border-emerald-200 bg-[var(--color-bg-accent)] p-6"
+        role="status"
+        aria-live="polite"
+      >
         <div className="flex items-start gap-3">
           <Trophy className="mt-1 h-5 w-5 text-emerald-600" aria-hidden />
           <div className="flex-1">

@@ -138,18 +138,25 @@ export type CanonicalLearnerRecord = z.infer<typeof CanonicalLearnerRecordSchema
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * DURA's stored card.id is `string` (no UUID guarantee). The canonical wire
- * format requires UUIDs. When a stored id is already a UUID we pass it
- * through; otherwise we deterministically derive a v5-style namespaced UUID.
- * Keeps round-trips stable: the same input produces the same output, and
- * existing UUID-shaped ids (the common case) are preserved bit-for-bit.
+ * RFC 4122 namespace UUID for DURA. Used as the prefix bytes when deriving
+ * v5 UUIDs from non-UUID stored ids (lesson slugs etc.). This is a stable
+ * project-level constant — changing it would break the deterministic
+ * derivation for every existing learner export.
+ */
+const DURA_NAMESPACE_UUID = "1c4ad6e0-3a1f-5e7d-9b8a-4c2d6e8f0a1b";
+
+/**
+ * Synchronous identity hash for use INSIDE DURA (sync merge, LWW-tiebreak
+ * comparisons). Returns a UUID-shaped string that's deterministic per
+ * input, but is NOT a real RFC 4122 v5 — it's an FNV-derived pseudo-UUID.
+ * For the canonical wire format (export, xAPI), use {@link toCanonicalIdAsync}
+ * which computes real SHA-1-based UUIDv5 via Web Crypto.
+ *
+ * UUID-shaped stored ids pass through unchanged (the common case for cards
+ * minted client-side via crypto.randomUUID).
  */
 export function toCanonicalId(storedId: string): string {
   if (UUID_RE.test(storedId)) return storedId.toLowerCase();
-  // Deterministic synthetic UUID — SHA-1 of namespace + id, formatted as v5.
-  // Browser-only crypto.subtle is async; for a sync projection we use a
-  // simple hash-based fallback that's stable per input. Real UUIDv5 lands
-  // in P2-D when the export pipeline materializes the bytes async.
   let h1 = 0x811c9dc5;
   let h2 = 0xc9dc5811;
   for (let i = 0; i < storedId.length; i++) {
@@ -158,6 +165,53 @@ export function toCanonicalId(storedId: string): string {
   }
   const hex = (h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0")).repeat(2);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+/**
+ * Real RFC 4122 §4.3 UUIDv5 derivation. SHA-1 of namespace bytes + name,
+ * with the version (0x50) and variant (0x80) bits set per spec. Used by
+ * the learner export pipeline so the emitted IDs validate against any
+ * conforming xAPI / LFLRS consumer.
+ *
+ * UUID-shaped stored ids pass through unchanged (no derivation needed).
+ */
+export async function toCanonicalIdAsync(storedId: string): Promise<string> {
+  if (UUID_RE.test(storedId)) return storedId.toLowerCase();
+  if (typeof crypto === "undefined" || !crypto.subtle) {
+    // No Web Crypto in this scope — fall back to the sync hash. Callers
+    // who need true RFC 4122 v5 must run in a browser or a Node 20+ test
+    // runner where crypto.subtle is available.
+    return toCanonicalId(storedId);
+  }
+
+  const namespaceBytes = uuidStringToBytes(DURA_NAMESPACE_UUID);
+  const nameBytes = new TextEncoder().encode(storedId);
+  const input = new Uint8Array(namespaceBytes.length + nameBytes.length);
+  input.set(namespaceBytes, 0);
+  input.set(nameBytes, namespaceBytes.length);
+
+  const hashBuffer = await crypto.subtle.digest("SHA-1", input);
+  const hash = new Uint8Array(hashBuffer).slice(0, 16);
+  // Set version (high nibble of byte 6) to 0x5 = v5
+  hash[6] = (hash[6] & 0x0f) | 0x50;
+  // Set variant (high two bits of byte 8) to 10 = RFC 4122
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+
+  return bytesToUuidString(hash);
+}
+
+function uuidStringToBytes(uuid: string): Uint8Array {
+  const hex = uuid.replace(/-/g, "");
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function bytesToUuidString(bytes: Uint8Array): string {
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 const epochToISO = (ms: number): string => new Date(ms).toISOString();
