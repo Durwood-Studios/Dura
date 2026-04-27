@@ -200,21 +200,22 @@ If any code review reveals a payment gate on core features, it is a bug. Revert 
 
 ## DESIGN SYSTEM
 
-### Colors (use these CSS custom properties)
+> **Source of truth as of 2026-04-26:** [`standards/dls/dls-1.0.md`](standards/dls/dls-1.0.md) (visual language + tokens) and [`standards/dls/dls-2.0.md`](standards/dls/dls-2.0.md) (motion + signatures). This section is a quick reference; if it conflicts with the standards files, the standards win — open an amendment commit (CODEOWNERS-gated).
 
-```css
---bg-primary: #08080d;
---bg-surface: rgba(255, 255, 255, 0.04);
---bg-surface-hover: rgba(255, 255, 255, 0.06);
---border: rgba(255, 255, 255, 0.08);
---text-primary: #f0f0f0;
---text-secondary: #a0a0a8;
---text-muted: #6b6b75;
---accent-emerald: #10b981;
---accent-cyan: #06b6d4;
-```
+### Accent identity (the hybrid rule)
 
-### Phase Colors
+DURA uses TWO accent tokens, used at different moments:
+
+- `--color-accent` (DLS-1.0 blue, `oklch(65% 0.18 250)`) — primary CTA, focus rings, neutral product chrome. The default accent.
+- `--color-celebration` (emerald, `oklch(68% 0.18 145)`) — reserved for **learner-positive moments only**: mastery-gate unlock, lesson completion, "all caught up" empty state, streak milestones. Never used as primary accent.
+
+The hybrid prevents emerald from being so omnipresent that genuine accomplishments lose their visual weight, while keeping the emerald-as-success association the compliance-sprint UI established.
+
+### Colors
+
+The full token set lives in `standards/dls/dls-1.0.md` §Design Tokens. Surfaces (0–3), text (primary/secondary/tertiary), accent + hover + muted, FSRS rating colors (`--color-rating-again|hard|good|easy`), surface overrides (Dojo / Classroom / Discover), semantic states (success/warning/error/info), borders. All in OKLCH for perceptual uniformity.
+
+### Phase Colors (curriculum phase identity — orthogonal to DLS)
 
 ```
 Phase 0: #6ee7b7    Phase 5: #f0abfc
@@ -227,14 +228,16 @@ Phase 4: #fdba74    Phase 9: #f472b6
 ### Typography
 
 ```
-Body/Headings: "DM Sans" (400/500/600/700)
-Code:          "JetBrains Mono" (400/500)
-Accent:        "Instrument Serif" (italic, for taglines only)
-Body size:     16-18px desktop, 15-16px mobile
-Line height:   1.8 for reading, 1.5 for UI
-Code size:     14px
+Body/Headings: "Geist" (400/500/600/700)        — primary
+Code:          "Geist Mono" (400/500)           — code, FSRS intervals, data
+Body size:     16-18px desktop, 15-16px mobile  (use --text-base / --text-lg fluid scale)
+Line height:   --leading-relaxed (1.625) for reading, --leading-normal (1.5) for UI
+Code size:     14px (--text-sm)
 Max content:   700px for reading
+Min font size: --text-sm (12px floor) — anything smaller fails WCAG 2.2 AA
 ```
+
+Geist + Geist Mono are loaded via `next/font/google` in `src/app/layout.tsx`. The fonts that previously shipped (DM Sans, JetBrains Mono, Instrument Serif) were replaced 2026-04-26 to align with DLS-1.0 §Typography. Existing components reference fonts via the `--font-primary` / `--font-mono` CSS variables — they do not need updates.
 
 ### Animation Timing
 
@@ -243,15 +246,16 @@ Hover:           150-250ms
 Page transition: 300-500ms
 Scroll reveal:   400-800ms ease-out
 List stagger:    50-100ms between items
-Spring:          stiffness 300, damping 30
+Spring:          see SPRINGS vocabulary in src/lib/motion/springs.ts
+                 (DLS-2.0: snappy / fluid / settle / drift / bounce)
 ```
 
 ### Component Style
 
-- Glass morphism cards: bg-surface + border + backdrop-blur-xl
-- Rounded corners: 8px (buttons), 12px (cards), 16px (modals)
-- Minimum tap target: 48px on mobile
-- Focus indicators: 2px ring, emerald color, visible on all interactive elements
+- Glass morphism: used **once** across the app — the inference status indicator. See DLS-2.0 §Glass Morphism.
+- Rounded corners: 8px (buttons), 12px (cards), 16px (modals), full (rating buttons + pills).
+- Minimum tap target: 48px on mobile (44px is the WCAG 2.2 SC 2.5.8 floor).
+- Focus indicators: 2px ring, `--color-accent` (blue), 2px offset, visible on all interactive elements.
 
 ---
 
@@ -426,7 +430,8 @@ Full rationale and examples live in [`xDocs/decisions/0002-ai-provenance-format.
 
 ## Changelog
 
-| Date       | Change                                                                                                                      | Rationale                                         |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| 2026-04-25 | Added AINDGS-1.0 required sections (Capability Boundary, High-Risk Surfaces, Review Triggers, Provenance Format, Changelog) | Compliance Sprint Phase 1-D / AINDGS-R1 / R4 / R5 |
-| Inception  | Initial CLAUDE.md (Rules 0–7, Design System, Workflow)                                                                      | Project intelligence baseline                     |
+| Date       | Change                                                                                                                                                                    | Rationale                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| 2026-04-25 | Added AINDGS-1.0 required sections (Capability Boundary, High-Risk Surfaces, Review Triggers, Provenance Format, Changelog)                                               | Compliance Sprint Phase 1-D / AINDGS-R1 / R4 / R5                                                        |
+| 2026-04-26 | Aligned DESIGN SYSTEM to DLS-1.0: blue accent canonical, emerald → `--color-celebration` semantic, Geist + Geist Mono replace DM Sans / JetBrains Mono / Instrument Serif | Motion Sprint P0 (conflict resolutions #1, #2 captured in `xDocs/active/motion-2026-q2/build-prompt.md`) |
+| Inception  | Initial CLAUDE.md (Rules 0–7, Design System, Workflow)                                                                                                                    | Project intelligence baseline                                                                            |
