@@ -1,27 +1,22 @@
 import type { Metadata, Viewport } from "next";
-import { DM_Sans, JetBrains_Mono, Instrument_Serif } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
 import { ThemeProvider, themeBootstrapScript } from "@/components/providers/ThemeProvider";
 import { AnalyticsProvider } from "@/components/providers/AnalyticsProvider";
 import "./globals.css";
 
-const dmSans = DM_Sans({
-  variable: "--font-dm-sans",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-});
-
-const jetbrainsMono = JetBrains_Mono({
-  variable: "--font-jetbrains-mono",
-  subsets: ["latin"],
-  weight: ["400", "500"],
-});
-
-const instrumentSerif = Instrument_Serif({
-  variable: "--font-instrument-serif",
-  subsets: ["latin"],
-  weight: ["400"],
-  style: ["italic", "normal"],
-});
+/**
+ * Font wiring per DLS-1.0 §Typography.
+ *
+ * Geist Sans + Geist Mono replace the prior DM Sans / JetBrains Mono /
+ * Instrument Serif trio (motion sprint P0/P1, conflict #2 resolution).
+ * The geist package exposes the fonts via next/font/local internally,
+ * so subset/weight options aren't passed here — Geist ships every weight
+ * and the variable axis. CSS still references them via
+ * `var(--font-geist-sans)` / `var(--font-geist-mono)` (the package's own
+ * variable names) — globals.css derives `--font-sans` / `--font-mono` /
+ * `--font-primary` / `--font-serif` from these.
+ */
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -68,7 +63,11 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <meta name="theme-color" content="#10B981" media="(prefers-color-scheme: light)" />
+        {/* theme-color reflects the app shell, not a brand celebration.
+            Per DLS-1.0 hybrid rule: --color-accent (blue) is the canonical
+            chrome color; emerald is reserved for learner-positive moments
+            (mastery unlock, completion). Neutral surface for the meta. */}
+        <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
         <meta name="theme-color" content="#08080d" media="(prefers-color-scheme: dark)" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -104,9 +103,7 @@ export default function RootLayout({
           }}
         />
       </head>
-      <body
-        className={`${dmSans.variable} ${jetbrainsMono.variable} ${instrumentSerif.variable} antialiased`}
-      >
+      <body className={`${GeistSans.variable} ${GeistMono.variable} antialiased`}>
         <span
           dangerouslySetInnerHTML={{
             __html:
