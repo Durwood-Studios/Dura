@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { ArrowRight } from "lucide-react";
 import { evaluate } from "@mdx-js/mdx";
 import * as runtime from "react/jsx-runtime";
 import { mdxComponents } from "@/components/lesson/MDXComponents";
@@ -6,12 +8,18 @@ import { CompletionGate } from "@/components/lesson/CompletionGate";
 import { BiteMode } from "@/components/lesson/BiteMode";
 import { formatMinutes } from "@/lib/utils";
 import { ShareButton } from "@/components/seo/ShareButton";
-import type { LoadedLesson } from "@/lib/content";
+import type { LoadedLesson, NextLessonRef } from "@/lib/content";
 
 interface LessonReaderProps {
   lesson: LoadedLesson;
-  next?: { href: string; title: string };
+  next?: NextLessonRef;
   shareUrl: string;
+}
+
+function nextLabel(next: NextLessonRef): string {
+  if (next.scope === "module") return `Next module: ${next.contextLabel ?? next.title}`;
+  if (next.scope === "phase") return `Next phase: ${next.contextLabel ?? next.title}`;
+  return `Next: ${next.title}`;
 }
 
 export async function LessonReader({
@@ -72,9 +80,24 @@ export async function LessonReader({
         lessonTitle={meta.title}
         hasQuiz={hasQuiz}
         nextHref={next?.href}
-        nextTitle={next?.title}
+        nextTitle={next ? nextLabel(next) : undefined}
         vocabulary={meta.vocabulary}
       />
+
+      {next && (
+        <nav
+          aria-label="Lesson navigation"
+          className="mt-8 flex justify-end border-t border-[var(--color-border)] pt-6"
+        >
+          <Link
+            href={next.href}
+            className="group inline-flex items-center gap-2 text-sm font-medium text-[var(--color-text-secondary)] transition hover:text-[var(--color-accent)]"
+          >
+            {nextLabel(next)}
+            <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        </nav>
+      )}
     </article>
   );
 }

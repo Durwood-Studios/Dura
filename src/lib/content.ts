@@ -2,6 +2,7 @@ import "server-only";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
+import { PHASES } from "@/content/phases";
 import type { BloomLevel, DreyfusStage, LessonMeta } from "@/types/curriculum";
 
 const CONTENT_ROOT = path.join(process.cwd(), "src", "content", "phases");
@@ -151,6 +152,78 @@ export async function listAllLessonParams(): Promise<
     console.error("[content] listAllLessonParams failed", error);
   }
   return params;
+}
+
+export type NextLessonScope = "lesson" | "module" | "phase";
+
+export interface NextLessonRef {
+  href: string;
+  title: string;
+  scope: NextLessonScope;
+  /** When scope !== "lesson", the human label of the module/phase being entered. */
+  contextLabel?: string;
+}
+
+/**
+ * Resolve the next lesson in curriculum order, walking across module and phase
+ * boundaries. Returns undefined only when the learner is on the final lesson
+ * of the final module of the final phase.
+ */
+export async function resolveNextLesson(
+  phaseId: string,
+  moduleId: string,
+  lessonId: string
+): Promise<NextLessonRef | undefined> {
+  // 1) Try the next lesson within the same module.
+  const siblings = await listLessons(phaseId, moduleId);
+  const idx = siblings.findIndex((l) => l.id === lessonId);
+  if (idx >= 0 && idx + 1 < siblings.length) {
+    const next = siblings[idx + 1];
+    return {
+      href: `/paths/${phaseId}/${moduleId}/${next.id}`,
+      title: next.title,
+      scope: "lesson",
+    };
+  }
+
+  // 2) Try the first lesson of the next module in the same phase.
+  const phase = PHASES.find((p) => p.id === phaseId);
+  if (!phase) return undefined;
+  const modules = [...phase.modules].sort((a, b) => a.order - b.order);
+  const modIdx = modules.findIndex((m) => m.id === moduleId);
+  if (modIdx >= 0 && modIdx + 1 < modules.length) {
+    const nextMod = modules[modIdx + 1];
+    const firstLesson = (await listLessons(phaseId, nextMod.id))[0];
+    if (firstLesson) {
+      return {
+        href: `/paths/${phaseId}/${nextMod.id}/${firstLesson.id}`,
+        title: firstLesson.title,
+        scope: "module",
+        contextLabel: nextMod.title,
+      };
+    }
+  }
+
+  // 3) Fall back to the first lesson of the first module of the next phase.
+  const phases = [...PHASES].sort((a, b) => a.order - b.order);
+  const phaseIdx = phases.findIndex((p) => p.id === phaseId);
+  if (phaseIdx >= 0 && phaseIdx + 1 < phases.length) {
+    const nextPhase = phases[phaseIdx + 1];
+    const firstMod = [...nextPhase.modules].sort((a, b) => a.order - b.order)[0];
+    if (firstMod) {
+      const firstLesson = (await listLessons(nextPhase.id, firstMod.id))[0];
+      if (firstLesson) {
+        return {
+          href: `/paths/${nextPhase.id}/${firstMod.id}/${firstLesson.id}`,
+          title: firstLesson.title,
+          scope: "phase",
+          contextLabel: nextPhase.title,
+        };
+      }
+    }
+  }
+
+  return undefined;
 }
 
 export async function listLessons(phaseId: string, moduleId: string): Promise<LessonMeta[]> {
