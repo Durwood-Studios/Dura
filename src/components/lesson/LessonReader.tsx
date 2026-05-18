@@ -6,8 +6,11 @@ import { mdxComponents } from "@/components/lesson/MDXComponents";
 import { ScrollTracker } from "@/components/lesson/ScrollTracker";
 import { CompletionGate } from "@/components/lesson/CompletionGate";
 import { BiteMode } from "@/components/lesson/BiteMode";
+import { StandardsBadges } from "@/components/lesson/StandardsBadges";
 import { formatMinutes } from "@/lib/utils";
 import { ShareButton } from "@/components/seo/ShareButton";
+import { buildBadges } from "@/lib/standards";
+import { getStandardsForModule } from "@/content/standards-map";
 import type { LoadedLesson, NextLessonRef } from "@/lib/content";
 
 interface LessonReaderProps {
@@ -39,6 +42,22 @@ export async function LessonReader({
 
   const hasQuiz = /<Quiz\b/.test(body);
 
+  // Merge lesson-level standards (from frontmatter) with module-level
+  // K-12 alignment (CSTA / AP / ISTE) from PHASE_STANDARDS, so every
+  // lesson surfaces its full pedagogical provenance.
+  const moduleStandards = getStandardsForModule(meta.phaseId, meta.moduleId);
+  const badges = buildBadges({
+    cs2023: meta.standards.cs2023,
+    swebok: meta.standards.swebok,
+    sfia: meta.standards.sfia,
+    bloom: meta.bloom,
+    dreyfus: meta.dreyfus,
+    csta: moduleStandards?.csta,
+    apcsp: moduleStandards?.apCSP,
+    apcsa: moduleStandards?.apCSA,
+    iste: moduleStandards?.iste,
+  });
+
   return (
     <article className="mx-auto max-w-[700px] px-6 py-12">
       <ScrollTracker lessonId={meta.id} phaseId={meta.phaseId} moduleId={meta.moduleId} />
@@ -53,16 +72,11 @@ export async function LessonReader({
         {meta.description && (
           <p className="mb-4 text-lg text-[var(--color-text-secondary)]">{meta.description}</p>
         )}
+        <StandardsBadges badges={badges} />
         <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>{formatMinutes(meta.estimatedMinutes)}</span>
           <span aria-hidden>·</span>
           <span>Difficulty {meta.difficulty}/5</span>
-          {meta.standards.cs2023?.[0] && (
-            <>
-              <span aria-hidden>·</span>
-              <span>{meta.standards.cs2023[0]}</span>
-            </>
-          )}
           <span className="ml-auto">
             <ShareButton url={shareUrl} title={meta.title} text={meta.description} />
           </span>
