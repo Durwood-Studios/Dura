@@ -82,57 +82,38 @@ function SandboxControls({
   const [verdictMessage, setVerdictMessage] = useState("");
   const pendingCheck = useRef(false);
 
-  // Check verdict when logs update after a run
+  // Check verdict when logs update after a run.
+  // testCases are author-written behavioral descriptions (e.g. "echo returns
+  // its input"), not literal expected console output — so we don't try to
+  // match them as strings. Verdict = did the code run without throwing?
   useEffect(() => {
     if (!pendingCheck.current || logs.length === 0) return;
 
-    // Wait a tick for all console output to flush
     const timer = setTimeout(() => {
       if (!pendingCheck.current) return;
       pendingCheck.current = false;
 
-      // Collect all console.log output lines
-      const output = logs
-        .filter((l) => l.method === "log" || l.method === "info")
-        .map((l) => extractLogText(l.data))
-        .filter(Boolean);
-
       const hasErrors = logs.some((l) => l.method === "error");
+      const hasOutput = logs.some(
+        (l) => (l.method === "log" || l.method === "info") && extractLogText(l.data).length > 0
+      );
 
-      if (testCases.length === 0) {
-        // No expected output — pass if no errors, show neutral message
-        if (hasErrors) {
-          setVerdict("fail");
-          setVerdictMessage("Check the errors above");
-        } else {
-          setVerdict("pass");
-          setVerdictMessage("Code ran successfully");
-        }
+      if (hasErrors) {
+        setVerdict("fail");
+        setVerdictMessage("Check the errors above");
+      } else if (!hasOutput) {
+        setVerdict("fail");
+        setVerdictMessage("No output — did your code run?");
       } else {
-        // Compare output against expected test cases
-        const allPassed = testCases.every((expected) => {
-          const trimmed = expected.trim();
-          return output.some((line) => line.trim() === trimmed || line.includes(trimmed));
-        });
-
-        if (allPassed) {
-          setVerdict("pass");
-          setVerdictMessage("Correct!");
-        } else {
-          setVerdict("fail");
-          const got = output.length > 0 ? output.join(", ") : "(no output)";
-          setVerdictMessage(`Expected "${testCases[0]}" — got ${got}`);
-        }
+        setVerdict("pass");
+        setVerdictMessage(testCases.length > 0 ? "Ran — verify the checks below" : "Ran cleanly");
       }
 
-      void track("sandbox_executed", {
-        language,
-        success: verdict === "pass",
-      });
+      void track("sandbox_executed", { language, success: !hasErrors && hasOutput });
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [logs, testCases, language, verdict]);
+  }, [logs, testCases, language]);
 
   const run = useCallback(() => {
     setHasAttempted(true);
@@ -220,6 +201,18 @@ export default function SandboxExerciseInner({
       >
         <figcaption className="border-b border-[var(--color-border)] px-4 py-3 text-sm text-[var(--color-text-secondary)]">
           {instructions}
+          {testCases.length > 0 && (
+            <ul className="mt-3 flex flex-col gap-1 text-xs text-[var(--color-text-muted)]">
+              {testCases.map((tc) => (
+                <li key={tc} className="flex items-start gap-2">
+                  <span aria-hidden className="mt-[2px] text-[var(--color-text-muted)]">
+                    ✓
+                  </span>
+                  <span className="font-mono">{tc}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </figcaption>
         <SandboxControls
           initialCode={initialCode}
