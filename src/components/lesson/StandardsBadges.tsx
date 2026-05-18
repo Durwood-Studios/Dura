@@ -42,7 +42,7 @@ export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactEl
 
   return (
     <div ref={containerRef} className="mb-4 flex flex-wrap items-center gap-1.5">
-      <span className="mr-1 text-[10px] font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
+      <span className="mr-1 text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
         Aligned to
       </span>
       {badges.map(({ body, codes }) => {
@@ -56,16 +56,14 @@ export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactEl
               aria-expanded={isOpen}
               aria-label={`${body.full}: ${codes.join(", ")}`}
               className={cn(
-                "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition",
+                "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium transition",
                 isOpen
                   ? "border-[var(--color-accent)] bg-[var(--color-bg-accent)] text-[var(--color-accent)]"
                   : "border-[var(--color-border)] bg-[var(--color-bg-subtle)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
               )}
             >
               <span className="font-semibold">{body.short}</span>
-              <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
-                {preview}
-              </span>
+              <span className="font-mono text-xs text-[var(--color-text-muted)]">{preview}</span>
             </button>
             {isOpen && (
               <span
@@ -79,14 +77,14 @@ export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactEl
                 <span className="mt-1 block text-xs leading-relaxed text-[var(--color-text-secondary)]">
                   {body.description}
                 </span>
-                <span className="mt-3 block text-[10px] font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
+                <span className="mt-3 block text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
                   This lesson covers
                 </span>
                 <span className="mt-1 flex flex-wrap gap-1">
                   {codes.map((c) => (
                     <span
                       key={c}
-                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-text-primary)]"
+                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-1.5 py-0.5 font-mono text-xs text-[var(--color-text-primary)]"
                     >
                       {c}
                     </span>
@@ -96,7 +94,7 @@ export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactEl
                   href={body.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="mt-3 inline-flex items-center gap-1 text-[11px] font-medium text-[var(--color-accent)] hover:underline"
+                  className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] hover:underline"
                 >
                   Official spec
                   <ExternalLink className="h-3 w-3" />

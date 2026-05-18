@@ -13,7 +13,11 @@ export type StandardsBodyId =
   | "csta"
   | "apcsp"
   | "apcsa"
-  | "iste";
+  | "iste"
+  | "wcag"
+  | "owasp"
+  | "ieee7000"
+  | "nice";
 
 export interface StandardsBody {
   id: StandardsBodyId;
@@ -99,6 +103,38 @@ export const STANDARDS_BODIES: Record<StandardsBodyId, StandardsBody> = {
     description:
       "International Society for Technology in Education's standards for what students should know and do with technology, adopted by schools globally.",
     url: "https://iste.org/standards/students",
+  },
+  wcag: {
+    id: "wcag",
+    short: "WCAG",
+    full: "Web Content Accessibility Guidelines 2.2 (W3C)",
+    description:
+      "The W3C's accessibility guidelines for web content, organised around four principles (Perceivable, Operable, Understandable, Robust) and three conformance levels (A, AA, AAA). Cited as the legal standard for accessibility in most jurisdictions.",
+    url: "https://www.w3.org/TR/WCAG22/",
+  },
+  owasp: {
+    id: "owasp",
+    short: "OWASP",
+    full: "OWASP Top 10 / Application Security Verification Standard",
+    description:
+      "The Open Worldwide Application Security Project's consensus list of the most critical security risks to web applications, and the matching verification standard. The de facto reference for secure software development.",
+    url: "https://owasp.org/Top10/",
+  },
+  ieee7000: {
+    id: "ieee7000",
+    short: "IEEE 7000",
+    full: "IEEE 7000-series Standards on Ethics in Autonomous and Intelligent Systems",
+    description:
+      "A family of IEEE standards on ethical design of intelligent systems — value-based design, transparency of autonomous systems, algorithmic bias, data privacy, child and student data governance.",
+    url: "https://standards.ieee.org/industry-connections/ec/autonomous-systems/",
+  },
+  nice: {
+    id: "nice",
+    short: "NICE",
+    full: "NIST NICE Workforce Framework for Cybersecurity",
+    description:
+      "The US National Initiative for Cybersecurity Education's reference taxonomy of cybersecurity work roles, tasks, and knowledge/skill statements. Used by employers and educators to describe security roles.",
+    url: "https://www.nist.gov/itl/applied-cybersecurity/nice/nice-framework-resource-center",
   },
 };
 
