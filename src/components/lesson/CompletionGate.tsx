@@ -286,7 +286,7 @@ export function CompletionGate({
               href={nextHref}
               className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600"
             >
-              Next: {nextTitle}
+              {nextTitle}
               <ArrowRight className="h-4 w-4" />
             </Link>
           )}
