@@ -50,12 +50,16 @@ export async function LessonReader({
     cs2023: meta.standards.cs2023,
     swebok: meta.standards.swebok,
     sfia: meta.standards.sfia,
+    sfiaModule: moduleStandards?.sfia,
     bloom: meta.bloom,
     dreyfus: meta.dreyfus,
     csta: moduleStandards?.csta,
     apcsp: moduleStandards?.apCSP,
     apcsa: moduleStandards?.apCSA,
     iste: moduleStandards?.iste,
+    owasp: moduleStandards?.owasp,
+    ieee7000: moduleStandards?.ieee7000,
+    nice: moduleStandards?.nice,
   });
 
   return (

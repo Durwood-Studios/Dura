@@ -148,30 +148,47 @@ export interface StandardsBadge {
 export function buildBadges(input: {
   cs2023?: string[];
   swebok?: string[];
+  /** Lesson-level SFIA string, e.g. "Level 2". */
   sfia?: string;
+  /** Module-level SFIA work-role summary, merged with lesson sfia. */
+  sfiaModule?: string;
   bloom?: string;
   dreyfus?: string;
   csta?: string[];
   apcsp?: string[];
   apcsa?: string[];
   iste?: string[];
+  /** Module-level OWASP Top 10 categories (security modules). */
+  owasp?: string[];
+  /** Module-level IEEE 7000-series ethics standards (AI / ethics modules). */
+  ieee7000?: string[];
+  /** Module-level NIST NICE workforce codes (cyber / devops modules). */
+  nice?: string[];
 }): StandardsBadge[] {
   const badges: StandardsBadge[] = [];
   const push = (id: StandardsBodyId, codes: string[] | undefined): void => {
-    const cleaned = (codes ?? []).filter((c): c is string => Boolean(c && c.trim()));
+    const cleaned = dedupe((codes ?? []).filter((c): c is string => Boolean(c && c.trim())));
     if (cleaned.length === 0) return;
     badges.push({ body: STANDARDS_BODIES[id], codes: cleaned });
   };
   push("cs2023", input.cs2023);
   push("swebok", input.swebok);
-  if (input.sfia) push("sfia", [input.sfia]);
+  const sfiaCodes = [input.sfia, input.sfiaModule].filter((s): s is string => Boolean(s));
+  if (sfiaCodes.length > 0) push("sfia", sfiaCodes);
   if (input.bloom) push("bloom", [capitalize(input.bloom)]);
   if (input.dreyfus) push("dreyfus", [formatDreyfus(input.dreyfus)]);
   push("csta", input.csta);
   push("apcsp", input.apcsp);
   push("apcsa", input.apcsa);
   push("iste", input.iste);
+  push("owasp", input.owasp);
+  push("ieee7000", input.ieee7000);
+  push("nice", input.nice);
   return badges;
+}
+
+function dedupe(arr: string[]): string[] {
+  return Array.from(new Set(arr));
 }
 
 function capitalize(s: string): string {
