@@ -198,3 +198,110 @@ function capitalize(s: string): string {
 function formatDreyfus(s: string): string {
   return s.split("-").map(capitalize).join(" ");
 }
+
+/**
+ * Knowledge-area decoders for codes that follow a predictable structure.
+ * Used to enrich raw codes (e.g. "AR-1") with the human-readable area
+ * name ("Architecture & Organization") so the chip popover and the
+ * /standards page surface meaning, not just identifiers.
+ *
+ * Only authoritative, stable mappings live here. Codes whose interpretation
+ * has changed across framework versions (e.g. AP CSP Big Ideas reframed
+ * in 2020) are intentionally NOT decoded — the raw code wins over a
+ * possibly-stale label.
+ */
+
+const CS2023_AREAS: Record<string, string> = {
+  AI: "Artificial Intelligence",
+  AL: "Algorithms & Complexity",
+  AR: "Architecture & Organization",
+  DM: "Data Management",
+  FPL: "Foundations of Programming Languages",
+  GIT: "Graphics & Interactive Techniques",
+  HCI: "Human-Computer Interaction",
+  MSF: "Mathematical & Statistical Foundations",
+  NC: "Networking & Communication",
+  OS: "Operating Systems",
+  PDC: "Parallel & Distributed Computing",
+  PD: "Platform-Based Development",
+  SE: "Software Engineering",
+  SEC: "Security",
+  SF: "Systems Fundamentals",
+  SDF: "Software Development Fundamentals",
+  SP: "Society, Ethics & Professionalism",
+};
+
+const CSTA_LEVELS: Record<string, string> = {
+  "1A": "Level 1A (K-2)",
+  "1B": "Level 1B (3-5)",
+  "2": "Level 2 (6-8)",
+  "3A": "Level 3A (9-10)",
+  "3B": "Level 3B (11-12)",
+};
+
+const CSTA_DOMAINS: Record<string, string> = {
+  CS: "Computing Systems",
+  NI: "Networks & the Internet",
+  DA: "Data & Analysis",
+  AP: "Algorithms & Programming",
+  IC: "Impacts of Computing",
+};
+
+const ISTE_STUDENT: Record<string, string> = {
+  "1.1": "Empowered Learner",
+  "1.2": "Digital Citizen",
+  "1.3": "Knowledge Constructor",
+  "1.4": "Innovative Designer",
+  "1.5": "Computational Thinker",
+  "1.6": "Creative Communicator",
+  "1.7": "Global Collaborator",
+};
+
+const APCSA_UNITS: Record<string, string> = {
+  "CSA-Unit1": "Primitive Types",
+  "CSA-Unit2": "Using Objects",
+  "CSA-Unit3": "Boolean Expressions & If Statements",
+  "CSA-Unit4": "Iteration",
+  "CSA-Unit5": "Writing Classes",
+  "CSA-Unit6": "Array",
+  "CSA-Unit7": "ArrayList",
+  "CSA-Unit8": "2D Array",
+  "CSA-Unit9": "Inheritance",
+  "CSA-Unit10": "Recursion",
+};
+
+/**
+ * Decode a standards code into a human-readable label when the body has a
+ * stable structural mapping. Returns the raw code unchanged when no
+ * decoder applies — readability is opportunistic, never invented.
+ */
+export function decodeCode(bodyId: StandardsBodyId, code: string): string {
+  const trimmed = code.trim();
+  switch (bodyId) {
+    case "cs2023": {
+      // CS2023 codes look like "AR-1", "SE-3", "MSF-1.1"
+      const match = trimmed.match(/^([A-Z]+)(?:[-.].+)?$/);
+      const area = match?.[1] ? CS2023_AREAS[match[1]] : undefined;
+      return area ? `${trimmed} — ${area}` : trimmed;
+    }
+    case "csta": {
+      // CSTA codes: Level-Domain-Number, e.g. "2-AP-10" or "3B-DA-09"
+      const match = trimmed.match(/^(1A|1B|2|3A|3B)-([A-Z]{2})-\d+$/);
+      if (!match) return trimmed;
+      const level = CSTA_LEVELS[match[1]];
+      const domain = CSTA_DOMAINS[match[2]];
+      if (!level || !domain) return trimmed;
+      return `${trimmed} — ${level}, ${domain}`;
+    }
+    case "iste": {
+      const label = ISTE_STUDENT[trimmed];
+      return label ? `${trimmed} — ${label}` : trimmed;
+    }
+    case "apcsa": {
+      const label = APCSA_UNITS[trimmed];
+      return label ? `${trimmed} — ${label}` : trimmed;
+    }
+    default:
+      return trimmed;
+  }
+}

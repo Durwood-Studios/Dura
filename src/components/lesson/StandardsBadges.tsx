@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { StandardsBadge } from "@/lib/standards";
+import { decodeCode, type StandardsBadge } from "@/lib/standards";
 
 interface StandardsBadgesProps {
   badges: StandardsBadge[];
@@ -80,13 +80,13 @@ export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactEl
                 <span className="mt-3 block text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
                   This lesson covers
                 </span>
-                <span className="mt-1 flex flex-wrap gap-1">
+                <span className="mt-1 flex flex-col gap-1">
                   {codes.map((c) => (
                     <span
                       key={c}
-                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-1.5 py-0.5 font-mono text-xs text-[var(--color-text-primary)]"
+                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-2 py-1 text-xs text-[var(--color-text-primary)]"
                     >
-                      {c}
+                      <span className="font-mono">{decodeCode(body.id, c)}</span>
                     </span>
                   ))}
                 </span>

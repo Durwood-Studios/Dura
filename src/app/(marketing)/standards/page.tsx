@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ExternalLink } from "lucide-react";
 import { aggregateStandards, type BodyCoverage } from "@/lib/standards-aggregate";
+import { decodeCode } from "@/lib/standards";
 
 export const metadata: Metadata = {
   title: "Standards — DURA",
@@ -125,7 +126,7 @@ function StandardsBodySection({ coverage }: { coverage: BodyCoverage }): React.R
             className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4"
           >
             <p className="mb-2 font-mono text-sm font-semibold text-[var(--color-text-primary)]">
-              {code}
+              {decodeCode(body.id, code)}
             </p>
             <ul className="flex flex-wrap gap-1.5">
               {modules.map((m) => (
