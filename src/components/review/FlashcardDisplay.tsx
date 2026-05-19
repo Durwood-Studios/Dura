@@ -46,7 +46,7 @@ export function FlashcardDisplay({
       >
         {/* Front */}
         <div className="flashcard-face absolute inset-0 flex flex-col items-center justify-center rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-8 shadow-md">
-          <span className="mb-3 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+          <span className="mb-3 font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
             Term
           </span>
           <h2 className="text-center text-3xl font-semibold text-[var(--color-text-primary)] sm:text-4xl">
@@ -59,7 +59,7 @@ export function FlashcardDisplay({
         </div>
         {/* Back */}
         <div className="flashcard-face flashcard-back absolute inset-0 flex flex-col items-center justify-center rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-8 shadow-md">
-          <span className="mb-3 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+          <span className="mb-3 font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
             Definition
           </span>
           <p className="max-w-[480px] text-center leading-relaxed text-[var(--color-text-secondary)]">

@@ -84,7 +84,7 @@ export function PixelArt(): React.ReactElement {
               transform: activeColor === i ? "scale(1.15)" : "scale(1)",
             }}
           >
-            <span className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-[10px] text-[var(--color-text-muted)]">
+            <span className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-xs text-[var(--color-text-muted)]">
               {i}
             </span>
           </button>

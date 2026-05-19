@@ -35,7 +35,7 @@ export function ReviewBadge({ className }: ReviewBadgeProps): React.ReactElement
     <span
       aria-label={`${count} cards due for review`}
       className={cn(
-        "inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[10px] font-semibold text-white",
+        "inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-emerald-500 px-1.5 text-xs font-semibold text-white",
         className
       )}
     >

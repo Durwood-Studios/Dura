@@ -126,7 +126,7 @@ function StatCard({
         className="mx-auto mb-3 h-0.5 w-12 rounded-full opacity-60"
         style={{ background: phaseColor }}
       />
-      <p className="font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+      <p className="font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
         {label}
       </p>
       <p className="dura-stat-gradient mt-1 text-2xl font-bold">{value}</p>
@@ -190,7 +190,7 @@ function ModuleRow({ phaseId, module, phaseColor, index }: ModuleRowProps): Reac
           </div>
 
           <div className="flex-1">
-            <p className="font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+            <p className="font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
               {module.id}
             </p>
             <h3 className="mt-0.5 font-semibold text-[var(--color-text-primary)]">
@@ -206,7 +206,7 @@ function ModuleRow({ phaseId, module, phaseColor, index }: ModuleRowProps): Reac
         </div>
 
         {/* Stat row */}
-        <div className="flex items-center gap-4 text-[10px] text-[var(--color-text-muted)]">
+        <div className="flex items-center gap-4 text-xs text-[var(--color-text-muted)]">
           <span className="font-mono">
             {module.lessonCount} lesson{module.lessonCount === 1 ? "" : "s"}
           </span>
@@ -228,7 +228,7 @@ function ModuleRow({ phaseId, module, phaseColor, index }: ModuleRowProps): Reac
               }}
             />
           </div>
-          <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
+          <span className="font-mono text-xs text-[var(--color-text-muted)]">
             {completed}/{module.lessonCount}
           </span>
         </div>

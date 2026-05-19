@@ -51,7 +51,7 @@ export function MobileBottomTabs(): React.ReactElement {
             key={href}
             href={href}
             className={cn(
-              "relative flex flex-1 flex-col items-center justify-center gap-1 text-[11px] font-medium",
+              "relative flex flex-1 flex-col items-center justify-center gap-1 text-xs font-medium",
               active ? "text-emerald-600" : "text-[var(--color-text-secondary)]"
             )}
           >
@@ -177,7 +177,7 @@ export function MobileDrawer(): React.ReactElement | null {
           {DRAWER_SECTIONS.map((section, si) => (
             <div key={section.title || si} className="mb-1">
               {section.title && (
-                <p className="mt-4 mb-1 px-3 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+                <p className="mt-4 mb-1 px-3 font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
                   {section.title}
                 </p>
               )}
@@ -207,7 +207,7 @@ export function MobileDrawer(): React.ReactElement | null {
                     />
                     {label}
                     {href === "/review" && (
-                      <ReviewBadge className="ml-auto h-5 min-w-[20px] text-[10px]" />
+                      <ReviewBadge className="ml-auto h-5 min-w-[20px] text-xs" />
                     )}
                   </Link>
                 );
@@ -218,7 +218,7 @@ export function MobileDrawer(): React.ReactElement | null {
 
         {/* Footer */}
         <div className="border-t border-[var(--color-border)] px-5 py-3">
-          <p className="text-[10px] text-[var(--color-text-muted)]">
+          <p className="text-xs text-[var(--color-text-muted)]">
             Free forever. Offline-first. Open source.
           </p>
         </div>

@@ -80,7 +80,7 @@ export function CertificateList(): React.ReactElement {
                 }}
               >
                 <Award className="h-5 w-5 text-[var(--color-text-primary)]" aria-hidden />
-                <p className="mt-2 font-mono text-[10px] text-[var(--color-text-muted)] uppercase">
+                <p className="mt-2 font-mono text-xs text-[var(--color-text-muted)] uppercase">
                   Phase {cert.phaseId} · Verified
                 </p>
                 <h3 className="mt-1 text-base font-semibold text-[var(--color-text-primary)]">

@@ -257,11 +257,11 @@ export function StatsClient(): React.ReactElement {
                   }}
                 />
                 <span
-                  className={`text-[10px] font-medium ${isToday ? "text-emerald-500" : "text-[var(--color-text-muted)]"}`}
+                  className={`text-xs font-medium ${isToday ? "text-emerald-500" : "text-[var(--color-text-muted)]"}`}
                 >
                   {weeklyLabels[i]}
                 </span>
-                <span className="font-mono text-[10px] text-[var(--color-text-secondary)]">
+                <span className="font-mono text-xs text-[var(--color-text-secondary)]">
                   {count}
                 </span>
               </div>
@@ -303,7 +303,7 @@ export function StatsClient(): React.ReactElement {
                         Phase {p.phase.id}
                       </span>
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
+                        <span className="font-mono text-xs text-[var(--color-text-muted)]">
                           {p.completedLessons}/{p.totalLessons}
                         </span>
                         {p.certificate && (
@@ -382,17 +382,17 @@ export function StatsClient(): React.ReactElement {
             <div className="grid grid-cols-3 gap-4 text-center">
               <div>
                 <p className="dura-stat-gradient text-3xl font-bold">{data.deckSize}</p>
-                <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">Cards total</p>
+                <p className="mt-1 text-xs text-[var(--color-text-muted)]">Cards total</p>
               </div>
               <div>
                 <p className="dura-stat-gradient text-3xl font-bold">{data.dueToday}</p>
-                <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">Due now</p>
+                <p className="mt-1 text-xs text-[var(--color-text-muted)]">Due now</p>
               </div>
               <div>
                 <p className="dura-stat-gradient text-3xl font-bold">
                   {Math.round(data.retentionRate * 100)}%
                 </p>
-                <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">Retention</p>
+                <p className="mt-1 text-xs text-[var(--color-text-muted)]">Retention</p>
               </div>
             </div>
           </section>
@@ -421,12 +421,12 @@ function StatCard({ icon, label, value, hint, accentColor }: StatCardProps): Rea
         }}
       />
       <div className="flex flex-col gap-1.5 p-4">
-        <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--color-text-muted)] uppercase">
+        <div className="flex items-center gap-2 font-mono text-xs tracking-wider text-[var(--color-text-muted)] uppercase">
           {icon}
           {label}
         </div>
         <div className="dura-stat-gradient text-3xl font-bold">{value}</div>
-        <div className="text-[10px] text-[var(--color-text-muted)]">{hint}</div>
+        <div className="text-xs text-[var(--color-text-muted)]">{hint}</div>
       </div>
     </div>
   );

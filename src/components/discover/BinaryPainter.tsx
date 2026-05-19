@@ -35,7 +35,7 @@ function BitSwitch({ bitIndex, isOn, onToggle }: BitSwitchProps): React.ReactEle
       aria-pressed={isOn}
       className="flex flex-col items-center gap-1"
     >
-      <span className={cn("text-[10px] font-medium", channelColor)}>{channel}</span>
+      <span className={cn("text-xs font-medium", channelColor)}>{channel}</span>
       <div
         className={cn(
           "flex h-12 w-7 items-end rounded-full p-0.5 transition-colors duration-150",

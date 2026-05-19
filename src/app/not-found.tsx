@@ -35,7 +35,7 @@ export default function NotFound(): React.ReactElement {
           </Link>
         </div>
       </div>
-      <p className="mt-8 font-mono text-[10px] text-[var(--color-text-muted)]">DURA</p>
+      <p className="mt-8 font-mono text-xs text-[var(--color-text-muted)]">DURA</p>
     </div>
   );
 }

@@ -59,7 +59,7 @@ export function SprintTimer(): React.ReactElement | null {
       {active ? (
         <>
           <span className="font-mono">{format(remaining)}</span>
-          <span className="text-[10px] opacity-75">
+          <span className="text-xs opacity-75">
             {phase === "working"
               ? `Sprint ${sprintIndex}/${totalSprints}`
               : phase === "break"

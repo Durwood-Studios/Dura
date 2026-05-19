@@ -75,7 +75,7 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
           </Link>
           {firstPhase && (
             <span
-              className="shrink-0 rounded-full px-2.5 py-0.5 text-[10px] font-semibold"
+              className="shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold"
               style={{
                 backgroundColor: `${phaseColor ?? "#10b981"}20`,
                 color: phaseColor,
@@ -91,7 +91,7 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
         </p>
 
         <div className="mt-auto flex items-center justify-between pt-2">
-          <span className="text-[10px] text-[var(--color-text-muted)]">
+          <span className="text-xs text-[var(--color-text-muted)]">
             {term.lessonIds.length > 0
               ? `Used in ${term.lessonIds.length} lesson${term.lessonIds.length === 1 ? "" : "s"}`
               : term.category}
@@ -102,7 +102,7 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
               onClick={() => void addToDeck()}
               disabled={inDeck}
               className={cn(
-                "inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition",
+                "inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition",
                 inDeck
                   ? "dura-glow-emerald border-emerald-400/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
                   : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-emerald-400/50 hover:bg-emerald-500/5 hover:text-emerald-600 dark:hover:text-emerald-400"
@@ -113,7 +113,7 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
             </button>
             <Link
               href={`/dictionary/${term.slug}`}
-              className="inline-flex items-center gap-0.5 text-[11px] font-medium text-emerald-600 transition hover:text-emerald-500 dark:text-emerald-400"
+              className="inline-flex items-center gap-0.5 text-xs font-medium text-emerald-600 transition hover:text-emerald-500 dark:text-emerald-400"
             >
               Open
               <ArrowRight className="h-3 w-3" />

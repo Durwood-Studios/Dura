@@ -330,7 +330,7 @@ export function DashboardClient(): React.ReactElement {
           accentColor="cyan"
         />
       </div>
-      <p className="text-[11px] text-[var(--color-text-muted)]">
+      <p className="text-xs text-[var(--color-text-muted)]">
         AP tracks your effort and consistency. MP tracks proven competence. Only MP appears on
         certificates.
       </p>
@@ -376,7 +376,7 @@ export function DashboardClient(): React.ReactElement {
                 }}
               />
             </div>
-            <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
+            <span className="font-mono text-xs text-[var(--color-text-muted)]">
               {Math.round((avgMinutesPerDay / dailyGoalMinutes) * 100)}%
             </span>
           </div>

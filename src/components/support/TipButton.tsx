@@ -161,12 +161,12 @@ export function TipButton({ variant = "floating", className }: TipButtonProps): 
                       </span>
                       <span className="font-mono text-xs text-emerald-600">{tier.amount}</span>
                     </span>
-                    <span className="text-[10px] text-[var(--color-text-muted)]">{tier.hint}</span>
+                    <span className="text-xs text-[var(--color-text-muted)]">{tier.hint}</span>
                   </a>
                 );
               })}
             </div>
-            <p className="mt-4 text-[10px] text-[var(--color-text-muted)]">
+            <p className="mt-4 text-xs text-[var(--color-text-muted)]">
               Payment via Stripe. 2.9% + 30¢ goes to Stripe, the rest goes to building DURA. No
               middleman platforms.
             </p>

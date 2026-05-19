@@ -40,7 +40,7 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
         }}
       >
         <Award className="mx-auto h-14 w-14 text-[var(--color-text-primary)]" aria-hidden />
-        <p className="mt-3 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+        <p className="mt-3 font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
           DURA · Verified
         </p>
         <h1 className="mt-1 text-3xl font-semibold text-[var(--color-text-primary)]">
@@ -59,21 +59,19 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
 
         <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3">
           <div className="rounded-lg border border-[var(--color-border)] p-3">
-            <p className="font-mono text-[10px] text-[var(--color-text-muted)] uppercase">Score</p>
+            <p className="font-mono text-xs text-[var(--color-text-muted)] uppercase">Score</p>
             <p className="mt-1 text-2xl font-semibold text-emerald-600">
               {Math.round(certificate.score * 100)}%
             </p>
           </div>
           <div className="rounded-lg border border-[var(--color-border)] p-3">
-            <p className="font-mono text-[10px] text-[var(--color-text-muted)] uppercase">
-              Questions
-            </p>
+            <p className="font-mono text-xs text-[var(--color-text-muted)] uppercase">Questions</p>
             <p className="mt-1 text-2xl font-semibold text-[var(--color-text-primary)]">
               {certificate.totalQuestions}
             </p>
           </div>
           <div className="col-span-2 rounded-lg border border-[var(--color-border)] p-3 sm:col-span-1">
-            <p className="font-mono text-[10px] text-[var(--color-text-muted)] uppercase">Date</p>
+            <p className="font-mono text-xs text-[var(--color-text-muted)] uppercase">Date</p>
             <p className="mt-1 text-sm font-semibold text-[var(--color-text-primary)]">
               {new Date(certificate.completedAt).toLocaleDateString(undefined, {
                 year: "numeric",
@@ -86,7 +84,7 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
 
         {certificate.standards.length > 0 && (
           <div className="mt-6 rounded-lg bg-[var(--color-bg-subtle)] p-4 text-left">
-            <p className="font-mono text-[10px] text-[var(--color-text-muted)] uppercase">
+            <p className="font-mono text-xs text-[var(--color-text-muted)] uppercase">
               Standards covered
             </p>
             <p className="mt-1 flex flex-wrap gap-1.5 text-xs text-[var(--color-text-secondary)]">
@@ -129,7 +127,7 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
           />
         </div>
       </footer>
-      <p className="mt-2 text-center text-[10px] text-[var(--color-text-muted)] print:hidden">
+      <p className="mt-2 text-center text-xs text-[var(--color-text-muted)] print:hidden">
         Choose &ldquo;Save as PDF&rdquo; in the print dialog
       </p>
     </article>

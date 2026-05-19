@@ -38,7 +38,7 @@ export default async function ModuleWorkbookPage({
         </p>
         <h1 className="mt-1 text-4xl font-semibold">{mod.title}</h1>
         <p className="mt-2 text-sm text-[var(--color-text-secondary)]">{mod.description}</p>
-        <p className="mt-2 font-mono text-[10px] text-[var(--color-text-secondary)]">
+        <p className="mt-2 font-mono text-xs text-[var(--color-text-secondary)]">
           {lessons.length} lessons · ~{mod.estimatedHours}h · {new Date().toLocaleDateString()}
         </p>
       </header>
@@ -50,7 +50,7 @@ export default async function ModuleWorkbookPage({
           style={{ pageBreakInside: "avoid" }}
         >
           <header className="mb-4 border-b border-neutral-300 pb-3">
-            <p className="font-mono text-[10px] text-[var(--color-text-secondary)] uppercase">
+            <p className="font-mono text-xs text-[var(--color-text-secondary)] uppercase">
               Lesson {i + 1} · {lesson.meta.id}
             </p>
             <h2 className="mt-1 text-2xl font-semibold text-[var(--color-text-primary)]">
@@ -61,7 +61,7 @@ export default async function ModuleWorkbookPage({
                 {lesson.meta.description}
               </p>
             )}
-            <p className="mt-1 font-mono text-[10px] text-[var(--color-text-secondary)]">
+            <p className="mt-1 font-mono text-xs text-[var(--color-text-secondary)]">
               {formatMinutes(lesson.meta.estimatedMinutes)} · Difficulty {lesson.meta.difficulty}/5
               · Bloom: {lesson.meta.bloom}
               {lesson.meta.standards.cs2023?.[0] && ` · ${lesson.meta.standards.cs2023[0]}`}
@@ -73,7 +73,7 @@ export default async function ModuleWorkbookPage({
         </article>
       ))}
 
-      <footer className="mt-16 border-t border-neutral-300 pt-4 text-center text-[10px] text-[var(--color-text-secondary)]">
+      <footer className="mt-16 border-t border-neutral-300 pt-4 text-center text-xs text-[var(--color-text-secondary)]">
         DURA · {mod.title} · Durwood Studios LLC · AGPLv3
       </footer>
     </main>

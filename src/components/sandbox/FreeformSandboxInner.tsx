@@ -288,7 +288,7 @@ function Toolbar({
                   className="flex w-full flex-col px-3 py-2 text-left text-xs hover:bg-[var(--color-bg-subtle)]"
                 >
                   <span className="font-medium text-[var(--color-text-primary)]">{s.language}</span>
-                  <span className="text-[10px] text-[var(--color-text-muted)]">
+                  <span className="text-xs text-[var(--color-text-muted)]">
                     {new Date(s.updatedAt).toLocaleString()}
                   </span>
                 </button>
@@ -298,7 +298,7 @@ function Toolbar({
         )}
       </div>
       {savedAt && (
-        <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">
+        <span className="ml-auto text-xs text-[var(--color-text-muted)]">
           Saved {new Date(savedAt).toLocaleTimeString()}
         </span>
       )}

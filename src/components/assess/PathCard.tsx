@@ -43,7 +43,7 @@ export function PathCard({
       )}
     >
       {recommended && (
-        <span className="absolute -top-2.5 right-4 inline-flex items-center gap-1 rounded-full bg-emerald-500 px-2.5 py-0.5 text-[10px] font-semibold text-white">
+        <span className="absolute -top-2.5 right-4 inline-flex items-center gap-1 rounded-full bg-emerald-500 px-2.5 py-0.5 text-xs font-semibold text-white">
           <Star className="h-3 w-3" /> Recommended
         </span>
       )}
@@ -54,7 +54,7 @@ export function PathCard({
         {path.phases.map((p) => (
           <span
             key={p}
-            className="flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold"
+            className="flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold"
             style={{
               backgroundColor: `${PHASE_COLORS[p] ?? "#10b981"}44`,
               color: "var(--color-text-primary)",

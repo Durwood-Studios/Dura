@@ -226,7 +226,7 @@ export function WebsiteBuilder(): React.ReactElement {
 
                   {/* Tag label */}
                   <span
-                    className="mb-1 inline-block rounded-md px-2 py-0.5 font-[family-name:var(--font-mono)] text-[11px] font-medium text-white"
+                    className="mb-1 inline-block rounded-md px-2 py-0.5 font-[family-name:var(--font-mono)] text-xs font-medium text-white"
                     style={{ backgroundColor: def.color }}
                   >
                     {def.tag}

@@ -45,7 +45,7 @@ export default function RootError({
         </Link>{" "}
         as a backup.
       </p>
-      <p className="mt-4 font-mono text-[10px] text-[var(--color-text-muted)]">DURA</p>
+      <p className="mt-4 font-mono text-xs text-[var(--color-text-muted)]">DURA</p>
     </div>
   );
 }

@@ -233,7 +233,7 @@ export function InstallPrompt(): React.ReactElement | null {
               </button>
             )}
 
-            <p className="mt-3 text-[10px] text-[var(--color-text-muted)]">
+            <p className="mt-3 text-xs text-[var(--color-text-muted)]">
               Works offline. Your data stays on your device.
             </p>
           </div>

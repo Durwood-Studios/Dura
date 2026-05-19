@@ -102,12 +102,12 @@ export function RatingButtons({ card, visible, onRate }: RatingButtonsProps): Re
           )}
         >
           <span className="flex items-center gap-1.5" aria-hidden>
-            <kbd className="hidden rounded border border-current/30 px-1 py-0 font-mono text-[10px] opacity-70 sm:inline">
+            <kbd className="hidden rounded border border-current/30 px-1 py-0 font-mono text-xs opacity-70 sm:inline">
               {r.key}
             </kbd>
             {r.label}
           </span>
-          <span className="mt-0.5 font-mono text-[11px] opacity-80" aria-hidden>
+          <span className="mt-0.5 font-mono text-xs opacity-80" aria-hidden>
             {previews[r.value]}
           </span>
         </button>

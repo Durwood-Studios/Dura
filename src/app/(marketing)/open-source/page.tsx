@@ -238,7 +238,7 @@ function LicenseCard({
           {title}
         </span>
       </header>
-      <p className="font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+      <p className="font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
         {scope}
       </p>
       <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">{body}</p>

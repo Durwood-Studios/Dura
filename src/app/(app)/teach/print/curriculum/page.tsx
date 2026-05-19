@@ -65,7 +65,7 @@ export default async function CurriculumMapPage(): Promise<React.ReactElement> {
                 <li key={modulePair.module.id}>
                   <p className="text-sm font-semibold text-[var(--color-text-primary)]">
                     {modulePair.module.title}{" "}
-                    <span className="font-mono text-[10px] font-normal text-[var(--color-text-secondary)]">
+                    <span className="font-mono text-xs font-normal text-[var(--color-text-secondary)]">
                       · {modulePair.lessons.length}/{modulePair.module.lessonCount} ·{" "}
                       {modulePair.module.estimatedHours}h
                     </span>
@@ -79,7 +79,7 @@ export default async function CurriculumMapPage(): Promise<React.ReactElement> {
                     <ol className="mt-1.5 ml-4 flex flex-col gap-0.5 text-xs text-neutral-700">
                       {modulePair.lessons.map((lesson) => (
                         <li key={lesson.id}>
-                          <span className="font-mono text-[10px] text-[var(--color-text-secondary)]">
+                          <span className="font-mono text-xs text-[var(--color-text-secondary)]">
                             {lesson.id}.
                           </span>{" "}
                           {lesson.title}{" "}
@@ -97,7 +97,7 @@ export default async function CurriculumMapPage(): Promise<React.ReactElement> {
         );
       })}
 
-      <footer className="mt-16 border-t border-neutral-300 pt-4 text-center text-[10px] text-[var(--color-text-secondary)]">
+      <footer className="mt-16 border-t border-neutral-300 pt-4 text-center text-xs text-[var(--color-text-secondary)]">
         DURA · Durwood Studios LLC · AGPLv3 · github.com/Durwood-Studios/Dura
       </footer>
     </main>
