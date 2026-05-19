@@ -22,6 +22,9 @@ export default function MarketingLayout({
             <Link href="/how-it-works" className="hover:text-emerald-700">
               How it works
             </Link>
+            <Link href="/standards" className="hover:text-emerald-700">
+              Standards
+            </Link>
             <Link href="/about" className="hover:text-emerald-700">
               About
             </Link>

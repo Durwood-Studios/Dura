@@ -90,15 +90,23 @@ export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactEl
                     </span>
                   ))}
                 </span>
-                <a
-                  href={body.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] hover:underline"
-                >
-                  Official spec
-                  <ExternalLink className="h-3 w-3" />
-                </a>
+                <span className="mt-3 flex flex-wrap items-center gap-3">
+                  <a
+                    href={`/standards#${body.id}`}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] hover:underline"
+                  >
+                    All DURA coverage →
+                  </a>
+                  <a
+                    href={body.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] hover:underline"
+                  >
+                    Official spec
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                </span>
               </span>
             )}
           </span>
