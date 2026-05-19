@@ -13,6 +13,8 @@ import { Play, RotateCcw, Eye, Check, X, Circle } from "lucide-react";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 import { buildHarnessJs, INDEX_HTML, PASS_MARKER, FAIL_MARKER } from "@/lib/sandbox/harness";
+import { CircleCheckIcon } from "@/components/ui/circle-check";
+import { usePlayOnMount } from "@/components/celebration/usePlayOnMount";
 
 interface SandboxExerciseInnerProps {
   language: "javascript" | "typescript";
@@ -188,6 +190,12 @@ function SandboxControls({
         ? "text-amber-600"
         : "text-rose-600";
 
+  // Animate the verdict icon only on a genuine pass with at least one
+  // evaluated test (so the celebration earns its mount). Replays on the
+  // verdict transition so a learner re-running gets a fresh confirmation.
+  const verdictIconRef = usePlayOnMount(verdict);
+  const showAnimatedPass = verdict === "pass" && testStates.size > 0;
+
   return (
     <>
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-2">
@@ -224,7 +232,9 @@ function SandboxControls({
               verdictColor
             )}
           >
-            {verdict === "pass" ? (
+            {showAnimatedPass ? (
+              <CircleCheckIcon ref={verdictIconRef} size={14} className="text-emerald-600" />
+            ) : verdict === "pass" ? (
               <Check className="h-3 w-3" />
             ) : verdict === "partial" ? (
               <Circle className="h-3 w-3" />
