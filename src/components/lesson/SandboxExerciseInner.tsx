@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import {
   SandpackProvider,
   SandpackLayout,
@@ -9,9 +9,10 @@ import {
   useSandpack,
   useSandpackConsole,
 } from "@codesandbox/sandpack-react";
-import { Play, RotateCcw, Eye, Check, X } from "lucide-react";
+import { Play, RotateCcw, Eye, Check, X, Circle } from "lucide-react";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
+import { buildHarnessJs, INDEX_HTML, PASS_MARKER, FAIL_MARKER } from "@/lib/sandbox/harness";
 
 interface SandboxExerciseInnerProps {
   language: "javascript" | "typescript";
@@ -20,6 +21,9 @@ interface SandboxExerciseInnerProps {
   solution: string;
   testCases: string[];
 }
+
+type TestState = "pending" | "pass" | "fail";
+type Verdict = "idle" | "pass" | "fail" | "partial";
 
 const SANDPACK_THEME = {
   colors: {
@@ -78,14 +82,27 @@ function SandboxControls({
     showSyntaxError: true,
   });
   const [hasAttempted, setHasAttempted] = useState(false);
-  const [verdict, setVerdict] = useState<"idle" | "pass" | "fail">("idle");
+  const [verdict, setVerdict] = useState<Verdict>("idle");
   const [verdictMessage, setVerdictMessage] = useState("");
+  const [testStates, setTestStates] = useState<Map<string, TestState>>(new Map());
   const pendingCheck = useRef(false);
 
-  // Check verdict when logs update after a run.
-  // testCases are author-written behavioral descriptions (e.g. "echo returns
-  // its input"), not literal expected console output — so we don't try to
-  // match them as strings. Verdict = did the code run without throwing?
+  // Parse the auto-grader sentinel markers out of console output.
+  const markers = useMemo(() => {
+    const map = new Map<string, TestState>();
+    for (const log of logs) {
+      if (log.method !== "log") continue;
+      const text = extractLogText(log.data);
+      if (text.startsWith(PASS_MARKER)) {
+        map.set(text.slice(PASS_MARKER.length), "pass");
+      } else if (text.startsWith(FAIL_MARKER)) {
+        map.set(text.slice(FAIL_MARKER.length), "fail");
+      }
+    }
+    return map;
+  }, [logs]);
+
+  // After a run, compute the aggregate verdict from markers + error state.
   useEffect(() => {
     if (!pendingCheck.current || logs.length === 0) return;
 
@@ -98,9 +115,29 @@ function SandboxControls({
         (l) => (l.method === "log" || l.method === "info") && extractLogText(l.data).length > 0
       );
 
+      // Lock the per-testcase state from this run.
+      setTestStates(new Map(markers));
+
+      const evaluable = Array.from(markers.values());
+      const failed = evaluable.filter((s) => s === "fail").length;
+      const passed = evaluable.filter((s) => s === "pass").length;
+
       if (hasErrors) {
         setVerdict("fail");
         setVerdictMessage("Check the errors above");
+      } else if (evaluable.length > 0) {
+        if (failed === 0) {
+          setVerdict("pass");
+          setVerdictMessage(
+            `${passed} of ${evaluable.length} check${passed === 1 ? "" : "s"} passed`
+          );
+        } else if (passed > 0) {
+          setVerdict("partial");
+          setVerdictMessage(`${passed} of ${evaluable.length} checks passed`);
+        } else {
+          setVerdict("fail");
+          setVerdictMessage(`0 of ${evaluable.length} checks passed`);
+        }
       } else if (!hasOutput) {
         setVerdict("fail");
         setVerdictMessage("No output — did your code run?");
@@ -109,16 +146,20 @@ function SandboxControls({
         setVerdictMessage(testCases.length > 0 ? "Ran — verify the checks below" : "Ran cleanly");
       }
 
-      void track("sandbox_executed", { language, success: !hasErrors && hasOutput });
+      void track("sandbox_executed", {
+        language,
+        success: !hasErrors && (evaluable.length === 0 ? hasOutput : failed === 0),
+      });
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [logs, testCases, language]);
+  }, [logs, markers, testCases, language]);
 
   const run = useCallback(() => {
     setHasAttempted(true);
     setVerdict("idle");
     setVerdictMessage("");
+    setTestStates(new Map());
     resetLogs();
     pendingCheck.current = true;
     sandpack.runSandpack();
@@ -128,6 +169,7 @@ function SandboxControls({
     sandpack.updateFile("/index.js", initialCode);
     setVerdict("idle");
     setVerdictMessage("");
+    setTestStates(new Map());
     resetLogs();
   };
 
@@ -135,49 +177,96 @@ function SandboxControls({
     sandpack.updateFile("/index.js", solution);
     setVerdict("idle");
     setVerdictMessage("");
+    setTestStates(new Map());
     resetLogs();
   };
 
+  const verdictColor =
+    verdict === "pass"
+      ? "text-emerald-600"
+      : verdict === "partial"
+        ? "text-amber-600"
+        : "text-rose-600";
+
   return (
-    <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-2">
-      <button
-        type="button"
-        onClick={run}
-        className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600"
-      >
-        <Play className="h-3 w-3" />
-        Run
-      </button>
-      <button
-        type="button"
-        onClick={reset}
-        className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
-      >
-        <RotateCcw className="h-3 w-3" />
-        Reset
-      </button>
-      {hasAttempted && (
+    <>
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-2">
         <button
           type="button"
-          onClick={showSolution}
+          onClick={run}
+          className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600"
+        >
+          <Play className="h-3 w-3" />
+          Run
+        </button>
+        <button
+          type="button"
+          onClick={reset}
           className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
         >
-          <Eye className="h-3 w-3" />
-          Show solution
+          <RotateCcw className="h-3 w-3" />
+          Reset
         </button>
+        {hasAttempted && (
+          <button
+            type="button"
+            onClick={showSolution}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+          >
+            <Eye className="h-3 w-3" />
+            Show solution
+          </button>
+        )}
+        {verdict !== "idle" && (
+          <span
+            className={cn(
+              "ml-auto inline-flex items-center gap-1 text-xs font-medium",
+              verdictColor
+            )}
+          >
+            {verdict === "pass" ? (
+              <Check className="h-3 w-3" />
+            ) : verdict === "partial" ? (
+              <Circle className="h-3 w-3" />
+            ) : (
+              <X className="h-3 w-3" />
+            )}
+            {verdictMessage}
+          </span>
+        )}
+      </div>
+      {testCases.length > 0 && (
+        <ul className="flex flex-col gap-1 border-b border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-3 text-xs">
+          {testCases.map((tc) => {
+            const state = testStates.get(tc) ?? "pending";
+            return (
+              <li key={tc} className="flex items-start gap-2">
+                {state === "pass" ? (
+                  <Check className="mt-[2px] h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden />
+                ) : state === "fail" ? (
+                  <X className="mt-[2px] h-3.5 w-3.5 shrink-0 text-rose-600" aria-hidden />
+                ) : (
+                  <Circle
+                    className="mt-[2px] h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]"
+                    aria-hidden
+                  />
+                )}
+                <span
+                  className={cn(
+                    "font-mono",
+                    state === "pass" && "text-emerald-700",
+                    state === "fail" && "text-rose-700",
+                    state === "pending" && "text-[var(--color-text-secondary)]"
+                  )}
+                >
+                  {tc}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
       )}
-      {verdict !== "idle" && (
-        <span
-          className={cn(
-            "ml-auto inline-flex items-center gap-1 text-xs font-medium",
-            verdict === "pass" ? "text-emerald-600" : "text-rose-600"
-          )}
-        >
-          {verdict === "pass" ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
-          {verdictMessage}
-        </span>
-      )}
-    </div>
+    </>
   );
 }
 
@@ -188,12 +277,25 @@ export default function SandboxExerciseInner({
   solution,
   testCases,
 }: SandboxExerciseInnerProps): React.ReactElement {
+  // Build harness + custom HTML once per testCases set. They're static
+  // per-lesson, so this needn't react to user edits in /index.js.
+  const harnessJs = useMemo(() => buildHarnessJs(testCases), [testCases]);
+
   return (
     <SandpackProvider
       template="vanilla"
       theme={SANDPACK_THEME}
-      files={{ "/index.js": initialCode }}
-      options={{ recompileMode: "delayed", recompileDelay: 500 }}
+      files={{
+        "/index.html": { code: INDEX_HTML, hidden: true },
+        "/index.js": initialCode,
+        "/harness.js": { code: harnessJs, hidden: true },
+      }}
+      options={{
+        recompileMode: "delayed",
+        recompileDelay: 500,
+        activeFile: "/index.js",
+        visibleFiles: ["/index.js"],
+      }}
     >
       <figure
         data-lenis-prevent
@@ -201,18 +303,6 @@ export default function SandboxExerciseInner({
       >
         <figcaption className="border-b border-[var(--color-border)] px-4 py-3 text-sm text-[var(--color-text-secondary)]">
           {instructions}
-          {testCases.length > 0 && (
-            <ul className="mt-3 flex flex-col gap-1 text-xs text-[var(--color-text-muted)]">
-              {testCases.map((tc) => (
-                <li key={tc} className="flex items-start gap-2">
-                  <span aria-hidden className="mt-[2px] text-[var(--color-text-muted)]">
-                    ✓
-                  </span>
-                  <span className="font-mono">{tc}</span>
-                </li>
-              ))}
-            </ul>
-          )}
         </figcaption>
         <SandboxControls
           initialCode={initialCode}
