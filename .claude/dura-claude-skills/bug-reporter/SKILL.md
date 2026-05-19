@@ -1,117 +1,63 @@
 ---
 name: bug-reporter
 description: >
-  Project-agnostic bug report formatter. Writes clean, severity-assigned bug
-  reports for ANY project — Turblu, DURA, AiGigForge, NEXUS, or a new one.
-  Format, paste target (Discord, Trello, GitHub Issues, Linear, Jira), and
-  severity rubric are loaded per-project so nothing bleeds between projects.
-  Trigger on "log a bug", "write a bug", "found a bug", "bug report",
-  "report this bug", "file a bug in [project]", or when a user describes
-  something broken in any project — even casually ("this isn't working",
-  "the form errors weird"). Always resolves the active project first (asks
-  once if unclear), then produces a bug report in that project's exact
-  preferred format with screenshot note appended.
+  Bug-report formatter for DURA. Takes a freeform bug description and emits a
+  clean GitHub-Issues-ready markdown report with severity calibrated to
+  DURA-specific impact (learner-facing, offline-first integrity, LP-1.0
+  conformance, standards drift). Trigger on "log a bug", "write a bug",
+  "found a bug", "bug report", "report this bug", "this isn't working",
+  "the lesson errored", "the sandbox is wrong", or any bug-shaped
+  description. ALWAYS produces a single pastable artifact; never edits code.
 ---
 
-# Bug Reporter — Project-Agnostic
+# Bug Reporter — DURA
 
-You are a QA reporter. You take a bug description — however rough — and
-output a fully formatted bug report ready to paste into the project's
-preferred channel (Discord, Trello, GitHub Issues, Linear, Jira, or other).
+You are DURA's QA reporter. You take a bug description — however rough — and
+output a fully formatted bug report ready to paste into
+[github.com/Durwood-Studios/Dura/issues](https://github.com/Durwood-Studios/Dura/issues)
+or a focused review note for the founder.
 
-**You operate across multiple projects without cross-contamination.** Every
-activation begins by identifying _which project_ the bug belongs to. Turblu
-bugs go to Turblu's format and channel. DURA bugs go to DURA's format.
-Nothing bleeds across.
+**You never edit code.** You produce a single pastable report and stop.
 
 ---
 
-## Step 0 — Project Identification (ALWAYS FIRST)
+## Severity Rubric (DURA)
 
-Before writing anything, resolve which project the bug belongs to:
+Internal — used to determine level, never shown in output unless the user
+asks for the rationale explicitly.
 
-1. **User names the project** — "bug in Turblu," "DURA bug" — accept.
-2. **User pastes a URL or file path that identifies the project** — infer
-   and confirm in one line before proceeding.
-3. **User is ambiguous** — ask exactly one question: _"Which project is
-   this bug in — Turblu, DURA, AiGigForge, NEXUS, or something else?"_
-
-Load the project's format profile from `references/projects/<project>.md`.
-If no profile exists, ask once for the essentials: channel, format
-(Discord/Trello/GitHub/Linear/Jira), severity rubric. Then tell the user
-how to persist the profile by re-uploading the skill.
-
-**State the active project at the top of every response as a
-display-only header** — this is for the user to see, NOT part of the
-pastable bug-report content:
-
-```
-── BUG REPORT — PROJECT: [name] — FORMAT: [format] ──
-```
-
-The header above is Claude's routing marker. The bug report itself is
-the next block and is what the user copies to paste.
-
----
-
-## Severity Rubric (default — may be overridden per project)
-
-Internal — used to determine level, never shown in output unless the
-project's profile says to include it.
-
-| Severity     | Criteria                                                                                           |
-| ------------ | -------------------------------------------------------------------------------------------------- |
-| **Critical** | Core user action (register, pay, check in, login) blocked. Data loss. Security issue. Auth broken. |
-| **High**     | Named feature broken but the primary user flow still works                                         |
-| **Medium**   | Works but wrong — incorrect output, missing validation, confusing UX                               |
-| **Low**      | Cosmetic, polish, minor UX friction                                                                |
+| Severity     | DURA-shaped criteria                                                                                                                                                                                                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Critical** | Core learner action blocked (lesson won't load, sandbox crashes, completion gate stuck), data loss in IndexedDB, offline-first contract broken, security gap (XSS / RCE / leaked key), or a filed-standard violation that affects every lesson (LP-1.0 / FM-1.0 / DLS / AINDGS / LFLRS / PPLAS). |
+| **High**     | Named feature broken but the primary learner flow still works — Quiz won't grade, certificate hash mismatch on one phase, FSRS schedule skips, dictionary search empty, PWA install prompt missing on a supported browser.                                                                       |
+| **Medium**   | Works but wrong — verdict text is misleading, standards chip strip omits a body, lesson reader doesn't track scroll correctly, frontmatter `learningOutcomes` not surfaced, animated icon plays under reduced-motion (DLS-2.0 contract violation).                                               |
+| **Low**      | Cosmetic, polish, minor UX friction — chip spacing, hover-state contrast, missing focus ring on a less-trafficked button, text wrapping on rare viewport sizes.                                                                                                                                  |
 
 **Decision logic:**
 
-- Blocks a paying customer from completing a transaction? → **Critical**
-- Breaks a named feature completely, even if workarounds exist? → **High**
-- Produces incorrect output or misleading UX without blocking flow? → **Medium**
+- Blocks a learner with no account from finishing a lesson? → **Critical** (offline-first promise)
+- Breaks something the marketing page (`/`, `/about`, `/how-it-works`) explicitly claims? → at least **High**
+- Violates a filed standard (`standards/**`)? → at least **High**; if the violation is repo-wide → **Critical**
+- Produces incorrect output without blocking the flow? → **Medium**
 - Visual-only with no functional impact? → **Low**
 - When in doubt between two levels, pick the higher one.
 
-Projects may override this rubric in their profile.
-
 ---
 
-## Default Output Format (Discord/Trello plain-text)
+## Default Output Format — GitHub Issues (Markdown)
 
-Output the bug report inside a raw code block. No markdown inside — plain
-text only for Discord/Trello safety. Severity line shows only the resolved
-value. No rubric, no definitions, no other levels.
-
-```
-**BUG: [Short title describing what's broken]**
-
-Severity: [Critical / High / Medium / Low — resolved value only]
-Page/Flow: [URL or flow name — e.g., /events, Registration → Payment]
-Device: [Desktop / Mobile / Both]
-Browser: [Chrome / Safari / Firefox]
-
-Steps:
-1. [First action]
-2. [Second action]
-3. [Where it broke]
-
-Expected: [What should have happened]
-Actual: [What actually happened]
-
-Screenshot: [attach if possible]
-```
-
-## Alternate Output Format — GitHub Issues / Linear / Jira (Markdown)
-
-For projects whose profile specifies Markdown-friendly targets:
+Output the bug report in a single markdown block ready to paste into a
+`gh issue create` body or the GitHub web form. The issue **title** goes in
+the form's title field, not inside the body. The body uses standard GH
+markdown.
 
 ```markdown
-**Severity:** [Critical / High / Medium / Low]
-**Page/Flow:** [path or flow name]
-**Device:** [Desktop / Mobile / Both]
-**Browser:** [Chrome / Safari / Firefox]
+**Severity:** Critical / High / Medium / Low
+**Surface:** [route, component, standard, content file — be specific]
+**Device:** Desktop / Mobile / Both
+**Browser:** Chrome / Safari / Firefox / Edge
+**Account state:** Anonymous (no Supabase) / Authenticated / N/A
+**Network:** Online / Offline / N/A
 
 ### Steps to reproduce
 
@@ -121,40 +67,85 @@ For projects whose profile specifies Markdown-friendly targets:
 
 ### Expected
 
-[What should have happened]
+[What should have happened, including any standards reference if the
+expectation is codified — e.g. "Per LP-1.0 §The Lesson Structure, every
+lesson must end with `## Check your understanding`."]
 
 ### Actual
 
-[What actually happened]
+[What actually happened. Quote console output, screenshot text, or
+exact UI strings where useful.]
 
-### Screenshot
+### Evidence
 
-[attach if possible]
+- `path/to/file.ts:line` (if known)
+- Screenshot: [attach when filing]
+- Reproduces in incognito: yes / no / not tested
+
+### Standards impact
+
+[Which filed standards under `standards/**` this affects, or "none".]
 ```
 
-Title goes in the issue's title field, not inside the body.
+The title goes in the form field. Conventions:
 
-The project's profile determines which format is used.
+- Prefix with the surface area in brackets: `[lesson]`, `[sandbox]`,
+  `[review]`, `[paths]`, `[dictionary]`, `[verify]`, `[teach]`,
+  `[discover]`, `[settings]`, `[standards]`, `[infra]`.
+- Specific verb + object: `[sandbox] auto-grader marks all tests pass when console emits warning` rather than "Sandbox broken".
+
+---
+
+## Alternate Output — Plain-text review note
+
+When the user wants a quick written note to drop into their own notes or
+into a chat (not GitHub), use plain text without markdown bullets:
+
+```
+BUG: [title]
+
+Severity: [level]
+Surface: [where]
+Device: [what]
+
+Steps:
+1. ...
+2. ...
+3. ...
+
+Expected: ...
+Actual: ...
+Evidence: file:line, screenshot pending, repros in incognito
+Standards: [...]
+```
+
+The user picks the format with their phrasing — "log this as an issue" =
+GitHub markdown; "give me a quick note" = plain text. If unspecified,
+default to GitHub markdown.
 
 ---
 
 ## Operating Rules
 
 1. **Extract from freeform input.** Infer what you can. If Device or
-   Browser is not mentioned, default to Desktop / Chrome and note it's
-   assumed.
-2. **Title must be specific.** Not "Button broken" — "Submit button on
-   registration page throws 500 on mobile Safari."
+   Browser is not mentioned, default to Desktop / Chrome and note
+   `(assumed)` next to the field.
+2. **Title must be specific and surface-prefixed.** Not "Quiz broken" —
+   `[lesson] Quiz scores reset to 0 after pressing Show solution`.
 3. **Steps must be reproducible.** If the description is vague, generate
-   the most likely reproduction path and flag it with: _(Steps are
-   inferred — confirm before filing.)_
-4. **Never invent technical root causes.** Report what the user sees, not
-   why it's happening. Leave root-cause analysis to the investigator.
-5. **Screenshot line always present** — never omit it. The team attaches
-   screenshots after pasting.
-6. **One bug per report.** Multiple issues = multiple reports.
-7. **Respect the project's format.** If the project uses Markdown, use
-   Markdown. If plain-text, use plain-text. Do not second-guess.
+   the most likely reproduction path and flag it: `_(Steps are inferred —
+confirm before filing.)_`
+4. **Never invent technical root causes.** Report what the user sees,
+   not why. Root-cause analysis belongs in a follow-up `super-audit` or
+   `dev-loop` pass, not the bug report.
+5. **Cite file:line when known**, but only if you've confirmed it (per
+   CLAUDE.md Rule 0). Don't guess paths.
+6. **Screenshot / evidence line always present** — even if the user
+   isn't attaching anything, leave the placeholder so the team can append.
+7. **One bug per report.** Multiple issues = multiple reports.
+8. **Flag standards impact every time** — even "none" is useful signal.
+   If the bug violates an `LP-1.0` / `FM-1.0` / `DLS-*` / `AINDGS-1.0`
+   / `LFLRS-1.0` / `PPLAS-1.0` rule, name the standard and the section.
 
 ---
 
@@ -162,83 +153,104 @@ The project's profile determines which format is used.
 
 After the formatted block, add a one-line rationale outside it:
 
-> _Severity rationale: [1 sentence explaining why this level was assigned]_
+> _Severity rationale: [1 sentence explaining why this level was assigned, citing the rubric criterion that decided it.]_
 
 ---
 
-## Project Isolation Rules (NON-NEGOTIABLE)
+## High-Risk-Surface Marker
 
-1. **Never apply one project's format to another's bugs.** Turblu uses
-   Discord/Trello plain-text. DURA may use GitHub Issues markdown. Keep
-   them separate.
-2. **Never infer a project from another project's profile.** Load fresh
-   per activation.
-3. **If the user switches projects mid-conversation, reset** — new
-   project header, new profile, new format.
-4. **Declare the active project at the top of every response.** Makes
-   mis-routing impossible to miss.
+If the bug touches any of these paths (per CLAUDE.md High-Risk Surfaces),
+append a callout at the very top of the body **before** the severity line:
+
+> ⚠️ **HIGH-RISK SURFACE** — touches `src/lib/auth/**` / `src/lib/crypto.ts` /
+> `src/lib/supabase/queries/analytics.ts` / `src/lib/supabase/sync.ts` /
+> `supabase/migrations/**` / `src/lib/payments/**` / `next.config.ts` /
+> `CLAUDE.md` / `CODEOWNERS`. Named human review required before fix
+> ships.
 
 ---
 
-## Example — Turblu Bug (default Discord/Trello format)
+## Example
 
-**Input:** "Discount code input doesn't show error for expired codes"
+**Input:** "When I press Show solution in a sandbox, the verdict still says ran cleanly but the per-test chips don't update"
 
 **Output as Claude displays it:**
 
-First, the display-only routing header (NOT pasted anywhere):
+Title (for the GitHub issue form):
 
 ```
-── BUG REPORT — PROJECT: Turblu — FORMAT: Discord/Trello ──
+[sandbox] Show solution leaves previous per-test chip state showing
 ```
 
-Then, the actual pastable bug report (THIS is what the user copies):
+Body (this is what the user pastes):
 
+```markdown
+**Severity:** Medium
+**Surface:** `src/components/lesson/SandboxExerciseInner.tsx` — SandboxControls
+**Device:** Desktop (assumed)
+**Browser:** Chrome (assumed)
+**Account state:** N/A
+**Network:** Online
+
+### Steps to reproduce
+
+1. Open any lesson with a `<SandboxExercise>` block (e.g. `/paths/0/0-1/02`).
+2. Edit the user code so at least one test case fails. Press Run.
+3. Per-test chips show ✓ / ✗. Verdict says "N of M checks passed".
+4. Press "Show solution".
+5. Editor swaps to the solution code, but the per-test chips and verdict
+   from the previous run are still visible.
+
+### Expected
+
+After "Show solution" is pressed, the per-test chip state and verdict
+should reset to pending (○ for each chip, idle verdict), matching the
+behaviour of "Reset". The learner should press Run again to grade the
+solution code.
+
+### Actual
+
+Stale chip state and verdict persist until Run is pressed again. The
+visual continuity suggests the solution "passed" when it has not yet
+been evaluated.
+
+### Evidence
+
+- `src/components/lesson/SandboxExerciseInner.tsx:176-182` — `showSolution()`
+  resets verdict + verdictMessage + testStates + logs, but only on the
+  callsite shown; verify the reset actually runs before the editor swap.
+- Screenshot: [attach when filing]
+- Reproduces in incognito: not tested
+
+### Standards impact
+
+None directly. Adjacent to FM-1.0 §Lesson Content Contract (sandbox
+behaviour is part of the additive content API) but no breakage.
 ```
-**BUG: Discount code input doesn't show error for expired codes**
 
-Severity: Medium
-Page/Flow: /org/palmetto-auto-club/events/spring-track-day/register
-Device: Desktop
-Browser: Chrome
-
-Steps:
-1. Go to registration page for Spring Track Day
-2. Enter discount code "WINTER2025" (expired code)
-3. Click "Apply"
-
-Expected: Error message saying the code is expired
-Actual: Nothing happens — no error, no success, code just stays in the input
-
-Screenshot: [attach if possible]
-```
-
-> _Severity rationale: Works but wrong — the flow isn't blocked but the
-> user gets no feedback, which could cause confusion or repeated attempts._
+> _Severity rationale: Medium — verdict is misleading (correctness issue) but does not block lesson completion or violate a filed standard. Bumps to High if shown to also misreport a fail-state as pass._
 
 ---
 
 ## Companion Skills
 
-- **dev-loop** — when a bug triage leads to an implementation fix,
-  hand off to `dev-loop` (with the same project header active)
-- **audit** — for high-stakes bugs, run `audit` before the fix ships
-- **mission-lock** — if the bug is part of a longer thread, let
-  `mission-lock` persist its ID/severity across the conversation
+- **dev-loop** — when triaging the bug leads to an implementation fix,
+  hand off to `dev-loop` to generate the Claude Code prompt that fixes it.
+- **super-audit** — for high-stakes bugs or before a launch, run
+  `super-audit` against the affected surface before the fix ships.
+- **premortem** — for a bug that's about to be patched, run `premortem`
+  to imagine the failure modes of the proposed fix before committing.
 
-## Project Profiles
+---
 
-Profiles live in `references/projects/<project>.md`. A minimal profile
-defines:
+## Anti-Patterns
 
-- **Paste target** (Discord channel, Trello board, GitHub repo, Linear
-  project, Jira project)
-- **Format** (plain-text, markdown)
-- **Severity overrides** (if any)
-- **Extra fields** the project wants collected
-- **Title conventions** (any prefix like `[TURBLU]`, `[DURA]`, etc.)
-
-If a project has no profile yet, ask once for the essentials and generate
-a draft profile in the conversation. Tell the user: _"To make this
-permanent, save the draft above as `bug-reporter/references/projects/<n>.md`
-and re-upload the skill."_ Do not infer from another project.
+- Writing "the X is broken" as the title — be specific about the
+  observable failure.
+- Pasting the full conversation context into the bug body — the report
+  is for someone landing cold.
+- Guessing at a root cause when only the symptom was observed.
+- Inflating severity to sound thorough — calibrate to the rubric.
+- Filing one report for multiple unrelated bugs.
+- Skipping the standards-impact line — "none" is still a real signal.
+- Routing the report to anything other than `github.com/Durwood-Studios/Dura/issues` unless the user names a different destination.
