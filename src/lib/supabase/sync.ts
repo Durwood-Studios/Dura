@@ -15,6 +15,11 @@ import {
   getAllEncryptedFlashcards,
   getEncryptedFlashcard,
   putEncryptedFlashcard,
+  getAllEncryptedReviewLogs,
+  putEncryptedReviewLog,
+  getEncryptedUnsyncedLessonProgress,
+  getEncryptedLessonProgress,
+  putEncryptedLessonProgress,
 } from "@/lib/idb/encrypted-store";
 import type { LessonProgress } from "@/types/curriculum";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
@@ -89,15 +94,15 @@ export async function pushChanges(): Promise<number> {
   const db = await getDB();
   let pushed = 0;
 
-  // Push unsynced lesson progress
-  const unsyncedProgress = await db.getAllFromIndex("progress", "by-synced", 0);
+  // Push unsynced lesson progress — read via encrypted wrapper so the
+  // plaintext fields are correctly decrypted before handing to syncLessonProgress.
+  const unsyncedProgress = await getEncryptedUnsyncedLessonProgress(db);
   if (unsyncedProgress.length > 0) {
     await syncLessonProgress(userId, unsyncedProgress);
-    const tx = db.transaction("progress", "readwrite");
+    // Write synced flag back through the encrypted wrapper to preserve encryption
     for (const record of unsyncedProgress) {
-      await tx.store.put({ ...record, synced: 1 });
+      await putEncryptedLessonProgress(db, { ...record, synced: 1 });
     }
-    await tx.done;
     pushed += unsyncedProgress.length;
   }
 
@@ -110,8 +115,9 @@ export async function pushChanges(): Promise<number> {
     pushed += allCards.length;
   }
 
-  // Push all review logs (append-only, server deduplicates)
-  const allLogs = await db.getAll("reviewLogs");
+  // Push all review logs (append-only, server deduplicates). Decrypt via
+  // encrypted wrapper before transmitting plaintext to Supabase.
+  const allLogs = await getAllEncryptedReviewLogs(db);
   if (allLogs.length > 0) {
     await syncReviewLogs(userId, allLogs);
     pushed += allLogs.length;
@@ -170,16 +176,16 @@ export async function pullChanges(): Promise<{ pulled: number; conflicts: number
   let pulled = 0;
   let conflicts = 0;
 
-  // Pull lesson progress
+  // Pull lesson progress — read/write via encrypted wrapper
   const remoteProgress = await fetchLessonProgress(userId);
   for (const remote of remoteProgress) {
-    const local = await db.get("progress", remote.lessonId);
+    const local = await getEncryptedLessonProgress(db, remote.lessonId);
     if (local) {
       const merged = mergeProgress(local, remote);
       if (merged !== local) conflicts++;
-      await db.put("progress", merged);
+      await putEncryptedLessonProgress(db, merged);
     } else {
-      await db.put("progress", remote);
+      await putEncryptedLessonProgress(db, remote);
     }
     pulled++;
   }
@@ -220,11 +226,13 @@ export async function pullChanges(): Promise<{ pulled: number; conflicts: number
   // happen — review log entries are immutable by contract — but if it
   // does, the local copy wins because the server is authoritative-on-write
   // not authoritative-on-read for an append-only log).
+  // New entries from remote are written via encrypted wrapper so they
+  // are stored at-rest-encrypted locally (P5-A.4).
   const remoteLogs = await fetchReviewLogs(userId);
-  const localLogIds = new Set((await db.getAll("reviewLogs")).map((entry) => entry.id));
+  const localLogIds = new Set((await getAllEncryptedReviewLogs(db)).map((entry) => entry.id));
   for (const remote of remoteLogs) {
     if (localLogIds.has(remote.id)) continue;
-    await db.put("reviewLogs", remote);
+    await putEncryptedReviewLog(db, remote);
     pulled++;
   }
 

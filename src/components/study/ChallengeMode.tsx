@@ -2,7 +2,6 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { Check, X, Timer, Zap, Trophy } from "lucide-react";
-import { ALL_QUESTIONS } from "@/content/questions";
 import { awardXPWithToast } from "@/lib/xp-manager";
 import { XP_AWARDS } from "@/lib/xp";
 import { track } from "@/lib/analytics";
@@ -23,12 +22,6 @@ const BRACKETS: { value: Bracket; label: string }[] = [
 const QUESTION_COUNT = 10;
 const TIME_PER_QUESTION = 60;
 
-function filterQuestions(bracket: Bracket): AssessmentQuestion[] {
-  if (bracket === "mixed") return ALL_QUESTIONS;
-  const [lo, hi] = bracket.split("-");
-  return ALL_QUESTIONS.filter((q) => q.phaseId === lo || q.phaseId === hi);
-}
-
 function shuffle<T>(arr: T[]): T[] {
   const copy = [...arr];
   for (let i = copy.length - 1; i > 0; i--) {
@@ -36,6 +29,14 @@ function shuffle<T>(arr: T[]): T[] {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy;
+}
+
+async function loadQuestions(bracket: Bracket): Promise<AssessmentQuestion[]> {
+  // Dynamic import keeps the question bank out of the initial challenge bundle
+  const { ALL_QUESTIONS, getQuestionsByPhase } = await import("@/content/questions");
+  if (bracket === "mixed") return ALL_QUESTIONS;
+  const [lo, hi] = bracket.split("-");
+  return [...getQuestionsByPhase(lo), ...getQuestionsByPhase(hi)];
 }
 
 interface SessionState {
@@ -56,17 +57,18 @@ export function ChallengeMode(): React.ReactElement {
 
   const startSession = useCallback((b: Bracket) => {
     setBracket(b);
-    const pool = filterQuestions(b);
-    const picked = shuffle(pool).slice(0, QUESTION_COUNT);
-    setSession({
-      questions: picked,
-      current: 0,
-      answers: new Array(picked.length).fill(null) as (number | null)[],
-      timeLeft: TIME_PER_QUESTION,
-      streak: 0,
-      maxStreak: 0,
-      xpEarned: 0,
-      finished: false,
+    void loadQuestions(b).then((pool) => {
+      const picked = shuffle(pool).slice(0, QUESTION_COUNT);
+      setSession({
+        questions: picked,
+        current: 0,
+        answers: new Array(picked.length).fill(null) as (number | null)[],
+        timeLeft: TIME_PER_QUESTION,
+        streak: 0,
+        maxStreak: 0,
+        xpEarned: 0,
+        finished: false,
+      });
     });
   }, []);
 

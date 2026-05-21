@@ -103,7 +103,7 @@ export function RatingButtons({ card, visible, onRate }: RatingButtonsProps): Re
               setTapped(r.value);
               onRate(r.value);
             }}
-            aria-label={`${r.label}${isSelected ? ` — next review in ${previews[r.value]}` : ""} (keyboard shortcut ${r.key})`}
+            aria-label={`${r.label} — next review in ${previews[r.value]} (keyboard shortcut ${r.key})`}
             aria-keyshortcuts={r.key}
             aria-pressed={isSelected}
             className={cn(
