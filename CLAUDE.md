@@ -432,26 +432,40 @@ Before pushing a `package.json` change that adds, removes, or version-bumps a ru
 
 ## Provenance Format
 
-All commits containing AI-generated code must include the provenance tag in the commit message:
+All commits whose diff contains AI-generated or AI-assisted code must carry a provenance trailer in the commit message body:
 
 ```
-[AI: <agent> ~X%] <conventional-commit-subject> (<optional-standard-or-law>)
+AI-assisted: <agent> ~X%
 ```
 
 Where:
 
 - `<agent>` is the AI tool (`claude-code` for DURA today)
-- `~X%` is the approximate percentage of AI-generated lines in the commit. Honest estimate. `100%` = entirely AI-generated.
-- For commits with no AI involvement at all, the tag is **omitted** (so a future audit can distinguish "human-only" from "AI ~0% guidance")
+- `~X%` is the approximate percentage of AI-generated lines in the commit. Honest estimate. `100%` = entirely AI-generated; `0%` = AI guided, human typed.
+- The trailer is its own line in the commit body, conventionally just above any `Co-Authored-By:` line.
+- The conventional header (`type(scope): subject`) stays clean — provenance never occupies header space.
+- For commits with **no AI involvement at all**, the trailer is omitted on non-high-risk diffs (so audits can distinguish human-only from AI-guided).
 
-Full rationale and examples live in [`xDocs/decisions/0002-ai-provenance-format.md`](xDocs/decisions/0002-ai-provenance-format.md). The CI provenance gate (compliance Phase 4) will enforce the format on commits touching paths listed in CODEOWNERS as high-risk.
+### Enforcement (Phase 4 gate, live since 2026-05-21)
+
+The commitlint rule `ai-provenance-required` (defined in [`commitlint.config.js`](commitlint.config.js)) reads CODEOWNERS at commit-msg time and enforces this contract:
+
+- If any staged file matches a CODEOWNERS-listed path, the commit message **must** contain either:
+  - `AI-assisted: <agent> ~X%` — when AI was involved at any level, or
+  - `Human-only: <one-line reason>` — when no AI was involved (explicit opt-out, required for audit on high-risk paths)
+- Commits whose diff touches only non-high-risk paths are unaffected; the trailer is optional there.
+
+There is no `--no-verify` escape hatch in policy. If the gate fires, fix the message rather than bypassing the hook.
+
+Full rationale, history, and the 2026-05-21 format amendment (moving from header prefix to body trailer, after the bracket prefix kept tripping the conventional-commits parser) live in [`xDocs/decisions/0002-ai-provenance-format.md`](xDocs/decisions/0002-ai-provenance-format.md).
 
 ---
 
 ## Changelog
 
-| Date       | Change                                                                                                                                                                    | Rationale                                                                                                |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| 2026-04-25 | Added AINDGS-1.0 required sections (Capability Boundary, High-Risk Surfaces, Review Triggers, Provenance Format, Changelog)                                               | Compliance Sprint Phase 1-D / AINDGS-R1 / R4 / R5                                                        |
-| 2026-04-26 | Aligned DESIGN SYSTEM to DLS-1.0: blue accent canonical, emerald → `--color-celebration` semantic, Geist + Geist Mono replace DM Sans / JetBrains Mono / Instrument Serif | Motion Sprint P0 (conflict resolutions #1, #2 captured in `xDocs/active/motion-2026-q2/build-prompt.md`) |
-| Inception  | Initial CLAUDE.md (Rules 0–7, Design System, Workflow)                                                                                                                    | Project intelligence baseline                                                                            |
+| Date       | Change                                                                                                                                                                                                          | Rationale                                                                                                                                                              |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-04-25 | Added AINDGS-1.0 required sections (Capability Boundary, High-Risk Surfaces, Review Triggers, Provenance Format, Changelog)                                                                                     | Compliance Sprint Phase 1-D / AINDGS-R1 / R4 / R5                                                                                                                      |
+| 2026-04-26 | Aligned DESIGN SYSTEM to DLS-1.0: blue accent canonical, emerald → `--color-celebration` semantic, Geist + Geist Mono replace DM Sans / JetBrains Mono / Instrument Serif                                       | Motion Sprint P0 (conflict resolutions #1, #2 captured in `xDocs/active/motion-2026-q2/build-prompt.md`)                                                               |
+| 2026-05-21 | Provenance format moved from header prefix (`[AI: …] subject`) to body trailer (`AI-assisted: <agent> ~X%`); Phase 4 commitlint gate `ai-provenance-required` live, enforces trailer on CODEOWNERS-listed diffs | Bracket prefix broke conventional-commits header parsing and exceeded the 100-char limit; trailer form is parser-friendly and the gate-implementation deadline arrived |
+| Inception  | Initial CLAUDE.md (Rules 0–7, Design System, Workflow)                                                                                                                                                          | Project intelligence baseline                                                                                                                                          |
