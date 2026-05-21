@@ -170,8 +170,10 @@ export function Sidebar(): React.ReactElement {
       </nav>
 
       {/* ── Bottom stats card ──────────────────────────────────────── */}
+      {/* Min 24px top clearance + a divider so the 20px dura-glow-emerald on
+          an active last nav item doesn't bleed into the card. */}
       {stats && (
-        <div className="mx-3 mt-auto mb-3">
+        <div className="mt-auto border-t border-[var(--color-border)] px-3 pt-6 pb-3">
           <div className="dura-glass rounded-xl p-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
