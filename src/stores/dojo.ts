@@ -15,8 +15,10 @@ import {
   type InferenceTier,
   type GradeResult,
 } from "@/lib/dojo/inference";
-import { ALL_QUESTIONS } from "@/content/questions";
 import { track } from "@/lib/analytics";
+import { putDojoSession } from "@/lib/db/dojo";
+import { generateId } from "@/lib/utils";
+import type { DojoSession } from "@/types/dojo";
 
 export type DojoFlowState =
   | "READY"
@@ -42,29 +44,19 @@ export interface DojoSessionResult {
 }
 
 interface DojoState {
-  // Session config
   tier: InferenceTier | null;
   tierProbed: boolean;
-
-  // Flow
   flowState: DojoFlowState;
   questions: DojoQuestion[];
   currentIndex: number;
   answer: string;
-
-  // Streaming AI state (EVALUATING)
   streamedText: string;
   pendingScore: number | null;
-
-  // Results (SCORED)
   currentGrade: GradeResult | null;
   results: DojoSessionResult[];
   questionStartedAt: number | null;
-
-  // Session summary (COMPLETE)
   sessionStartedAt: number | null;
 
-  // Actions
   probeTier: () => Promise<void>;
   startSession: (phaseFilter?: string) => void;
   beginQuestion: () => void;
@@ -76,10 +68,11 @@ interface DojoState {
 
 const SESSION_LENGTH = 5;
 
-function pickQuestions(phaseFilter?: string): DojoQuestion[] {
+/** Dynamic import keeps the 504-question bank out of the Dojo initial bundle. */
+async function pickQuestions(phaseFilter?: string): Promise<DojoQuestion[]> {
+  const { ALL_QUESTIONS } = await import("@/content/questions");
   const pool = phaseFilter ? ALL_QUESTIONS.filter((q) => q.phaseId === phaseFilter) : ALL_QUESTIONS;
 
-  // Convert AssessmentQuestion → DojoQuestion (open-ended framing)
   const openEnded = pool.filter(
     (q) => q.type === "multiple-choice" || q.type === "multiple-select"
   );
@@ -89,7 +82,7 @@ function pickQuestions(phaseFilter?: string): DojoQuestion[] {
     id: q.id,
     text: q.question,
     correctAnswer: Array.isArray(q.correct)
-      ? q.correct.map((i) => q.options[i]).join("; ")
+      ? q.correct.map((i: number) => q.options[i]).join("; ")
       : (q.options[q.correct as number] ?? ""),
     phase: q.phaseId,
   }));
@@ -116,17 +109,18 @@ export const useDojoStore = create<DojoState>((set, get) => ({
   },
 
   startSession: (phaseFilter?: string) => {
-    const questions = pickQuestions(phaseFilter);
-    set({
-      flowState: "READY",
-      questions,
-      currentIndex: 0,
-      answer: "",
-      streamedText: "",
-      pendingScore: null,
-      currentGrade: null,
-      results: [],
-      sessionStartedAt: Date.now(),
+    void pickQuestions(phaseFilter).then((questions) => {
+      set({
+        flowState: "READY",
+        questions,
+        currentIndex: 0,
+        answer: "",
+        streamedText: "",
+        pendingScore: null,
+        currentGrade: null,
+        results: [],
+        sessionStartedAt: Date.now(),
+      });
     });
     void track("dojo_session_started", {
       tier: get().tier ?? "unknown",
@@ -169,7 +163,6 @@ export const useDojoStore = create<DojoState>((set, get) => ({
           });
         },
         onError: () => {
-          // T1 failed mid-stream — fall back to T3
           const grade = gradeViaFallback(question.text, answer, question.correctAnswer);
           set({
             tier: "T3",
@@ -180,9 +173,7 @@ export const useDojoStore = create<DojoState>((set, get) => ({
         },
       });
     } else {
-      // T3 — instant, no streaming
       const grade = gradeViaFallback(question.text, answer, question.correctAnswer);
-      // Brief pause so the EVALUATING state is perceptible
       await new Promise<void>((r) => setTimeout(r, 600));
       set({
         flowState: "SCORED",
@@ -193,8 +184,31 @@ export const useDojoStore = create<DojoState>((set, get) => ({
   },
 
   nextQuestion: () => {
-    const { currentIndex, questions } = get();
+    const { currentIndex, questions, results, tier, sessionStartedAt } = get();
     if (currentIndex + 1 >= questions.length) {
+      const avgScore =
+        results.length > 0
+          ? Math.round((results.reduce((sum, r) => sum + r.grade.score, 0) / results.length) * 10) /
+            10
+          : 0;
+      const session: DojoSession = {
+        id: generateId("dojo"),
+        startedAt: sessionStartedAt ?? Date.now(),
+        completedAt: Date.now(),
+        tier: tier ?? "T3",
+        phaseFilter: questions[0]?.phase,
+        results: results.map((r) => ({
+          questionId: r.questionId,
+          questionText: questions.find((q) => q.id === r.questionId)?.text ?? "",
+          answer: r.answer,
+          score: r.grade.score,
+          gap: r.grade.gap,
+          feedback: r.grade.feedback,
+          timeMs: r.timeMs,
+        })),
+        avgScore,
+      };
+      void putDojoSession(session);
       set({ flowState: "COMPLETE" });
       void track("dojo_session_complete", { questions: questions.length });
     } else {

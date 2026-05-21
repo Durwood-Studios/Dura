@@ -8,9 +8,10 @@ import type { SandboxSave } from "@/types/sandbox";
 import type { AssessmentResult, Certificate } from "@/types/assessment";
 import type { XPEvent } from "@/types/xp";
 import type { TutorialProgress } from "@/types/tutorial";
+import type { DojoSession } from "@/types/dojo";
 
 export const DB_NAME = "dura";
-export const DB_VERSION = 5;
+export const DB_VERSION = 6;
 
 export interface DuraDBSchema extends DBSchema {
   progress: {
@@ -79,6 +80,11 @@ export interface DuraDBSchema extends DBSchema {
     key: string;
     value: TutorialProgress;
     indexes: { "by-type": string; "by-slug": string; "by-active": number };
+  };
+  "dojo-sessions": {
+    key: string;
+    value: DojoSession;
+    indexes: { "by-completed": number; "by-phase": string };
   };
 }
 
@@ -161,6 +167,12 @@ export function getDB(): Promise<DuraDB> {
           store.createIndex("by-type", "type");
           store.createIndex("by-slug", "slug");
           store.createIndex("by-active", "lastActiveAt");
+        }
+        // v6: dojo session history
+        if (!db.objectStoreNames.contains("dojo-sessions")) {
+          const store = db.createObjectStore("dojo-sessions", { keyPath: "id" });
+          store.createIndex("by-completed", "completedAt");
+          store.createIndex("by-phase", "phaseFilter");
         }
       },
       blocked() {

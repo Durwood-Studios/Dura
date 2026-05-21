@@ -11,6 +11,7 @@ import { levelProgress } from "@/lib/xp";
 import { formatMinutes, formatTime } from "@/lib/utils";
 import { PHASES } from "@/content/phases";
 import { summarizeAllPhases, type PhaseSummary } from "@/lib/progress-aggregate";
+import { getDojoStats } from "@/lib/db/dojo";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { LessonProgress } from "@/types/curriculum";
@@ -40,11 +41,12 @@ interface StatsData {
   completedCount: number;
   totalTimeMs: number;
   streak: StreakState;
-  weekly: number[]; // last 7 days, oldest first
+  weekly: number[];
   phases: PhaseSummary[];
   deckSize: number;
   dueToday: number;
   retentionRate: number;
+  dojo: { totalSessions: number; avgScore: number; bestScore: number; recentTrend: number[] };
 }
 
 function startOfDay(ts: number): number {
@@ -93,6 +95,8 @@ async function loadStats(): Promise<StatsData> {
   const reviewState = cards.filter((c) => c.state === "review").length;
   const retentionRate = cards.length === 0 ? 0 : reviewState / cards.length;
 
+  const dojo = await getDojoStats();
+
   return {
     totalXp,
     lessonXp,
@@ -108,6 +112,7 @@ async function loadStats(): Promise<StatsData> {
     deckSize: cards.length,
     dueToday,
     retentionRate,
+    dojo,
   };
 }
 
@@ -395,6 +400,65 @@ export function StatsClient(): React.ReactElement {
                 <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">Retention</p>
               </div>
             </div>
+          </section>
+        </>
+      )}
+
+      {data.dojo.totalSessions > 0 && (
+        <>
+          <div className="dura-divider" />
+          <section className="dura-card p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+                Dojo
+              </h2>
+              <Link href="/dojo" className="text-xs text-[var(--color-accent)] hover:underline">
+                Open Dojo →
+              </Link>
+            </div>
+            <div className="grid grid-cols-3 gap-4 text-center">
+              <div>
+                <p className="dura-stat-gradient text-3xl font-bold">{data.dojo.totalSessions}</p>
+                <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">Sessions</p>
+              </div>
+              <div>
+                <p
+                  className="text-3xl font-bold"
+                  style={{
+                    color:
+                      data.dojo.avgScore >= 7 ? "var(--color-accent)" : "var(--color-text-primary)",
+                  }}
+                >
+                  {data.dojo.avgScore}
+                </p>
+                <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">Avg score</p>
+              </div>
+              <div>
+                <p className="dura-stat-gradient text-3xl font-bold">{data.dojo.bestScore}</p>
+                <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">Best</p>
+              </div>
+            </div>
+            {data.dojo.recentTrend.length > 1 && (
+              <div className="mt-4">
+                <p className="mb-1.5 text-[10px] text-[var(--color-text-muted)]">
+                  Recent trend (last {data.dojo.recentTrend.length} sessions)
+                </p>
+                <div className="flex h-8 items-end gap-1">
+                  {data.dojo.recentTrend.map((score, i) => (
+                    <div
+                      key={i}
+                      className="flex-1 rounded-sm"
+                      style={{
+                        height: `${(score / 10) * 100}%`,
+                        background: score >= 7 ? "var(--color-accent)" : "var(--color-text-muted)",
+                        opacity: 0.5 + (i / data.dojo.recentTrend.length) * 0.5,
+                      }}
+                      title={`${score}/10`}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         </>
       )}
