@@ -68,19 +68,28 @@ export function RestReminder(): React.ReactElement | null {
 
   if (!shouldShow) return null;
 
+  // DLS-1.0 info semantic token — theme-aware. Background and border use a
+  // soft tint (color-mix with transparent) so the surface stays subtle in
+  // both themes; the text uses the full info color, which sits at ~60-65%
+  // lightness in either theme and clears WCAG 2.2 AA against page surfaces.
   return (
     <div
       role="status"
-      className="flex items-center justify-between gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-5 py-3"
+      className="flex items-center justify-between gap-3 rounded-xl border px-5 py-3"
+      style={{
+        borderColor: "color-mix(in oklch, var(--color-info) 30%, transparent)",
+        backgroundColor: "color-mix(in oklch, var(--color-info) 8%, transparent)",
+      }}
     >
-      <p className="text-sm text-cyan-300/80">
+      <p className="text-sm" style={{ color: "var(--color-info)" }}>
         You&apos;ve been at it for {minutesStudied} minutes. Your brain consolidates knowledge
         during rest.
       </p>
       <button
         type="button"
         onClick={dismiss}
-        className="shrink-0 rounded-md p-1 text-cyan-400/60 transition-colors hover:bg-cyan-500/10 hover:text-cyan-300"
+        className="shrink-0 rounded-md p-1 transition-colors hover:bg-[color-mix(in_oklch,var(--color-info)_15%,transparent)]"
+        style={{ color: "var(--color-info)" }}
         aria-label="Dismiss rest reminder"
       >
         <X className="h-4 w-4" />
