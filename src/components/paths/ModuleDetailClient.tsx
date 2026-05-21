@@ -121,7 +121,7 @@ export function ModuleDetailClient({
                       </p>
                     )}
                   </div>
-                  <span className="text-[10px] text-[var(--color-text-muted)]">
+                  <span className="text-xs text-[var(--color-text-muted)]">
                     {formatMinutes(lesson.estimatedMinutes)}
                   </span>
                   <ArrowRight className="h-4 w-4 text-[var(--color-text-muted)] group-hover:text-emerald-600" />
@@ -135,7 +135,7 @@ export function ModuleDetailClient({
       <div className="mt-8">
         <MasteryGate moduleId={moduleId} moduleTitle={moduleTitle} phaseId={phaseId} />
         {!allComplete && (
-          <p className="mt-2 text-center text-[10px] text-[var(--color-text-muted)]">
+          <p className="mt-2 text-center text-xs text-[var(--color-text-muted)]">
             Tip: complete every lesson before attempting the module assessment.
           </p>
         )}

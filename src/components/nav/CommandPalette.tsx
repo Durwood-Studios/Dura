@@ -180,7 +180,7 @@ export function CommandPalette(): React.ReactElement | null {
             placeholder="Search pages, phases, dictionary…"
             className="flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-muted)]"
           />
-          <kbd className="rounded border border-[var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
+          <kbd className="rounded border border-[var(--color-border)] px-1.5 py-0.5 font-mono text-xs text-[var(--color-text-muted)]">
             ESC
           </kbd>
         </div>
@@ -205,9 +205,7 @@ export function CommandPalette(): React.ReactElement | null {
                 )}
               >
                 <span className="flex-1">{result.label}</span>
-                <span className="text-[10px] text-[var(--color-text-muted)]">
-                  {result.category}
-                </span>
+                <span className="text-xs text-[var(--color-text-muted)]">{result.category}</span>
                 <ArrowRight className="h-3.5 w-3.5 text-neutral-300" />
               </button>
             </li>

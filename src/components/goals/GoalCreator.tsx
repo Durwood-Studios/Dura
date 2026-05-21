@@ -105,7 +105,7 @@ export function GoalCreator({ open, onClose }: GoalCreatorProps): React.ReactEle
               )}
             >
               <div className="font-semibold">{t.label}</div>
-              <div className="text-[10px] text-[var(--color-text-muted)]">{t.hint}</div>
+              <div className="text-xs text-[var(--color-text-muted)]">{t.hint}</div>
             </button>
           ))}
         </div>

@@ -52,7 +52,7 @@ export function TopBar(): React.ReactElement {
       >
         <Search className="h-4 w-4" />
         <span className="hidden sm:inline">Search</span>
-        <kbd className="ml-2 hidden rounded border border-[var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)] sm:inline">
+        <kbd className="ml-2 hidden rounded border border-[var(--color-border)] px-1.5 py-0.5 font-mono text-xs text-[var(--color-text-muted)] sm:inline">
           ⌘K
         </kbd>
       </button>

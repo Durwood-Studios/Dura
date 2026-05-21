@@ -220,7 +220,7 @@ function CompetencyCard({
       {/* Dreyfus Levels */}
       <div className="space-y-2 border-t border-[var(--color-border)] pt-3">
         <div>
-          <span className="font-mono text-[11px] font-medium tracking-wider text-[var(--color-text-muted)] uppercase">
+          <span className="font-mono text-xs font-medium tracking-wider text-[var(--color-text-muted)] uppercase">
             Novice
           </span>
           <p className="mt-0.5 text-sm leading-relaxed text-[var(--color-text-secondary)]">
@@ -228,7 +228,7 @@ function CompetencyCard({
           </p>
         </div>
         <div>
-          <span className="font-mono text-[11px] font-medium tracking-wider text-[#67e8f9] uppercase">
+          <span className="font-mono text-xs font-medium tracking-wider text-[#67e8f9] uppercase">
             Expert
           </span>
           <p className="mt-0.5 text-sm leading-relaxed text-[var(--color-text-secondary)]">

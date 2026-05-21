@@ -146,7 +146,7 @@ export function SecretEncoder(): React.ReactElement {
                 <span className="text-xs font-semibold text-[var(--color-text-primary)]">
                   {letter}
                 </span>
-                <span className="text-[10px] text-[var(--color-text-muted)]">&#8595;</span>
+                <span className="text-xs text-[var(--color-text-muted)]">&#8595;</span>
                 <span className="text-xs font-bold text-[var(--color-accent-emerald)]">
                   {shifted}
                 </span>

@@ -70,7 +70,7 @@ export function CurriculumBrowser({
       {/* Sidebar filters */}
       <aside className="flex flex-col gap-5 lg:sticky lg:top-20 lg:self-start">
         <div>
-          <label className="font-mono text-[10px] text-[var(--color-text-muted)] uppercase">
+          <label className="font-mono text-xs text-[var(--color-text-muted)] uppercase">
             Search
           </label>
           <div className="relative mt-1">
@@ -86,7 +86,7 @@ export function CurriculumBrowser({
         </div>
 
         <div>
-          <label className="font-mono text-[10px] text-[var(--color-text-muted)] uppercase">
+          <label className="font-mono text-xs text-[var(--color-text-muted)] uppercase">
             Framework
           </label>
           <select
@@ -107,14 +107,12 @@ export function CurriculumBrowser({
         </div>
 
         <div>
-          <label className="flex items-center gap-1 font-mono text-[10px] text-[var(--color-text-muted)] uppercase">
+          <label className="flex items-center gap-1 font-mono text-xs text-[var(--color-text-muted)] uppercase">
             <Filter className="h-3 w-3" /> Standards
           </label>
           <div className="mt-1 max-h-[320px] overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-1">
             {visibleStandards.length === 0 ? (
-              <p className="p-2 text-[11px] text-[var(--color-text-muted)]">
-                No standards tagged yet.
-              </p>
+              <p className="p-2 text-xs text-[var(--color-text-muted)]">No standards tagged yet.</p>
             ) : (
               <ul className="flex flex-col gap-0.5">
                 <li>
@@ -122,7 +120,7 @@ export function CurriculumBrowser({
                     type="button"
                     onClick={() => setSelectedCode(null)}
                     className={cn(
-                      "w-full rounded px-2 py-1 text-left text-[11px]",
+                      "w-full rounded px-2 py-1 text-left text-xs",
                       selectedCode === null
                         ? "bg-emerald-50 text-emerald-700"
                         : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
@@ -137,7 +135,7 @@ export function CurriculumBrowser({
                       type="button"
                       onClick={() => setSelectedCode(s.code)}
                       className={cn(
-                        "flex w-full items-center justify-between rounded px-2 py-1 text-left text-[11px]",
+                        "flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs",
                         selectedCode === s.code
                           ? "bg-emerald-50 text-emerald-700"
                           : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
@@ -161,7 +159,7 @@ export function CurriculumBrowser({
         </div>
 
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-3">
-          <p className="font-mono text-[10px] text-[var(--color-text-muted)] uppercase">Coverage</p>
+          <p className="font-mono text-xs text-[var(--color-text-muted)] uppercase">Coverage</p>
           <p className="mt-1 text-xl font-semibold text-[var(--color-text-primary)]">
             {totalAuthored} / {totalTarget}
           </p>
@@ -171,7 +169,7 @@ export function CurriculumBrowser({
               style={{ width: `${coverage}%` }}
             />
           </div>
-          <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">
             {coverage}% of target lessons authored
           </p>
         </div>
@@ -224,7 +222,7 @@ export function CurriculumBrowser({
                   style={{ backgroundColor: node.phase.color }}
                 />
                 <div className="flex-1">
-                  <p className="font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+                  <p className="font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
                     Phase {node.phase.id}
                   </p>
                   <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
@@ -232,7 +230,7 @@ export function CurriculumBrowser({
                   </h3>
                   <p className="text-xs text-[var(--color-text-muted)]">{node.phase.tagline}</p>
                 </div>
-                <span className="text-[10px] text-[var(--color-text-muted)]">
+                <span className="text-xs text-[var(--color-text-muted)]">
                   {authoredInPhase}/{node.phase.lessonCount} lessons
                 </span>
               </button>
@@ -260,7 +258,7 @@ export function CurriculumBrowser({
                           <span className="flex-1 text-sm font-medium text-[var(--color-text-primary)]">
                             {modulePair.module.title}
                           </span>
-                          <span className="text-[10px] text-[var(--color-text-muted)]">
+                          <span className="text-xs text-[var(--color-text-muted)]">
                             {modulePair.lessons.length}/{modulePair.module.lessonCount}
                           </span>
                         </button>
@@ -276,7 +274,7 @@ export function CurriculumBrowser({
                                   <span className="flex-1 text-[var(--color-text-primary)]">
                                     {lesson.title}
                                   </span>
-                                  <span className="inline-flex items-center gap-1 text-[10px] text-[var(--color-text-muted)]">
+                                  <span className="inline-flex items-center gap-1 text-xs text-[var(--color-text-muted)]">
                                     <Clock className="h-2.5 w-2.5" />
                                     {formatMinutes(lesson.estimatedMinutes)}
                                   </span>
@@ -286,7 +284,7 @@ export function CurriculumBrowser({
                           </ul>
                         )}
                         {isModuleOpen && modulePair.lessons.length === 0 && (
-                          <p className="mt-1 ml-5 text-[10px] text-[var(--color-text-muted)] italic">
+                          <p className="mt-1 ml-5 text-xs text-[var(--color-text-muted)] italic">
                             Lessons not yet authored.
                           </p>
                         )}

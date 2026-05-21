@@ -85,9 +85,7 @@ export default async function TermPage({
               <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
                 {tier.label}
               </h2>
-              <span className="text-[10px] text-[var(--color-text-muted)] uppercase">
-                {tier.hint}
-              </span>
+              <span className="text-xs text-[var(--color-text-muted)] uppercase">{tier.hint}</span>
             </header>
             <p className="leading-relaxed text-[var(--color-text-secondary)]">
               {term.definitions[tier.key]}

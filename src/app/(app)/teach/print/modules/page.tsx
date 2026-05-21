@@ -40,7 +40,7 @@ export default async function ModuleIndexPage(): Promise<React.ReactElement> {
                   {disabled ? (
                     <span className="inline-flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
                       {modulePair.module.title}
-                      <span className="font-mono text-[10px]">(not yet authored)</span>
+                      <span className="font-mono text-xs">(not yet authored)</span>
                     </span>
                   ) : (
                     <Link
@@ -49,7 +49,7 @@ export default async function ModuleIndexPage(): Promise<React.ReactElement> {
                       target="_blank"
                     >
                       {modulePair.module.title}
-                      <span className="font-mono text-[10px] text-[var(--color-text-secondary)]">
+                      <span className="font-mono text-xs text-[var(--color-text-secondary)]">
                         · {authored} lessons
                       </span>
                     </Link>

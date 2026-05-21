@@ -64,7 +64,7 @@ export function AikenWeather(): React.ReactElement | null {
   if (!time) return null;
 
   return (
-    <div className="mt-1.5 text-center text-[10px] text-[#A3A3A3] sm:text-left dark:text-[#6b6b75]">
+    <div className="mt-1.5 text-center text-xs text-[#A3A3A3] sm:text-left dark:text-[#6b6b75]">
       Aiken, SC{time ? ` · ${time}` : ""}
       {weather ? ` · ${weather}` : ""}
       {" · 202+ commits of care"}

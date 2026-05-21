@@ -125,7 +125,7 @@ export function Sidebar(): React.ReactElement {
           <div key={group.label}>
             {groupIdx > 0 && <div className="dura-divider mx-2 my-2.5" />}
             {group.label && (
-              <span className="mb-1 block px-3 pt-1 text-[10px] font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+              <span className="mb-1 block px-3 pt-1 text-xs font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
                 {group.label}
               </span>
             )}
@@ -182,7 +182,7 @@ export function Sidebar(): React.ReactElement {
                   <p className="text-xs font-semibold text-[var(--color-text-primary)]">
                     Level {stats.level}
                   </p>
-                  <p className="text-[10px] text-[var(--color-text-muted)]">
+                  <p className="text-xs text-[var(--color-text-muted)]">
                     {stats.xpPercent}% to next
                   </p>
                 </div>
@@ -190,7 +190,7 @@ export function Sidebar(): React.ReactElement {
               {stats.streakDays > 0 && (
                 <div
                   className={cn(
-                    "flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold",
+                    "flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold",
                     stats.streakAlive
                       ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
                       : "bg-[var(--color-bg-subtle)] text-[var(--color-text-muted)]"

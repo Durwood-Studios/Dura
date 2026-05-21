@@ -57,7 +57,7 @@ export function CertificateLookup({ hash }: CertificateLookupProps): React.React
           This certificate is stored locally on the device that earned it. Cross-device verification
           is coming soon.
         </p>
-        <p className="mt-4 font-mono text-[10px] text-[var(--color-text-muted)]">
+        <p className="mt-4 font-mono text-xs text-[var(--color-text-muted)]">
           Hash: {hash.slice(0, 24)}…
         </p>
         <Link
@@ -81,7 +81,7 @@ export function CertificateLookup({ hash }: CertificateLookupProps): React.React
         Your certificates
       </Link>
       <CertificateView certificate={certificate} />
-      <p className="mt-6 text-center text-[10px] text-[var(--color-text-muted)]">
+      <p className="mt-6 text-center text-xs text-[var(--color-text-muted)]">
         This certificate is stored locally. Cross-device verification coming soon.
       </p>
     </>

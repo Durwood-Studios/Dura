@@ -47,7 +47,7 @@ function ExportCard({
           </p>
         </div>
         {count && (
-          <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
+          <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 font-mono text-xs text-[var(--color-text-muted)]">
             {count}
           </span>
         )}

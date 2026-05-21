@@ -42,7 +42,7 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
     <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 shadow-sm">
       <header className="mb-3 flex items-start justify-between gap-3">
         <div>
-          <p className="font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+          <p className="font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
             {goal.type}
           </p>
           <h3 className="mt-1 font-semibold text-[var(--color-text-primary)]">{goal.label}</h3>
@@ -94,12 +94,12 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
             </span>
           </p>
           {goal.deadline && (
-            <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">
+            <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
               Deadline: {new Date(goal.deadline).toLocaleDateString()}
             </p>
           )}
           {achieved && (
-            <p className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600">
+            <p className="mt-0.5 inline-flex items-center gap-1 text-xs font-medium text-emerald-600">
               <Check className="h-3 w-3" />
               Achieved {new Date(goal.achievedAt!).toLocaleDateString()}
             </p>
@@ -108,7 +108,7 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
             <button
               type="button"
               onClick={() => void complete(goal.id)}
-              className="mt-2 inline-flex items-center gap-1 rounded-md bg-emerald-500 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-emerald-600"
+              className="mt-2 inline-flex items-center gap-1 rounded-md bg-emerald-500 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-600"
             >
               Mark complete
             </button>

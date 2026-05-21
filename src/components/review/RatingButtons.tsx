@@ -114,7 +114,7 @@ export function RatingButtons({ card, visible, onRate }: RatingButtonsProps): Re
             )}
           >
             <span className="flex items-center gap-1.5" aria-hidden>
-              <kbd className="hidden rounded border border-current/30 px-1 py-0 font-mono text-[10px] opacity-70 sm:inline">
+              <kbd className="hidden rounded border border-current/30 px-1 py-0 font-mono text-xs opacity-70 sm:inline">
                 {r.key}
               </kbd>
               {r.label}
@@ -122,7 +122,7 @@ export function RatingButtons({ card, visible, onRate }: RatingButtonsProps): Re
             {/* Interval revealed only AFTER tap — not before (DLS-1.0 §Rating Button behaviour) */}
             <span
               className={cn(
-                "mt-0.5 font-mono text-[11px] transition-opacity duration-150",
+                "mt-0.5 font-mono text-xs transition-opacity duration-150",
                 isSelected ? "opacity-80" : "opacity-0 select-none"
               )}
               aria-hidden

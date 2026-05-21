@@ -155,7 +155,7 @@ export function SettingsClient(): React.ReactElement {
                 )}
               >
                 <span className="font-semibold">{m.label}</span>
-                <span className="text-[10px] text-[var(--color-text-muted)]">{m.hint}</span>
+                <span className="text-xs text-[var(--color-text-muted)]">{m.hint}</span>
               </button>
             ))}
           </div>
@@ -196,7 +196,7 @@ export function SettingsClient(): React.ReactElement {
         >
           <Toggle value={prefs.soundEnabled} onChange={(v) => save({ soundEnabled: v })} />
         </SettingRow>
-        <p className="text-[11px] text-[var(--color-text-muted)]">
+        <p className="text-xs text-[var(--color-text-muted)]">
           Notifications work when DURA is open or recently used. They check your local data — streak
           status, due flashcards, daily goal progress — and remind you gently. No server required.
         </p>
@@ -211,7 +211,7 @@ export function SettingsClient(): React.ReactElement {
           {SHORTCUTS.map((s) => (
             <div key={s.keys} className="flex items-center justify-between text-xs">
               <span className="text-[var(--color-text-secondary)]">{s.action}</span>
-              <kbd className="rounded border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-2 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
+              <kbd className="rounded border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-2 py-0.5 font-mono text-xs text-[var(--color-text-muted)]">
                 {s.keys}
               </kbd>
             </div>
@@ -392,7 +392,7 @@ function SettingRow({
     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <p className="text-sm font-medium text-[var(--color-text-primary)]">{label}</p>
-        {hint && <p className="text-[11px] text-[var(--color-text-muted)]">{hint}</p>}
+        {hint && <p className="text-xs text-[var(--color-text-muted)]">{hint}</p>}
       </div>
       <div className="shrink-0">{children}</div>
     </div>

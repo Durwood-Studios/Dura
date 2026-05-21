@@ -2,14 +2,13 @@
  * Education standards alignment reference.
  * Maps DURA phases and modules to K-12, college, and professional standards.
  *
- * Standards covered:
- * - CSTA K-12 CS Standards (2017, updated 2024)
- * - AP Computer Science Principles (CSP) — College Board
- * - AP Computer Science A (CSA) — College Board
- * - ACM CS2023 (already in lesson frontmatter)
- * - SWEBOK v4 (already in lesson frontmatter)
- * - SFIA 9 (already in lesson frontmatter)
- * - ISTE Standards for Students
+ * Phases 0-3 (K-12 + intro-college coverage): CSTA, AP CSP, AP CSA, ISTE.
+ * Phases 4-9 (professional + advanced practice): module-level SFIA work-role
+ * summaries, plus OWASP (security modules), IEEE 7000-series (AI/ethics),
+ * and NIST NICE (cybersecurity workforce). ACM CS2023, SWEBOK v4, and SFIA
+ * level numbers per lesson live on lesson frontmatter; the module-level
+ * fields here surface codes that don't fit per-lesson but apply to the
+ * whole module's scope of work.
  */
 
 export interface StandardsAlignment {
@@ -19,6 +18,14 @@ export interface StandardsAlignment {
   apCSP: string[];
   apCSA: string[];
   iste: string[];
+  /** Module-level SFIA work-role + level summary, plain-language. */
+  sfia?: string;
+  /** OWASP Top 10 categories addressed by this module (security-relevant only). */
+  owasp?: string[];
+  /** IEEE 7000-series ethics standards relevant to this module (AI / ethics only). */
+  ieee7000?: string[];
+  /** NIST NICE Cybersecurity Workforce work-role codes (cyber/devops only). */
+  nice?: string[];
 }
 
 // CSTA Standard Codes Reference:
@@ -199,7 +206,318 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     iste: ["1.5"],
   },
 
-  // Phases 4-9: Beyond AP scope — professional standards only (CS2023, SWEBOK, SFIA already mapped)
+  // Phase 4: Backend Engineering → SWEBOK + SFIA L3-4 + OWASP (API security) + NICE (DevOps)
+  {
+    phaseId: "4",
+    moduleId: "4-1",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3 — Programming / software development",
+  },
+  {
+    phaseId: "4",
+    moduleId: "4-2",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3 — Programming / software development",
+    owasp: ["A01:2021 Broken Access Control", "A07:2021 Identification & Auth Failures"],
+  },
+  {
+    phaseId: "4",
+    moduleId: "4-3",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3 — Database design (DBAD)",
+  },
+  {
+    phaseId: "4",
+    moduleId: "4-4",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3 — Systems integration / sustainability",
+    nice: ["SP-DEV-001 Software Developer"],
+  },
+  {
+    phaseId: "4",
+    moduleId: "4-5",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Release & deployment management (RELM)",
+    nice: ["OM-NET-001 Network Operations Specialist"],
+  },
+
+  // Phase 5: Systems Engineering → SFIA L4-5 + NICE (network/incident response)
+  {
+    phaseId: "5",
+    moduleId: "5-1",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4–5 — Solution architecture (ARCH)",
+  },
+  {
+    phaseId: "5",
+    moduleId: "5-2",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Network design (NTDS)",
+    nice: ["OM-NET-001 Network Operations Specialist"],
+  },
+  {
+    phaseId: "5",
+    moduleId: "5-3",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Performance management (PDSG)",
+  },
+  {
+    phaseId: "5",
+    moduleId: "5-4",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Service level management (SLMO)",
+    nice: ["PR-CIR-001 Cyber Incident Response"],
+  },
+
+  // Phase 6: AI/ML Engineering → SFIA MLNG + IEEE 7000-series ethics
+  {
+    phaseId: "6",
+    moduleId: "6-1",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3 — Machine learning (MLNG)",
+  },
+  {
+    phaseId: "6",
+    moduleId: "6-2",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3–4 — Machine learning (MLNG)",
+    ieee7000: ["IEEE 7000-2021 (Ethical System Design)"],
+  },
+  {
+    phaseId: "6",
+    moduleId: "6-3",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Machine learning (MLNG)",
+    ieee7000: ["IEEE 7000-2021 (Ethical System Design)", "IEEE 7001-2021 (Transparency)"],
+  },
+  {
+    phaseId: "6",
+    moduleId: "6-4",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Machine learning (MLNG)",
+    ieee7000: ["IEEE 7000-2021 (Ethical System Design)"],
+  },
+  {
+    phaseId: "6",
+    moduleId: "6-5",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Data engineering (DENG)",
+    ieee7000: ["IEEE 7001-2021 (Transparency of Autonomous Systems)"],
+  },
+  {
+    phaseId: "6",
+    moduleId: "6-6",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4–5 — Solution architecture (ARCH)",
+    ieee7000: ["IEEE 7007-2021 (Ontological standards for ethical AI)"],
+  },
+
+  // Phase 7: Advanced Systems → SFIA L5 + NICE (security) + OWASP
+  {
+    phaseId: "7",
+    moduleId: "7-1",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 5 — Programming / specialism (PROG)",
+  },
+  {
+    phaseId: "7",
+    moduleId: "7-2",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 5 — Systems development management (DLMG)",
+  },
+  {
+    phaseId: "7",
+    moduleId: "7-3",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4–5 — Information security (SCTY)",
+    owasp: ["A02:2021 Cryptographic Failures", "A04:2021 Insecure Design"],
+    nice: ["SP-DEV-002 Secure Software Assessor", "OM-CYB-001 Cyber Defense Analyst"],
+  },
+  {
+    phaseId: "7",
+    moduleId: "7-4",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 5–6 — Solution architecture (ARCH)",
+  },
+
+  // Phase 8: Professional Practice → SFIA L3-4 + SWEBOK + IEEE 7000 ethics
+  {
+    phaseId: "8",
+    moduleId: "8-1",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Methods & tools (METL)",
+  },
+  {
+    phaseId: "8",
+    moduleId: "8-2",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3–4 — Testing (TEST)",
+  },
+  {
+    phaseId: "8",
+    moduleId: "8-3",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3 — Quality management (QUMG)",
+  },
+  {
+    phaseId: "8",
+    moduleId: "8-4",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 3–4 — Technical writing (TECH)",
+  },
+  {
+    phaseId: "8",
+    moduleId: "8-5",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4 — Professional development (PDSV)",
+    ieee7000: ["IEEE 7000-2021 (Ethical System Design)", "IEEE 7010-2020 (Wellbeing Metrics)"],
+  },
+
+  // Phase 9: CTO Track → SFIA L5-7 strategy + management work roles
+  {
+    phaseId: "9",
+    moduleId: "9-1",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 5 — People management / mentoring (PEMT)",
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-2",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 6–7 — Enterprise & solution architecture (ARCH)",
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-3",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 5–6 — Organisational design (RESC)",
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-4",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 5–6 — IT strategy & planning (ITSP)",
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-5",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 5 — Financial management for IT (FMIT)",
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-6",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 5 — IT strategy & planning (ITSP)",
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-7",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 6 — IT strategy & planning (ITSP)",
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-8",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 7 — IT strategy & planning (ITSP)",
+  },
 ];
 
 /** Look up the standards alignment for a specific module. */

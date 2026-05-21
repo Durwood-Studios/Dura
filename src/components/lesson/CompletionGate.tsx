@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, Lock, Trophy, ArrowRight, Repeat } from "lucide-react";
+import { Check, Lock, ArrowRight, Repeat } from "lucide-react";
 import { useProgressStore } from "@/stores/progress";
 import { XP_AWARDS, levelFromXP } from "@/lib/xp";
 import { track } from "@/lib/analytics";
@@ -11,9 +11,12 @@ import { getCompletedLessonCount } from "@/lib/db/progress";
 import { getTotalXP } from "@/lib/db/xp";
 import { awardXPWithToast } from "@/lib/xp-manager";
 import { extendStreak } from "@/lib/streak-manager";
-import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { Confetti } from "@/components/motion/Confetti";
 import { ShareButton } from "@/components/seo/ShareButton";
+import { PartyPopperIcon } from "@/components/ui/party-popper";
+import { SparklesIcon } from "@/components/ui/sparkles";
+import { FlameIcon } from "@/components/ui/flame";
+import { usePlayOnMount } from "@/components/celebration/usePlayOnMount";
 import { SITE_URL } from "@/lib/og";
 import { cn } from "@/lib/utils";
 
@@ -218,90 +221,22 @@ export function CompletionGate({
     const shareText = `Just learned about ${lessonTitle} on DURA`;
 
     return (
-      <section className="my-12 overflow-hidden rounded-2xl border border-emerald-200 bg-[var(--color-bg-accent)] p-8 text-center">
-        <Confetti active={celebrating && !completed} />
-        <Trophy className="mx-auto h-12 w-12 text-amber-500" aria-hidden />
-        <h2
-          className="mt-4 text-3xl font-semibold text-[var(--color-text-primary)] opacity-0"
-          style={{ animation: "celebrate-in 400ms ease-out 0.3s forwards" }}
-        >
-          Lesson complete
-        </h2>
-        {completionMessage && (
-          <p
-            className="mt-2 font-serif text-base text-[var(--color-text-secondary)] italic opacity-0"
-            style={{ animation: "celebrate-in 400ms ease-out 0.45s forwards" }}
-          >
-            {completionMessage}
-          </p>
-        )}
-        {vocabulary.length > 0 && (
-          <div
-            className="mx-auto mt-4 max-w-md opacity-0"
-            style={{ animation: "celebrate-in 400ms ease-out 0.55s forwards" }}
-          >
-            <p className="mb-2 text-xs font-medium text-[var(--color-text-muted)]">You now know</p>
-            <div className="flex flex-wrap justify-center gap-1.5">
-              {vocabulary.slice(0, 6).map((term) => (
-                <span
-                  key={term}
-                  className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
-                >
-                  {term}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-        <p
-          className="mt-3 font-mono text-2xl font-semibold text-emerald-600 opacity-0"
-          style={{ animation: "celebrate-in 400ms ease-out 0.7s forwards" }}
-        >
-          +{xp} XP
-        </p>
-        {leveledUp && (
-          <p
-            className="mt-2 text-sm font-medium text-amber-600 opacity-0"
-            style={{ animation: "celebrate-in 400ms ease-out 0.9s forwards" }}
-          >
-            ⭐ Level up — Level {newLevel}
-          </p>
-        )}
-        {streakExtended && streakDays > 0 && (
-          <p
-            className="mt-2 inline-flex items-center justify-center gap-1 text-sm font-medium text-amber-600 opacity-0"
-            style={{ animation: "celebrate-in 400ms ease-out 1s forwards" }}
-          >
-            <StreakFlame days={streakDays} />
-            {streakDays} day streak
-            {[7, 14, 30, 60, 100, 365].includes(streakDays) && " — milestone!"}
-          </p>
-        )}
-        <div
-          className="mt-6 flex flex-col items-center gap-3 opacity-0"
-          style={{ animation: "celebrate-in 400ms ease-out 1.2s forwards" }}
-        >
-          {nextHref && nextTitle && (
-            <Link
-              href={nextHref}
-              className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600"
-            >
-              Next: {nextTitle}
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-          )}
-          {dueAfter > 0 && (
-            <Link
-              href="/review"
-              className="inline-flex items-center gap-2 rounded-lg border border-emerald-300 bg-[var(--color-bg-surface)] px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-50"
-            >
-              <Repeat className="h-4 w-4" />
-              {dueAfter} flashcard{dueAfter === 1 ? "" : "s"} due for review
-            </Link>
-          )}
-          <ShareButton url={shareUrl} title={shareText} text={shareText} />
-        </div>
-      </section>
+      <CelebrationSection
+        celebrating={celebrating}
+        completed={completed}
+        completionMessage={completionMessage}
+        vocabulary={vocabulary}
+        xp={xp}
+        leveledUp={leveledUp}
+        newLevel={newLevel}
+        streakExtended={streakExtended}
+        streakDays={streakDays}
+        nextHref={nextHref}
+        nextTitle={nextTitle}
+        dueAfter={dueAfter}
+        shareUrl={shareUrl}
+        shareText={shareText}
+      />
     );
   }
 
@@ -373,6 +308,139 @@ export function CompletionGate({
       >
         {ready ? `Complete lesson (+${XP_AWARDS.lesson} XP)` : "Keep going"}
       </button>
+    </section>
+  );
+}
+
+interface CelebrationSectionProps {
+  celebrating: boolean;
+  completed: number | null | undefined;
+  completionMessage: string;
+  vocabulary: string[];
+  xp: number;
+  leveledUp: boolean;
+  newLevel: number | null;
+  streakExtended: boolean;
+  streakDays: number;
+  nextHref?: string;
+  nextTitle?: string;
+  dueAfter: number;
+  shareUrl: string;
+  shareText: string;
+}
+
+/**
+ * Celebration panel rendered when the lesson completes (or is already
+ * completed). Surgical animated icons fire once on mount via PlayOnMount
+ * — party-popper for lesson complete, sparkles for level-up, flame for
+ * streak milestones. All three respect the reduced-motion contract.
+ */
+function CelebrationSection({
+  celebrating,
+  completed,
+  completionMessage,
+  vocabulary,
+  xp,
+  leveledUp,
+  newLevel,
+  streakExtended,
+  streakDays,
+  nextHref,
+  nextTitle,
+  dueAfter,
+  shareUrl,
+  shareText,
+}: CelebrationSectionProps): React.ReactElement {
+  const popperRef = usePlayOnMount();
+  const sparklesRef = usePlayOnMount(leveledUp ? (newLevel ?? 0) : undefined);
+  const flameRef = usePlayOnMount(streakDays);
+  const isMilestone = [7, 14, 30, 60, 100, 365].includes(streakDays);
+
+  return (
+    <section className="my-12 overflow-hidden rounded-2xl border border-emerald-200 bg-[var(--color-bg-accent)] p-8 text-center">
+      <Confetti active={celebrating && !completed} />
+      <PartyPopperIcon ref={popperRef} size={48} className="mx-auto text-amber-500" />
+      <h2
+        className="mt-4 text-3xl font-semibold text-[var(--color-text-primary)] opacity-0"
+        style={{ animation: "celebrate-in 400ms ease-out 0.3s forwards" }}
+      >
+        Lesson complete
+      </h2>
+      {completionMessage && (
+        <p
+          className="mt-2 font-serif text-base text-[var(--color-text-secondary)] italic opacity-0"
+          style={{ animation: "celebrate-in 400ms ease-out 0.45s forwards" }}
+        >
+          {completionMessage}
+        </p>
+      )}
+      {vocabulary.length > 0 && (
+        <div
+          className="mx-auto mt-4 max-w-md opacity-0"
+          style={{ animation: "celebrate-in 400ms ease-out 0.55s forwards" }}
+        >
+          <p className="mb-2 text-xs font-medium text-[var(--color-text-muted)]">You now know</p>
+          <div className="flex flex-wrap justify-center gap-1.5">
+            {vocabulary.slice(0, 6).map((term) => (
+              <span
+                key={term}
+                className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
+              >
+                {term}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      <p
+        className="mt-3 font-mono text-2xl font-semibold text-emerald-600 opacity-0"
+        style={{ animation: "celebrate-in 400ms ease-out 0.7s forwards" }}
+      >
+        +{xp} XP
+      </p>
+      {leveledUp && (
+        <p
+          className="mt-2 inline-flex items-center justify-center gap-1.5 text-sm font-medium text-amber-600 opacity-0"
+          style={{ animation: "celebrate-in 400ms ease-out 0.9s forwards" }}
+        >
+          <SparklesIcon ref={sparklesRef} size={16} className="text-amber-500" />
+          Level up — Level {newLevel}
+        </p>
+      )}
+      {streakExtended && streakDays > 0 && (
+        <p
+          className="mt-2 inline-flex items-center justify-center gap-1.5 text-sm font-medium text-amber-600 opacity-0"
+          style={{ animation: "celebrate-in 400ms ease-out 1s forwards" }}
+        >
+          <FlameIcon ref={flameRef} size={16} className="text-amber-500" />
+          {streakDays} day streak
+          {isMilestone && " — milestone!"}
+        </p>
+      )}
+      <div
+        className="mt-6 flex flex-col items-center gap-3 opacity-0"
+        style={{ animation: "celebrate-in 400ms ease-out 1.2s forwards" }}
+      >
+        {nextHref && nextTitle && (
+          <Link
+            href={nextHref}
+            className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600"
+          >
+            {nextTitle}
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+        )}
+        {dueAfter > 0 && (
+          <Link
+            href="/review"
+            className="inline-flex items-center gap-2 rounded-lg border border-emerald-300 bg-[var(--color-bg-surface)] px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-50"
+          >
+            <Repeat className="h-4 w-4" />
+            {dueAfter} flashcard{dueAfter === 1 ? "" : "s"} due for review
+          </Link>
+        )}
+        <ShareButton url={shareUrl} title={shareText} text={shareText} />
+      </div>
     </section>
   );
 }

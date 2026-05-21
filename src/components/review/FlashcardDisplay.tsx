@@ -138,7 +138,7 @@ export function FlashcardDisplay({
 function FrontContent({ card }: { card: FlashCard }): React.ReactElement {
   return (
     <>
-      <span className="mb-3 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+      <span className="mb-3 font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
         Term
       </span>
       <h2 className="text-center text-3xl font-semibold text-[var(--color-text-primary)] sm:text-4xl">
@@ -155,7 +155,7 @@ function FrontContent({ card }: { card: FlashCard }): React.ReactElement {
 function BackContent({ card }: { card: FlashCard }): React.ReactElement {
   return (
     <>
-      <span className="mb-3 font-mono text-[10px] tracking-widest text-[var(--color-text-muted)] uppercase">
+      <span className="mb-3 font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
         Definition
       </span>
       <p className="max-w-[480px] text-center leading-relaxed text-[var(--color-text-secondary)]">

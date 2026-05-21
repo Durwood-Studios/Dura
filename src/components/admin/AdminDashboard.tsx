@@ -479,7 +479,7 @@ function SupabaseTierPanel(): React.ReactElement {
                     : "border-[var(--color-border)] bg-[var(--color-bg-surface)]"
               }`}
             >
-              <p className="mb-1 text-[10px] font-medium tracking-wider text-[var(--color-text-muted)] uppercase">
+              <p className="mb-1 text-xs font-medium tracking-wider text-[var(--color-text-muted)] uppercase">
                 {feature}
               </p>
               <div className="flex items-center gap-1.5">
@@ -502,7 +502,7 @@ function SupabaseTierPanel(): React.ReactElement {
 
         {/* Session usage */}
         <div className="mt-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-3">
-          <p className="mb-1 text-[10px] font-medium tracking-wider text-[var(--color-text-muted)] uppercase">
+          <p className="mb-1 text-xs font-medium tracking-wider text-[var(--color-text-muted)] uppercase">
             Session Usage
           </p>
           <p className="font-mono text-sm text-[var(--color-text-primary)]">

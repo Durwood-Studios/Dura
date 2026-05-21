@@ -1,17 +1,28 @@
+import Link from "next/link";
+import { ArrowRight } from "lucide-react";
 import { evaluate } from "@mdx-js/mdx";
 import * as runtime from "react/jsx-runtime";
 import { mdxComponents } from "@/components/lesson/MDXComponents";
 import { ScrollTracker } from "@/components/lesson/ScrollTracker";
 import { CompletionGate } from "@/components/lesson/CompletionGate";
 import { BiteMode } from "@/components/lesson/BiteMode";
+import { StandardsBadges } from "@/components/lesson/StandardsBadges";
 import { formatMinutes } from "@/lib/utils";
 import { ShareButton } from "@/components/seo/ShareButton";
-import type { LoadedLesson } from "@/lib/content";
+import { buildBadges } from "@/lib/standards";
+import { getStandardsForModule } from "@/content/standards-map";
+import type { LoadedLesson, NextLessonRef } from "@/lib/content";
 
 interface LessonReaderProps {
   lesson: LoadedLesson;
-  next?: { href: string; title: string };
+  next?: NextLessonRef;
   shareUrl: string;
+}
+
+function nextLabel(next: NextLessonRef): string {
+  if (next.scope === "module") return `Next module: ${next.contextLabel ?? next.title}`;
+  if (next.scope === "phase") return `Next phase: ${next.contextLabel ?? next.title}`;
+  return `Next: ${next.title}`;
 }
 
 export async function LessonReader({
@@ -31,6 +42,26 @@ export async function LessonReader({
 
   const hasQuiz = /<Quiz\b/.test(body);
 
+  // Merge lesson-level standards (from frontmatter) with module-level
+  // K-12 alignment (CSTA / AP / ISTE) from PHASE_STANDARDS, so every
+  // lesson surfaces its full pedagogical provenance.
+  const moduleStandards = getStandardsForModule(meta.phaseId, meta.moduleId);
+  const badges = buildBadges({
+    cs2023: meta.standards.cs2023,
+    swebok: meta.standards.swebok,
+    sfia: meta.standards.sfia,
+    sfiaModule: moduleStandards?.sfia,
+    bloom: meta.bloom,
+    dreyfus: meta.dreyfus,
+    csta: moduleStandards?.csta,
+    apcsp: moduleStandards?.apCSP,
+    apcsa: moduleStandards?.apCSA,
+    iste: moduleStandards?.iste,
+    owasp: moduleStandards?.owasp,
+    ieee7000: moduleStandards?.ieee7000,
+    nice: moduleStandards?.nice,
+  });
+
   return (
     <article className="mx-auto max-w-[700px] px-6 py-12">
       <ScrollTracker lessonId={meta.id} phaseId={meta.phaseId} moduleId={meta.moduleId} />
@@ -45,16 +76,11 @@ export async function LessonReader({
         {meta.description && (
           <p className="mb-4 text-lg text-[var(--color-text-secondary)]">{meta.description}</p>
         )}
+        <StandardsBadges badges={badges} />
         <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>{formatMinutes(meta.estimatedMinutes)}</span>
           <span aria-hidden>·</span>
           <span>Difficulty {meta.difficulty}/5</span>
-          {meta.standards.cs2023?.[0] && (
-            <>
-              <span aria-hidden>·</span>
-              <span>{meta.standards.cs2023[0]}</span>
-            </>
-          )}
           <span className="ml-auto">
             <ShareButton url={shareUrl} title={meta.title} text={meta.description} />
           </span>
@@ -72,9 +98,24 @@ export async function LessonReader({
         lessonTitle={meta.title}
         hasQuiz={hasQuiz}
         nextHref={next?.href}
-        nextTitle={next?.title}
+        nextTitle={next ? nextLabel(next) : undefined}
         vocabulary={meta.vocabulary}
       />
+
+      {next && (
+        <nav
+          aria-label="Lesson navigation"
+          className="mt-8 flex justify-end border-t border-[var(--color-border)] pt-6"
+        >
+          <Link
+            href={next.href}
+            className="group inline-flex items-center gap-2 text-sm font-medium text-[var(--color-text-secondary)] transition hover:text-[var(--color-accent)]"
+          >
+            {nextLabel(next)}
+            <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        </nav>
+      )}
     </article>
   );
 }

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { loadLesson, listLessons } from "@/lib/content";
+import { loadLesson, resolveNextLesson } from "@/lib/content";
 import { LessonReader } from "@/components/lesson/LessonReader";
 import { GatingGuard } from "@/components/paths/GatingGuard";
 import { ClassroomSurface } from "@/components/surfaces";
@@ -32,16 +32,9 @@ export default async function LessonPage({
   const lesson = await loadLesson(phaseId, moduleId, lessonId);
   if (!lesson) notFound();
 
-  // Resolve "next lesson" by listing the module's lessons in order.
-  const siblings = await listLessons(phaseId, moduleId);
-  const currentIndex = siblings.findIndex((l) => l.id === lessonId);
-  const nextSibling = currentIndex >= 0 ? siblings[currentIndex + 1] : undefined;
-  const next = nextSibling
-    ? {
-        href: `/paths/${phaseId}/${moduleId}/${nextSibling.id}`,
-        title: nextSibling.title,
-      }
-    : undefined;
+  // Walk the curriculum end-to-end: next lesson in module, then first lesson
+  // of next module, then first lesson of next phase.
+  const next = await resolveNextLesson(phaseId, moduleId, lessonId);
 
   const shareUrl = `${SITE_URL}/paths/${phaseId}/${moduleId}/${lessonId}`;
 

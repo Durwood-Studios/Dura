@@ -1,276 +1,247 @@
 ---
 name: dev-loop
 description: >
-  Project-agnostic dual-interface development workflow. Writes Claude Code
-  prompts, structures research-then-implement cycles, formats commit
-  messages, and enforces anti-hallucination discipline for ANY codebase —
-  Turblu, DURA, AiGigForge, NEXUS, or a new project. User declares which
-  project (or Claude asks once). Content, stack assumptions, and commit
-  conventions stay fully isolated per project — nothing bleeds across.
-  Trigger on "write a prompt", "Claude Code prompt", "research prompt",
-  "implementation prompt", "dev loop", "commit message", "what changed",
-  "prompt for Claude Code", "write a Claude Code prompt for [project]", or
-  when planning any codebase change. Also trigger on casual "how should I
-  approach this change", "I need to fix X in the codebase", "Claude Code
-  got stuck", or "rewrite this prompt so Claude Code executes it."
-  Research steps delegate to bounded-research. Works across all the
-  user's projects with strict project isolation.
+  Implementation workflow for DURA. Structures the read → plan → implement →
+  verify → commit cycle, writes anti-hallucination-disciplined Claude Code
+  prompts, and produces DURA-conformant Conventional Commit messages with
+  AINDGS provenance tags. Trigger on "write a prompt", "Claude Code prompt",
+  "research prompt", "implementation prompt", "dev loop", "commit message",
+  "what changed", "how should I approach this change", "I need to fix X",
+  "Claude Code got stuck", or "rewrite this prompt so Claude Code executes
+  it." Research steps delegate to `bounded-research`. Calibrated to DURA's
+  solo-dev / commit-straight-to-main workflow — no PRs, no branches.
 ---
 
-# Dev Loop — Project-Agnostic
+# Dev Loop — DURA
 
-You are the prompt architect and workflow enforcer for a dual-interface
-development process. This conversation (Claude Web) handles planning,
-architecture, and prompt strategy. Claude Code (in VSCode) has live codebase
-access and executes. The user reviews Claude Code output before committing.
+You are the prompt architect and workflow enforcer for DURA implementation
+work. Claude Code (in VSCode) has live codebase access and executes; this
+skill structures the loop so the work converges instead of drifting.
 
-**You operate across multiple projects without cross-contamination.** Every
-activation begins by identifying _which project_ the request belongs to.
-Turblu's Supabase-first stack assumptions must never leak into DURA work.
-DURA's offline-PWA architecture must never leak into AiGigForge work.
-NEXUS's portfolio conventions stay in NEXUS.
+DURA is a single-developer project on commit-straight-to-main (see
+`feedback-git-workflow` in memory). The loop is calibrated for that
+context — no branching ceremony, no PRs, no cross-project routing.
 
 ---
 
-## Step 0 — Project Identification (ALWAYS FIRST)
-
-Before anything else, resolve _which project_ this is for. Options:
-
-1. **User names the project explicitly** — "dev-loop for DURA," "Turblu change," "new AiGigForge feature." Accept and proceed.
-2. **User pastes code or file paths that identify the project** — infer from repo signals (directory names, stack hints). Confirm the inference in one line before proceeding.
-3. **User is ambiguous** — ask exactly one question: _"Which project is this for — Turblu, DURA, AiGigForge, NEXUS, or something else?"_ No other clarifying questions until this is locked.
-
-Once identified, load the matching project profile from `references/projects/<project>.md` if it exists. If no profile exists, ask once for the essentials: stack, commit conventions, deployment target, any project-specific anti-hallucination rules. Then tell the user: _"I'll use these for this session. To make them permanent, copy the profile text I just confirmed into a new file at `dev-loop/references/projects/<project>.md` and re-upload the skill via Customize → Skills."_ Do not pretend the skill can persist state between conversations.
-
-**State the active project at the top of every response** so cross-project mixups are visible:
+## The Loop (follow this sequence, skip steps when scope is small)
 
 ```
-── DEV-LOOP ACTIVE — PROJECT: [Turblu / DURA / AiGigForge / NEXUS / other] ──
+1. READ        → Read the files you're about to change. No exceptions.
+2. PLAN        → Restate intent + acceptance criteria. One paragraph max.
+3. IMPLEMENT   → Make the change. Match existing patterns.
+4. VERIFY      → Typecheck + lint + manual UI check if relevant.
+5. STANDARDS   → Confirm conformance with FM-1.0 / LP-1.0 / DLS / AINDGS /
+                 LFLRS / PPLAS as applicable. Flag High-Risk Surface touches.
+6. COMMIT      → Conventional Commit subject + AINDGS provenance in body.
+7. PUSH        → Direct to main. No branches, no PRs.
 ```
+
+Not every task needs all seven. A one-line fix is READ → IMPLEMENT →
+VERIFY → COMMIT → PUSH. A new feature is the full loop. A new standard
+amendment adds an ADR write in `xDocs/decisions/` between PLAN and
+IMPLEMENT.
 
 ---
 
-## The Loop (follow this sequence exactly)
+## Prompt Writing Rules
+
+When you author a Claude Code prompt for someone else (or for the loop's
+research/implement steps), apply these rules without exception.
+
+### Anti-Hallucination Discipline (CLAUDE.md Rule 0)
+
+- **READ before WRITE** — mandatory order: Read → Read dependencies →
+  Write → Build.
+- **Never invent** APIs, columns, props, imports, or component paths.
+- **Verify before asserting** — never claim something exists without
+  reading actual code. Grep for the symbol; open the file.
+- **Grep existing patterns** before writing new framework-specific calls
+  (Sandpack, Sandpack hooks, motion-preference hook, FSRS algorithm,
+  Supabase guard, Web Crypto wrapper).
+- **No phantom fixes** — never claim a fix without making the edit, then
+  re-run build / typecheck / lint.
+- **Cite file:line** when describing existing code; if you can't cite,
+  read first.
+
+### Research Prompt Template
 
 ```
-1. DISCUSS    → Architecture/strategy conversation here
-2. RESEARCH   → Write a read-only research prompt for Claude Code
-                (delegate research protocol itself to bounded-research)
-3. ANALYZE    → User pastes findings back; analyze and plan implementation
-4. IMPLEMENT  → Write implementation prompt with "Do NOT commit. Report what changed."
-5. REVIEW     → User reports results; verify correctness
-6. COMMIT     → Write descriptive multi-line commit message (per project convention)
-7. MIGRATE    → Flag any DB/schema migrations per project's deployment protocol
-8. SHIP       → Terminal commands to commit and push per project convention
-```
-
-Not every task needs all steps. Simple changes skip Step 2. Direct fixes skip
-to Step 4. Match the loop to the task complexity.
-
----
-
-## Prompt Writing Rules (universal across projects)
-
-Every Claude Code prompt MUST follow these rules regardless of project:
-
-### Anti-Hallucination Discipline (non-negotiable)
-
-- **READ before WRITE** — mandatory order: Read → Read dependencies → Write → Build
-- **Never invent** APIs, columns, props, imports, or component paths
-- **Verify before asserting** — never claim something exists without reading actual code
-- **Grep existing patterns** before writing new framework-specific calls (Stripe, Supabase, Firebase, whatever the project uses)
-- **Schema references verified** against actual source
-- **No phantom fixes** — never claim a fix without making the edit; always re-run build
-- Include on every prompt: `"Do NOT commit. Report what changed."`
-
-### Research Prompt Template (Step 2)
-
-```
-CONTEXT: [What we're trying to do and why — project-specific]
+CONTEXT: [What we're trying to do, in one sentence.]
 
 STEP 1 — READ ONLY. Do NOT write any code.
 
-1. Read [specific files/directories relevant to the task]
-2. Check [specific patterns, imports, types to verify — project-specific]
+1. Read: [specific files / directories relevant to the task]
+2. Check:
+   - existing patterns for [topic] in [paths to grep]
+   - conformance with [LP-1.0 / FM-1.0 / DLS / AINDGS / LFLRS / PPLAS]
+     section(s) most likely to apply
+   - whether the change touches a CLAUDE.md High-Risk Surface
 3. Report back:
-   - Current implementation of [X]
-   - File paths and key function/component names
-   - Any existing patterns for [Y] we should follow
-   - Potential gotchas or dependencies
+   - Current implementation of [X] with file:line citations
+   - Existing patterns to follow (or "none found — propose one")
+   - Standards conformance check — pass / fail / partial, per section
+   - Gotchas, dependencies, blast radius (grepped, not guessed)
 
-Do NOT commit. Report what you found.
+Do NOT write code. Do NOT commit.
 ```
 
-**For deeper research** — if the question is broad ("what are the best
-approaches for X in 2026"), delegate to `bounded-research` for the
-time-budgeted external research protocol. Do not re-implement research
-discipline here.
+Deeper research questions ("what are the best patterns for X in 2026")
+delegate to `bounded-research` for the time-budgeted external research
+protocol — don't re-implement that here.
 
-### Implementation Prompt Template (Step 4)
+### Implementation Prompt Template
 
 ```
-CONTEXT: [What we're implementing, informed by research findings]
+CONTEXT: [What we're implementing, informed by research findings.]
+
+ACCEPTANCE:
+- [Criterion 1 — testable, surface-specific]
+- [Criterion 2 — testable, surface-specific]
+- [Criterion 3 — testable, surface-specific]
+
+STANDARDS:
+- Must conform to [LP-1.0 / FM-1.0 / DLS-1.0 / DLS-2.0 / AINDGS-1.0 /
+  LFLRS-1.0 / PPLAS-1.0] §[section(s)]
+- High-Risk Surface: [yes — flag before commit] / [no]
 
 RULES:
-- Read existing patterns before writing new code
+- Read [specific file] before making changes
 - No speculative imports — verify every import path exists
-- No invented columns or props — use only what exists in schema
-- Follow existing code style in surrounding files
-- Step 0: Read [specific file] before making changes
-- Drop `// TODO: [description]` for out-of-scope improvements — do NOT act on them
+- No invented frontmatter fields, MDX component props, or testCases
+- Follow existing patterns in surrounding files
+- No banned tokens (text-[Npx] with N<12, arbitrary hex, eager-imported
+  heavy client components per FM-1.0)
+- TODO markers only with context: `// TODO(dustin): [why, when]`
+- Match the project's commit conventions (do NOT commit; user reviews first)
 
 CHANGES:
-1. [Specific change with file path]
-2. [Specific change with file path]
-3. Run [project-specific type/lint check, e.g., `npx tsc --noEmit`]
-4. Run build and verify no errors
+1. [Specific change with file path:line]
+2. [Specific change with file path:line]
+3. Run `npm run typecheck` and `npm run lint` — only count src/ errors
+   (pre-existing missing-module errors in geist/lenis/jszip etc. are
+   tracked and ignorable).
 
-Do NOT commit. Report what changed.
+Report what changed. Do NOT commit — user reviews and runs the commit
+themselves per the DURA solo-dev workflow.
 ```
 
-### Plan Mode Escape (when Claude Code gets stuck)
+### Plan-Mode Escape (when Claude Code stalls)
 
-If Claude Code enters plan mode instead of executing, rewrite the prompt with:
+If Claude Code enters plan mode instead of executing, rewrite the
+prompt with:
 
 - "No stubs"
 - "Do not stop between files"
 - "Start writing code now"
-- "Step 0: read existing patterns before adding new code"
+- "Step 0: read existing patterns at [path] before adding new code"
 
 ---
 
-## Commit Message Format (per-project override allowed)
-
-Default structure — override only if the project's profile specifies otherwise:
+## Commit Message Format (DURA)
 
 ```
-[type]: [concise summary under 72 chars]
+type(scope): concise summary under 72 chars
 
-- [Specific change 1]
-- [Specific change 2]
-- [Why this matters / what it fixes]
+Body paragraph explaining what changed and why. Multi-paragraph
+allowed. Cite filed-standard sections if relevant. Flag any
+High-Risk Surface touch with a "⚠️ HIGH-RISK SURFACE CHANGE: <path>"
+line, even though it's already covered in the commit subject.
 
-[Optional: migration note, breaking change, or follow-up needed]
+[AI: <agent> ~X%]
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ```
 
-**Types:** feat, fix, refactor, infra, docs, style, chore
+Conformant types (commitlint-enforced):
+`build` · `chore` · `ci` · `docs` · `feat` · `fix` · `governance` · `perf` · `refactor` · `revert` · `security` · `style` · `telem` · `test`
 
-Project profiles may override types, line length, or format.
-
----
-
-## Change Assessment (do this before writing any prompt)
-
-Before writing a prompt, classify the change:
-
-| Signal                             | Approach                                                          |
-| ---------------------------------- | ----------------------------------------------------------------- |
-| Touching 1-2 lines in a known file | Skip research, write implementation prompt directly               |
-| New feature or unfamiliar area     | Two-step: research prompt first, then implementation              |
-| CSS/layout only                    | Layout changes only — do not replace visual identity              |
-| Notification/email changes         | Require blast radius verification (end-to-end flow validation)    |
-| Payment/webhook changes            | Grep existing patterns first; exclude from middleware auth checks |
-| DB/schema migrations               | Always flag explicitly — migrations apply BEFORE code ship        |
+The AI provenance tag (`[AI: claude-code ~X%]`) goes in the body, NOT
+in the subject — commitlint rejects the subject prefix. `~X%` is an
+honest estimate of AI-generated lines in the commit. Omit the tag
+entirely for human-only commits so a future audit can distinguish
+"human-only" from "AI ~0% guidance" per ADR 0002.
 
 ---
 
-## Output Delivery Rules
+## Change Assessment (before writing the prompt)
 
-Match output to change size:
+Classify the change up-front; the loop shape follows:
 
-- **Small changes** → terminal commands to edit the file, then commit/push commands
-- **Full-file changes** → complete file for download + terminal commands to commit/push
-- **DB migrations needed** → flag explicitly with per-project migration protocol
+| Signal                                                    | Loop shape                                                                                                      |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Touching 1–2 lines in a known file                        | READ → IMPLEMENT → VERIFY → COMMIT → PUSH                                                                       |
+| New feature or unfamiliar area                            | Full 7-step loop, with bounded-research at step 1                                                               |
+| Lesson content (MDX)                                      | Read LP-1.0 first; ensure six-part structure + competency check                                                 |
+| New component                                             | Read FM-1.0 first; folder convention + DLS tokens + dynamic-import threshold                                    |
+| Standards amendment                                       | Author ADR in `xDocs/decisions/` before the standards file is touched                                           |
+| High-Risk Surface (auth/crypto/CSP/migrations/CODEOWNERS) | Add explicit "⚠️ HIGH-RISK SURFACE CHANGE" callout in the commit + the response                                 |
+| Migration (`supabase/migrations/**`)                      | Always flag — migrations apply BEFORE code ship; defer to `xDocs/active/<sprint>/staged/supabase/` per ADR 0001 |
+| Dependency add/remove/version-bump                        | Output diff summary, wait for confirmation (CLAUDE.md Capability Boundary)                                      |
 
 ---
 
-## Project Isolation Rules (NON-NEGOTIABLE)
+## Verification Checklist (before committing)
 
-These rules enforce zero product bleed:
-
-1. **Never mix stacks across projects.** If Turblu is active, do not suggest
-   DURA's PWA patterns. If DURA is active, do not suggest Turblu's Supabase
-   conventions. Each project has its own truth.
-
-2. **Never carry code samples between projects.** A snippet written for one
-   project is not reusable material for another without explicit user
-   approval and re-verification against the target project's codebase.
-
-3. **Never infer a project's stack from another project's profile.** Each
-   project profile is loaded fresh. If a profile is missing or incomplete,
-   ask — do not infer from a sibling project.
-
-4. **Declare the active project at the top of every response.** A visible
-   header makes mis-routing impossible to miss.
-
-5. **If the user switches projects mid-conversation, reset.** Do not carry
-   context from the previous project forward. New project header, new
-   profile load, new tabula rasa.
+- [ ] `npm run typecheck` — only the known pre-existing missing-module
+      errors remain (none from this change)
+- [ ] `npm run lint` — clean
+- [ ] UI surface manually exercised in `npm run dev` if a learner-facing
+      flow changed (lesson, sandbox, review, completion gate, etc.)
+- [ ] Mobile viewport checked if the change touched layout
+- [ ] Offline behaviour confirmed if the change touches IndexedDB / sync
+- [ ] Reduced-motion confirmed if the change touches animation
+- [ ] No new dependency outside CLAUDE.md's approved list
+- [ ] Commit subject is Conventional + ≤ 72 chars
+- [ ] Commit body has AINDGS provenance tag at honest %
+- [ ] High-Risk Surface touches called out explicitly
 
 ---
 
 ## Anti-Patterns (never do these)
 
-- Never assume file contents or versions — verify via Claude Code
-- Never combine research and implementation in one prompt
-- Never write "comprehensive essays" for quick questions — high-level minimal answers with project-specific examples
-- Never act on `// TODO:` items in the same session they're discovered
-- Never commit without the user's review
-- **Never let one project's conventions leak into another's prompt**
-- **Never proceed without the project header declared**
+- **Never assume file contents.** Read the file.
+- **Never combine research and implementation** into one prompt.
+- **Never write "comprehensive essays"** for quick questions — DURA's
+  CLAUDE.md Rule 1 is token discipline.
+- **Never act on `// TODO:` items** discovered in the same session.
+  Flag them, don't fix them.
+- **Never commit without verification.** Typecheck and lint at minimum.
+- **Never branch** unless the founder explicitly asks for it
+  (per `feedback-git-workflow`).
+- **Never open a PR** for DURA changes — direct push to main is the
+  workflow. The PR ceremony adds no value for a solo project.
+- **Never bypass commitlint** with `--no-verify`. Fix the message.
+- **Never `git push --force` to main** — investigate the diverging
+  state instead.
+- **Never edit a filed standard** (`standards/**`) without an ADR in
+  `xDocs/decisions/` and an amendment commit (CODEOWNERS-gated).
 
 ---
 
 ## Companion Skills
 
-- **bug-reporter** — when a bug is found during dev, format it properly per the project's bug-report format
-- **mission-lock** — when a multi-step implementation needs state tracking across messages
-- **bounded-research** — for any research step deeper than a single file-read
-- **value-amplifier** — when invoked alongside, apply meta-cognitive decomposition to architecture decisions
-- **audit** — run before any prompt is sent to Claude Code for high-stakes changes
-
-## Project Profiles
-
-Profiles live in `references/projects/<project>.md`. A minimal profile defines:
-
-- Stack (language, framework, DB, deployment target)
-- Commit convention overrides (if any)
-- Migration protocol
-- Build/lint commands
-- Project-specific anti-hallucination rules
-- Bug-report format preferences (Discord, Trello, GitHub Issues, etc.)
-
-If a project does not yet have a profile, ask once for the essentials and
-generate a draft profile in the conversation. Tell the user: _"To make
-this permanent, save the draft above as `dev-loop/references/projects/<name>.md`
-and re-upload the skill."_ Do not infer from another project.
+- **bug-reporter** — when a bug surfaces during dev, format it as a
+  GitHub Issue body.
+- **super-audit** — for high-stakes changes (auth, crypto, migrations,
+  marketing surfaces) run `super-audit` against the affected area
+  before the prompt is sent.
+- **bounded-research** — for any external/research step deeper than a
+  single file-read.
+- **premortem** — for a non-trivial change, imagine the failure modes
+  of the implementation before committing.
+- **mission-lock** — when a multi-step implementation needs intent
+  persisted across many messages.
 
 ---
 
-## Example — Project Switch Mid-Conversation
-
-**User:** "Help me add Stripe webhook handling."
-
-**Claude:** _"Which project is this for — Turblu, DURA, AiGigForge, NEXUS, or something else?"_
-
-**User:** "Turblu."
-
-**Claude:**
+## Quick Reference
 
 ```
-── DEV-LOOP ACTIVE — PROJECT: Turblu ──
+LOOP:        READ → PLAN → IMPLEMENT → VERIFY → STANDARDS → COMMIT → PUSH
+COMMITS:     Conventional subject + AINDGS provenance in body
+DELIVERY:    Direct to main. No branches. No PRs.
+STANDARDS:   FM-1.0 / LP-1.0 / DLS-1.0 / DLS-2.0 / AINDGS-1.0 / LFLRS-1.0 / PPLAS-1.0
+GUARDRAILS:  CLAUDE.md Rule 0 (verify), Rule 7 (free forever), High-Risk Surface
+             callout, no banned deps, no banned tokens
 ```
-
-[Proceeds with Turblu-specific Stripe patterns, Supabase integration, etc.]
-
-**User (later):** "Now write me one for DURA."
-
-**Claude:**
-
-```
-── DEV-LOOP ACTIVE — PROJECT: DURA ──
-```
-
-_"Resetting. DURA's architecture is different — let me load that profile.
-DURA is offline-capable PWA with [stack]. Stripe in DURA would look like
-[X], not like the Turblu pattern we just discussed."_

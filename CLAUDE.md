@@ -259,6 +259,26 @@ Spring:          see SPRINGS vocabulary in src/lib/motion/springs.ts
 
 ---
 
+## STANDARDS
+
+DURA enforces conformance against prose + schema specs versioned under `standards/`. Authority order: if any conflict, the standards file wins; CLAUDE.md is a summary, not the source of truth.
+
+| Standard                         | Path                                  | Governs                                                                   |
+| -------------------------------- | ------------------------------------- | ------------------------------------------------------------------------- |
+| Design Language 1.0              | `standards/dls/dls-1.0.md`            | Visual tokens, surfaces, typography, color semantics                      |
+| Design Language 2.0              | `standards/dls/dls-2.0.md`            | Motion vocabulary, springs, signature moments, reduced-motion contract    |
+| **Lesson Pedagogy 1.0**          | `standards/pedagogy/lp-1.0.md`        | Every lesson under `src/content/phases/**` — zero→competency invariant    |
+| **Feature Module 1.0**           | `standards/feature-modules/fm-1.0.md` | Every new feature — folder layout, DLS tokens, dynamic imports, contracts |
+| AI-Native Dev Governance 1.0     | `standards/aindgs/`                   | AI provenance, capability boundaries, high-risk surfaces                  |
+| Local-First Learning Record 1.0  | `standards/lflrs/`                    | Learner record format, durability, sync semantics                         |
+| Privacy-Preserving Analytics 1.0 | `standards/pplas/`                    | Allowed analytics events, consent gates                                   |
+
+**LP-1.0 (new):** every lesson must walk a learner with the listed prerequisites and nothing else from zero understanding to verifiable competency in the lesson's topic. New lessons must conform on first commit; existing lessons migrate incrementally.
+
+**FM-1.0 (new):** every new feature ships as a self-contained module that styles itself from DLS tokens, lazy-loads its weight, and cannot regress core learner flows. The worked example is [`StandardsBadges`](src/components/lesson/StandardsBadges.tsx). Reading FM-1.0 before adding a feature is the cheapest way to avoid the most common bugs.
+
+---
+
 ## DEPENDENCIES — APPROVED LIST
 
 Only install packages from this list without asking. Anything else requires explicit approval.

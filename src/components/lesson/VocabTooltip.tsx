@@ -138,7 +138,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
                       type="button"
                       onClick={() => setTier(t.value)}
                       className={cn(
-                        "rounded px-1.5 py-0.5 text-[10px] font-medium transition",
+                        "rounded px-1.5 py-0.5 text-xs font-medium transition",
                         tier === t.value
                           ? "bg-[var(--color-bg-surface)] text-emerald-700 shadow-sm"
                           : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
@@ -153,7 +153,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
                 {term.definitions[tier]}
               </span>
               {term.seeAlso.length > 0 && (
-                <span className="mb-3 block text-[10px] text-[var(--color-text-muted)]">
+                <span className="mb-3 block text-xs text-[var(--color-text-muted)]">
                   See also:{" "}
                   {term.seeAlso.map((s, i) => (
                     <span key={s}>
@@ -171,7 +171,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
                   onClick={() => void addToDeck()}
                   disabled={inDeck}
                   className={cn(
-                    "inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] font-semibold transition",
+                    "inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-semibold transition",
                     inDeck
                       ? "border-emerald-300 bg-emerald-50 text-emerald-700"
                       : "border-[var(--color-border)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)] hover:border-emerald-400 hover:text-emerald-700"
@@ -181,13 +181,11 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
                   {inDeck ? "In your deck" : "Add to flashcards"}
                 </button>
                 {justAdded && (
-                  <span className="text-[10px] text-emerald-600">
-                    Added &ldquo;{term.term}&rdquo;
-                  </span>
+                  <span className="text-xs text-emerald-600">Added &ldquo;{term.term}&rdquo;</span>
                 )}
                 <Link
                   href={`/dictionary/${slug}`}
-                  className="ml-auto text-[11px] font-medium text-emerald-600 hover:text-emerald-700"
+                  className="ml-auto text-xs font-medium text-emerald-600 hover:text-emerald-700"
                 >
                   View in dictionary →
                 </Link>

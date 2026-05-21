@@ -158,14 +158,14 @@ export function DictionaryClient({
 
       {categories.length > 1 && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
+          <span className="text-xs font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
             Category
           </span>
           <button
             type="button"
             onClick={() => setCategory(undefined)}
             className={cn(
-              "rounded-full px-3 py-1 text-[11px] font-medium transition",
+              "rounded-full px-3 py-1 text-xs font-medium transition",
               category === undefined
                 ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
                 : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
@@ -179,7 +179,7 @@ export function DictionaryClient({
               type="button"
               onClick={() => setCategory(c)}
               className={cn(
-                "rounded-full px-3 py-1 text-[11px] font-medium transition",
+                "rounded-full px-3 py-1 text-xs font-medium transition",
                 category === c
                   ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
                   : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
