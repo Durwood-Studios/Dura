@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { loadLesson, listLessons } from "@/lib/content";
 import { LessonReader } from "@/components/lesson/LessonReader";
 import { GatingGuard } from "@/components/paths/GatingGuard";
+import { ClassroomSurface } from "@/components/surfaces";
 import { getModule } from "@/content/phases";
 import { lessonMetadata } from "@/lib/og";
 import { SITE_URL } from "@/lib/og";
@@ -48,8 +49,10 @@ export default async function LessonPage({
   const moduleTitle = mod?.title ?? `Module ${moduleId}`;
 
   return (
-    <GatingGuard phaseId={phaseId} moduleId={moduleId} moduleTitle={moduleTitle}>
-      <LessonReader lesson={lesson} next={next} shareUrl={shareUrl} />
-    </GatingGuard>
+    <ClassroomSurface>
+      <GatingGuard phaseId={phaseId} moduleId={moduleId} moduleTitle={moduleTitle}>
+        <LessonReader lesson={lesson} next={next} shareUrl={shareUrl} />
+      </GatingGuard>
+    </ClassroomSurface>
   );
 }

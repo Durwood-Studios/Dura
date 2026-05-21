@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { getTotalXP } from "@/lib/db/xp";
 import { levelFromXP } from "@/lib/xp";
 import { getCurrentStreak } from "@/lib/streak-manager";
@@ -8,14 +9,20 @@ import { usePreferencesStore } from "@/stores/preferences";
 import { LevelBadge } from "@/components/gamification/LevelBadge";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 
+/** Routes where the streak counter must not appear (DLS-1.0 §Anti-Patterns). */
+const REVIEW_ROUTES = ["/review", "/challenge"];
+
 /**
  * Compact level + streak indicators for the top bar.
  * Refreshes every 15 seconds so awards made elsewhere show up.
+ * DLS-1.0 §Anti-Patterns: streak hidden during review and challenge routes.
  */
 export function TopBarGamification(): React.ReactElement {
+  const pathname = usePathname();
   const [level, setLevel] = useState(0);
   const [streakDays, setStreakDays] = useState(0);
   const showStreak = usePreferencesStore((s) => s.prefs.showStreak);
+  const inReview = REVIEW_ROUTES.some((r) => pathname.startsWith(r));
 
   useEffect(() => {
     let cancelled = false;
@@ -35,7 +42,7 @@ export function TopBarGamification(): React.ReactElement {
 
   return (
     <div className="hidden items-center gap-3 text-xs sm:flex">
-      {showStreak && (
+      {showStreak && !inReview && (
         <span className="flex items-center gap-1 text-[var(--color-text-secondary)]">
           <StreakFlame days={streakDays} />
           <span className="font-mono">{streakDays}d</span>
