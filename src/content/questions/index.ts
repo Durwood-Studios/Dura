@@ -28,6 +28,23 @@ export const ALL_QUESTIONS: AssessmentQuestion[] = [
   ...PHASE_9_QUESTIONS,
 ];
 
+/**
+ * Total number of assessment questions across all phases.
+ * Import this (not ALL_QUESTIONS) when you only need a count — it avoids
+ * bundling the full question bank into client components.
+ */
+export const QUESTION_COUNT: number =
+  PHASE_0_QUESTIONS.length +
+  PHASE_1_QUESTIONS.length +
+  PHASE_2_QUESTIONS.length +
+  PHASE_3_QUESTIONS.length +
+  PHASE_4_QUESTIONS.length +
+  PHASE_5_QUESTIONS.length +
+  PHASE_6_QUESTIONS.length +
+  PHASE_7_QUESTIONS.length +
+  PHASE_8_QUESTIONS.length +
+  PHASE_9_QUESTIONS.length;
+
 export function getAllQuestions(): AssessmentQuestion[] {
   return ALL_QUESTIONS;
 }

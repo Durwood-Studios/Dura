@@ -12,8 +12,9 @@ export const config = {
      * - _next/static (build output)
      * - _next/image  (image optimizer)
      * - favicon.ico
+     * - /api/v1/*   (public JSON API — no session needed)
      * - common image/static asset extensions
      */
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/v1/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };

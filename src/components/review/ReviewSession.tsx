@@ -1,15 +1,36 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
-import { Brain, RotateCcw, ArrowRight } from "lucide-react";
+import { RotateCcw, ArrowRight } from "lucide-react";
+import { useAnimate } from "motion/react";
 import { useReviewStore } from "@/stores/review";
 import { FlashcardDisplay } from "@/components/review/FlashcardDisplay";
 import { RatingButtons } from "@/components/review/RatingButtons";
+import { IntervalReveal } from "@/components/review/IntervalReveal";
 import { ReviewProgress } from "@/components/review/ReviewProgress";
 import { Spinner } from "@/components/ui/Spinner";
+import { schedule } from "@/lib/fsrs";
 import { formatTime } from "@/lib/utils";
 import { XP_AWARDS } from "@/lib/xp";
+import type { ReviewRating } from "@/types/flashcard";
+
+/** Labels for each rating value — shown alongside the interval on card exit. */
+const RATING_LABELS: Record<ReviewRating, string> = {
+  again: "Again",
+  hard: "Hard",
+  good: "Good",
+  easy: "Easy",
+};
+
+function formatInterval(days: number): string {
+  if (days < 1 / 1440) return "<1m";
+  if (days < 1 / 24) return `${Math.round(days * 1440)}m`;
+  if (days < 1) return `${Math.round(days * 24)}h`;
+  if (days < 30) return `${Math.round(days)}d`;
+  if (days < 365) return `${Math.round(days / 30)}mo`;
+  return `${Math.round(days / 365)}y`;
+}
 
 function formatRelative(timestamp: number, now: number = Date.now()): string {
   const ms = timestamp - now;
@@ -37,6 +58,28 @@ export function ReviewSession(): React.ReactElement {
   const rate = useReviewStore((s) => s.rate);
   const reset = useReviewStore((s) => s.reset);
 
+  // DLS-1.0 §FSRS Interval Reveal: show the chosen interval during card-exit window
+  const [revealInterval, setRevealInterval] = useState<string | null>(null);
+  const [revealRating, setRevealRating] = useState<string | null>(null);
+
+  const handleRate = useCallback(
+    (rating: ReviewRating): void => {
+      const card = queue[index];
+      if (card) {
+        const { intervalDays } = schedule(card, rating);
+        setRevealInterval(formatInterval(intervalDays));
+        setRevealRating(RATING_LABELS[rating]);
+        // Clear after card-exit window (~400ms matches FlashcardDisplay transition)
+        setTimeout(() => {
+          setRevealInterval(null);
+          setRevealRating(null);
+        }, 400);
+      }
+      void rate(rating);
+    },
+    [queue, index, rate]
+  );
+
   useEffect(() => {
     void loadQueue();
     return () => reset();
@@ -52,36 +95,7 @@ export function ReviewSession(): React.ReactElement {
 
   // Empty state — no due cards
   if (sessionComplete && dueCount === 0) {
-    return (
-      <div className="mx-auto max-w-xl py-16 text-center">
-        <Brain className="mx-auto h-14 w-14 text-emerald-500" aria-hidden />
-        <h2 className="mt-4 text-2xl font-semibold text-[var(--color-text-primary)]">
-          All caught up
-        </h2>
-        {nextDue ? (
-          <p className="mt-2 text-[var(--color-text-secondary)]">
-            Your next review is {formatRelative(nextDue)}. Come back then to keep your memory fresh.
-          </p>
-        ) : (
-          <>
-            <p className="mt-2 text-[var(--color-text-secondary)]">
-              Flashcards are created automatically as you complete lessons. Each lesson adds
-              vocabulary to your review deck.
-            </p>
-            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-              Your first cards will be ready to review the day after your first lesson.
-            </p>
-          </>
-        )}
-        <Link
-          href="/paths/0/0-1/01"
-          className="mt-6 inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600"
-        >
-          {nextDue ? "Keep learning" : "Start your first lesson"}
-          <ArrowRight className="h-4 w-4" />
-        </Link>
-      </div>
-    );
+    return <AllCaughtUp nextDue={nextDue} />;
   }
 
   // Session complete summary
@@ -142,7 +156,142 @@ export function ReviewSession(): React.ReactElement {
         startedAt={startedAt}
       />
       <FlashcardDisplay card={card} flipped={flippedAt !== null} onFlip={flip} />
-      <RatingButtons card={card} visible={flippedAt !== null} onRate={(r) => void rate(r)} />
+      <IntervalReveal interval={revealInterval} rating={revealRating} />
+      <RatingButtons card={card} visible={flippedAt !== null} onRate={handleRate} />
+    </div>
+  );
+}
+
+// ── AllCaughtUp ──────────────────────────────────────────────────────────────
+// DLS-2.0 §Signature 4 — "The Clearing"
+// 1600ms sequence: SVG checkmark draw-in → heading + copy stagger →
+// button entry → 8-second background breath → haptic at 1400ms.
+// --color-celebration (emerald) tint on the breath: learner reached the goal.
+
+import { SPRINGS } from "@/lib/motion/springs";
+import { useMotionPreference } from "@/hooks/use-reduced-motion";
+import { haptic } from "@/lib/haptics";
+
+function AllCaughtUp({ nextDue }: { nextDue: number | null }): React.ReactElement {
+  const { shouldAnimate } = useMotionPreference();
+  const [wrapScope, animateWrap] = useAnimate();
+  const [checkScope, animateCheck] = useAnimate();
+  const [headScope, animateHead] = useAnimate();
+  const [copyScope, animateCopy] = useAnimate();
+  const [btnScope, animateBtn] = useAnimate();
+  const ran = useRef(false);
+
+  useEffect(() => {
+    if (ran.current) return;
+    ran.current = true;
+
+    if (!shouldAnimate) return;
+
+    // Phase 1 (0ms–400ms): SVG checkmark draws in via stroke-dashoffset
+    void animateCheck(
+      checkScope.current,
+      { strokeDashoffset: [100, 0] },
+      { duration: 0.4, ease: "easeOut" }
+    );
+
+    // Phase 2 (400ms): heading fades + slides up
+    void animateHead(
+      headScope.current,
+      { opacity: [0, 1], y: [10, 0] },
+      { ...SPRINGS.fluid, duration: undefined, delay: 0.4 }
+    );
+
+    // Phase 3 (600ms): copy
+    void animateCopy(
+      copyScope.current,
+      { opacity: [0, 1], y: [6, 0] },
+      { ...SPRINGS.fluid, duration: undefined, delay: 0.6 }
+    );
+
+    // Phase 4 (900ms): buttons stagger in
+    void animateBtn(
+      btnScope.current,
+      { opacity: [0, 1], y: [8, 0] },
+      { ...SPRINGS.fluid, duration: undefined, delay: 0.9 }
+    );
+
+    // Phase 5 (0ms–∞): 8-second background breath
+    void animateWrap(
+      wrapScope.current,
+      {
+        background: [
+          "radial-gradient(ellipse at 50% 60%, oklch(68% 0.18 145 / 0%) 0%, transparent 70%)",
+          "radial-gradient(ellipse at 50% 60%, oklch(68% 0.18 145 / 6%) 0%, transparent 70%)",
+          "radial-gradient(ellipse at 50% 60%, oklch(68% 0.18 145 / 0%) 0%, transparent 70%)",
+        ],
+      },
+      { duration: 8, repeat: Infinity, ease: "easeInOut" }
+    );
+
+    // Phase 6 (1400ms): haptic
+    const t = setTimeout(() => haptic("sessionEnd"), 1400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div
+      ref={wrapScope}
+      className="mx-auto max-w-xl py-16 text-center"
+      role="status"
+      aria-live="polite"
+      aria-label="All caught up — no cards due"
+    >
+      {/* SVG checkmark */}
+      <svg width="56" height="56" viewBox="0 0 56 56" fill="none" className="mx-auto" aria-hidden>
+        <circle cx="28" cy="28" r="26" stroke="oklch(68% 0.18 145)" strokeWidth="2.5" />
+        <path
+          ref={checkScope}
+          d="M16 28l9 9 15-15"
+          stroke="oklch(58% 0.18 145)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeDasharray="100"
+          strokeDashoffset={shouldAnimate ? 100 : 0}
+        />
+      </svg>
+
+      <h2
+        ref={headScope}
+        className="mt-4 text-2xl font-semibold text-[var(--color-text-primary)]"
+        style={{ opacity: shouldAnimate ? 0 : 1 }}
+      >
+        All caught up
+      </h2>
+
+      <div ref={copyScope} className="mt-2" style={{ opacity: shouldAnimate ? 0 : 1 }}>
+        {nextDue ? (
+          <p className="text-[var(--color-text-secondary)]">
+            Your next review is {formatRelative(nextDue)}. Come back then to keep your memory fresh.
+          </p>
+        ) : (
+          <>
+            <p className="text-[var(--color-text-secondary)]">
+              Flashcards are created automatically as you complete lessons. Each lesson adds
+              vocabulary to your review deck.
+            </p>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+              Your first cards will be ready to review the day after your first lesson.
+            </p>
+          </>
+        )}
+      </div>
+
+      <div ref={btnScope} style={{ opacity: shouldAnimate ? 0 : 1 }}>
+        <Link
+          href="/paths/0/0-1/01"
+          className="mt-6 inline-flex items-center gap-2 rounded-lg bg-[color:oklch(58%_0.18_145)] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[color:oklch(52%_0.18_145)]"
+        >
+          {nextDue ? "Keep learning" : "Start your first lesson"}
+          <ArrowRight className="h-4 w-4" />
+        </Link>
+      </div>
     </div>
   );
 }

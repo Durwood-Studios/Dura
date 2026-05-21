@@ -16,9 +16,13 @@ import {
   Check,
   AlertTriangle,
 } from "lucide-react";
-import { PHASES, TOTAL_LESSONS, TOTAL_MODULES, TOTAL_HOURS } from "@/content/phases";
-import { DICTIONARY } from "@/content/dictionary";
-import { ALL_QUESTIONS } from "@/content/questions";
+import {
+  PHASES,
+  TOTAL_LESSONS,
+  TOTAL_MODULES,
+  TOTAL_HOURS,
+  CONTENT_COUNTS,
+} from "@/content/phases";
 import type { AnalyticsEvent } from "@/types/analytics";
 import { getDB } from "@/lib/db";
 import { clearAllData, exportAllData } from "@/lib/clearAllData";
@@ -202,10 +206,14 @@ export function AdminDashboard(): React.ReactElement {
             icon={GraduationCap}
             sub={`${TOTAL_HOURS} estimated hours`}
           />
-          <StatCard label="Dictionary Terms" value={DICTIONARY.length} icon={BookOpen} />
+          <StatCard
+            label="Dictionary Terms"
+            value={CONTENT_COUNTS.dictionaryTerms}
+            icon={BookOpen}
+          />
           <StatCard
             label="Assessment Questions"
-            value={ALL_QUESTIONS.length}
+            value={CONTENT_COUNTS.assessmentQuestions}
             icon={GraduationCap}
           />
           <StatCard label="How-To Guides" value={35} icon={BookOpen} />

@@ -461,3 +461,15 @@ export function getModule(phaseId: string, moduleId: string): Module | undefined
 export const TOTAL_HOURS = PHASES.reduce((sum, p) => sum + p.estimatedHours, 0);
 export const TOTAL_MODULES = PHASES.reduce((sum, p) => sum + p.moduleCount, 0);
 export const TOTAL_LESSONS = PHASES.reduce((sum, p) => sum + p.lessonCount, 0);
+
+/**
+ * Hard-coded counts for use in admin/dashboard stat cards.
+ * Update these when content is added; they exist so client components
+ * don't need to import the full dictionary/question banks just for .length.
+ */
+export const CONTENT_COUNTS = {
+  /** Total dictionary terms across all batches. */
+  dictionaryTerms: 500,
+  /** Total assessment questions across all phases. */
+  assessmentQuestions: 504,
+} as const;

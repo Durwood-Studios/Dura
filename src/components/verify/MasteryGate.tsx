@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Lock, Trophy, Clock, RotateCcw } from "lucide-react";
+import { useAnimate } from "motion/react";
 import { QuestionDisplay } from "@/components/verify/QuestionDisplay";
 import {
   selectMasteryQuestions,
@@ -268,34 +269,7 @@ export function MasteryGate({
   }
 
   if (status === "passed") {
-    return (
-      <section
-        className="my-8 rounded-2xl border border-emerald-200 bg-[var(--color-bg-accent)] p-6"
-        role="status"
-        aria-live="polite"
-      >
-        <div className="flex items-start gap-3">
-          <Trophy className="mt-1 h-5 w-5 text-emerald-600" aria-hidden />
-          <div className="flex-1">
-            <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">
-              Module Unlocked
-            </h3>
-            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-              Passed {latestResult && new Date(latestResult.completedAt).toLocaleDateString()} ·{" "}
-              Score: {latestResult ? Math.round(latestResult.score * 100) : 0}%
-            </p>
-            <button
-              type="button"
-              onClick={startAssessment}
-              className="mt-3 inline-flex items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-subtle)]"
-            >
-              <RotateCcw className="h-3 w-3" />
-              Retake for practice
-            </button>
-          </div>
-        </div>
-      </section>
-    );
+    return <MasteryPassedDisplay latestResult={latestResult} onRetake={startAssessment} />;
   }
 
   if (status === "in-progress" && current) {
@@ -432,4 +406,130 @@ export function MasteryGate({
   }
 
   return <></>;
+}
+
+// ── MasteryPassedDisplay ─────────────────────────────────────────────────────
+// DLS-2.0 §Signature 2 — "The Gate Opens"
+// 1200ms 5-phase choreography: lock dissolve → border pulse → content reveal
+// → mastery score counts up → haptic.
+// --color-celebration (emerald) is used for the border pulse + score — this
+// is a learner-positive moment per the hybrid rule in CLAUDE.md.
+
+import { SPRINGS } from "@/lib/motion/springs";
+import { useMotionPreference } from "@/hooks/use-reduced-motion";
+import { haptic } from "@/lib/haptics";
+
+interface MasteryPassedDisplayProps {
+  latestResult: AssessmentResult | null;
+  onRetake: () => void;
+}
+
+function MasteryPassedDisplay({
+  latestResult,
+  onRetake,
+}: MasteryPassedDisplayProps): React.ReactElement {
+  const { shouldAnimate } = useMotionPreference();
+  const [sectionScope, animateSection] = useAnimate();
+  const [lockScope, animateLock] = useAnimate();
+  const [contentScope, animateContent] = useAnimate();
+  const [scoreDisplay, setScoreDisplay] = useState(0);
+  const scoreTarget = latestResult ? Math.round(latestResult.score * 100) : 0;
+  const ran = useRef(false);
+
+  useEffect(() => {
+    if (ran.current) return;
+    ran.current = true;
+
+    if (!shouldAnimate) {
+      // Reduced-motion: instant border flash + show full score
+      setScoreDisplay(scoreTarget);
+      return;
+    }
+
+    // Phase 1 (0ms): lock icon dissolves out
+    void animateLock(
+      lockScope.current,
+      { opacity: [1, 0], scale: [1, 0.6] },
+      { duration: 0.18, ease: "easeIn" }
+    );
+
+    // Phase 2 (200ms): border pulses celebration color
+    void animateSection(
+      sectionScope.current,
+      {
+        borderColor: [
+          "var(--color-border)",
+          "oklch(68% 0.18 145)",
+          "oklch(68% 0.18 145)",
+          "oklch(58% 0.14 145)",
+        ],
+      },
+      { duration: 0.6, delay: 0.2, ease: "easeOut" }
+    );
+
+    // Phase 3 (300ms): content reveals with settle spring
+    void animateContent(
+      contentScope.current,
+      { opacity: [0, 1], y: [8, 0] },
+      { ...SPRINGS.settle, duration: undefined, delay: 0.3 }
+    );
+
+    // Phase 4 (500ms–900ms): score counts up
+    const start = performance.now() + 500;
+    const duration = 400;
+    let rafId: number;
+    const tick = (now: number): void => {
+      const elapsed = Math.max(0, now - start);
+      const t = Math.min(1, elapsed / duration);
+      // ease-out cubic
+      const eased = 1 - Math.pow(1 - t, 3);
+      setScoreDisplay(Math.round(eased * scoreTarget));
+      if (t < 1) rafId = requestAnimationFrame(tick);
+      else setScoreDisplay(scoreTarget);
+    };
+    rafId = requestAnimationFrame(tick);
+
+    // Phase 5 (1000ms): haptic confirmation
+    const hapticTimeout = setTimeout(() => haptic("masteryUnlock"), 1000);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      clearTimeout(hapticTimeout);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <section
+      ref={sectionScope}
+      className="my-8 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-accent)] p-6"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="flex items-start gap-3">
+        <span ref={lockScope}>
+          <Trophy className="mt-1 h-5 w-5 text-[color:oklch(58%_0.18_145)]" aria-hidden />
+        </span>
+        <div ref={contentScope} className="flex-1" style={{ opacity: shouldAnimate ? 0 : 1 }}>
+          <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">
+            Module Unlocked
+          </h3>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            Passed {latestResult && new Date(latestResult.completedAt).toLocaleDateString()}
+          </p>
+          <p className="mt-1 font-mono text-2xl font-semibold text-[color:oklch(58%_0.18_145)]">
+            {scoreDisplay}%
+          </p>
+          <button
+            type="button"
+            onClick={onRetake}
+            className="mt-3 inline-flex items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-subtle)]"
+          >
+            <RotateCcw className="h-3 w-3" />
+            Retake for practice
+          </button>
+        </div>
+      </div>
+    </section>
+  );
 }
