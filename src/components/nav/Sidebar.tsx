@@ -54,6 +54,7 @@ const NAV_GROUPS = [
     items: [
       { href: "/review", label: "Flashcards", icon: Repeat },
       { href: "/challenge", label: "Challenge", icon: Swords },
+      { href: "/dojo", label: "Dojo", icon: Sparkles },
       { href: "/sandbox", label: "Code Sandbox", icon: Code2 },
     ],
   },

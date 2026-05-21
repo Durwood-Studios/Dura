@@ -10,7 +10,7 @@ import { LevelBadge } from "@/components/gamification/LevelBadge";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 
 /** Routes where the streak counter must not appear (DLS-1.0 §Anti-Patterns). */
-const REVIEW_ROUTES = ["/review", "/challenge"];
+const REVIEW_ROUTES = ["/review", "/challenge", "/dojo"];
 
 /**
  * Compact level + streak indicators for the top bar.

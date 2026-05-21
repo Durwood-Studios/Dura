@@ -16,7 +16,10 @@ export type AnalyticsEventName =
   | "goal_achieved"
   | "study_mode_changed"
   | "theme_changed"
-  | "share_clicked";
+  | "share_clicked"
+  | "dojo_session_started"
+  | "dojo_session_complete"
+  | "dojo_question_graded";
 
 export interface AnalyticsEvent {
   id: string;
