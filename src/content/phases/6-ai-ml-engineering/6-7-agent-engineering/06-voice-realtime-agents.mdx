@@ -1,0 +1,254 @@
+---
+title: "Voice & Realtime Agents"
+description: "End-to-end speech-to-speech (gpt-realtime, Gemini Live) vs STT→LLM→TTS pipelines, the latency budgets that decide which one fits, the compliance gotchas (HIPAA, GDPR), and the interrupt-handling patterns that make a voice agent feel alive."
+phase: 6
+module: "6-7-agent-engineering"
+order: 6
+estimatedMinutes: 12
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-2", "HCI-2"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+  - agent
+---
+
+## Why this matters
+
+Voice agents are the emerging customer-facing surface of the 2025-2026 wave. Real-time conversational AI moved from research demos to production over the past 12 months, and "voice mode" is now table stakes for support, sales, and accessibility products.
+
+The architectural choices look superficially similar to text agents but the constraints are unforgiving: humans notice latency above ~600ms, get frustrated above 1.5s, and abandon the call above 3s. The compliance footprint is different too — voice modality often falls outside the HIPAA-eligibility umbrella that text endpoints have.
+
+This lesson covers the two architectural approaches, the provider landscape (mid-2026), the latency budget that defines "production-ready," and the compliance gotchas you'll otherwise discover the hard way.
+
+## Two architectural approaches
+
+### 1. Pipeline (STT → LLM → TTS)
+
+The classic approach: a speech-to-text model transcribes user audio, a text LLM generates a response, a text-to-speech model speaks it back. Three separate services chained.
+
+```
+[user audio] → STT (Whisper, Deepgram) → text → LLM (Claude, GPT-5) → text →
+TTS (ElevenLabs, OpenAI TTS) → [agent audio]
+```
+
+**Strengths:** swap any component independently. Use whichever STT/LLM/TTS you prefer. Compliance is per-component — you can pick HIPAA-eligible STT and TTS even if a particular LLM modality isn't covered.
+
+**Weaknesses:** higher latency (each hop adds round-trip time), loses prosody and emotional cues between STT and LLM (the LLM sees text, not tone), can't handle overlapping speech naturally.
+
+### 2. End-to-end speech-to-speech
+
+A single model takes audio in, produces audio out. The model "hears" intonation, pause, hesitation, and "speaks" with prosody. Notable production examples: OpenAI's `gpt-realtime`, Google's Gemini Live native audio.
+
+```
+[user audio] → end-to-end speech model → [agent audio]
+```
+
+**Strengths:** lower latency (single API call, no chaining), better prosody (model picks intonation; can express emotion), native interrupt handling, can detect emotional cues in user speech and respond accordingly.
+
+**Weaknesses:** locked into the provider's modality (can't swap STT/TTS), compliance gaps (audio modality often not covered under the same BAA as text), more expensive per minute than pipeline.
+
+## The provider landscape (mid-2026)
+
+| Provider      | API                                        | Status (May 2026)                                | Latency                               | Pricing signal                                                                                               |
+| ------------- | ------------------------------------------ | ------------------------------------------------ | ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **OpenAI**    | Realtime API + `gpt-realtime`              | **GA** (graduated from beta in 2025)             | ~800ms voice-to-voice; ~500ms TTFB US | $32 / M audio-in, $64 / M audio-out; cached input drops to $0.40 / M (80× saving)                            |
+| **OpenAI**    | `gpt-realtime-2`, `gpt-realtime-translate` | **GA** (announced 2026-05-07)                    | n/a                                   | GPT-5-class reasoning over voice; conversation-paced translation                                             |
+| **Google**    | Gemini Live API                            | **GA-ish** (older preview deprecated 2026-03-19) | Conversational                        | 70 languages, native interrupt handling, tool calls + Search built in                                        |
+| **Anthropic** | (no GA voice API as of 2026-05)            | —                                                | —                                     | Computer Use covers some voice-adjacent workflows via system audio; no first-party speech-to-speech endpoint |
+
+Pure-pipeline component vendors (STT/TTS only) — Deepgram, ElevenLabs, AssemblyAI, OpenAI Whisper + TTS as components — remain the canonical option for HIPAA-covered or component-swappable deployments.
+
+If you're choosing in mid-2026:
+
+- **Best end-to-end out of the box** → OpenAI Realtime / `gpt-realtime`.
+- **Translation, multi-lingual** → Gemini Live (70 languages) or `gpt-realtime-translate`.
+- **HIPAA / regulated work** → Pipeline approach with HIPAA-eligible components (Azure OpenAI text endpoints are eligible; the audio modality of OpenAI Realtime is NOT eligible under BAA as of May 2026 — verify with current procurement).
+- **Need any first-party Claude voice product** → not available yet; use Anthropic for text reasoning inside a pipeline.
+
+## The latency budget
+
+Voice perception research has settled on rough thresholds humans care about:
+
+- **< 200 ms** turn-taking → indistinguishable from human conversational rhythm.
+- **200-600 ms** → noticeable but acceptable; feels "thoughtful."
+- **600 ms - 1.5 s** → users start to wonder if it's broken.
+- **> 1.5 s** → users repeat themselves or hang up.
+- **> 3 s** → call abandonment rate spikes.
+
+OpenAI Realtime's ~500ms TTFB US lands in the "noticeable but acceptable" band. A pipeline with three serial network hops typically lands at 800ms-1.5s end-to-end depending on geography, model choice, and TTS streaming behavior — survivable but not delightful.
+
+What gets you closer to the natural-conversation threshold:
+
+- **End-to-end models** save the inter-component round-trips. The biggest single win.
+- **Streaming TTS** starts speaking as soon as the first text tokens arrive, instead of waiting for the full response. Saves 500ms-1s of perceived latency.
+- **Region-local endpoints**. A round-trip to a US-east endpoint from APAC adds 200-300ms before anyone says a word.
+- **VAD (voice activity detection) tuning.** Aggressive VAD interrupts faster; conservative VAD waits to confirm. Tune per use case.
+
+## Interrupt handling
+
+Production-grade voice agents must handle interruption — the user barging in mid-sentence. The major end-to-end APIs (OpenAI Realtime, Gemini Live) ship with interrupt handling: the model stops speaking, listens to the user, resumes (or adjusts) when they finish.
+
+Two failure modes still need explicit handling:
+
+1. **Cross-talk** — both speaking at once. End-to-end models often "yield" silently when they detect user speech, which is the right behavior but creates dead air. Surface a visual cue in the UI ("listening...") so users don't repeat themselves.
+2. **Mid-thought resumption** — user interrupts to clarify, then says "ok go on." The agent should resume meaningfully, not restart its sentence. Most 2026 production deployments solve this with explicit "I'll continue" affordances in the agent's persona ("Let me know when you're ready and I'll pick up from where we were on...").
+
+For pipeline deployments, you implement VAD + interrupt manually:
+
+```javascript
+// Pseudo-code for a pipeline voice agent
+async function handleAgentTurn(userAudioStream, agentAudioOut) {
+  let cancelled = false;
+  vad.onSpeechStart(() => {
+    cancelled = true;
+    agentAudioOut.flush();
+  });
+
+  const userText = await stt.transcribe(userAudioStream);
+  if (cancelled) return; // user already started talking again
+
+  const stream = llm.streamResponse(userText);
+  for await (const token of stream) {
+    if (cancelled) break;
+    await tts.streamSynthesize(token, agentAudioOut);
+  }
+}
+```
+
+## Compliance — the gotcha
+
+OpenAI Realtime's audio modality is **not HIPAA-eligible under BAA as of May 2026.** Azure OpenAI's text endpoints are eligible; the audio path isn't.
+
+Practical implication: if your voice agent ever touches Protected Health Information (PHI), the end-to-end approach with OpenAI Realtime is off the table. You need either:
+
+- **Pipeline with all HIPAA-eligible components** — eligible STT (Azure Speech, AWS Transcribe Medical, Deepgram with BAA), eligible LLM (Azure OpenAI text endpoint, AWS Bedrock with appropriate model), eligible TTS (Azure Speech, Amazon Polly with BAA).
+- **On-premise model deployment** for the speech path.
+
+Same kind of analysis applies for GDPR (data residency), SOC 2 (audit trail of audio recordings), and industry-specific regulations (PCI for payment voice flows, FINRA for financial-services voice).
+
+The pattern: voice agents often discover compliance constraints the text version didn't have. Engage compliance early, not after the demo lands.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write pickVoiceArchitecture(req) where req is { needsHipaaBaa, latencyBudgetMs, needsComponentSwap }. Return 'pipeline-hipaa' if needsHipaaBaa is true. Return 'pipeline' if needsComponentSwap is true (and not HIPAA). Return 'end-to-end' if latencyBudgetMs is less than 700 (and no other constraints). Return 'pipeline' as the safe default otherwise."
+  initialCode={`function pickVoiceArchitecture(req) {
+  // Pick the right architecture given the constraints
+}
+
+console.log(pickVoiceArchitecture({ needsHipaaBaa: true, latencyBudgetMs: 500 }));
+// 'pipeline-hipaa'
+
+console.log(pickVoiceArchitecture({ needsHipaaBaa: false, latencyBudgetMs: 500 }));
+// 'end-to-end'
+
+console.log(pickVoiceArchitecture({ needsHipaaBaa: false, latencyBudgetMs: 2000, needsComponentSwap: true }));
+// 'pipeline'
+
+console.log(pickVoiceArchitecture({ needsHipaaBaa: false, latencyBudgetMs: 2000 }));
+// 'pipeline'`}
+  solution={`function pickVoiceArchitecture(req) {
+if (req?.needsHipaaBaa) return "pipeline-hipaa";
+if (req?.needsComponentSwap) return "pipeline";
+if (typeof req?.latencyBudgetMs === "number" && req.latencyBudgetMs < 700) return "end-to-end";
+return "pipeline";
+}
+
+console.log(pickVoiceArchitecture({ needsHipaaBaa: true, latencyBudgetMs: 500 }));
+console.log(pickVoiceArchitecture({ needsHipaaBaa: false, latencyBudgetMs: 500 }));
+console.log(pickVoiceArchitecture({ needsHipaaBaa: false, latencyBudgetMs: 2000, needsComponentSwap: true }));
+console.log(pickVoiceArchitecture({ needsHipaaBaa: false, latencyBudgetMs: 2000 }));`}
+testCases={["picks pipeline-hipaa when BAA required; end-to-end when latency tight + no compliance issue; pipeline otherwise"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Your voice agent will handle patient appointment booking — Protected Health Information will be discussed. Which architecture is appropriate as of mid-2026?",
+      options: [
+        "OpenAI Realtime — fastest and easiest.",
+        "Pipeline with HIPAA-eligible components (Azure Speech STT + Azure OpenAI text + Azure Speech TTS, all under BAA). OpenAI Realtime's audio modality isn't HIPAA-eligible.",
+        "Gemini Live — Google has the strongest compliance.",
+        "Anthropic voice — built-in HIPAA mode.",
+      ],
+      correct: 1,
+      explanation:
+        "OpenAI Realtime's audio modality is NOT HIPAA-eligible under BAA as of May 2026 (text endpoints under Azure OpenAI are, but not audio). For PHI-touching voice, you assemble a HIPAA-eligible pipeline. Voice often discovers compliance constraints text didn't have.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Pipeline (STT→LLM→TTS) vs end-to-end speech-to-speech — what's the single biggest tradeoff?",
+      options: [
+        "Pipeline is more expensive.",
+        "End-to-end has lower latency and richer prosody; pipeline gives you component-level swap (any STT, any LLM, any TTS) and per-component compliance.",
+        "End-to-end can't handle interruptions.",
+        "Pipeline can only do one language.",
+      ],
+      correct: 1,
+      explanation:
+        "End-to-end models (gpt-realtime, Gemini Live native audio) win on latency and prosody — the model hears intonation and speaks with emotion. Pipeline lets you swap components independently and pick HIPAA-eligible pieces individually. The biggest factor in real deployments is compliance and component flexibility.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your voice agent has 1.2 seconds of latency before it speaks. What does the user-perception research say?",
+      options: [
+        "Indistinguishable from natural human conversation.",
+        "Acceptable — within natural conversational rhythm.",
+        "Noticeable; users start wondering if it's broken. Approaching the threshold where users repeat themselves or hang up (>1.5s).",
+        "Excellent for a voice agent.",
+      ],
+      correct: 2,
+      explanation:
+        "Voice-perception thresholds: <200ms indistinguishable, 200-600ms noticeable-but-acceptable, 600ms-1.5s 'is it broken,' >1.5s users repeat / hang up, >3s call abandonment spikes. 1.2s lands in the 'is it broken' band — needs optimization (streaming TTS, region-local endpoints, end-to-end model swap) to recover.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your end-to-end voice agent occasionally goes silent for several seconds in the middle of a conversation. Most likely cause?",
+      options: [
+        "The model crashed.",
+        "Cross-talk: both speaking at once. End-to-end models 'yield' silently when they detect user speech, creating dead air. Fix: surface a visible 'listening...' affordance and tune VAD.",
+        "Insufficient context window.",
+        "The user's microphone is broken.",
+      ],
+      correct: 1,
+      explanation:
+        "Cross-talk handling produces dead air by design — the agent yields when it detects user speech. Without a visual cue, users think the agent is broken and repeat themselves, making it worse. The fix is UI affordance + VAD tuning, not a model change.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Voice agents come in two architectures: ___ (STT→LLM→TTS, component-swappable, easier compliance) and ___-to-___ (single model, lower latency, richer prosody, but provider-locked and modality-compliance-gapped). Users notice latency above ~600ms; the natural-conversation threshold is ~___ms turn-taking."
+  answers={["pipeline", "end", "end", "200"]}
+  hints={[
+    "The chained-components approach.",
+    "First word of the single-model approach (two words).",
+    "Second word of the single-model approach.",
+    "Latency in milliseconds at which voice agents feel indistinguishable from human conversation.",
+  ]}
+/>
+
+## What you learned
+
+- **Two architectures**: pipeline (STT→LLM→TTS, swappable components, per-component compliance) vs end-to-end speech-to-speech (single model, lower latency, richer prosody, provider-locked).
+- **Provider landscape mid-2026**: OpenAI Realtime + `gpt-realtime` (GA, $32/M audio-in / $64/M audio-out, ~500ms TTFB), Gemini Live (70 languages, GA-ish), no Anthropic GA voice endpoint, classic component vendors (Deepgram, ElevenLabs, Whisper, AssemblyAI) remain canonical for pipeline.
+- **Latency thresholds**: <200ms natural, 200-600ms acceptable, 600ms-1.5s "is it broken," >1.5s users repeat, >3s call abandonment. Streaming TTS + region-local endpoints + end-to-end models are the recovery levers.
+- **Interrupt handling** is solved in production for major end-to-end APIs; cross-talk and mid-thought resumption still need explicit UI affordances ("listening...") and agent-persona affordances ("Let me know when you're ready").
+- **Compliance is voice's distinct surface.** OpenAI Realtime's audio modality is NOT HIPAA-eligible under BAA as of May 2026. PHI-touching voice goes pipeline with HIPAA-eligible components. Engage compliance early.
+
+Next: [Code-Writing Agents — Case Study](./07-code-writing-agents.mdx) — Claude Code, Cursor, Aider, Devin and what production patterns crystallized in 2025-2026.
+
+**Canonical references:** [OpenAI — Introducing gpt-realtime](https://openai.com/index/introducing-gpt-realtime/) · [OpenAI Realtime API docs](https://platform.openai.com/docs/guides/realtime) · [Gemini Live API docs](https://ai.google.dev/gemini-api/docs/live-api) · [Deepgram](https://deepgram.com) · [ElevenLabs](https://elevenlabs.io).
