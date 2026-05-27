@@ -1,10 +1,10 @@
 ---
 title: "Building MCP Tools"
-description: "Define tools with JSON Schema inputs, implement handlers, return structured results, and handle errors — the core of MCP server development."
+description: "Define tools with JSON Schema inputs and outputs, return structured content, annotate behavior hints, opt into the Tasks primitive — the core of MCP server development against the 2025-11-25 spec."
 phase: 6
 module: "6-4-mcp-development"
 order: 3
-estimatedMinutes: 10
+estimatedMinutes: 13
 difficulty: "intermediate"
 standards:
   cs2023: ["AI-1"]
@@ -22,7 +22,9 @@ Tools are the most common reason to build an MCP server. They let AI models take
 
 ## Anatomy of a tool definition
 
-Every MCP tool has three parts: a **name**, a **description**, and an **inputSchema**. The name is a unique identifier. The description tells the model what the tool does and when to use it. The inputSchema is a JSON Schema object that defines the expected arguments.
+Every MCP tool has three required parts: a **name**, a **description**, and an **inputSchema**. The name is a unique identifier. The description tells the model what the tool does and when to use it. The inputSchema is a JSON Schema object that defines the expected arguments.
+
+The `2025-11-25` spec adds several optional fields that polish how the tool surfaces in clients: `title` (human-friendly UI label), `icons[]` (visual icon refs), `outputSchema` (JSON Schema for the structured result), `annotations` (server hints about behavior — covered later), `execution.taskSupport` (whether the tool can run as a Task), and `_meta` (server-defined extras). Required pieces below, optional fields layered in as we go.
 
 ```javascript
 // A tool definition for getting weather data
@@ -135,6 +137,110 @@ server.tool(
 ```
 
 Notice the `isError: true` field. This tells the model the tool call failed, so it can inform the user or try a different approach instead of treating error text as a successful result.
+
+## Structured output and outputSchema
+
+Returning a wall of JSON-stringified text in a `text` content block works, but the model has to re-parse it every time. The `2025-11-25` spec added two paired fields that fix this: `outputSchema` on the tool definition, and `structuredContent` on the result.
+
+```javascript
+server.tool(
+  "get_weather",
+  "Get current weather for a city",
+  // inputSchema
+  { city: { type: "string", description: "City name" } },
+  // outputSchema — declares the shape of structuredContent
+  {
+    type: "object",
+    properties: {
+      city: { type: "string" },
+      temperature: { type: "number" },
+      units: { type: "string", enum: ["F", "C"] },
+      condition: { type: "string" },
+    },
+    required: ["city", "temperature", "units"],
+  },
+  async ({ city }) => {
+    const data = await fetchWeather(city);
+    return {
+      // structuredContent — typed JSON the model can rely on
+      structuredContent: {
+        city,
+        temperature: data.temperature,
+        units: "F",
+        condition: data.condition,
+      },
+      // content[] — the human-readable rendering, kept for backward compat
+      content: [
+        {
+          type: "text",
+          text: `${city}: ${data.temperature}°F, ${data.condition}`,
+        },
+      ],
+    };
+  }
+);
+```
+
+When a tool declares `outputSchema`, the SDK validates `structuredContent` against it before returning. Clients that prefer typed access (modern ones do) read `structuredContent`; older clients fall back to the `content` blocks. Always include both unless you control every client that will call you.
+
+## Tool annotations (and why the spec marks them untrusted)
+
+Tools can carry `annotations` — server-provided hints about how the tool behaves. The spec defines a few standard ones: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`, and `title`.
+
+```javascript
+server.tool(
+  "delete_file",
+  "Delete a file from the workspace",
+  { path: { type: "string" } },
+  async ({ path }) => {
+    await fs.unlink(path);
+    return { content: [{ type: "text", text: `Deleted ${path}` }] };
+  },
+  {
+    annotations: {
+      title: "Delete file",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  }
+);
+```
+
+**Critical contract:** annotations are **untrusted unless the server is trusted**. A malicious or compromised server can lie — claim `destructiveHint: false` on a tool that wipes your drive. Clients use annotations to inform UX (badging dangerous tools, default-deny on destructive ones), but they MUST NOT use annotations as the sole authorization signal. The real authorization signal is the user's explicit consent at call time, plus whatever the server actually has permission to do.
+
+Treat annotations as a UX courtesy the model can read alongside the description, not as a security boundary.
+
+## Linking to the Tasks primitive
+
+The `2025-11-25` spec introduced **Tasks** — a durable state machine for long-running operations. A tool can opt into Tasks via `execution.taskSupport`:
+
+```javascript
+server.tool(
+  "run_test_suite",
+  "Run the full integration test suite (typically 5–10 minutes)",
+  { branch: { type: "string" } },
+  async ({ branch }, { task }) => {
+    // Task-aware handler: report progress to the task object if present.
+    if (task) {
+      await task.update({ status: "working", progress: "Cloning…" });
+    }
+    const results = await runSuite(branch, task);
+    return {
+      structuredContent: results,
+      content: [{ type: "text", text: `Passed ${results.passed}/${results.total}` }],
+    };
+  },
+  {
+    execution: {
+      taskSupport: "optional", // also: "required" or "forbidden"
+    },
+  }
+);
+```
+
+`taskSupport: "required"` means the tool only works when wrapped in a Task. `"optional"` (the common case) means the client can choose to wrap. `"forbidden"` means short-running only — never wrap in a Task. The Tasks primitive itself gets its own lesson — for now, know that this is the hook that lets a tool participate in long-running flows.
 
 ## Error handling patterns
 
@@ -270,6 +376,34 @@ testCases={["tool has name, description, and inputSchema with properties"]}
       explanation:
         "Tool execution errors should be returned as normal results with isError: true and a meaningful error message. This tells the model the call failed without crashing the server.",
     },
+    {
+      type: "multiple-choice",
+      question:
+        "A tool's annotations include `destructiveHint: false`. The model is about to call the tool. Can the client safely auto-approve the call based on the annotation?",
+      options: [
+        "Yes — annotations are spec-defined and trustworthy.",
+        "Yes, but only if the tool also has `readOnlyHint: true`.",
+        "No — annotations are untrusted unless the server itself is trusted; user consent is the real authorization signal.",
+        "Only if the tool has been certified by Anthropic.",
+      ],
+      correct: 2,
+      explanation:
+        "The spec explicitly marks annotations as untrusted unless the server is trusted. A malicious server can lie about destructiveHint. Annotations inform UX (badges, default-deny patterns) but MUST NOT be the sole authorization signal — user consent at call time is.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your tool returns weather data. You want modern clients to read it as typed JSON, but old clients to keep working. What do you return?",
+      options: [
+        "Only structuredContent (modern clients only).",
+        "Only a text content block with JSON.stringified data.",
+        "Both structuredContent (typed) AND a content[] block (human-readable fallback).",
+        "An image content block rendering the data as a table.",
+      ],
+      correct: 2,
+      explanation:
+        "Always return both: structuredContent for modern clients that read typed JSON validated against outputSchema, and content[] for backward-compatibility with older clients that haven't adopted the 2025-11-25 fields.",
+    },
   ]}
 />
 
@@ -287,4 +421,7 @@ testCases={["tool has name, description, and inputSchema with properties"]}
 
 - MCP tools are defined with a **name**, **description**, and **inputSchema** (JSON Schema) that tells the model what arguments to provide.
 - Tool handlers execute the work and return **content blocks** — text, images, or embedded resources — with an optional `isError` flag for failures.
+- The `2025-11-25` spec added **`outputSchema` + `structuredContent`** — declare the shape of typed JSON output and return both `structuredContent` and `content[]` for forward/backward compatibility.
+- Tool **annotations** (`destructiveHint`, `readOnlyHint`, etc.) inform UX but are **untrusted unless the server is trusted** — never use them as a sole authorization signal.
+- **`execution.taskSupport`** opts a tool into the Tasks primitive for long-running operations (`required` / `optional` / `forbidden`) — covered in depth in the Tasks lesson.
 - Good **descriptions** are critical — they are the model's only guide for deciding when and how to use each tool.
