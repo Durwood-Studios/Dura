@@ -1,0 +1,466 @@
+---
+title: "OAuth & Remote MCP Servers"
+description: "The OAuth 2.1 + PKCE-S256 + RFC 9728 + RFC 8707 contract the 2025-11-25 spec requires for HTTP-based MCP servers. From Protected Resource Metadata to token-passthrough prohibition."
+phase: 6
+module: "6-4-mcp-development"
+order: 9
+estimatedMinutes: 15
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1", "SEC-1", "NC-2"]
+  swebok: ["Software Design", "Software Engineering Management"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Lesson 07 introduced bearer tokens as a development shortcut. Production is not a shortcut. The `2025-11-25` spec defines an exact authorization contract for HTTP-based MCP servers — OAuth 2.1 with PKCE-S256, Protected Resource Metadata for discovery, Resource Indicators to prevent token misuse, and a hard prohibition on token passthrough. Skip any one of those and you ship a server that conformant clients refuse to talk to (or worse, a server that _does_ talk to them and silently leaks credentials).
+
+This lesson walks through the contract end to end. By the end, you can build an OAuth-protected MCP server that any 2025-11-25-conformant client recognizes and authenticates against.
+
+## When OAuth applies (and when it doesn't)
+
+The auth spec scopes itself precisely. It applies to **HTTP-based MCP servers** — anything using Streamable HTTP. It explicitly **excludes** stdio servers, which inherit the parent client's permissions and read any credentials they need from environment variables. A stdio server using OAuth is a design error.
+
+Authorization is **optional** at the protocol level. A public Streamable HTTP server that returns the same data to anyone can skip OAuth entirely. The contract only kicks in once you decide some requests need an authenticated identity.
+
+```javascript
+// stdio server — no OAuth. Env vars carry the auth.
+const transport = new StdioServerTransport();
+process.env.GITHUB_TOKEN; // server uses this directly
+
+// HTTP server, public data — no OAuth.
+app.post("/mcp", (req, res) => transport.handleRequest(req, res));
+
+// HTTP server, authenticated identity required — full OAuth 2.1 contract.
+app.post("/mcp", validateBearerToken, (req, res) => transport.handleRequest(req, res));
+```
+
+## The 5-step OAuth dance
+
+When a conformant client connects to an OAuth-protected MCP server, the flow has five steps:
+
+1. **Client request fails 401.** Client sends an unauthenticated request. Server returns `401 Unauthorized` with a `WWW-Authenticate: Bearer resource_metadata="<url>"` header pointing at the Protected Resource Metadata document.
+2. **Discover the resource and its authorization server.** Client fetches the metadata URL (RFC 9728). The document lists which Authorization Servers the resource trusts.
+3. **Discover the authorization server's endpoints.** Client fetches the AS metadata (RFC 8414 or OIDC Discovery 1.0) to get the authorize, token, and registration endpoints, plus the supported PKCE methods.
+4. **Authorize with PKCE-S256 + Resource Indicators.** Client redirects the user to the authorize endpoint with `code_challenge_method=S256` and `resource=<mcp-server-uri>`. After consent, it exchanges the code for an access token.
+5. **Replay the original request with the bearer token.** Client sends the same MCP call with `Authorization: Bearer <token>`. The server validates the audience (must be its own URI), accepts the call, and the session proceeds normally.
+
+Every piece below maps to one of these five steps. The order matters — earlier steps gate the later ones.
+
+## Step 1: the 401 and Protected Resource Metadata
+
+The server's job at the first failed request is to point the client at metadata. The `WWW-Authenticate` header carries the URL where that metadata lives:
+
+```javascript
+app.use("/mcp", (req, res, next) => {
+  const token = extractBearerToken(req);
+  if (!token) {
+    res.set(
+      "WWW-Authenticate",
+      `Bearer realm="mcp", resource_metadata="https://tools.example.com/.well-known/oauth-protected-resource"`
+    );
+    return res.status(401).json({ error: "missing_token" });
+  }
+  // ...token validation continues
+});
+
+// The metadata document itself (RFC 9728):
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+  res.json({
+    resource: "https://tools.example.com/mcp",
+    authorization_servers: ["https://auth.example.com"],
+    bearer_methods_supported: ["header"], // never "query" — see Bearer placement below
+    scopes_supported: ["mcp:tools", "mcp:resources"],
+    resource_documentation: "https://tools.example.com/docs",
+  });
+});
+```
+
+The metadata document is what makes MCP servers discoverable. A new client can walk into a server it's never seen before, hit the 401, follow the metadata pointer, and learn everything it needs to authenticate. No prior agreement required.
+
+## Step 2: Authorization Server Metadata
+
+Once the client knows which AS the resource trusts, it fetches the AS metadata. The spec requires servers to support **both** discovery formats — clients try them in order:
+
+```http
+GET https://auth.example.com/.well-known/oauth-authorization-server  (RFC 8414)
+GET https://auth.example.com/.well-known/openid-configuration         (OIDC Discovery 1.0)
+```
+
+The response tells the client which endpoints exist, which response types are supported, and — critically — **which PKCE code-challenge methods the AS accepts**:
+
+```json
+{
+  "issuer": "https://auth.example.com",
+  "authorization_endpoint": "https://auth.example.com/authorize",
+  "token_endpoint": "https://auth.example.com/token",
+  "registration_endpoint": "https://auth.example.com/register",
+  "code_challenge_methods_supported": ["S256"],
+  "response_types_supported": ["code"],
+  "grant_types_supported": ["authorization_code", "refresh_token"],
+  "scopes_supported": ["mcp:tools", "mcp:resources", "offline_access"]
+}
+```
+
+If `code_challenge_methods_supported` doesn't include `S256` (or is missing entirely), the conformant client MUST refuse to proceed. PKCE-plain and no-PKCE are non-conformant for MCP.
+
+## Step 3: PKCE-S256 — non-negotiable
+
+PKCE (Proof Key for Code Exchange) is what stops a stolen authorization code from being exchanged for a token. The client generates a random `code_verifier`, hashes it with SHA-256, and sends the hash as `code_challenge` to the authorize endpoint. On the token exchange, the client sends the original verifier; the AS rehashes it and compares.
+
+```javascript
+// Generate PKCE pair
+import { createHash, randomBytes } from "node:crypto";
+
+function generatePkcePair() {
+  const verifier = randomBytes(64).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+
+const { verifier, challenge } = generatePkcePair();
+
+// Step A: redirect to authorize with the challenge
+const authUrl = new URL("https://auth.example.com/authorize");
+authUrl.searchParams.set("response_type", "code");
+authUrl.searchParams.set("client_id", clientId);
+authUrl.searchParams.set("redirect_uri", "https://client.example.com/callback");
+authUrl.searchParams.set("scope", "mcp:tools");
+authUrl.searchParams.set("code_challenge", challenge);
+authUrl.searchParams.set("code_challenge_method", "S256");
+// Resource Indicators — critical, covered in step 4
+authUrl.searchParams.set("resource", "https://tools.example.com/mcp");
+authUrl.searchParams.set("state", crypto.randomUUID());
+
+// Step B: after user consents, exchange the code with the verifier
+const tokenResponse = await fetch("https://auth.example.com/token", {
+  method: "POST",
+  headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({
+    grant_type: "authorization_code",
+    code: returnedCode,
+    redirect_uri: "https://client.example.com/callback",
+    client_id: clientId,
+    code_verifier: verifier, // proves we initiated the original request
+    resource: "https://tools.example.com/mcp", // must match the authorize call
+  }),
+});
+```
+
+Three forbidden variations to know by name and reject on sight: `code_challenge_method=plain` (no hashing — defeats the point), no PKCE at all, and `code_verifier` shorter than 43 characters (the RFC minimum).
+
+## Step 4: Resource Indicators (RFC 8707) — audience binding
+
+The `resource` parameter — required on both the authorize call and the token exchange — names the MCP server URI the token is meant for. The AS bakes this into the token's audience claim. The MCP server, on receiving the token, MUST verify the audience matches its own canonical URI before accepting it.
+
+```javascript
+async function validateBearerToken(req, res, next) {
+  const token = extractBearerToken(req);
+  const claims = await verifyJwt(token, asPublicKey);
+
+  // Audience validation — RFC 8707 + spec MUST.
+  const expectedAudience = "https://tools.example.com/mcp";
+  const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (!aud.includes(expectedAudience)) {
+    return res.status(403).json({ error: "wrong_audience" });
+  }
+
+  // Expiration, issuer, scope checks follow normally.
+  if (claims.exp * 1000 < Date.now()) {
+    return res.status(401).json({ error: "token_expired" });
+  }
+
+  req.tokenClaims = claims;
+  next();
+}
+```
+
+Without `resource` indicators, an attacker who steals a token issued for service A could replay it against service B if both share an AS. With them, the token is cryptographically bound to a specific resource and useless anywhere else.
+
+## Step 5: Bearer token placement
+
+The token rides on every subsequent MCP request as a `Bearer` token in the `Authorization` header. The spec is explicit: the token **MUST NOT** appear in the URI query string.
+
+```http
+POST /mcp HTTP/1.1
+Host: tools.example.com
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-11-25
+Content-Type: application/json
+
+{"jsonrpc":"2.0","id":1,"method":"tools/call", ...}
+```
+
+Tokens in query strings end up in server logs, browser history, referrer headers, and CDN access logs — places they don't belong. Header-only is non-negotiable.
+
+## Token passthrough is forbidden
+
+When your MCP server calls an upstream API on the user's behalf, you might be tempted to forward the client's access token. The spec **forbids this**. Your server must obtain its own credentials for upstream calls — typically via a separate OAuth flow with the upstream service, or a service-account credential scoped to what your server needs.
+
+```javascript
+// WRONG — token passthrough. Forbidden by the spec.
+server.tool(
+  "read_github_issue",
+  "Read an issue",
+  { issue: { type: "string" } },
+  async (args, { tokenClaims }) => {
+    const userToken = tokenClaims.rawToken; // the client's MCP token
+    const resp = await fetch(`https://api.github.com/repos/foo/bar/issues/${args.issue}`, {
+      headers: { Authorization: `Bearer ${userToken}` }, // sending MCP token to GitHub — wrong audience!
+    });
+  }
+);
+
+// RIGHT — the server has its own GitHub credentials, scoped to what it needs.
+server.tool(
+  "read_github_issue",
+  "Read an issue",
+  { issue: { type: "string" } },
+  async (args, { tokenClaims }) => {
+    // Decide what to allow based on the user's MCP claims.
+    if (!tokenClaims.scope.includes("mcp:tools")) {
+      return { content: [{ type: "text", text: "Insufficient scope." }], isError: true };
+    }
+    // Use the server's own GitHub token (obtained via separate flow, stored securely).
+    const resp = await fetch(`https://api.github.com/repos/foo/bar/issues/${args.issue}`, {
+      headers: { Authorization: `Bearer ${process.env.GITHUB_SERVER_TOKEN}` },
+    });
+    return { content: [{ type: "text", text: await resp.text() }] };
+  }
+);
+```
+
+Token passthrough collapses every audience boundary. One stolen MCP token now hits every upstream API your server talks to. The Resource Indicator audience binding from Step 4 only protects you if you actually keep tokens in their lane.
+
+## Client registration: three options, in priority order
+
+Before a client can hit the authorize endpoint, the AS needs to know it exists. The spec endorses three approaches:
+
+**1. Pre-registration** — the preferred path when there's a relationship. The client developer registers the client out of band with the AS, gets a stable `client_id`, and bakes it into the client.
+
+**2. Client ID Metadata Documents (CIMD)** — the recommended path for unknown client-server pairs. The client publishes a JSON document at a public HTTPS URL and uses that URL as its `client_id`. The AS fetches it on first sight.
+
+```http
+GET https://my-client.example.com/.well-known/client-metadata.json
+```
+
+```json
+{
+  "client_id": "https://my-client.example.com/.well-known/client-metadata.json",
+  "client_name": "Acme MCP Client",
+  "redirect_uris": ["https://my-client.example.com/oauth/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "mcp:tools mcp:resources",
+  "token_endpoint_auth_method": "none"
+}
+```
+
+CIMD is how new clients can talk to new servers without any prior arrangement. The discoverability story matters because the MCP ecosystem is hundreds of clients × thousands of servers; pre-registering every pair is impractical.
+
+**3. Dynamic Client Registration (RFC 7591)** — kept for backwards compatibility. The client POSTs metadata to the AS's registration endpoint and gets back a `client_id`. Conformant servers MAY support DCR but new servers should prefer CIMD.
+
+## A complete OAuth-protected MCP server
+
+Pulling all five steps together, a minimal protected server looks like this:
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
+import { jwtVerify, createRemoteJWKSet } from "jose";
+
+const app = express();
+const SERVER_URI = "https://tools.example.com/mcp";
+const AS_ISSUER = "https://auth.example.com";
+const jwks = createRemoteJWKSet(new URL(`${AS_ISSUER}/.well-known/jwks.json`));
+
+// Protected Resource Metadata (Step 1 target).
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+  res.json({
+    resource: SERVER_URI,
+    authorization_servers: [AS_ISSUER],
+    bearer_methods_supported: ["header"],
+    scopes_supported: ["mcp:tools", "mcp:resources"],
+  });
+});
+
+// Token validation (Steps 4 + 5).
+async function validateBearerToken(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith("Bearer ")) {
+    res.set(
+      "WWW-Authenticate",
+      `Bearer realm="mcp", resource_metadata="${new URL("/.well-known/oauth-protected-resource", SERVER_URI)}"`
+    );
+    return res.status(401).json({ error: "missing_token" });
+  }
+  try {
+    const { payload } = await jwtVerify(auth.slice(7), jwks, {
+      issuer: AS_ISSUER,
+      audience: SERVER_URI, // RFC 8707 audience binding
+    });
+    req.tokenClaims = payload;
+    next();
+  } catch {
+    return res.status(401).json({ error: "invalid_token" });
+  }
+}
+
+// MCP server + transport, protected by the bearer validator.
+const server = new McpServer({ name: "tools", version: "1.0.0" });
+const transport = new StreamableHTTPServerTransport({
+  sessionIdGenerator: () => crypto.randomUUID(),
+});
+await server.connect(transport);
+
+app.post("/mcp", validateBearerToken, (req, res) => transport.handleRequest(req, res));
+app.get("/mcp", validateBearerToken, (req, res) => transport.handleRequest(req, res));
+app.delete("/mcp", validateBearerToken, (req, res) => transport.handleRequest(req, res));
+
+// Bind to a real interface (not 0.0.0.0) and validate Origin (lesson 06).
+app.listen(3001, "127.0.0.1");
+```
+
+Every piece serves a step in the dance. Strip out the Resource Metadata endpoint and clients can't discover you. Strip out the audience check and you accept tokens issued for other services. Strip out PKCE on the client and the AS refuses to issue tokens. The contract only works as a whole.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write validateOAuthMetadata(meta) that returns true only if the AS metadata document supports PKCE-S256 and has authorization_endpoint and token_endpoint defined. Otherwise return false. A conformant MCP client must refuse to proceed if any of these are missing."
+  initialCode={`function validateOAuthMetadata(meta) {
+  // Check for required fields and S256 support
+}
+
+console.log(validateOAuthMetadata({
+authorization_endpoint: "https://auth.example.com/authorize",
+token_endpoint: "https://auth.example.com/token",
+code_challenge_methods_supported: ["S256"]
+})); // true
+
+console.log(validateOAuthMetadata({
+authorization_endpoint: "https://auth.example.com/authorize",
+token_endpoint: "https://auth.example.com/token",
+code_challenge_methods_supported: ["plain"]
+})); // false — plain isn't S256
+
+console.log(validateOAuthMetadata({
+authorization_endpoint: "https://auth.example.com/authorize"
+// missing token_endpoint AND code_challenge_methods_supported
+})); // false`}
+  solution={`function validateOAuthMetadata(meta) {
+if (!meta || typeof meta !== "object") return false;
+if (!meta.authorization_endpoint) return false;
+if (!meta.token_endpoint) return false;
+const methods = meta.code_challenge_methods_supported;
+if (!Array.isArray(methods)) return false;
+return methods.includes("S256");
+}
+
+console.log(validateOAuthMetadata({
+authorization_endpoint: "https://auth.example.com/authorize",
+token_endpoint: "https://auth.example.com/token",
+code_challenge_methods_supported: ["S256"]
+}));
+
+console.log(validateOAuthMetadata({
+authorization_endpoint: "https://auth.example.com/authorize",
+token_endpoint: "https://auth.example.com/token",
+code_challenge_methods_supported: ["plain"]
+}));
+
+console.log(validateOAuthMetadata({
+authorization_endpoint: "https://auth.example.com/authorize"
+}));`}
+testCases={["returns true only when both endpoints exist AND S256 is supported"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "An MCP server's Authorization Server returns metadata with `code_challenge_methods_supported: ['plain']`. A conformant client should:",
+      options: [
+        "Proceed using PKCE-plain.",
+        "Proceed without PKCE.",
+        "Refuse to proceed — PKCE-S256 is MUST for MCP.",
+        "Fall back to HTTP Basic auth.",
+      ],
+      correct: 2,
+      explanation:
+        "The 2025-11-25 spec MUSTs PKCE-S256. If the AS metadata lacks S256 in code_challenge_methods_supported, conformant clients refuse — PKCE-plain and no-PKCE are non-conformant.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What does the `resource` parameter (RFC 8707) bind a token to?",
+      options: [
+        "The user's geographic region.",
+        "A specific MCP server URI — preventing the token from being replayed against other services.",
+        "The client's session ID.",
+        "A specific tool name within the server.",
+      ],
+      correct: 1,
+      explanation:
+        "RFC 8707 Resource Indicators bind the token's audience claim to a specific resource (the MCP server URI). The server MUST verify aud matches its canonical URI before accepting the token, preventing replay against other services that share the AS.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your MCP server needs to call the GitHub API on the user's behalf. The user authenticated to your server with OAuth. Can you forward the user's access token to GitHub?",
+      options: [
+        "Yes — that's the canonical pattern.",
+        "Yes, as long as you strip the audience claim first.",
+        "No — token passthrough is FORBIDDEN. The server must obtain its own credentials for upstream APIs.",
+        "Only if GitHub also runs MCP.",
+      ],
+      correct: 2,
+      explanation:
+        "Token passthrough is explicitly forbidden by the spec. Forwarding the client's token to upstream services collapses the audience boundary RFC 8707 exists to enforce. The server must obtain its own credentials (separate OAuth flow, service account, etc.).",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A new MCP client wants to authenticate against a brand-new MCP server it has never seen before, without any prior arrangement. Which client-registration approach does the spec recommend?",
+      options: [
+        "Static client_id embedded in the binary.",
+        "Pre-registration (the developer manually registers with each server).",
+        "Client ID Metadata Documents (CIMD) — the client publishes a JSON document at an HTTPS URL and uses that URL as its client_id.",
+        "Dynamic Client Registration (RFC 7591) — preferred over CIMD.",
+      ],
+      correct: 2,
+      explanation:
+        "CIMD is the recommended path for unknown client-server pairs. The client publishes metadata at a public HTTPS URL; the AS fetches it on first sight. DCR is kept for backwards compatibility but is no longer preferred.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The 2025-11-25 OAuth contract for MCP requires PKCE with ___ (no plain), Protected Resource Metadata at the .well-known/___ -protected-resource path, RFC 8707 ___ indicators to bind the token to a specific server, and FORBIDS token ___ to upstream APIs."
+  answers={["S256", "oauth", "resource", "passthrough"]}
+  hints={[
+    "The SHA-256 PKCE method.",
+    "The OAuth metadata path prefix.",
+    "RFC 8707's mechanism for audience binding.",
+    "The forbidden pattern of forwarding tokens to upstream services.",
+  ]}
+/>
+
+## What you learned
+
+- HTTP-based MCP servers use **OAuth 2.1 + PKCE-S256** as the canonical authorization contract. Stdio servers do not — they read credentials from environment variables.
+- **Protected Resource Metadata (RFC 9728)** at `/.well-known/oauth-protected-resource` is how clients discover which Authorization Server a server trusts. The 401 + `WWW-Authenticate` flow is what bootstraps the dance.
+- **PKCE-S256 is MUST**. Clients refuse if the AS metadata doesn't list S256. PKCE-plain and no-PKCE are non-conformant.
+- **Resource Indicators (RFC 8707)** bind the token to a specific MCP server URI via the `resource` parameter on authorize + token requests. Servers MUST validate audience before accepting tokens.
+- **Bearer tokens go in the `Authorization` header**, never in the URI query string.
+- **Token passthrough is FORBIDDEN** — your server must obtain its own credentials for upstream APIs.
+- For client registration: **pre-registration > CIMD > DCR**. CIMD is the recommended path for unknown client-server pairs; DCR is kept for backwards compatibility only.
