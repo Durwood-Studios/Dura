@@ -1,0 +1,293 @@
+---
+title: "Agent Observability & Tracing"
+description: "Debugging a 50-step agent run with no traces is the #1 production failure mode. The OpenTelemetry GenAI conventions, the tool landscape (Langfuse, LangSmith, Arize, Helicone, Braintrust, Datadog), and what a good agent trace actually contains."
+phase: 6
+module: "6-7-agent-engineering"
+order: 2
+estimatedMinutes: 14
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-2", "SE-2", "SE-3"]
+  swebok: ["Software Engineering Process", "Software Engineering Management"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+  - agent
+---
+
+## Why this matters
+
+A workflow you debug by reading your own code. An agent you debug by reading what the model decided to do. Without traces, you cannot do the second. The most common pattern in 2025-2026 production-agent post-mortems isn't "the model was wrong" — it's "we couldn't tell what the model was doing."
+
+A 50-step agent run with no observability is a black box that occasionally returns wrong answers and silently burns tokens. Add tracing and the same run becomes a sequence of decisions you can audit, replay, and gate on. This lesson teaches what to capture, the standard for capturing it, and which tools are worth adopting in mid-2026.
+
+## What a good agent trace contains
+
+Bare-minimum spans for a useful trace:
+
+- **Session span** — the top-level container for a multi-turn user interaction. Has a stable session_id, user_id, started_at, completed_at.
+- **Per-turn spans** — one for each round of model output. Captures model name, prompt tokens, completion tokens, latency, cache-hit ratio.
+- **Tool call spans** — one per tool invocation. Captures tool name, arguments (redacted), return value (truncated), latency, error if any.
+- **Sub-agent spans** — when an orchestrator delegates to a worker agent, the worker's spans link back to the parent via parent_span_id.
+- **Eval spans** — when a step produces a score (e.g. evaluator-optimizer pattern), capture the score and which evaluator/rubric ran.
+- **State-diff annotations** — for LangGraph-style agents, what fields of the agent state changed each step.
+
+```javascript
+// Conceptual shape — not any particular SDK
+trace.session(
+  {
+    session_id: "sess_abc123",
+    user_id: "user_42",
+    attributes: { model_route: "opus-4.7" },
+  },
+  async (session) => {
+    await session.turn({ turn_num: 1 }, async (turn) => {
+      const planRes = await callModel({ messages, tools, parent: turn });
+      // planRes records: prompt_tokens, completion_tokens, cache_read_tokens, latency_ms, finish_reason
+
+      for (const tc of planRes.tool_calls) {
+        await turn.tool({ tool: tc.name, args: tc.args }, async (tspan) => {
+          return await invokeTool(tc, { parent: tspan });
+          // invokeTool records: latency_ms, output_size_bytes, error (if any)
+        });
+      }
+    });
+    await session.turn({ turn_num: 2 } /* ... */);
+  }
+);
+```
+
+The non-obvious fields that pay off more than people expect: `cache_read_tokens` (so you can see when prompt caching saved you money), `finish_reason` (so you can find truncations), and `parent_span_id` linking sub-agent runs into the orchestrator's trace.
+
+## The standard: OpenTelemetry GenAI semantic conventions
+
+As of Q1 2026, OpenTelemetry has published [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) — agreed-upon span and attribute names for LLM and agent telemetry. Status:
+
+- **Client spans** (the model-call layer) have **exited experimental**. Field names like `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` are stable.
+- **Agent and framework spans** (multi-step orchestration, tool calls, state) remain **experimental but stable in practice** — every major observability vendor and framework emits them; the spec hasn't reached a 1.0 stable release.
+
+Treat OTel GenAI as **the de-facto standard, pre-1.0**. When in doubt, name your custom spans to match the OTel attribute names rather than inventing your own.
+
+The practical upshot: pick a tool that emits OTel-compliant traces and you keep your options open. If you ever switch vendors — Langfuse to Datadog, LangSmith to Phoenix — the trace structure transfers because everyone consumes the same conventions.
+
+## The tool landscape (mid-2026)
+
+| Tool                          | License                  | Best for                                                       | Adoption pattern                                              |
+| ----------------------------- | ------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------- |
+| **Langfuse**                  | MIT (OSS)                | Self-hosting, EU / regulated orgs, OTel-compliant by default   | Run a self-hosted instance; SDK in your app sends spans to it |
+| **LangSmith**                 | Proprietary (hosted)     | LangChain / LangGraph users — deepest framework integration    | Add the LangChain tracer; node-by-node state diffs come free  |
+| **Arize Phoenix**             | Apache-2.0 (OSS)         | ML teams crossing from classical ML to GenAI; 50+ eval metrics | Self-host or use Arize cloud; OTel-native                     |
+| **Helicone**                  | Open-core                | Lowest-friction adoption — change a single base-URL            | Proxy in front of your model provider; zero SDK changes       |
+| **Braintrust**                | Proprietary (hosted)     | CI/CD-blocking eval shops                                      | Statistical-significance gating blocks merges on regression   |
+| **Datadog LLM Observability** | Proprietary (enterprise) | Shops already running Datadog for everything else              | Datadog APM agent + GenAI conventions; one pane of glass      |
+
+If you're choosing fresh in mid-2026, the practical starting points are:
+
+- **Self-hosting** → Langfuse.
+- **Already in LangChain** → LangSmith.
+- **Cross-cutting ML + GenAI** → Phoenix.
+- **Don't want to change your code** → Helicone.
+- **Pre-merge regression gates** → Braintrust.
+- **Already on Datadog** → Datadog LLM Observability.
+
+## Three adoption patterns
+
+How you wire observability in shapes how invasive the change is.
+
+### 1. Proxy pattern (lowest friction)
+
+Change your model provider's base URL to a proxy that captures every call. Helicone is the canonical example; LiteLLM Proxy is open-source. Zero SDK changes, full HTTP capture, can't see your agent's internal state (only the model calls).
+
+```javascript
+// Before
+const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+// After (Helicone proxy):
+const client = new Anthropic({
+  apiKey: ANTHROPIC_API_KEY,
+  baseURL: "https://anthropic.helicone.ai/v1",
+  defaultHeaders: {
+    "Helicone-Auth": `Bearer ${HELICONE_KEY}`,
+    "Helicone-Session-Id": currentSessionId, // for grouping turns
+  },
+});
+```
+
+Good when you just want to see _what's hitting the model_ without instrumenting your code. Insufficient when you need to know which tool the agent decided to call or how its internal state evolved.
+
+### 2. SDK pattern (medium friction, full control)
+
+Use the observability tool's SDK to explicitly start/end spans around the parts of your code that matter.
+
+```javascript
+import { Langfuse } from "langfuse";
+const langfuse = new Langfuse({ secretKey, publicKey });
+
+const trace = langfuse.trace({ name: "support-agent-run", userId: user.id });
+const generation = trace.generation({
+  name: "planning-step",
+  model: "claude-opus-4-7",
+  input: messages,
+});
+const result = await callClaude(messages);
+generation.end({
+  output: result.content,
+  usage: { input: result.usage.input_tokens, output: result.usage.output_tokens },
+});
+```
+
+Maximum control — you instrument exactly what's interesting. Worth it for agent frameworks where the proxy pattern would miss the orchestration story.
+
+### 3. Framework-native pattern (zero added code if you're already in the framework)
+
+LangChain, LangGraph, CrewAI, AutoGen, and AG2 emit OTel-compliant spans natively when configured. Set env vars; your existing code starts emitting.
+
+```bash
+export LANGSMITH_TRACING=true
+export LANGSMITH_API_KEY=lsv2_pt_...
+export LANGSMITH_PROJECT=support-agent
+# any LangChain/LangGraph run now sends traces
+```
+
+Best when you've already committed to the framework and the framework's view of "what happened" matches your debugging needs.
+
+## Beyond tracing: evals as continuous regression tests
+
+Observability is reading what happened. The next layer is **evaluations** — automatic scoring of agent runs against rubrics, and gating future changes on the scores.
+
+A practical pattern that scaled in 2025-2026:
+
+1. Run every production trace through a small evaluator LLM (or rule-based scorer) that emits 0-1 scores on dimensions like "task completed," "no hallucinated tool," "appropriate refusal."
+2. Sample the lowest-scoring traces into a regression set.
+3. Before every prompt change or model upgrade, run the new agent against the regression set and compare distribution of scores.
+4. If a dimension regresses, block the merge.
+
+Braintrust specifically built around this; Langfuse, LangSmith, and Phoenix all support it. The discipline matters more than the tool: agent quality drifts silently without it.
+
+## What to redact in traces
+
+Production traces contain user content. The default observability stance is: store everything, debug from anywhere. The default privacy stance is: don't store personal data you don't need to.
+
+Reconcile these by redacting at the SDK layer:
+
+- **PII fields** — emails, phone numbers, addresses, government IDs. Redact before sending the span.
+- **Authorization tokens** — bearer tokens, API keys, OAuth refresh tokens. Never log raw.
+- **Free-text content with PII** — user messages may contain anything. Either run a PII detector before logging, or hash the content and store only the hash for replay-by-pattern.
+
+Per the security lesson in the MCP module (07), `redactSecrets` is non-optional. The same discipline applies here.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write classifyObservabilityNeed(req) that returns one of: 'proxy' (lowest-friction, just needs HTTP capture), 'sdk' (needs span control over orchestration), 'framework-native' (already in LangChain/CrewAI), or 'evals' (needs pre-merge regression gating). The req object has booleans: alreadyInFramework, needsOrchestrationVisibility, justNeedsModelCalls, prereleaseGating."
+  initialCode={`function classifyObservabilityNeed(req) {
+  // Pick the right adoption pattern based on the request shape
+}
+
+console.log(classifyObservabilityNeed({ alreadyInFramework: true })); // 'framework-native'
+console.log(classifyObservabilityNeed({ justNeedsModelCalls: true })); // 'proxy'
+console.log(classifyObservabilityNeed({ needsOrchestrationVisibility: true })); // 'sdk'
+console.log(classifyObservabilityNeed({ prereleaseGating: true })); // 'evals'`}
+  solution={`function classifyObservabilityNeed(req) {
+if (req?.alreadyInFramework) return "framework-native";
+if (req?.prereleaseGating) return "evals";
+if (req?.needsOrchestrationVisibility) return "sdk";
+if (req?.justNeedsModelCalls) return "proxy";
+return "sdk";
+}
+
+console.log(classifyObservabilityNeed({ alreadyInFramework: true }));
+console.log(classifyObservabilityNeed({ justNeedsModelCalls: true }));
+console.log(classifyObservabilityNeed({ needsOrchestrationVisibility: true }));
+console.log(classifyObservabilityNeed({ prereleaseGating: true }));`}
+testCases={["routes to framework-native, proxy, sdk, or evals based on the request shape"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Your team is brand new to agent development. You haven't picked a framework yet, but you want to start capturing every model call so you can see what your prototypes are actually doing. Which adoption pattern fits best?",
+      options: [
+        "Framework-native — just turn it on.",
+        "Proxy — change a single base URL and you'll see every model call without instrumenting code.",
+        "SDK — add spans throughout your code right now so you don't have to retrofit later.",
+        "Skip observability until you ship.",
+      ],
+      correct: 1,
+      explanation:
+        "The proxy pattern (Helicone, LiteLLM Proxy) gives you full visibility of model calls with zero SDK changes — perfect for early prototypes before you've committed to a framework or orchestration approach. You can add SDK-level instrumentation later when you need to see orchestration internals.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Why does the OpenTelemetry GenAI semantic conventions effort matter for an agent team picking observability tooling?",
+      options: [
+        "It mandates a specific vendor.",
+        "It standardizes span and attribute names across vendors, so traces transfer if you switch tools — Langfuse → Datadog, LangSmith → Phoenix, etc.",
+        "It speeds up trace ingestion.",
+        "It's required by GDPR.",
+      ],
+      correct: 1,
+      explanation:
+        "OTel GenAI conventions define what fields like gen_ai.usage.input_tokens, gen_ai.request.model mean. Tools that emit OTel-compliant traces are interchangeable on the consume side. Vendor lock-in shrinks dramatically. Client spans are stable; agent spans are 'experimental but stable in practice.'",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your agent traces include the user's raw email body. The body sometimes contains credit card numbers customers pasted in. Where does redaction belong in the pipeline?",
+      options: [
+        "After traces are persisted — search and remove later.",
+        "At the SDK layer, before the span ever leaves your application — never persist raw secrets or PII.",
+        "Only on traces shown in the UI; the database can keep raw values.",
+        "Whichever the observability vendor implements.",
+      ],
+      correct: 1,
+      explanation:
+        "Redact before the span ships. Once a credit-card-bearing trace is persisted in your observability backend, you've taken on a privacy and compliance obligation you didn't intend. SDK-layer redaction is non-optional — same discipline as audit-log redactSecrets from the MCP security lesson.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your agent's evaluator score on 'task completed' has dropped from 0.91 to 0.85 over two weeks. Trace volume is normal. What does the eval-as-regression-test pattern recommend you do?",
+      options: [
+        "Wait — small drift is normal.",
+        "Sample the lowest-scoring traces into a regression set, identify the failure mode, and block the next prompt or model change behind a fix.",
+        "Increase the model temperature to see if the agent is being too cautious.",
+        "Add more tools to give the agent more options.",
+      ],
+      correct: 1,
+      explanation:
+        "Score drift is the signal; the response is to inspect the failing traces, identify the failure mode, fix it, and gate future changes on a regression set built from the failures. Eval-as-CI-gate (Braintrust, Langfuse, LangSmith, Phoenix all support this) is the discipline that catches drift before users do.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="A useful agent trace contains a top-level ___ span, per-turn spans capturing model name + tokens + latency, ___ spans for each invocation, sub-agent spans linked via parent_span_id, and eval spans capturing scores. The emerging standard for cross-vendor compatibility is OpenTelemetry ___ semantic conventions — client spans stable, agent spans pre-1.0 but stable in practice."
+  answers={["session", "tool", "GenAI"]}
+  hints={[
+    "The top-level container for a multi-turn interaction.",
+    "Each invocation of a callable the model decided to use.",
+    "The OTel acronym for the generative-AI conventions namespace.",
+  ]}
+/>
+
+## What you learned
+
+- **A good agent trace** has session, per-turn, tool-call, sub-agent, and eval spans; the non-obvious fields that pay off are `cache_read_tokens`, `finish_reason`, and `parent_span_id`.
+- **OpenTelemetry GenAI semantic conventions** are the cross-vendor standard. Client spans are stable; agent spans are experimental but stable in practice. Treat as de-facto, pre-1.0.
+- **Six tools dominate mid-2026**: Langfuse (OSS self-host), LangSmith (LangChain-native), Arize Phoenix (Apache OSS, ML-leaning), Helicone (proxy), Braintrust (CI-gated eval), Datadog (enterprise).
+- **Three adoption patterns**: proxy (lowest friction, model calls only), SDK (full control), framework-native (free if you're already in LangChain / CrewAI / LangGraph / AutoGen / AG2).
+- **Evaluations as continuous regression tests** is the discipline above tracing. Sample low-scoring traces into a regression set; block prompt/model changes on score regressions.
+- **Redact PII and secrets at the SDK layer**, before the span ships. Once a secret is in your observability backend, it's a compliance problem.
+
+Next: [Cost Engineering for Agents](./03-cost-engineering.mdx) — model routing, caching, batching, the actual production economics.
+
+**Canonical references:** [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) · [Langfuse](https://langfuse.com) · [LangSmith](https://docs.smith.langchain.com) · [Arize Phoenix](https://docs.arize.com/phoenix) · [Helicone](https://www.helicone.ai) · [Braintrust](https://www.braintrust.dev).
