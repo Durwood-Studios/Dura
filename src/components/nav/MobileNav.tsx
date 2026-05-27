@@ -96,7 +96,7 @@ const DRAWER_SECTIONS: DrawerSection[] = [
       { href: "/paths", label: "Curriculum", icon: BookOpen },
       { href: "/howto", label: "How-To Guides", icon: Lightbulb },
       { href: "/tutorials", label: "Tutorials", icon: Wrench },
-      { href: "/discover", label: "Discovery Center", icon: Sparkles },
+      { href: "/discover", label: "Discovery Zone", icon: Sparkles },
     ],
   },
   {

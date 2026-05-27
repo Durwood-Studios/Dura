@@ -260,7 +260,7 @@ export async function generateMetadata({
   if (!entry || entry.roomSlug !== slug) return {};
 
   return buildMetadata({
-    title: `${entry.title} — ${entry.roomName} — Discovery Center`,
+    title: `${entry.title} — ${entry.roomName} — Discovery Zone`,
     description: entry.description,
     path: `/discover/${slug}/${activitySlug}`,
   });

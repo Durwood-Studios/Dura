@@ -42,12 +42,10 @@ const ROOMS: Room[] = [
     color: "#34d399",
     activities: ["bug-detective", "logic-gates", "story-builder"],
   },
-  {
-    slug: "first-steps",
-    name: "First Steps",
-    color: "#fb923c",
-    activities: ["shape-sorter", "counting-blocks", "color-mixer"],
-  },
+  // The previous "first-steps" room (shape-sorter, counting-blocks, color-mixer)
+  // was removed from the Discovery surface in the 2026-05 refresh because the
+  // activities sat below DURA's target reading level. Components remain in the
+  // codebase; if they return, register the room here.
 ];
 
 const ALL_ACTIVITIES = ROOMS.flatMap((room) =>
@@ -58,7 +56,7 @@ const ALL_ACTIVITIES = ROOMS.flatMap((room) =>
   }))
 );
 
-/** Call this from an activity component when the kid completes it. */
+/** Call this from an activity component when the learner finishes the demo. */
 export function markActivityComplete(slug: string): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -82,7 +80,7 @@ function readCompleted(): string[] {
   }
 }
 
-/** Passport stamp tracker showing completion across all Discovery Center activities. */
+/** Passport stamp tracker showing completion across all Discovery Zone activities. */
 export function Passport(): React.ReactElement {
   const [completed, setCompleted] = useState<string[]>([]);
 
