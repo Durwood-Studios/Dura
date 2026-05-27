@@ -1,0 +1,271 @@
+---
+title: "Workflow vs Agent — The Decision Framework"
+description: "Most production AI problems are not agent problems. The canonical Anthropic framing — five workflow patterns vs one agent pattern — and the cost-of-flexibility calculus that decides between them."
+phase: 6
+module: "6-7-agent-engineering"
+order: 1
+estimatedMinutes: 13
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-2", "SE-1"]
+  swebok: ["Software Design"]
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - llm
+  - agent
+---
+
+## Why this matters
+
+Most production AI systems labeled "agents" are not agents. They're workflows — code paths with LLM calls slotted in at predefined steps. Calling them "agents" is fashionable, but it obscures the real engineering decision: how much runtime flexibility you're willing to pay for in exchange for unpredictability.
+
+The 2025-2026 agentic wave amplified this confusion. Teams reached for true agents (LLMs that direct their own tool use and reasoning) when a deterministic workflow would have shipped faster, cost less, and failed less surprisingly. This lesson teaches you the framework that the industry has converged on — Anthropic's _Building Effective Agents_ (2024-12-19) — so you can make this decision deliberately on every new system you design.
+
+## The distinction (Anthropic, 2024-12)
+
+> **Workflows** are systems where LLMs and tools are orchestrated through predefined code paths.
+>
+> **Agents** are systems where LLMs dynamically direct their own processes and tool usage, maintaining control over how they accomplish tasks.
+
+In a workflow, your code decides the next step based on the LLM's output. In an agent, the LLM decides the next step itself.
+
+```javascript
+// Workflow: code decides what happens next
+const classification = await classify(input);
+if (classification.intent === "refund") {
+  const refundDecision = await assessRefund(input, classification);
+  return formatRefundResponse(refundDecision);
+} else if (classification.intent === "shipping") {
+  return await lookupShippingStatus(input);
+}
+
+// Agent: the model decides what happens next, turn by turn,
+// based on tools available and prior turn results
+const result = await runAgent({
+  systemPrompt:
+    "You are a customer service agent. You have tools for refunds, shipping lookup, and escalation. Decide what to do.",
+  tools: [refundTool, shippingTool, escalationTool],
+  userMessage: input,
+});
+```
+
+Both can produce the same answer for "where is my package." Only the agent might decide on its own to _also_ offer a refund when it notices the package is late. That flexibility is the value an agent adds. The unpredictability of how it decides is the cost.
+
+## The five workflow patterns
+
+Anthropic names five recurring workflow patterns. Before reaching for an agent, ask whether one of these covers your use case.
+
+### 1. Prompt chaining
+
+Decompose a task into a fixed sequence of LLM calls where each step's output feeds the next.
+
+```
+[user input] → LLM 1: extract entities → LLM 2: rank entities → LLM 3: write response
+```
+
+Use when the task has clean stages and intermediate validation between stages is cheap and useful.
+
+### 2. Routing
+
+A small LLM (or simple classifier) picks which downstream path handles the input.
+
+```
+[user input] → router LLM (small/cheap) → one of N specialized prompts/models
+```
+
+Use when different input types need genuinely different handling — a question for a different model, a different prompt, or even a different non-LLM pipeline. The router is a switch statement that learns.
+
+### 3. Parallelization
+
+Run several LLM calls concurrently on parts of the input, then aggregate. Two flavors:
+
+- **Sectioning** — split the input into independent pieces (review each PR file in parallel; analyze each customer review separately) then combine.
+- **Voting** — run the same task multiple times with different prompts or models, then take majority/median to reduce variance.
+
+Use when latency matters more than the marginal cost of duplicate calls.
+
+### 4. Orchestrator-workers
+
+A central LLM dynamically decomposes a task into subtasks and delegates each to a worker LLM. The orchestrator integrates the results.
+
+```
+[task] → orchestrator (plan + delegate) → worker A, worker B, worker C → orchestrator (integrate)
+```
+
+This is _close to_ a real agent — it's the most flexible workflow pattern. The distinction: the orchestrator's behavior is constrained by code (single planning step → fixed delegation → single integration step), not free-roaming model-driven control.
+
+### 5. Evaluator-optimizer
+
+One LLM produces a response, another LLM (or rubric) evaluates it; the loop continues until the evaluator passes.
+
+```
+[task] → generator LLM → evaluator LLM → (pass: done; fail: feed critique back) → generator LLM …
+```
+
+Use when you have a clear quality bar that can be evaluated automatically and a meaningful chance the first attempt won't meet it.
+
+If your task fits any of these five patterns, **build the workflow, not the agent.** You get more predictable cost, more debuggable behavior, and faster shipping.
+
+## When to actually reach for an agent
+
+An agent is the right call when _all three_ of these are true:
+
+1. **The set of next-step decisions is too large to enumerate in code.** If a switch statement over plausible next actions has more than a handful of branches, an LLM dynamically choosing is more honest than your hand-coded heuristic.
+2. **The path to the answer varies between requests in ways you can't predict.** Customer-support escalation, debugging an unfamiliar codebase, exploring an unfamiliar API — the value is exactly that you don't know in advance what steps the system will need.
+3. **You can absorb the cost of unpredictability.** Agents will sometimes loop, take an unexpected path, or burn tokens on dead ends. Production systems that can't tolerate that need a workflow.
+
+The most successful agentic production systems in 2025-2026 cluster in three surfaces where all three conditions hold:
+
+- **Coding assistants** — the space of "what to do next" in an unknown codebase is vast and per-task.
+- **Browser automation** — the same flow can hit a different DOM, a different login wall, a different error each time.
+- **Customer-support escalation** — the long tail of unusual cases doesn't fit a fixed decision tree.
+
+Notably absent: routine data extraction, content generation with a fixed structure, classification, summarization, translation. Those are workflow problems all the way down.
+
+## The cost-of-flexibility analysis
+
+Quantitatively, agents cost more than workflows on every axis:
+
+| Axis                | Workflow                                   | Agent                                                   |
+| ------------------- | ------------------------------------------ | ------------------------------------------------------- |
+| Token cost per task | Predictable (fixed call count)             | Variable (model decides how many turns)                 |
+| Latency             | Predictable (sum of call latencies)        | Variable (model decides loop length)                    |
+| Debuggability       | Easy — every step is in your code          | Hard — model's decisions are opaque without good traces |
+| Failure modes       | Tractable (each call may fail; you handle) | Open-ended (loops, dead ends, hallucinated tools)       |
+| Test surface        | Small (test each step)                     | Large (test possible trajectories)                      |
+
+Anthropic's recommendation, which the field has adopted: **start with the simplest workflow that solves the problem.** Only escalate to an agent when the workflow's rigidity is actively blocking the use case. The escalation should be a deliberate decision with a written justification, not a reflex.
+
+## Production framing in 2026
+
+Two patterns have crystallized:
+
+- **Workflows ship first; agents replace workflows piecewise as cases reveal themselves.** Most production AI starts as a routing workflow over specialized prompts. Only when a workflow's branches multiply past usefulness does a team replace one branch with a true agent.
+- **The harness matters more than the model for agent quality.** The SWE-bench community openly acknowledges that the _same base model in different scaffolds_ varies by 15+ percentage points. The implication for your work: spend more design time on the agent's tools, prompts, approval gates, and failure handling than on which model you picked.
+
+The MCP module (6-4) covered the protocol agents use to reach tools. This module — 6-7 — covers what to do once your agent is reaching for tools in production.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write classifyApproach(task) that takes a task description string and returns one of: 'workflow:chaining', 'workflow:routing', 'workflow:parallelization', 'workflow:orchestrator-workers', 'workflow:evaluator-optimizer', or 'agent'. Use heuristics in the description text: keywords like 'classify and route', 'split into sections', 'iterate until quality bar met', 'fixed sequence', 'unknown next step', etc."
+  initialCode={`function classifyApproach(task) {
+  // Inspect the task description and return one of the six patterns
+}
+
+console.log(classifyApproach("Extract entities, rank them, write a 3-sentence summary in fixed sequence."));
+// 'workflow:chaining'
+
+console.log(classifyApproach("Decide whether the user wants refund, shipping, or escalation, and route to the right specialized prompt."));
+// 'workflow:routing'
+
+console.log(classifyApproach("Generate the response, then evaluate against a rubric, iterate until quality bar is met."));
+// 'workflow:evaluator-optimizer'
+
+console.log(classifyApproach("Debug an unfamiliar codebase with an unknown set of next steps; use any of these tools to explore."));
+// 'agent'`}
+  solution={`function classifyApproach(task) {
+const t = task.toLowerCase();
+if (t.includes("fixed sequence") || (t.includes("then") && t.includes("then"))) return "workflow:chaining";
+if (t.includes("route") || t.includes("decide whether") || t.includes("right specialized")) return "workflow:routing";
+if (t.includes("split into") || t.includes("in parallel") || t.includes("aggregate")) return "workflow:parallelization";
+if (t.includes("delegate") || t.includes("subtasks") || t.includes("orchestrat")) return "workflow:orchestrator-workers";
+if (t.includes("evaluate against") || t.includes("iterate until") || t.includes("quality bar")) return "workflow:evaluator-optimizer";
+if (t.includes("unknown") || t.includes("unfamiliar") || t.includes("decide its own") || t.includes("any of these tools")) return "agent";
+return "workflow:chaining"; // default to simplest workflow per Anthropic guidance
+}
+
+console.log(classifyApproach("Extract entities, rank them, write a 3-sentence summary in fixed sequence."));
+console.log(classifyApproach("Decide whether the user wants refund, shipping, or escalation, and route to the right specialized prompt."));
+console.log(classifyApproach("Generate the response, then evaluate against a rubric, iterate until quality bar is met."));
+console.log(classifyApproach("Debug an unfamiliar codebase with an unknown set of next steps; use any of these tools to explore."));`}
+testCases={["correctly classifies chaining, routing, evaluator-optimizer, and agent tasks; defaults to workflow"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Which of these is the textbook distinction between a workflow and an agent per Anthropic's 2024-12 framework?",
+      options: [
+        "Workflows are written in Python; agents are written in TypeScript.",
+        "In a workflow, your code decides the next step; in an agent, the LLM decides the next step itself.",
+        "Workflows use one model; agents use multiple models.",
+        "Workflows are deterministic; agents are non-deterministic.",
+      ],
+      correct: 1,
+      explanation:
+        "The defining axis is who controls the next-step decision: code (workflow) or the model (agent). Non-determinism isn't the distinction — both can be non-deterministic, but the workflow's structure is fixed in code.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your task: summarize 100 customer reviews into a single weekly digest. Each review is independent. Which pattern fits best?",
+      options: [
+        "True agent — let the model decide what to do.",
+        "Routing — classify each review first.",
+        "Parallelization with sectioning — summarize each review concurrently, then aggregate the summaries.",
+        "Evaluator-optimizer — iterate until the digest meets a quality bar.",
+      ],
+      correct: 2,
+      explanation:
+        "Sectioning parallelization is the canonical pattern for 'process N independent items, aggregate.' It's faster than serial chaining and far cheaper + more predictable than an agent. Evaluator-optimizer would add value only if quality varies wildly across attempts.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Anthropic's guidance is to escalate from workflow to agent when:",
+      options: [
+        "Stakeholders ask for 'an AI agent.'",
+        "The set of next-step decisions is too large to enumerate in code, the path varies unpredictably per request, AND the system can absorb cost of unpredictability.",
+        "The current workflow is faster than 1 second.",
+        "You have a budget for a frontier model.",
+      ],
+      correct: 1,
+      explanation:
+        "All three conditions must hold. If any one is false — small decision space, predictable path, or low tolerance for variability — a workflow is the better choice.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "The SWE-bench community has converged on a saying: the harness matters more than the model. What does this imply for your design priorities?",
+      options: [
+        "Always use the most expensive model.",
+        "Spend more design time on the agent's tools, prompts, approval gates, and failure handling than on which model you picked.",
+        "Pick a framework first, then fit the task to it.",
+        "Skip the harness — just call the model directly.",
+      ],
+      correct: 1,
+      explanation:
+        "The same model in different scaffolds varies by 15+ percentage points on SWE-bench Verified. The harness (tools, prompts, error handling, approval gates) is where most of the quality lives, not in the model choice. This is the most under-appreciated finding of the 2025-2026 agentic wave.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Anthropic names five workflow patterns: prompt ___, routing, parallelization, orchestrator-workers, and evaluator-___. Escalate to a true agent only when the next-step decisions are too large to enumerate, the path varies unpredictably per request, AND you can absorb the cost of ___."
+  answers={["chaining", "optimizer", "unpredictability"]}
+  hints={[
+    "Sequential LLM calls feeding each other.",
+    "The pattern where one LLM critiques another's output until it passes.",
+    "The cost an agent imposes on every system that uses it.",
+  ]}
+/>
+
+## What you learned
+
+- **The defining axis between workflow and agent is who controls the next-step decision** — code (workflow) or the LLM itself (agent).
+- **Five workflow patterns** cover most production needs: **prompt chaining**, **routing**, **parallelization** (sectioning + voting), **orchestrator-workers**, **evaluator-optimizer**.
+- **Three conditions to justify an agent**: enumerable-in-code decision space is too large, per-request path varies unpredictably, AND your system can absorb the cost of unpredictability.
+- **Cost-of-flexibility tradeoff**: agents cost more than workflows on every axis — tokens, latency, debuggability, test surface, failure modes. Reach for them deliberately, not reflexively.
+- **The harness matters more than the model.** Spend design time on tools, prompts, approval gates, and failure handling. The SWE-bench evidence is unambiguous.
+- **Production framing**: workflows ship first; agents replace specific workflow branches piecewise as the long tail of cases reveals itself.
+
+Next: [Agent Observability & Tracing](./02-agent-observability.mdx) — how you debug what an agent actually did.
+
+**Canonical reading:** [Anthropic — Building Effective Agents (2024-12-19)](https://www.anthropic.com/research/building-effective-agents).
