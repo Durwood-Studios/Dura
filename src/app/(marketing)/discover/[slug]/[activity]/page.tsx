@@ -134,6 +134,27 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     ),
   },
 
+  "hash-avalanche": {
+    title: "Hash Avalanche",
+    description:
+      "Paste a message and watch its SHA-256 bit grid. Change one character; about half the bits flip.",
+    concept: "Cryptographic hashing · Avalanche property",
+    intro:
+      "A cryptographic hash function maps any input to a fixed-size output that should look uniformly random. The avalanche property says: change one bit of input, and about half the output bits should flip. Without that property, similar inputs would produce similar hashes — and attackers could forge messages by tweaking real ones. SHA-256 has it by design. This demo computes real SHA-256 in your browser via the Web Crypto API; the bit grid you see is exactly what your operating system computes when it verifies a git commit, a TLS certificate, or a software-update signature.",
+    underTheHood: [
+      "SHA-256 produces a 256-bit output (32 bytes, displayed as 64 hex characters). The bit grid shows all 256 bits laid out in 8 rows of 32.",
+      "Avalanche is measured by Hamming distance — count of differing bits. Ideal value for a one-character change: ~128 bits (50%). SHA-256 hovers right around that.",
+      "The Web Crypto API (crypto.subtle.digest) runs the same SHA-256 implementation browsers use for HTTPS certificate verification — no JS-level reimplementation needed.",
+    ],
+    teaches: { label: "Phase 7 · Security Engineering", href: "/paths/7" },
+    roomSlug: "secret-codes",
+    roomName: "Secret Codes",
+    roomColor: "#f472b6",
+    Component: dynamic(() => import("@/components/discover/HashAvalanche"), {
+      loading: () => <ActivitySkeleton />,
+    }),
+  },
+
   // ─── Robot Chef — algorithms & sequencing ───────────────────────────────
   "algorithm-kitchen": {
     title: "Algorithm Kitchen",
@@ -193,6 +214,28 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     roomColor: "#fbbf24",
     Component: dynamic(
       () => import("@/components/discover/TreasureMap").then((m) => m.TreasureMap),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
+
+  "sorting-race": {
+    title: "Sorting Race",
+    description:
+      "Bubble sort vs merge sort vs quick sort on the same shuffled array. Big-O made visible.",
+    concept: "Sorting algorithms · Big-O complexity",
+    intro:
+      "Three sorting algorithms run on the same starting array. Bubble sort makes ~n² comparisons; merge and quick sort make ~n log n. With 30 elements that's a 6× gap. With 1,000 it's 100×. With 1,000,000 it's 50,000×. This is what complexity classes actually mean — not a textbook abstraction, but elapsed time you can watch.",
+    underTheHood: [
+      "Bubble sort: O(n²) — compares every pair across n-1 passes. Worst case is also its average case. Used here because it makes the cost of bad complexity visible, not because anyone ships it.",
+      "Merge sort: O(n log n) — divide the array in halves recursively, merge sorted halves. Worst case equals average case. Stable, predictable, the default for guaranteed bounds.",
+      "Quick sort: O(n log n) average, O(n²) worst — partition around a pivot, recurse on each side. Faster than merge in practice because it sorts in place; the worst case is rare with good pivot selection.",
+    ],
+    teaches: { label: "Phase 3 · Complexity and Big O", href: "/paths/3" },
+    roomSlug: "robot-chef",
+    roomName: "Robot Chef",
+    roomColor: "#fbbf24",
+    Component: dynamic(
+      () => import("@/components/discover/SortingRace").then((m) => m.SortingRace),
       { loading: () => <ActivitySkeleton /> }
     ),
   },
@@ -345,6 +388,28 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     ),
   },
 
+  "memoization-cliff": {
+    title: "Memoization Cliff",
+    description:
+      "Slider for fib(N); side-by-side call trees, naive vs memoized. Watch the exponential turn linear.",
+    concept: "Memoization · Dynamic programming",
+    intro:
+      "The same recursive function, with one tiny addition — caching the result of each sub-call. The naive version recomputes fib(k) for every value of k that appears in the recursion tree; the memoized version computes each fib(k) exactly once. The call count drops from exponential to linear. This is the entire idea of dynamic programming, in the smallest possible form.",
+    underTheHood: [
+      "Naive fib(n) has T(n) = T(n-1) + T(n-2) + 1 function calls — growing like Fibonacci itself, roughly 1.618ⁿ. fib(35) needs ~30 million calls.",
+      "Memoized fib(n) computes each value once: n+1 unique values, plus ~n-1 cache hits = ~2n-1 total calls. fib(35) needs ~69 calls.",
+      "Memoization is the canonical dynamic-programming optimization. Every DP problem in the textbook reduces to: identify the sub-problems, cache them, never recompute. The same principle drives prompt caching in LLM APIs (lesson 6-7 · cost engineering).",
+    ],
+    teaches: { label: "Phase 1 · Functions", href: "/paths/1" },
+    roomSlug: "pattern-factory",
+    roomName: "Pattern Factory",
+    roomColor: "#a78bfa",
+    Component: dynamic(
+      () => import("@/components/discover/MemoizationCliff").then((m) => m.MemoizationCliff),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
+
   // ─── Bug Lab — debugging & logic ────────────────────────────────────────
   "bug-detective": {
     title: "Bug Detective",
@@ -411,10 +476,16 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
 
 /** Room-to-activities mapping for generateStaticParams. */
 const ROOM_ACTIVITIES: Record<string, string[]> = {
-  "secret-codes": ["binary-painter", "morse-code", "pixel-art", "secret-encoder"],
-  "robot-chef": ["algorithm-kitchen", "robot-dance", "treasure-map"],
+  "secret-codes": ["binary-painter", "morse-code", "pixel-art", "secret-encoder", "hash-avalanche"],
+  "robot-chef": ["algorithm-kitchen", "robot-dance", "treasure-map", "sorting-race"],
   "internet-explorer": ["network-post-office", "dns-phonebook", "website-builder"],
-  "pattern-factory": ["pattern-machine", "fractal-tree", "music-beats", "tile-designer"],
+  "pattern-factory": [
+    "pattern-machine",
+    "fractal-tree",
+    "music-beats",
+    "tile-designer",
+    "memoization-cliff",
+  ],
   "bug-lab": ["bug-detective", "logic-gates", "story-builder"],
 };
 

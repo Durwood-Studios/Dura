@@ -82,6 +82,14 @@ const ROOMS: Record<string, Room> = {
         concept: "Substitution ciphers · Cryptography 101",
         teaches: { label: "Phase 7 · Security Engineering", href: "/paths/7" },
       },
+      {
+        slug: "hash-avalanche",
+        name: "Hash Avalanche",
+        description:
+          "Paste a message and see its SHA-256 bit grid. Change one character — watch about half the 256 output bits flip. The avalanche property is what makes cryptographic hashes safe for signatures, passwords, and blockchain integrity.",
+        concept: "Cryptographic hashing · Avalanche property",
+        teaches: { label: "Phase 7 · Security Engineering", href: "/paths/7" },
+      },
     ],
   },
   "robot-chef": {
@@ -116,6 +124,14 @@ const ROOMS: Record<string, Room> = {
           "Give precise step-by-step directions to guide an explorer through a grid. The grid is your data structure; the directions are your program; the treasure is correctness.",
         concept: "Grid navigation · Procedural thinking",
         teaches: { label: "Phase 1 · Programming Fundamentals", href: "/paths/1" },
+      },
+      {
+        slug: "sorting-race",
+        name: "Sorting Race",
+        description:
+          "Three sorting algorithms run on the same shuffled array. Bubble sort vs merge sort vs quick sort — the same problem at O(n²) vs O(n log n) made viscerally visible. Big-O isn't a textbook abstraction here; it's elapsed time you can watch.",
+        concept: "Sorting algorithms · Big-O complexity",
+        teaches: { label: "Phase 3 · Complexity and Big O", href: "/paths/3" },
       },
     ],
   },
@@ -194,6 +210,14 @@ const ROOMS: Record<string, Room> = {
           "Design one tile, then tile a plane. The same repeat-mode primitive that powers CSS Grid, wallpaper rendering, and procedural texture generation in games.",
         concept: "Tiling · CSS Grid analogy",
         teaches: { label: "Phase 2 · CSS Fundamentals", href: "/paths/2" },
+      },
+      {
+        slug: "memoization-cliff",
+        name: "Memoization Cliff",
+        description:
+          "Slider for fib(N); side-by-side call trees, naive recursion vs memoized. At N=30, naive needs ~2.7 million calls; memoized needs 59. The dynamic-programming insight in its purest form — caching turns an exponential algorithm into a linear one.",
+        concept: "Memoization · Dynamic programming",
+        teaches: { label: "Phase 1 · Functions", href: "/paths/1" },
       },
     ],
   },

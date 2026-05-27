@@ -16,13 +16,13 @@ const ROOMS: Room[] = [
     slug: "secret-codes",
     name: "Secret Codes",
     color: "#f472b6",
-    activities: ["binary-painter", "morse-code", "pixel-art", "secret-encoder"],
+    activities: ["binary-painter", "morse-code", "pixel-art", "secret-encoder", "hash-avalanche"],
   },
   {
     slug: "robot-chef",
     name: "Robot Chef",
     color: "#fbbf24",
-    activities: ["algorithm-kitchen", "robot-dance", "treasure-map"],
+    activities: ["algorithm-kitchen", "robot-dance", "treasure-map", "sorting-race"],
   },
   {
     slug: "internet-explorer",
@@ -34,7 +34,13 @@ const ROOMS: Room[] = [
     slug: "pattern-factory",
     name: "Pattern Factory",
     color: "#a78bfa",
-    activities: ["pattern-machine", "fractal-tree", "music-beats", "tile-designer"],
+    activities: [
+      "pattern-machine",
+      "fractal-tree",
+      "music-beats",
+      "tile-designer",
+      "memoization-cliff",
+    ],
   },
   {
     slug: "bug-lab",
