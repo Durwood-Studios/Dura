@@ -323,11 +323,11 @@ export const PHASES: Phase[] = [
     title: "Phase 6: AI/ML Engineering",
     tagline: "Build with intelligence.",
     description:
-      "Applied AI engineering: foundations, RAG pipelines, agentic AI, MCP server development, fine-tuning, and shipping AI in production.",
+      "Applied AI engineering: foundations, RAG pipelines, agentic AI, MCP server development, fine-tuning, AI in production, and the production agentic-AI discipline.",
     color: "#67e8f9",
-    estimatedHours: 420,
-    moduleCount: 6,
-    lessonCount: 55,
+    estimatedHours: 440,
+    moduleCount: 7,
+    lessonCount: 62,
     order: 6,
     modules: [
       mod(
@@ -383,6 +383,15 @@ export const PHASES: Phase[] = [
         "Observability, cost controls, evals, guardrails, model versioning, incident playbooks.",
         50,
         8
+      ),
+      mod(
+        "6",
+        7,
+        "agent-engineering",
+        "Production Agentic AI",
+        "Workflow vs agent decisions, observability, cost engineering, prompt injection at agent depth, computer use, voice/realtime, code-writing agents.",
+        20,
+        7
       ),
     ],
   },
