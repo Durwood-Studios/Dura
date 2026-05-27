@@ -1,0 +1,309 @@
+---
+title: "MCP Elicitation"
+description: "Server-initiated user input collection. Form mode for structured data, URL mode for OAuth and credentials. Why the spec FORBIDS form mode for secrets."
+phase: 6
+module: "6-4-mcp-development"
+order: 10
+estimatedMinutes: 11
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1", "HCI-1"]
+  swebok: ["Software Design", "User Experience"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Tools let your server take actions. Resources let your server expose data. Prompts let your server seed conversations. None of those primitives let the server **ask the user a question mid-task**.
+
+Elicitation, introduced in spec `2025-06-18` and expanded with URL mode in `2025-11-25`, fills that gap. When your server needs information it doesn't have — a confirmation, a choice between options, an OAuth consent — it issues an elicitation request and the client surfaces the question to the user. This is the primitive that turns one-shot tool calls into interactive flows.
+
+It's also the primitive most easily abused. The spec writes explicit prohibitions around it because the wrong elicitation pattern can leak credentials, normalize phishing, or surface arbitrary content as if it came from the host.
+
+## The two modes
+
+Elicitation has exactly two modes the spec defines: `form` and `url`. They cover different shapes of question.
+
+**`form` mode** — the server sends a JSON Schema with primitive types only (string, number, boolean, enum). The client renders a form, the user fills it in, the response comes back as a typed object. Good for: confirmations, choices, plain structured input.
+
+**`url` mode** — the server sends a URL. The client opens it in a browser (out of band) and the user interacts with whatever lives there. Good for: OAuth flows, third-party consent screens, anything that needs richer interaction than a form can offer or needs to be credential-bearing.
+
+The mode determines the trust model. Form responses arrive embedded in the MCP message stream — same wire path as tool results — and are subject to the same logging, caching, and conversation-history exposure. URL responses never travel through MCP at all; they're brokered out of band by whatever the URL talks to.
+
+## Form mode
+
+A `form` elicitation declares the shape of input it wants. Primitive types only — the spec is firm about this. No nested objects, no arrays of objects, no `oneOf` discriminators. If you need richer structure, you compose multiple elicitations or you use URL mode.
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+const server = new McpServer({ name: "deploy-tools", version: "1.0.0" });
+
+server.tool(
+  "deploy_to_production",
+  "Deploy the current build to production",
+  { service: { type: "string" } },
+  async ({ service }, { elicit }) => {
+    // Ask the user to confirm and pick a strategy.
+    const response = await elicit({
+      message: `Deploy ${service} to production?`,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          confirm: { type: "boolean", description: "Confirm production deploy" },
+          strategy: {
+            type: "string",
+            enum: ["blue-green", "rolling", "canary"],
+            description: "Deployment strategy",
+          },
+          notifyOnComplete: {
+            type: "boolean",
+            description: "Send Slack notification when deploy finishes",
+          },
+        },
+        required: ["confirm", "strategy"],
+      },
+    });
+
+    if (response.action !== "accept" || !response.content?.confirm) {
+      return {
+        content: [{ type: "text", text: "Deploy cancelled." }],
+      };
+    }
+
+    const result = await runDeploy(service, response.content.strategy);
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `Deployed ${service} via ${response.content.strategy}. ` +
+            (response.content.notifyOnComplete ? "Slack notified." : "No notification sent."),
+        },
+      ],
+    };
+  }
+);
+```
+
+The user's response always carries an `action` — `accept`, `decline`, or `cancel`. Your handler MUST treat all three as valid outcomes. `accept` means the user submitted the form; `decline` means they explicitly refused; `cancel` means they dismissed the dialog. Decline and cancel are not error states; they're normal flows.
+
+## URL mode
+
+A `url` elicitation hands the user off to a browser. The client opens the URL, the user does whatever the page asks of them (sign in, consent, complete a payment), and the page itself completes the work via its own backend. The MCP connection never sees the form data.
+
+```javascript
+server.tool(
+  "connect_github",
+  "Connect a GitHub account for the user",
+  {},
+  async (_args, { elicit, sessionId }) => {
+    // Generate a one-time session key for this connection attempt.
+    const linkSession = crypto.randomUUID();
+    await pendingConnections.set(linkSession, { sessionId, expires: Date.now() + 600_000 });
+
+    const response = await elicit({
+      mode: "url",
+      url: `https://tools.example.com/connect/github?session=${linkSession}`,
+      message: "Open this link to sign in with GitHub and authorize the integration.",
+    });
+
+    if (response.action !== "accept") {
+      return { content: [{ type: "text", text: "Connection cancelled." }] };
+    }
+
+    // The browser flow signaled completion — the link session now has the user's GitHub identity.
+    const connection = await pendingConnections.get(linkSession);
+    if (!connection?.githubToken) {
+      return {
+        content: [{ type: "text", text: "Sign-in window closed before completing." }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: "text", text: `Connected as ${connection.githubLogin}.` }],
+    };
+  }
+);
+```
+
+The page at `tools.example.com/connect/github` handles the OAuth dance directly. When complete, it stores the result keyed by `linkSession` and the elicitation resolves. Note what doesn't happen: the GitHub token never traverses the MCP message stream, never appears in conversation history, never gets logged with the other tool results.
+
+URL mode is also how the `URLElicitationRequiredError` (JSON-RPC code -32042) gets used. If a client doesn't support URL mode, the server can return this error from any operation that _would_ need a URL elicitation, telling the client "your version of MCP can't handle this — upgrade or fall back." Conformant 2025-11-25 clients support both modes.
+
+## The credential prohibition
+
+The spec **forbids** form-mode elicitation for passwords, API keys, tokens, OAuth secrets, or any other credential material. Form responses live in the MCP message stream — they're subject to logging, conversation history, error reports, replay buffers. A credential in a form response is a credential leaked the moment something downstream caches the conversation.
+
+```javascript
+// WRONG — form-mode elicitation for an API key.
+// The spec forbids this. Hosts SHOULD refuse to render the dialog.
+const response = await elicit({
+  message: "Enter your GitHub personal access token",
+  requestedSchema: {
+    type: "object",
+    properties: { token: { type: "string", format: "password" } },
+    required: ["token"],
+  },
+});
+
+// RIGHT — URL mode kicks the user to a browser-based OAuth flow.
+const response = await elicit({
+  mode: "url",
+  url: `https://tools.example.com/auth/github?session=${linkSession}`,
+  message: "Open this link to authorize via GitHub.",
+});
+```
+
+There's a temptation to label a field `format: "password"` or `secret: true` and call it safe. It isn't. The data still travels through MCP. The only secret-safe elicitation pattern is URL mode through an OAuth-style flow where the credential is exchanged for an opaque session token — and the secret itself never crosses the MCP wire.
+
+If your server needs a credential and OAuth isn't available (no AS, no client registration), reconsider whether the user should be supplying it through an AI client at all. The right place for raw secrets is the host environment (env vars for stdio servers) or a credential vault, not a conversation.
+
+## Handling the three response actions
+
+Every elicitation response carries an `action`. Your handler MUST handle each one explicitly — the spec calls this out because too many early servers treated decline/cancel as errors and got the UX badly wrong.
+
+| Action    | Meaning                                                                                                  | What your server should do                               |
+| --------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `accept`  | User submitted the form / completed the URL flow. `content` is present and validates against the schema. | Continue the operation.                                  |
+| `decline` | User explicitly refused. They saw the question and said no.                                              | Stop. Return a graceful message — not an error.          |
+| `cancel`  | User dismissed the dialog without answering. Different from decline; might be accidental.                | Stop. Don't retry automatically; let the user re-invoke. |
+
+```javascript
+const response = await elicit(request);
+
+switch (response.action) {
+  case "accept":
+    return doWork(response.content);
+  case "decline":
+    return { content: [{ type: "text", text: "Understood — skipping." }] };
+  case "cancel":
+    return { content: [{ type: "text", text: "Cancelled. Re-run when you're ready." }] };
+  default:
+    // Forward-compat: an unknown action is treated as cancel.
+    return { content: [{ type: "text", text: "Unknown response — stopping." }] };
+}
+```
+
+## Capability negotiation
+
+Elicitation is a client capability. Servers MUST check during the `initialize` handshake whether the client advertises support before calling `elicit`. Old clients without elicitation will return JSON-RPC method-not-found errors if you assume support.
+
+```javascript
+server.onInitialize((req) => {
+  const clientSupportsElicitation = !!req.capabilities?.elicitation;
+  if (!clientSupportsElicitation) {
+    // Mark elicitation-dependent tools as unavailable, or fall back to
+    // non-interactive defaults.
+    server.disableTool("deploy_to_production");
+  }
+});
+```
+
+Within elicitation, support for `url` mode is itself capability-gated by the client. If you need URL mode and the client only advertises `form`, return `URLElicitationRequiredError` (-32042) so the client knows to upgrade or surface the limitation to the user.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write handleElicitationResponse(response) that returns one of three strings based on response.action: 'proceed' for accept (and response.content must be present), 'skipped' for decline, 'cancelled' for cancel or any unknown action. Return 'invalid' if action is accept but content is missing."
+  initialCode={`function handleElicitationResponse(response) {
+  // Map action → outcome string
+}
+
+console.log(handleElicitationResponse({ action: "accept", content: { confirm: true } })); // proceed
+console.log(handleElicitationResponse({ action: "accept" })); // invalid (accept needs content)
+console.log(handleElicitationResponse({ action: "decline" })); // skipped
+console.log(handleElicitationResponse({ action: "cancel" })); // cancelled
+console.log(handleElicitationResponse({ action: "wat" })); // cancelled (unknown → cancel)`}
+  solution={`function handleElicitationResponse(response) {
+if (response.action === "accept") {
+return response.content ? "proceed" : "invalid";
+}
+if (response.action === "decline") return "skipped";
+if (response.action === "cancel") return "cancelled";
+return "cancelled"; // unknown actions treated as cancel for forward-compat
+}
+
+console.log(handleElicitationResponse({ action: "accept", content: { confirm: true } }));
+console.log(handleElicitationResponse({ action: "accept" }));
+console.log(handleElicitationResponse({ action: "decline" }));
+console.log(handleElicitationResponse({ action: "cancel" }));
+console.log(handleElicitationResponse({ action: "wat" }));`}
+testCases={["maps each action to the right outcome, unknown actions to cancelled"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Your MCP server needs the user's GitHub API token to call the GitHub API. Which elicitation pattern is correct?",
+      options: [
+        "Form mode with `{ token: { type: 'string', format: 'password' } }`.",
+        "Form mode with the field marked `secret: true`.",
+        "URL mode pointing at an OAuth flow. Form mode for credentials is forbidden by the spec.",
+        "Inline the token request in a tool description so the model passes it as an argument.",
+      ],
+      correct: 2,
+      explanation:
+        "The spec FORBIDS form-mode elicitation for credentials. Form responses travel through MCP — subject to logging, conversation history, replay. URL mode is the only safe pattern: the credential is exchanged out-of-band via OAuth and never crosses the MCP wire.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "An elicitation returns with `action: 'decline'`. How should your server handle this?",
+      options: [
+        "Throw an error — decline indicates a failure.",
+        "Retry the elicitation a few times to be sure.",
+        "Stop the operation gracefully and return a non-error message. Decline is a normal user choice.",
+        "Treat it as cancel — they're the same outcome.",
+      ],
+      correct: 2,
+      explanation:
+        "Decline means the user explicitly refused. It's a normal outcome, not an error. Stop gracefully and return a non-error message. Decline and cancel are distinct — decline is a deliberate refusal; cancel is dismissal without answering.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your form-mode elicitation includes a property with `type: 'object'` containing two nested fields. The client returns an error. Why?",
+      options: [
+        "Nested objects aren't allowed in form mode — primitives only (string, number, boolean, enum).",
+        "The JSON Schema is missing a `required` field.",
+        "Form mode requires `additionalProperties: false`.",
+        "The client doesn't support form mode at all.",
+      ],
+      correct: 0,
+      explanation:
+        "Form-mode elicitation schemas use primitive types only — string, number, boolean, enum. No nested objects, no arrays of objects, no oneOf. For richer structure, compose multiple elicitations or switch to URL mode.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Elicitation has two modes: ___ (JSON Schema primitives, response travels through MCP) and ___ (out-of-band browser flow). Form mode MUST NOT be used for ___. Every response carries an action — accept, ___, or ___ — and all three must be handled."
+  answers={["form", "url", "credentials", "decline", "cancel"]}
+  hints={[
+    "Structured input mode.",
+    "Browser-handoff mode.",
+    "The forbidden category of data for form mode.",
+    "The 'explicit no' action.",
+    "The 'dismissed without answering' action.",
+  ]}
+/>
+
+## What you learned
+
+- **Elicitation** is the primitive that lets a server ask the user a question mid-task. Introduced in `2025-06-18`; URL mode added in `2025-11-25`.
+- **Form mode** uses JSON Schema with primitive types only and returns the response inline through MCP. Good for confirmations, choices, structured input.
+- **URL mode** opens an out-of-band browser flow. The response value never crosses the MCP wire — essential for OAuth, payments, and anything credential-bearing.
+- **Form mode is FORBIDDEN for credentials** (passwords, tokens, API keys). Use URL mode + OAuth instead.
+- Responses carry an `action`: **accept**, **decline**, or **cancel** — all three are normal outcomes, not errors. Handle each explicitly.
+- Elicitation is a client capability gated by `initialize`. URL-mode-only flows can signal a `URLElicitationRequiredError` (-32042) for clients that don't support URL mode.

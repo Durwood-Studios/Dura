@@ -1,0 +1,309 @@
+---
+title: "MCP Tasks"
+description: "The experimental 2025-11-25 primitive for long-running operations. Durable state machines that survive disconnects, support cancellation, and emit progress notifications. Wraps tools/call, sampling/createMessage, and elicitation/create."
+phase: 6
+module: "6-4-mcp-development"
+order: 12
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1", "SE-2"]
+  swebok: ["Software Design", "Software Engineering Process"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+MCP's request/response model assumes operations finish in seconds. Most do — a database query, a file read, an API call. Some don't: run a test suite, deploy a service, retrain a model, render a video, summarize a 500-page document. Until `2025-11-25`, the spec had no good answer for these. Servers either blocked the request channel for minutes (breaking client UX), fired-and-forget (no result delivery), or invented bespoke status-polling tools (everyone reinvented the wheel).
+
+The **Tasks** primitive, introduced as **experimental** in `2025-11-25`, is the wheel the spec finally drew. A task is a durable state machine wrapping a request — typically `tools/call`, but also `sampling/createMessage` or `elicitation/create`. The client can list, inspect, cancel, and resume task results across the connection's life. The server emits status notifications as the task progresses. Disconnects don't lose work.
+
+The "experimental" label matters: the spec author reserves the right to change this primitive based on field experience. Treat it as a real protocol feature for shipping today, but watch the spec changelog and be ready to adjust.
+
+## The task lifecycle
+
+Every task moves through a small state machine:
+
+```
+[ created ] → working → completed
+                     ↘ input_required → working → completed
+                     ↘ failed
+                     ↘ cancelled
+```
+
+- **`working`** — task is running; client can call `tasks/get` to see status, or wait for notifications.
+- **`input_required`** — task is paused waiting for the user (typically via an elicitation). Client surfaces the elicitation; task resumes when answered.
+- **`completed`** — task finished successfully. Result is available via `tasks/result`.
+- **`failed`** — task ended in error. Error info available via `tasks/result`.
+- **`cancelled`** — client called `tasks/cancel`. Terminal state.
+
+`completed`, `failed`, and `cancelled` are all terminal. Once a task is terminal, its result is stable — clients can fetch it repeatedly without changing it. Servers can garbage-collect terminal task records after a retention window (the spec doesn't pin the window; common implementations keep them for an hour).
+
+## The five task methods
+
+| Method                       | What it does                                                                                    |
+| ---------------------------- | ----------------------------------------------------------------------------------------------- |
+| `tasks/list`                 | List active and recently-completed tasks. Paginated.                                            |
+| `tasks/get`                  | Fetch the current status of a single task by ID.                                                |
+| `tasks/result`               | Fetch the final result of a terminal task.                                                      |
+| `tasks/cancel`               | Request cancellation of a working task. Server SHOULD honor; may not be possible mid-operation. |
+| `notifications/tasks/status` | Server → client notification when a task's status changes. Carries the task ID and new status.  |
+
+Tasks are created implicitly when a client invokes a method with task semantics — there's no `tasks/create`. The server's response includes a task ID alongside (or instead of) the inline result.
+
+## Opting in: `execution.taskSupport` on tools
+
+Tools opt into Tasks via the `execution.taskSupport` field — covered briefly in lesson 03, now in full:
+
+- **`"required"`** — the tool ONLY works as a task. Calling it without task semantics returns an error. Use for operations that are always long-running (training jobs, large builds).
+- **`"optional"`** — the client decides. Synchronous calls return inline; if the client requests task semantics, the same operation runs as a task. Most realistic tools live here.
+- **`"forbidden"`** — short-running only. Wrapping it in a task is rejected. Use for cheap, fast, side-effect-free reads where task overhead is silly.
+
+```javascript
+server.tool(
+  "run_test_suite",
+  "Run the full integration test suite (typically 5-10 minutes)",
+  { branch: { type: "string" } },
+  async ({ branch }, { task }) => {
+    if (!task) {
+      // Should never happen because taskSupport: "required", but defensive.
+      throw new Error("This tool requires task semantics.");
+    }
+
+    await task.update({ status: "working", progress: "Cloning repository..." });
+    await clone(branch);
+
+    await task.update({ status: "working", progress: "Installing dependencies..." });
+    await install();
+
+    await task.update({ status: "working", progress: "Running tests..." });
+    const results = await runTests();
+
+    return {
+      structuredContent: results,
+      content: [{ type: "text", text: `Passed ${results.passed}/${results.total}` }],
+    };
+  },
+  {
+    execution: { taskSupport: "required" },
+  }
+);
+```
+
+The handler receives a `task` context object when the call is task-wrapped. `task.update()` emits `notifications/tasks/status` to the client; the client can render a progress bar or a streaming log without the server needing a separate transport.
+
+## input_required: pausing for the user
+
+Long-running tasks often hit decision points where they need user input. Rather than failing or guessing, a task transitions to `input_required` by issuing an elicitation (lesson 10). The client surfaces the elicitation, the user responds, the task resumes with the response in scope.
+
+```javascript
+server.tool(
+  "deploy_with_review",
+  "Deploy a service after running tests and waiting for human approval",
+  { service: { type: "string" } },
+  async ({ service }, { task, elicit }) => {
+    await task.update({ status: "working", progress: "Running pre-deploy tests..." });
+    const testResults = await runTests(service);
+
+    if (!testResults.passed) {
+      return {
+        content: [{ type: "text", text: `Tests failed: ${testResults.failures} failures.` }],
+        isError: true,
+      };
+    }
+
+    // Pause the task for human review. The client surfaces an elicitation;
+    // task status becomes input_required until the user answers.
+    const review = await elicit({
+      message: `Tests passed for ${service}. Proceed with deploy?`,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          proceed: { type: "boolean" },
+          strategy: { type: "string", enum: ["blue-green", "rolling"] },
+        },
+        required: ["proceed"],
+      },
+    });
+
+    if (review.action !== "accept" || !review.content?.proceed) {
+      return { content: [{ type: "text", text: "Deploy cancelled at review." }] };
+    }
+
+    await task.update({
+      status: "working",
+      progress: `Deploying via ${review.content.strategy}...`,
+    });
+    await deploy(service, review.content.strategy);
+
+    return { content: [{ type: "text", text: `Deployed ${service} successfully.` }] };
+  },
+  { execution: { taskSupport: "required" } }
+);
+```
+
+This is the canonical pattern for "long-running, with human approval at known checkpoints." The task encapsulates everything: progress, the pause for elicitation, resumption, final result. The client gets one persistent thing to display and interact with.
+
+## Cancellation
+
+A client can request cancellation via `tasks/cancel`. The server SHOULD honor it, but the spec acknowledges some operations can't be cancelled cleanly mid-flight (a destructive irreversible step already underway, an external API call you can't recall). Two patterns the spec endorses:
+
+```javascript
+server.tool(
+  "process_dataset",
+  "Process a large dataset in chunks",
+  { datasetId: { type: "string" } },
+  async ({ datasetId }, { task }) => {
+    const chunks = await listChunks(datasetId);
+    for (let i = 0; i < chunks.length; i++) {
+      // Pattern 1: check for cancellation at safe points
+      if (task.cancelRequested) {
+        return {
+          content: [{ type: "text", text: `Cancelled at chunk ${i}/${chunks.length}.` }],
+        };
+      }
+      await processChunk(chunks[i]);
+      await task.update({
+        status: "working",
+        progress: `Processed ${i + 1}/${chunks.length} chunks`,
+      });
+    }
+    return { content: [{ type: "text", text: `Processed ${chunks.length} chunks.` }] };
+  },
+  { execution: { taskSupport: "optional" } }
+);
+```
+
+Pattern 1 (above) is cancellation-safe at chunk boundaries — clean state, partial work returned. Pattern 2 (below) is for irrevocable operations: acknowledge the cancel request, but document that the work might complete anyway.
+
+```javascript
+// Pattern 2: acknowledge that mid-flight cancellation isn't safe
+async ({ paymentId }, { task }) => {
+  await task.update({ status: "working", progress: "Charging card..." });
+  if (task.cancelRequested) {
+    // Cancellation arrived BEFORE we hit the irreversible step — honor it.
+    return { content: [{ type: "text", text: "Cancelled before charge." }] };
+  }
+  await charge(paymentId); // irreversible
+  // We can no longer cancel — the charge happened. Return success.
+  return {
+    content: [{ type: "text", text: "Charged. Cancellation ignored — past point of no return." }],
+  };
+};
+```
+
+Never lie about cancellation. If you can't honor it, say so in the result so the user knows.
+
+## Streamable HTTP + Tasks: the resumability win
+
+Tasks compose with the Streamable HTTP transport's resumability (lesson 06). A long-running task survives a transient disconnect because:
+
+- The task ID is persistent on the server.
+- The client can re-fetch status with `tasks/get` after reconnecting.
+- Server notifications missed during the disconnect can be replayed via SSE `Last-Event-ID` if the client was subscribed.
+
+For a five-minute deploy, this means a flaky Wi-Fi connection at minute three doesn't lose the deploy state. The client reconnects, calls `tasks/get`, sees `status: "working", progress: "Deploying via blue-green..."`, and continues observing. Compare to the pre-Tasks world, where a disconnect mid-deploy meant: did it succeed? did it fail? did it get stuck? — no way to know without polling a bespoke endpoint your server invented.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write isTerminalStatus(status) that returns true for completed, failed, or cancelled — and false for working or input_required (or any unknown status). The spec defines exactly these terminal states; everything else can still transition."
+  initialCode={`function isTerminalStatus(status) {
+  // completed | failed | cancelled → true
+  // working | input_required | anything else → false
+}
+
+console.log(isTerminalStatus("completed")); // true
+console.log(isTerminalStatus("failed")); // true
+console.log(isTerminalStatus("cancelled")); // true
+console.log(isTerminalStatus("working")); // false
+console.log(isTerminalStatus("input_required")); // false
+console.log(isTerminalStatus("unknown_state")); // false`}
+  solution={`function isTerminalStatus(status) {
+return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+console.log(isTerminalStatus("completed"));
+console.log(isTerminalStatus("failed"));
+console.log(isTerminalStatus("cancelled"));
+console.log(isTerminalStatus("working"));
+console.log(isTerminalStatus("input_required"));
+console.log(isTerminalStatus("unknown_state"));`}
+testCases={["terminal states return true; non-terminal and unknown return false"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Your tool runs a 10-minute deploy. The user's Wi-Fi drops at minute 5 and reconnects at minute 7. Without Tasks, what happens? With Tasks, what changes?",
+      options: [
+        "Without Tasks: the deploy continues invisibly until the client polls. With Tasks: the client gets a notification.",
+        "Without Tasks: the request channel times out and the deploy state is opaque to the client. With Tasks: the task ID persists; the client reconnects, calls tasks/get, sees current status, and can replay missed notifications via Last-Event-ID.",
+        "Without Tasks: the deploy is automatically cancelled. With Tasks: the task pauses and waits for reconnection.",
+        "There's no difference — both rely on long-lived HTTP connections.",
+      ],
+      correct: 1,
+      explanation:
+        "Tasks decouple operation state from the request channel. The task ID survives disconnects; the client re-fetches status on reconnect and can replay missed notifications via Streamable HTTP's Last-Event-ID mechanism. Without Tasks, a request-timeout means the client has no way to learn whether the deploy succeeded.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A tool declares `execution.taskSupport: 'required'`. The client calls the tool without requesting task semantics. What should happen?",
+      options: [
+        "The server runs the tool synchronously anyway.",
+        "The server runs it as a task and returns the task ID without asking.",
+        "The server returns an error — the tool cannot be invoked outside of task semantics.",
+        "The server queues the call until the client upgrades.",
+      ],
+      correct: 2,
+      explanation:
+        "taskSupport: 'required' means the tool ONLY works as a task. A synchronous call returns an error so the client knows to retry with task semantics. Use 'required' for operations that are always long-running and shouldn't be confused with quick reads.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your task processes a credit card payment mid-loop and then needs to do more work. A `tasks/cancel` request arrives AFTER the charge succeeded but before subsequent work finishes. The spec's guidance is:",
+      options: [
+        "Refund the charge automatically — cancellation must roll back.",
+        "Ignore the cancel — once the task is past terminal-state, no cancellation is honored.",
+        "Continue the remaining work but document in the result that the cancel arrived past the point of no return; never lie about what was cancelled.",
+        "Throw an error — irreversible work in a cancellable task is a design bug.",
+      ],
+      correct: 2,
+      explanation:
+        "The spec acknowledges that not all operations can be cancelled mid-flight. For irrevocable steps that have already happened, honor what you can and explicitly tell the user what couldn't be cancelled. Never lie about cancellation — the user needs to know the actual state of the world.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Tasks have five methods: tasks/list, tasks/get, tasks/result, tasks/___, and notifications/tasks/status. The lifecycle moves from working through optional ___ _required back to working, then to one of three terminal states: completed, ___, or cancelled. Tools opt in via execution.___."
+  answers={["cancel", "input", "failed", "taskSupport"]}
+  hints={[
+    "The cancellation method.",
+    "Status name when the task is paused awaiting user response (two words; first word here).",
+    "The terminal state for errors.",
+    "The tool-definition field that opts into task semantics.",
+  ]}
+/>
+
+## What you learned
+
+- **Tasks** is the experimental `2025-11-25` primitive for long-running operations: durable state machines wrapping `tools/call`, `sampling/createMessage`, or `elicitation/create`.
+- Lifecycle: `working` → optional `input_required` → terminal (`completed` / `failed` / `cancelled`). Terminal states are stable.
+- Five methods: `tasks/list`, `tasks/get`, `tasks/result`, `tasks/cancel`, plus `notifications/tasks/status` for progress updates.
+- Tools opt in via `execution.taskSupport`: `"required"` (only as a task), `"optional"` (client decides), `"forbidden"` (synchronous only).
+- **`input_required`** pairs with elicitation — a task can pause for user input, surfaced via the elicitation primitive, and resume on response.
+- **Cancellation** is best-effort: honor at safe checkpoints, but never lie about irreversible work. Communicate clearly when a cancel arrives past the point of no return.
+- **Streamable HTTP + Tasks = resumability**: a long task survives disconnects because state lives on the server, not in a long-held HTTP request.
+- The "experimental" label means the spec author may refine this primitive based on field experience. Ship with it, but watch the changelog.

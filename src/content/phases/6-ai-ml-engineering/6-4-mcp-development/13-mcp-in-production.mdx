@@ -1,0 +1,334 @@
+---
+title: "MCP in Production"
+description: "Logging via the spec's Logging utility, rate-limit strategies that survive model loops, the MCP Registry, version pinning, supply-chain hygiene, and the production checklist drawn from the 2025-2026 CVE trail."
+phase: 6
+module: "6-4-mcp-development"
+order: 13
+estimatedMinutes: 14
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1", "SEC-1", "SE-2"]
+  swebok: ["Software Engineering Process", "Software Engineering Management"]
+  bloom: "apply"
+  sfia: 6
+  dreyfus: "expert"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+You've learned the protocol, the primitives, the auth contract, the new agentic features. Shipping an MCP server in production is what turns that knowledge into a working operational practice. This lesson covers what the spec standardizes for production (less than you'd expect), what it leaves to you (more than you'd expect), and the operational habits that prevent the failure modes the past 18 months of advisories have already shown us.
+
+The short version: the spec gives you Logging as the only standardized observability primitive, leaves rate limiting and metrics as implementation-defined, and provides a registry for discovery. Everything else — health checks, alerting, dependency management, deployment topology — you build on top with normal production-software discipline. The MCP-specific habits are at the edges: supply-chain hygiene around community servers, careful version pinning, and treating annotations and tool results as untrusted by default.
+
+## Logging: the one standardized primitive
+
+The spec's Logging utility (`logging/setLevel`, `notifications/message`) uses RFC 5424 syslog severity levels — `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`. The client subscribes by setting a level threshold; the server emits notifications at or above that threshold:
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+const server = new McpServer({ name: "billing-tools", version: "1.0.0" });
+
+server.tool(
+  "issue_refund",
+  "Issue a refund",
+  { orderId: { type: "string" } },
+  async ({ orderId }) => {
+    // RFC 5424 levels: debug | info | notice | warning | error | critical | alert | emergency
+    await server.log("info", `Refund requested for order ${orderId}`, { orderId });
+
+    try {
+      const refund = await processRefund(orderId);
+      await server.log("notice", "Refund completed", { orderId, refundId: refund.id });
+      return { content: [{ type: "text", text: `Refunded order ${orderId}.` }] };
+    } catch (err) {
+      await server.log("error", "Refund failed", { orderId, error: err.message });
+      return {
+        content: [{ type: "text", text: `Refund failed: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+```
+
+Three habits that matter:
+
+1. **`debug` is for development, never production.** The volume swamps clients; logs sent to clients are user-visible.
+2. **Structured data goes in the second arg.** Log message is a human-readable string; data goes in the structured payload so clients can filter, search, redact.
+3. **Logging is for the client.** For your own server-side audit trail (lesson 07), write to stdout/stderr or a real log pipeline. The Logging utility is a client-facing observability channel, not your forensic record.
+
+The spec doesn't define metrics, traces, or alerts. Those are implementation-defined — use OpenTelemetry, Prometheus, Datadog, whatever fits your stack. Just don't conflate them with the spec's Logging utility, which has a narrower job.
+
+## Rate limiting that survives model loops
+
+The spec says servers **MUST rate-limit tool invocations**, but leaves the algorithm to you. The threat the rule exists to mitigate isn't human users — it's models in tight tool-calling loops. A prompt injection or a stuck reasoning loop can fire hundreds of identical tool calls per minute. Conservative limits are a feature, not a friction.
+
+```javascript
+class RateLimiter {
+  constructor() {
+    // Composite key → array of recent timestamps
+    this.windows = new Map();
+  }
+
+  check(key, maxRequests, windowMs) {
+    const now = Date.now();
+    const cutoff = now - windowMs;
+    const ts = (this.windows.get(key) || []).filter((t) => t > cutoff);
+    if (ts.length >= maxRequests) {
+      return {
+        allowed: false,
+        retryAfterMs: ts[0] + windowMs - now,
+      };
+    }
+    ts.push(now);
+    this.windows.set(key, ts);
+    return { allowed: true };
+  }
+}
+
+const limiter = new RateLimiter();
+
+server.tool(
+  "send_email",
+  "Send an email",
+  { to: { type: "string" }, body: { type: "string" } },
+  async (args, { tokenClaims, sessionId }) => {
+    // Key on the most stable identity available. Auth claims > session > best-effort.
+    const key = `send_email:${tokenClaims?.sub ?? sessionId ?? "anon"}`;
+    const decision = limiter.check(key, 10, 60_000); // 10/min per identity
+
+    if (!decision.allowed) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Rate limited. Try again in ${Math.ceil(decision.retryAfterMs / 1000)}s.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    await sendEmail(args.to, args.body);
+    return { content: [{ type: "text", text: `Sent.` }] };
+  }
+);
+```
+
+Key the limit on the most stable identity you have:
+
+1. **Authenticated user sub** (OAuth `sub` claim) — best. One user can't be starved by another.
+2. **Session ID** — second-best. Per-connection isolation.
+3. **`"anon"` or IP** — fallback for unauthenticated public servers.
+
+Add a _logging-only_ shadow limit at 2× the hard limit. When it fires, you have a leading indicator of users approaching the cap before they hit it — useful for raising limits ahead of complaints rather than reacting to them.
+
+## Version pinning and negotiation in practice
+
+Spec version negotiation (lesson 02) sounds clean until you ship into a real client ecosystem. Two operational habits make it manageable:
+
+**Pin your declared spec version explicitly.** Don't `latest`. Don't drift implicitly when you bump the SDK. Declare what you support and only change it deliberately:
+
+```javascript
+const SUPPORTED_PROTOCOL_VERSION = "2025-11-25";
+const FLOOR_PROTOCOL_VERSION = "2025-06-18"; // we'll still talk to slightly-older clients
+
+server.onInitialize((req) => {
+  const requested = req.params.protocolVersion;
+  if (!isSupportedVersion(requested)) {
+    // Spec: respond with our latest; client decides whether to accept.
+    return {
+      protocolVersion: SUPPORTED_PROTOCOL_VERSION,
+      capabilities: {
+        /* ... */
+      },
+    };
+  }
+  return {
+    protocolVersion: requested,
+    capabilities: {
+      /* ... */
+    },
+  };
+});
+```
+
+**Test against multiple client versions.** The big clients (Claude Desktop, Claude Code, VS Code with Copilot, Cursor, Windsurf) lag the spec at different rates. A feature you wrote against `2025-11-25` may not work in Claude Desktop until it ships an update. Capability-check before relying on anything (sampling, sampling.tools, elicitation URL mode, tasks) and degrade gracefully.
+
+Don't assume your server will be the only thing that drifts. Clients drift too — and they outnumber servers.
+
+## The MCP Registry and packaging
+
+The official MCP Registry lives at `registry.modelcontextprotocol.io`. It's the centralized discovery point for community servers — searchable, browsable, with metadata about each server's authors, capabilities, and supported transports.
+
+Two production implications:
+
+**If you're publishing a server**, register it. Discoverability is the registry's whole job, and listing there reaches the clients that scan it on user request ("add the GitHub MCP server"). Include accurate capability metadata so capability negotiation works without surprises.
+
+**If you're using community servers**, treat the registry as a directory, not an endorsement. Listed != audited. Pin specific versions in your client config — `@modelcontextprotocol/server-github@1.4.2` not `@modelcontextprotocol/server-github` — so a malicious or buggy release doesn't auto-deploy to your users.
+
+Packaging conventions for stdio servers:
+
+- **`npx` (Node)** — most common. `command: "npx", args: ["-y", "@scope/server-name@x.y.z"]`. Always pin the version.
+- **`uvx` (Python)** — `uv tool run` equivalent. Same version-pinning rule.
+- **Docker** — for servers with complex native dependencies. The container is the version pin.
+- **Custom binary** — your own build, distributed via your own channel. Highest control, most maintenance.
+
+Whatever you choose, the version string in the client config should never read like "current stable." It should read like a specific release you tested against.
+
+## Supply-chain hygiene (this is the 2025-2026 lesson)
+
+The recurring failure mode from the past 18 months of MCP CVEs is the supply-chain seam between hosts running many community servers. CVE-2025-6514 (mcp-remote RCE), CVE-2025-68143/4/5 (mcp-server-git chain), the tool-redefinition attack class — all involved a server doing something unexpected to a host that trusted it.
+
+Operationally, that means:
+
+- **Pin versions.** Always.
+- **Audit the diff before bumping a version.** Especially for servers from individual contributors or pre-1.0 packages. "Bump dependencies" is how a quiet supply-chain compromise becomes your compromise.
+- **Run untrusted servers under reduced privilege.** Containerize, drop filesystem capabilities, scope environment-variable access, restrict outbound network. The spec doesn't enforce sandboxing; your host does.
+- **Treat tool annotations as untrusted.** (Repeat from lesson 03.) `destructiveHint: false` from a community server is a hope, not a guarantee.
+- **Cross-server isolation is your responsibility.** The spec doesn't define cross-server isolation; multi-server hosts must enforce it themselves. The tool-redefinition class exists because hosts don't always namespace by server identity.
+- **Subscribe to advisories.** GitHub's security advisories for the `modelcontextprotocol` org, JFrog's MCP-server tracker, eSentire's MCP roundups, NVD CVE feeds tagged MCP. These are 30 seconds of feed-subscription work that catches incidents before users do.
+
+The advisory trail is now long enough that "we hadn't heard of any MCP CVEs" is no longer a credible defense. The CVEs are findable. Find them before they find you.
+
+## Production checklist
+
+Before exposing an MCP server to real users, walk this list:
+
+**Transport & networking**
+
+- [ ] If HTTP: Origin validation on every endpoint, bind local servers to `127.0.0.1`.
+- [ ] `MCP-Protocol-Version` header parsing in place; reject invalid versions with 400.
+- [ ] Session lifecycle (issue, validate, expire, 404 on stale) wired in.
+
+**Auth (if HTTP + authenticated)**
+
+- [ ] OAuth 2.1 + PKCE-S256 contract complete (lesson 09).
+- [ ] `.well-known/oauth-protected-resource` published.
+- [ ] Audience validation (RFC 8707) before accepting any bearer token.
+- [ ] Token passthrough explicitly NOT implemented anywhere.
+
+**Tools and primitives**
+
+- [ ] Every tool's input is semantically validated (not just JSON Schema).
+- [ ] Every tool with side effects has `annotations` honestly populated AND has its own permission check (annotations aren't authorization).
+- [ ] `outputSchema` + `structuredContent` on tools whose output should be machine-readable.
+- [ ] `execution.taskSupport` set deliberately on every tool.
+
+**Consent & user trust**
+
+- [ ] No form-mode elicitation for credentials — anywhere.
+- [ ] Roots validated on every filesystem operation.
+- [ ] Sampling calls send minimal context the user can see; never use `includeContext: "allServers"`.
+
+**Operations**
+
+- [ ] Rate limit per stable identity (sub > session > anon).
+- [ ] Audit logging (separate from client-visible Logging utility) with `redactSecrets`.
+- [ ] Spec version pinned in your declaration; capability fallbacks tested.
+- [ ] Dependency versions pinned; advisory feeds subscribed.
+- [ ] If on the registry: capability metadata accurate, version updates deliberate.
+
+If you can tick every box, you've built a server worth shipping. If you skip any, document why and re-evaluate when it becomes a problem (or read about it in a CVE).
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write resolveRateLimitKey(context) that picks the most stable identity available from a context object with optional tokenClaims.sub, sessionId, and remoteIp fields. Priority: tokenClaims.sub > sessionId > remoteIp > 'anon'. Return the chosen key prefixed with 'rl:'."
+  initialCode={`function resolveRateLimitKey(context) {
+  // Pick the most stable identity, return as "rl:<value>"
+}
+
+console.log(resolveRateLimitKey({ tokenClaims: { sub: "user_42" }, sessionId: "s1", remoteIp: "1.2.3.4" })); // rl:user_42
+console.log(resolveRateLimitKey({ sessionId: "s1", remoteIp: "1.2.3.4" })); // rl:s1
+console.log(resolveRateLimitKey({ remoteIp: "1.2.3.4" })); // rl:1.2.3.4
+console.log(resolveRateLimitKey({})); // rl:anon`}
+  solution={`function resolveRateLimitKey(context) {
+const sub = context?.tokenClaims?.sub;
+if (sub) return "rl:" + sub;
+if (context?.sessionId) return "rl:" + context.sessionId;
+if (context?.remoteIp) return "rl:" + context.remoteIp;
+return "rl:anon";
+}
+
+console.log(resolveRateLimitKey({ tokenClaims: { sub: "user_42" }, sessionId: "s1", remoteIp: "1.2.3.4" }));
+console.log(resolveRateLimitKey({ sessionId: "s1", remoteIp: "1.2.3.4" }));
+console.log(resolveRateLimitKey({ remoteIp: "1.2.3.4" }));
+console.log(resolveRateLimitKey({}));`}
+testCases={["picks most stable identity in priority order, falls back to anon"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Your MCP server logs every tool invocation. Should you emit those audit records via the spec's Logging utility (`notifications/message`) or write them to a separate log pipeline?",
+      options: [
+        "Use the Logging utility — that's what it's standardized for.",
+        "Write to a separate log pipeline (stdout/stderr or your observability stack). The Logging utility is a client-facing observability channel, not your forensic record.",
+        "Both — duplicate every audit record to both channels for redundancy.",
+        "Use the Logging utility only at the `audit` severity level.",
+      ],
+      correct: 1,
+      explanation:
+        "The spec's Logging utility is client-facing — clients subscribe by severity and use it for their own observability. Your server-side audit trail is separate: it needs to survive client disconnects, get redacted appropriately, and feed your security/forensics pipeline. There's no 'audit' severity in RFC 5424 anyway.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your client config references an MCP server as `npx -y @scope/server@latest`. Why does the spec community consider this a supply-chain risk?",
+      options: [
+        "npx is slower than direct binary execution.",
+        "@latest auto-pulls whatever the registry currently labels stable; a malicious release or a buggy bump deploys to your users automatically with no review.",
+        "npx doesn't validate package signatures.",
+        "The MCP spec forbids unscoped packages.",
+      ],
+      correct: 1,
+      explanation:
+        "`@latest` auto-upgrades to whatever's currently published as stable. A compromised maintainer account, a typosquat shipping under the same scope, or a buggy release all hit your users with zero review. Pin specific versions (`@scope/server@1.4.2`) and audit diffs before bumping.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your sampling call needs to include recent conversation context for the model to work well. What's the right pattern in 2025-11-25?",
+      options: [
+        "Set `includeContext: 'thisServer'` and let the client include relevant context automatically.",
+        "Set `includeContext: 'allServers'` to maximize signal.",
+        "Pass the needed context explicitly in the `messages` array so the user can see exactly what's being asked of the model.",
+        "Read the context from `resources/list` and pass it as a `resource_link` content type.",
+      ],
+      correct: 2,
+      explanation:
+        "`includeContext` is soft-deprecated in 2025-11-25 because it hid context from the user. Pass needed context explicitly in messages so the user can see what's being shared with the model during the sampling approval flow. The consent contract requires user visibility into the prompt.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The spec standardizes ___ as the only client-facing observability primitive (RFC 5424 levels), leaves rate limiting and metrics implementation-defined, and provides a ___ at registry.modelcontextprotocol.io for discovery. Pin server versions, never ___; treat community server diffs as ___-worthy before upgrading."
+  answers={["Logging", "registry", "@latest", "audit"]}
+  hints={[
+    "The spec's one observability utility.",
+    "The discovery directory for community servers.",
+    "The version specifier that auto-upgrades; do NOT use this in production configs.",
+    "What you should do to the diff before bumping a dependency.",
+  ]}
+/>
+
+## What you learned
+
+- **The spec standardizes Logging** (`notifications/message`, RFC 5424 levels) as the client-facing observability primitive. Server-side audit logging is separate and your responsibility.
+- **Rate limiting is MUST but implementation-defined.** Key on the most stable identity available (OAuth `sub` > session > IP). Conservative limits protect against runaway model loops, not just abusive users.
+- **Version pinning** at both ends: your declared spec version (`2025-11-25`, not "latest") and your dependency versions in client configs (`@scope/server@1.4.2`, never `@latest`). Capability-check and degrade gracefully when clients lag.
+- **The MCP Registry** at `registry.modelcontextprotocol.io` is for discovery, not endorsement. Treat listings as a directory; audit diffs before upgrading any community server.
+- **Supply-chain hygiene is the 2025-2026 lesson.** Pin versions, audit diffs, sandbox untrusted servers, treat annotations as untrusted, namespace tools across servers in multi-server hosts, subscribe to advisories.
+- **Walk the production checklist** before shipping. Transport, auth, primitives, consent, operations — every box is something a real CVE has trained the field to care about.
+
+This is the last lesson in the MCP module. You now have the protocol mechanics (lessons 01-06), the security contracts (07, 09), the agentic primitives (10-12), and the production operating model (13). Go build something — and watch the spec changelog.

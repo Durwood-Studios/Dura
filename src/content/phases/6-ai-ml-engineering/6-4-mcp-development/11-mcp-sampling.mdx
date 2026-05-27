@@ -1,0 +1,299 @@
+---
+title: "MCP Sampling"
+description: "Server-initiated LLM calls — when your server needs the client's model to reason, summarize, or decide. Plus the 2025-11-25 addition: tool use during sampling."
+phase: 6
+module: "6-4-mcp-development"
+order: 11
+estimatedMinutes: 13
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-1", "AI-2"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+---
+
+## Why this matters
+
+Most MCP servers do work: they query, fetch, compute, transform. Some kinds of work need _reasoning_ — summarize this changelog, decide whether this commit is risky, choose between two refactoring approaches. The naive answer is "the server runs its own LLM," but that's expensive, opinionated (which model? which API key?), and creates auth surface the spec is trying to avoid.
+
+Sampling is the spec's answer: your server asks the _client's_ model to do the reasoning, with the user in the loop. The server sends a `sampling/createMessage` request, the client surfaces it to the user for approval, the user-approved prompt goes to whatever model that client is using, and the response comes back to the server. The model stays in the client. The reasoning happens with the user's knowledge. The server gets the answer.
+
+In `2025-11-25` sampling went one step further: a sampling call can itself include tools, letting the model run a multi-turn loop entirely within the server's request. Same primitive, much more capable.
+
+## The basic sampling call
+
+A `sampling/createMessage` request asks the client's model to generate a completion from a set of messages. Shape mirrors what you'd send to any chat-style LLM API:
+
+```javascript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+const server = new McpServer({ name: "review-tools", version: "1.0.0" });
+
+server.tool(
+  "summarize_changelog",
+  "Summarize a changelog into a 3-sentence release note",
+  { changelog: { type: "string" } },
+  async ({ changelog }, { sample }) => {
+    const result = await sample({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Summarize this changelog into exactly 3 sentences for a release note. Lead with what users will notice; end with any breaking change.\n\n${changelog}`,
+          },
+        },
+      ],
+      maxTokens: 400,
+      systemPrompt: "You are a precise technical writer.",
+    });
+
+    return {
+      content: [{ type: "text", text: result.content.text }],
+    };
+  }
+);
+```
+
+The handler in the server can't directly invoke the client's model — that would defeat the consent boundary. It calls `sample()`, the SDK turns that into a `sampling/createMessage` request, and the client renders an approval UI before running the actual model call.
+
+## Model preferences
+
+You can't pick a specific model by name — the spec is deliberately model-agnostic. But you can express _preferences_ the client uses to pick the right model from what it has access to:
+
+```javascript
+const result = await sample({
+  messages: [...],
+  maxTokens: 1000,
+  modelPreferences: {
+    hints: [{ name: "claude-3-5-sonnet" }, { name: "gpt-4o" }],
+    costPriority: 0.5,         // 0.0 = ignore cost, 1.0 = minimize cost
+    speedPriority: 0.3,         // 0.0 = ignore latency, 1.0 = minimize latency
+    intelligencePriority: 0.9,  // 0.0 = ignore capability, 1.0 = maximize capability
+  },
+});
+```
+
+`hints[]` is an ordered list of model names you'd prefer; the client uses these as guidance, not commands. The three priority fields are 0.0–1.0 weights — the client picks a model that best satisfies the weighted preference. For deeply technical reasoning, set `intelligencePriority` high; for a quick tag-line, lean on `speedPriority`.
+
+The spec is explicit that the client makes the final choice. A server that hard-codes `claude-3-5-sonnet` and breaks when the client only has `gpt-4o` is doing it wrong — degrade gracefully and let the client decide.
+
+## The consent contract
+
+Sampling is the primitive most amenable to abuse. A malicious server could ask the client to run prompts that leak conversation history, exfiltrate context, or burn the user's API budget. The spec defends with hard rules:
+
+- **User MUST approve every sampling request.** Clients render the prompt for review before sending it to the model.
+- **Clients SHOULD let users edit the prompt** before it goes to the model — the user owns the final wording.
+- **Clients SHOULD let users review the response** before it comes back to the server — the user can redact, decline, or modify what the server sees.
+- **`includeContext: "thisServer" | "allServers"`** values are **soft-deprecated** in `2025-11-25`. Originally they let a server request the client include prior conversation content; the abuse potential proved too high. New code should leave `includeContext` unset and pass any needed context explicitly through the `messages` array — content the user can see.
+
+```javascript
+// Don't do this in new code:
+await sample({
+  messages: [...],
+  includeContext: "allServers", // soft-deprecated — visibility into other servers' context
+});
+
+// Do this — explicit context the user can see in the approval UI:
+await sample({
+  messages: [
+    {
+      role: "user",
+      content: { type: "text", text: `Given this PR diff:\n\n${diff}\n\nIs it safe to merge?` },
+    },
+  ],
+});
+```
+
+The user MUST see what the server is asking the model to see. Hiding context behind a flag breaks that contract.
+
+## Tool use during sampling (new in 2025-11-25)
+
+The most consequential `2025-11-25` addition: a sampling call can include tools. When the model wants to call one, the call surfaces back through the client (with user approval, naturally), executes, and the result flows back into the same sampling loop. The server gets a final answer that may have involved several tool turns inside the model's reasoning.
+
+```javascript
+server.tool(
+  "investigate_incident",
+  "Investigate a production incident using all available debugging tools",
+  { incidentId: { type: "string" } },
+  async ({ incidentId }, { sample }) => {
+    const result = await sample({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Investigate incident ${incidentId}. Use the available tools to fetch logs, metrics, and recent deploys. Produce a root-cause summary.`,
+          },
+        },
+      ],
+      maxTokens: 4000,
+      // 2025-11-25: declare tools available to the model during this sampling call.
+      tools: [
+        {
+          name: "get_logs",
+          description: "Fetch the last N log lines for a service",
+          inputSchema: {
+            type: "object",
+            properties: { service: { type: "string" }, lines: { type: "number" } },
+            required: ["service"],
+          },
+        },
+        {
+          name: "get_metrics",
+          description: "Fetch a metrics window",
+          inputSchema: {
+            type: "object",
+            properties: { metric: { type: "string" }, since: { type: "string" } },
+            required: ["metric"],
+          },
+        },
+      ],
+      toolChoice: "auto", // "auto" | "required" | "none"
+    });
+
+    return {
+      content: [{ type: "text", text: result.content.text }],
+    };
+  }
+);
+```
+
+`toolChoice` controls the model's behavior:
+
+- `"auto"` — model decides whether to call tools (the common case).
+- `"required"` — model MUST call at least one tool before responding (force-research patterns).
+- `"none"` — disable tools for this turn even though they're declared (occasionally useful for "summarize without exploring further").
+
+Tool-use-during-sampling is gated by a separate client capability: `sampling.tools`. A client that supports `sampling` but not `sampling.tools` will reject the request if you include the `tools[]` field. Capability-check before you rely on it.
+
+## Capability negotiation
+
+Sampling support is advertised by the **client** during `initialize`. Servers MUST check:
+
+```javascript
+server.onInitialize((req) => {
+  const sampling = req.capabilities?.sampling;
+  if (!sampling) {
+    // Disable tools that depend on sampling; surface this as a limitation.
+    server.disableTool("summarize_changelog");
+    server.disableTool("investigate_incident");
+    return;
+  }
+  if (!sampling.tools) {
+    // Sampling works, but not with tool use — fall back to single-turn calls.
+    server.disableTool("investigate_incident");
+  }
+});
+```
+
+Old clients may not implement sampling at all. Older-still clients might implement basic sampling but not the 2025-11-25 tools extension. Your server gracefully degrades or it ships broken in the wild.
+
+## When NOT to use sampling
+
+The temptation is to sample for every decision. Resist it. Sampling has real costs:
+
+- **Latency** — each sampling round-trip adds the client's user-approval friction plus the model's inference time.
+- **Cost** — the user pays for the inference. Servers calling sampling in tight loops are how API bills explode.
+- **Trust surface** — every sampling call is a prompt the user has to review. Spamming approvals trains users to click through, eroding the consent contract.
+
+Reserve sampling for genuinely ambiguous reasoning: should I take this destructive action? How should I categorize this freeform input? Summarize this long document. Deterministic decisions (string matching, numeric thresholds, schema validation) should run in your server's own code, not via the client's model.
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write canUseSampling(capabilities) that returns one of three strings: 'full' if both capabilities.sampling and capabilities.sampling.tools are present, 'basic' if sampling is present but sampling.tools is missing, 'none' if sampling itself is missing. Treat sampling: {} as basic (tools key absent)."
+  initialCode={`function canUseSampling(capabilities) {
+  // Inspect the client capability tree
+}
+
+console.log(canUseSampling({ sampling: { tools: {} } })); // full
+console.log(canUseSampling({ sampling: {} })); // basic
+console.log(canUseSampling({})); // none
+console.log(canUseSampling({ resources: {} })); // none (no sampling key)`}
+  solution={`function canUseSampling(capabilities) {
+const s = capabilities?.sampling;
+if (!s) return "none";
+if (s.tools) return "full";
+return "basic";
+}
+
+console.log(canUseSampling({ sampling: { tools: {} } }));
+console.log(canUseSampling({ sampling: {} }));
+console.log(canUseSampling({}));
+console.log(canUseSampling({ resources: {} }));`}
+testCases={["maps sampling capability tree to full / basic / none correctly"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Your server needs to summarize a long document. Why use sampling instead of calling an LLM API directly from your server code?",
+      options: [
+        "Sampling is always faster than direct API calls.",
+        "Sampling lets the user's client run the inference with user approval, keeping the model choice and cost on the user's side.",
+        "Sampling is the only way to use Claude models from a server.",
+        "Sampling bypasses the MCP authorization contract.",
+      ],
+      correct: 1,
+      explanation:
+        "Sampling keeps the model and inference on the client side, under user approval and using the user's chosen model. The server avoids managing API keys, model choice, or inference costs — and the user sees exactly what's being asked of the model.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "In `2025-11-25`, what does setting `toolChoice: 'required'` in a sampling call do?",
+      options: [
+        "Forces the client to require user approval for every tool call.",
+        "Makes the model call at least one of the provided tools before producing its final response.",
+        "Requires the user to manually pick which tool gets called.",
+        "Promotes the tools list to a hard capability requirement that the client must support.",
+      ],
+      correct: 1,
+      explanation:
+        "toolChoice: 'required' forces the model to call at least one tool before responding — useful for force-research patterns where the answer must be grounded in tool output, not the model's prior knowledge alone.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Why does the 2025-11-25 spec soft-deprecate `includeContext: 'allServers'`?",
+      options: [
+        "It was a performance bottleneck on large conversations.",
+        "It let servers request the client include prior conversation context — including from other servers — without the user seeing what was being shared, breaking the consent contract.",
+        "Newer clients use a different field name for the same feature.",
+        "It conflicted with the new tools-in-sampling feature.",
+      ],
+      correct: 1,
+      explanation:
+        "includeContext: 'allServers' let a server pull in conversation context (potentially from other servers) without the user seeing what context the model would see. That breaks the consent contract sampling depends on — the user MUST see what's being asked. Pass needed context explicitly through the messages array instead.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Sampling uses the ___ method to ask the client's model for a completion. Model preferences include hints[] and three 0.0-1.0 priorities: cost, ___, and intelligence. The 2025-11-25 spec added tool use during sampling, gated by the sampling.___ capability; toolChoice can be auto, required, or ___."
+  answers={["sampling/createMessage", "speed", "tools", "none"]}
+  hints={[
+    "JSON-RPC method name for sampling requests.",
+    "The latency-vs-cost-vs-capability axis other than cost and intelligence.",
+    "Sub-capability for tool use within sampling.",
+    "Disables tools for the current sampling turn even though they're declared.",
+  ]}
+/>
+
+## What you learned
+
+- **Sampling** (`sampling/createMessage`) lets a server ask the client's model for a completion — reasoning, summarization, categorization — without bringing its own model or API key.
+- **Model preferences** (`hints[]`, `costPriority`, `speedPriority`, `intelligencePriority`) guide the client's model choice, but the client makes the final pick.
+- **The consent contract is hard**: user MUST approve every sampling call; clients SHOULD let users edit prompts and review responses; `includeContext: "thisServer" | "allServers"` is soft-deprecated because it hid context from the user.
+- **Tool use during sampling** (new in 2025-11-25) lets the model call provided `tools[]` mid-loop. Gated by the separate `sampling.tools` capability. `toolChoice`: `auto` / `required` / `none`.
+- **Capability negotiation matters** — check `capabilities.sampling` and `capabilities.sampling.tools` during `initialize` and degrade gracefully.
+- **Don't sample for everything** — reserve it for genuinely ambiguous reasoning. Deterministic decisions belong in your server's own code.
