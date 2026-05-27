@@ -183,6 +183,81 @@ export const PHASE_5_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["semaphore", "synchronization", "blocking"]
   ),
+  q(
+    "5-1-q11",
+    "5-1",
+    "multiple-choice",
+    "What's the difference between a system call and a regular library function call?",
+    [
+      "System calls are written in assembly; library calls are written in C.",
+      "A system call traps into the kernel to request privileged services; a library call runs entirely in user space.",
+      "System calls are deprecated in modern operating systems.",
+      "Library calls require root privileges; system calls do not.",
+    ],
+    1,
+    "A library call (like printf) executes in user space. A syscall (like write) triggers a CPU mode switch into the kernel because only the kernel can touch hardware/IO. Libraries often wrap syscalls (printf eventually calls write).",
+    "easy",
+    ["syscall", "kernel"]
+  ),
+  q(
+    "5-1-q12",
+    "5-1",
+    "true-false",
+    "True or false: virtual memory lets a process address more memory than the machine physically has installed.",
+    ["True", "False"],
+    0,
+    "Each process gets its own virtual address space, mapped to physical RAM on demand and backed by swap when needed. A 64-bit process can address far more than physical RAM.",
+    "easy",
+    ["virtual-memory", "os"]
+  ),
+  q(
+    "5-1-q13",
+    "5-1",
+    "multiple-choice",
+    "What does the kernel save and restore during a context switch between processes?",
+    [
+      "Just the program counter.",
+      "CPU registers, the program counter, the stack pointer, and (in process switches) the page tables — which often invalidates the TLB.",
+      "Only the process ID.",
+      "Nothing — context switches are free.",
+    ],
+    1,
+    "A process context switch swaps register state, PC, SP, and the page-table pointer. TLB entries are no longer valid for the new address space, causing initial slowdowns. Thread switches within a process are cheaper because page tables stay.",
+    "medium",
+    ["context-switch", "os"]
+  ),
+  q(
+    "5-1-q14",
+    "5-1",
+    "multiple-choice",
+    "When would you reach for a spinlock instead of a mutex?",
+    [
+      "Spinlocks work on more architectures than mutexes.",
+      "When the protected section is extremely short and you're on a multi-core system — busy-waiting avoids the cost of sleeping/waking a thread.",
+      "Whenever you want guaranteed fairness across threads.",
+      "Spinlocks are deprecated; always use mutexes.",
+    ],
+    1,
+    "Spinlocks busy-wait, so they only make sense when (1) you have multiple cores and (2) the critical section is shorter than a context-switch cost. On single-core or long sections, mutexes (which sleep) are better.",
+    "medium",
+    ["spinlock", "mutex", "synchronization"]
+  ),
+  q(
+    "5-1-q15",
+    "5-1",
+    "multiple-choice",
+    "What is a zombie process?",
+    [
+      "A process consuming 100% CPU with no useful work.",
+      "A child process that has exited but whose entry remains in the process table because its parent hasn't called wait() to reap it.",
+      "A process that survives a kernel panic.",
+      "A daemon process running as root.",
+    ],
+    1,
+    "When a child exits, the kernel keeps a small process-table entry so the parent can read the exit status via wait(). Until the parent reaps it, the entry is a 'zombie'. Long-lived zombies are usually a parent bug.",
+    "hard",
+    ["process", "os"]
+  ),
 
   // ── Module 5-2: Computer Networking ──────────────────────────────────────
   q(
@@ -344,6 +419,86 @@ export const PHASE_5_QUESTIONS: AssessmentQuestion[] = [
     "TCP congestion control (slow start, congestion avoidance, fast retransmit) adjusts the sending rate based on packet loss signals. Without it, senders would flood the network until routers drop everything.",
     "medium",
     ["tcp", "congestion", "flow-control"]
+  ),
+  q(
+    "5-2-q11",
+    "5-2",
+    "multiple-choice",
+    "What does NAT (Network Address Translation) do?",
+    [
+      "Encrypts traffic crossing the internet.",
+      "Rewrites source/destination IP and port on packets so many private-IP devices can share one public IP.",
+      "Translates domain names into IP addresses.",
+      "Discovers neighboring routers on the same subnet.",
+    ],
+    1,
+    "NAT lives in your home router and at corporate edges. It maps a pool of private IPs (e.g., 192.168.x.x) to one public IP, tracking connections so reply traffic can be sent back to the right device.",
+    "easy",
+    ["nat", "networking"]
+  ),
+  q(
+    "5-2-q12",
+    "5-2",
+    "multiple-choice",
+    "What is the most fundamental difference between IPv4 and IPv6?",
+    [
+      "IPv6 only works over TCP; IPv4 supports both TCP and UDP.",
+      "IPv6 uses 128-bit addresses (~3.4 × 10^38 possible) vs IPv4's 32-bit (~4.3 billion) — solving IPv4 exhaustion.",
+      "IPv6 is encrypted by default; IPv4 is plaintext.",
+      "IPv4 is for IPv4 only; IPv6 supports all internets.",
+    ],
+    1,
+    "Address space is the headline. IPv6 also brings simplified headers, no NAT (every device can have a public address), better autoconfiguration, and built-in IPsec support, but the core driver is exhaustion.",
+    "easy",
+    ["ipv4", "ipv6", "networking"]
+  ),
+  q(
+    "5-2-q13",
+    "5-2",
+    "multiple-choice",
+    "What does BGP (Border Gateway Protocol) do on the public internet?",
+    [
+      "Manages WiFi network handshakes.",
+      "Exchanges routing information between autonomous systems (ISPs, large networks) — it's how the internet's backbones tell each other which prefixes they can reach.",
+      "Translates between IPv4 and IPv6.",
+      "Encrypts internal corporate traffic.",
+    ],
+    1,
+    "BGP is the routing protocol that glues the internet together at the AS-to-AS layer. A BGP misconfiguration at one major ISP (or a hijacked prefix announcement) can take large chunks of the internet offline.",
+    "medium",
+    ["bgp", "routing"]
+  ),
+  q(
+    "5-2-q14",
+    "5-2",
+    "multiple-choice",
+    "HTTP/3 differs from HTTP/2 most fundamentally because:",
+    [
+      "It supports streaming for the first time.",
+      "It runs over QUIC (UDP-based) instead of TCP, eliminating TCP head-of-line blocking at the transport layer and allowing faster connection setup with 0-RTT resumption.",
+      "It drops support for TLS.",
+      "It introduced binary framing.",
+    ],
+    1,
+    "HTTP/2's multiplexed streams still share one TCP connection — a single packet loss stalls every stream (TCP HOL blocking). HTTP/3 uses QUIC over UDP, where each stream has independent loss recovery. Plus 0-RTT connection resumption.",
+    "medium",
+    ["http3", "quic", "networking"]
+  ),
+  q(
+    "5-2-q15",
+    "5-2",
+    "multiple-choice",
+    "Your service has a median latency of 50ms but a p99 of 2 seconds. Which technique most directly attacks the p99?",
+    [
+      "Increase the TLS key size.",
+      "Hedged requests — fire a second request to a replica if the first hasn't responded by p95, then take whichever wins.",
+      "Lower the keep-alive timeout.",
+      "Switch from JSON to XML.",
+    ],
+    1,
+    "Hedging is the canonical tail-latency tool (Google 'The Tail at Scale'): pay a small extra cost to send a redundant request late, drop the loser. Median stays similar; p99 drops dramatically. Backend capacity needs to absorb the duplicated load.",
+    "hard",
+    ["tail-latency", "performance"]
   ),
 
   // ── Module 5-3: Database Internals ───────────────────────────────────────
@@ -507,6 +662,86 @@ export const PHASE_5_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["eventual-consistency", "cap", "distributed"]
   ),
+  q(
+    "5-3-q11",
+    "5-3",
+    "multiple-choice",
+    "What does ACID stand for, in database terms?",
+    [
+      "Append, Commit, Index, Delete",
+      "Atomicity, Consistency, Isolation, Durability",
+      "Authentication, Caching, Indexing, Distribution",
+      "Asynchronous, Concurrent, Idempotent, Decoupled",
+    ],
+    1,
+    "Atomicity (all or nothing), Consistency (constraints hold), Isolation (concurrent txns don't see each other's intermediate state), Durability (committed data survives crashes). The classic transaction guarantees.",
+    "easy",
+    ["acid", "transactions"]
+  ),
+  q(
+    "5-3-q12",
+    "5-3",
+    "multiple-choice",
+    "What does a foreign-key constraint enforce?",
+    [
+      "That values are encrypted at rest.",
+      "That every value in the referencing column matches a value that exists in the referenced table's primary key — preventing orphan rows.",
+      "That the referenced table cannot be dropped.",
+      "That writes to the referencing column must be uppercase.",
+    ],
+    1,
+    "FKs enforce referential integrity. An insert with an FK value that doesn't exist in the referenced table fails. ON DELETE policies (CASCADE, RESTRICT, SET NULL) control what happens when the referenced row is removed.",
+    "easy",
+    ["foreign-key", "referential-integrity"]
+  ),
+  q(
+    "5-3-q13",
+    "5-3",
+    "multiple-choice",
+    "Optimistic vs pessimistic concurrency control — when does each shine?",
+    [
+      "Optimistic always wins; pessimistic is deprecated.",
+      "Optimistic (assume no conflict, check at commit) is best when conflicts are rare; pessimistic (lock first, work second) is best when conflicts are frequent and locks are cheap relative to retries.",
+      "Optimistic locks rows; pessimistic locks tables.",
+      "They behave identically; the names are just preferences.",
+    ],
+    1,
+    "Optimistic uses version columns or timestamps and aborts on conflict — fast when contention is low. Pessimistic uses explicit locks (SELECT ... FOR UPDATE) — necessary when contention is high and you can't afford retry storms.",
+    "medium",
+    ["concurrency", "locking"]
+  ),
+  q(
+    "5-3-q14",
+    "5-3",
+    "multiple-choice",
+    "You have a query that filters on (user_id, created_at) and orders by created_at. Which index is most useful?",
+    [
+      "A separate index on user_id and another on created_at.",
+      "A composite index on (user_id, created_at) — the optimizer can both filter and avoid a sort.",
+      "A full-text index on created_at.",
+      "No index — the planner will figure it out.",
+    ],
+    1,
+    "A composite index whose first column matches the equality filter (user_id) and whose subsequent column matches the sort (created_at) lets the planner seek into the right user's range and return rows already ordered. Two single-column indexes can't combine that cleanly.",
+    "medium",
+    ["index", "composite", "query-planning"]
+  ),
+  q(
+    "5-3-q15",
+    "5-3",
+    "multiple-choice",
+    "For a cross-service business transaction (e.g., charge payment + ship product), two-phase commit (2PC) is rarely used today. What pattern is more common?",
+    [
+      "Three-phase commit (3PC).",
+      "Saga — model the transaction as a sequence of local transactions, each with a compensating action that's invoked if a later step fails.",
+      "Just run all steps inside a single SQL transaction across both services.",
+      "Skip transactional semantics entirely.",
+    ],
+    1,
+    "2PC requires a coordinator and blocks participants holding locks while it waits — operationally fragile at scale. Sagas decompose into local txns + compensations (refund the payment if shipping fails), trading strict atomicity for availability and operational sanity.",
+    "hard",
+    ["saga", "2pc", "distributed-transactions"]
+  ),
 
   // ── Module 5-4: Cloud and Infrastructure ─────────────────────────────────
   q(
@@ -668,5 +903,85 @@ export const PHASE_5_QUESTIONS: AssessmentQuestion[] = [
     "Serverless (Lambda, Cloud Functions) scales to zero — no idle cost, no server management. But cold starts add latency on first invocation. Containers (ECS, Cloud Run) are always warm but you pay even when idle. Choose based on traffic patterns.",
     "medium",
     ["serverless", "containers", "cost"]
+  ),
+  q(
+    "5-4-q11",
+    "5-4",
+    "multiple-choice",
+    "What is IAM in a cloud provider, in one sentence?",
+    [
+      "A pricing model based on usage.",
+      "The authentication + authorization service — who can do what to which resources, expressed as identities, roles, and policies.",
+      "A backup service.",
+      "A way to share VPCs across accounts.",
+    ],
+    1,
+    "IAM = Identity and Access Management. Users, roles, service accounts, and machine identities; policies attach to each declaring allowed actions on resources. Most cloud breaches trace to overly permissive IAM policies.",
+    "easy",
+    ["iam", "cloud", "security"]
+  ),
+  q(
+    "5-4-q12",
+    "5-4",
+    "multiple-choice",
+    "What's the difference between an SLA, an SLO, and an SLI?",
+    [
+      "They're three names for the same concept.",
+      "SLI is a measurement (latency, errors), SLO is your internal target (99.9% of requests under 200ms), SLA is the customer-facing contract (with penalties for breach).",
+      "SLA and SLO are equivalent; SLI is deprecated.",
+      "SLA is for hardware, SLO is for software, SLI is for networks.",
+    ],
+    1,
+    "Indicator (what you measure) → Objective (the bar you set internally) → Agreement (what you promise externally, with consequences). SLAs are looser than SLOs because you want headroom between 'oh-no' and 'pay-customers'.",
+    "easy",
+    ["sla", "slo", "sre"]
+  ),
+  q(
+    "5-4-q13",
+    "5-4",
+    "multiple-choice",
+    "Blue-green deployment vs canary release — what's the difference?",
+    [
+      "Blue-green runs only in dev; canary runs in prod.",
+      "Blue-green keeps two full production environments and cuts 100% of traffic from old to new at once; canary gradually shifts traffic (1%, 5%, 25%, 100%) to the new version while watching for regressions.",
+      "Blue-green is for stateless services; canary is for stateful.",
+      "They're identical except for the colors used in dashboards.",
+    ],
+    1,
+    "Blue-green: atomic switch, instant rollback, double infra cost during deploy. Canary: gradual exposure, catches regressions on a fraction of traffic, requires routing infra (LB rules, service mesh, feature flags).",
+    "medium",
+    ["deployment", "canary", "blue-green"]
+  ),
+  q(
+    "5-4-q14",
+    "5-4",
+    "multiple-choice",
+    "Your service caches API responses. Which strategy invalidates a cache entry on every write to the underlying data?",
+    [
+      "TTL-only — let the entry expire after N seconds.",
+      "Write-through — every write to the underlying store also updates (or invalidates) the cache.",
+      "Read-through — populate the cache on first read.",
+      "Refresh-ahead — proactively refresh entries before expiry.",
+    ],
+    1,
+    "Write-through (and its sibling write-around) explicitly invalidate or update the cache on writes, keeping it consistent. TTL alone risks stale reads for the TTL window. The right strategy depends on read/write ratio and tolerable staleness.",
+    "medium",
+    ["caching", "invalidation"]
+  ),
+  q(
+    "5-4-q15",
+    "5-4",
+    "multiple-choice",
+    "What does a service mesh (Envoy + Istio, Linkerd) give you that a plain reverse proxy doesn't?",
+    [
+      "Faster raw throughput.",
+      "Per-service sidecars that handle mTLS, retries, timeouts, circuit breaking, traffic-shifting, and uniform observability — without each service having to implement those concerns in code.",
+      "A managed Kubernetes cluster.",
+      "Automatic horizontal autoscaling.",
+    ],
+    1,
+    "A reverse proxy sits at the edge for north-south traffic. A service mesh adds a sidecar to every pod for east-west traffic, externalizing cross-cutting concerns (security, retries, observability). Cost: more components, control-plane complexity, latency overhead.",
+    "hard",
+    ["service-mesh", "envoy", "istio"]
   ),
 ];

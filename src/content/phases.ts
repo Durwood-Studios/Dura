@@ -607,5 +607,5 @@ export const CONTENT_COUNTS = {
   /** Total dictionary terms across all batches. */
   dictionaryTerms: 500,
   /** Total assessment questions across all phases. */
-  assessmentQuestions: 524,
+  assessmentQuestions: 564,
 } as const;

@@ -173,6 +173,86 @@ export const PHASE_7_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["ast", "visitor-pattern"]
   ),
+  q(
+    "7-1-q11",
+    "7-1",
+    "multiple-choice",
+    "What does the lexer (tokenizer) do, exactly?",
+    [
+      "Builds the abstract syntax tree.",
+      "Reads the raw source text and produces a stream of tokens (keywords, identifiers, literals, punctuation), discarding whitespace and comments.",
+      "Generates machine code.",
+      "Performs type checking.",
+    ],
+    1,
+    "Lexing is stage 1: text → tokens. Each token has a kind (IDENT, NUMBER, IF, LPAREN) and usually a value and source position. The parser then consumes tokens to build the AST.",
+    "easy",
+    ["lexer", "tokens"]
+  ),
+  q(
+    "7-1-q12",
+    "7-1",
+    "multiple-choice",
+    "What's the practical difference between a compiler and an interpreter?",
+    [
+      "Compilers produce executable files ahead of time; interpreters execute the source (or an intermediate form) directly at runtime.",
+      "Compilers are faster than interpreters in every case.",
+      "Interpreters don't support recursion.",
+      "Compilers only work on statically typed languages.",
+    ],
+    0,
+    "A compiler translates the whole program to a target (machine code, bytecode, JS) before execution. An interpreter walks the source or an intermediate representation and executes as it goes. Hybrid systems (JITs) blur the line.",
+    "easy",
+    ["compiler", "interpreter"]
+  ),
+  q(
+    "7-1-q13",
+    "7-1",
+    "multiple-choice",
+    "What does SSA (Static Single Assignment) form make easier in an optimizing compiler?",
+    [
+      "Source-level debugging.",
+      "Dataflow analyses (constant propagation, dead-code elimination, common-subexpression elimination) by guaranteeing each variable is assigned exactly once.",
+      "Lexing the source.",
+      "Producing readable error messages.",
+    ],
+    1,
+    "In SSA every assignment creates a fresh variable version (x1, x2, x3 ...). Reasoning about 'where did this value come from' becomes a single-edge lookup, which makes most dataflow optimizations dramatically simpler and faster.",
+    "medium",
+    ["ssa", "optimization"]
+  ),
+  q(
+    "7-1-q14",
+    "7-1",
+    "multiple-choice",
+    "Register allocation is hard primarily because:",
+    [
+      "Modern CPUs have unlimited registers.",
+      "There are typically far fewer hardware registers than live values in the program, and choosing which values to keep in registers vs spill to memory is an NP-hard graph-coloring problem in the general case.",
+      "Registers are slower than memory.",
+      "Compilers can't read register names.",
+    ],
+    1,
+    "Live ranges of variables interfere when they're alive at the same time. Mapping them to a fixed number of hardware registers is equivalent to graph coloring — NP-hard in general, solved with heuristics like linear scan or Chaitin's algorithm.",
+    "medium",
+    ["register-allocation", "optimization"]
+  ),
+  q(
+    "7-1-q15",
+    "7-1",
+    "multiple-choice",
+    "What is tail-call optimization (TCO), and why is it interesting?",
+    [
+      "A way to make the last function in a file run faster.",
+      "When a function's last action is to call another function (often itself), the compiler can reuse the current stack frame — turning recursion into iteration and avoiding stack overflow on deep recursion.",
+      "An optimization that only applies to JavaScript.",
+      "A way to reduce binary size by removing the tail of each function.",
+    ],
+    1,
+    "TCO is what lets functional languages (Scheme, OCaml, Haskell) use recursion for everything without blowing the stack. Some VMs implement it; most C compilers do for tail calls. JavaScript's spec includes it but most engines don't.",
+    "hard",
+    ["tco", "recursion", "optimization"]
+  ),
 
   // ── Module 7-2: Distributed Systems ──────────────────────────────────────
   q(
@@ -329,6 +409,81 @@ export const PHASE_7_QUESTIONS: AssessmentQuestion[] = [
     "Vector clocks track causality per node, allowing detection of concurrent events — Lamport clocks cannot distinguish concurrency from ordering.",
     "hard",
     ["vector-clock", "lamport-clock"]
+  ),
+  q(
+    "7-2-q11",
+    "7-2",
+    "multiple-choice",
+    "In a Dynamo-style replicated system with N replicas, what does a quorum read with R + W > N guarantee?",
+    [
+      "Linearizability under network partitions.",
+      "That a successful write set and a successful read set must overlap by at least one replica — so reads always see the most recent successful write.",
+      "That replicas never disagree.",
+      "That reads complete in O(1) round trips.",
+    ],
+    1,
+    "Quorums (N replicas, write to W, read from R) with R + W > N ensure overlap. Reads will hit at least one replica that saw the latest write. Trade between read and write speed by adjusting R and W.",
+    "easy",
+    ["quorum", "replication"]
+  ),
+  q(
+    "7-2-q12",
+    "7-2",
+    "true-false",
+    "True or false: making a distributed operation idempotent (safe to retry) is one of the most common ways to handle unreliable networks without coordination overhead.",
+    ["True", "False"],
+    0,
+    "If retrying a request yields the same result as running it once (e.g., 'set balance to $100' rather than 'add $5'), clients can safely retry on timeout. Idempotency keys let servers dedupe duplicate retries.",
+    "easy",
+    ["idempotency", "retries"]
+  ),
+  q(
+    "7-2-q13",
+    "7-2",
+    "multiple-choice",
+    "What is a gossip protocol used for in distributed systems?",
+    [
+      "Encrypting messages between nodes.",
+      "Spreading state (membership, failure detection, metrics) across a cluster by having each node periodically exchange info with a few random peers — converging in O(log N) rounds without a coordinator.",
+      "Compressing data before replication.",
+      "Routing queries to the nearest replica.",
+    ],
+    1,
+    "Used by Cassandra, Consul, Serf, and many others for membership and failure detection. Probabilistic, decentralized, and resilient to node churn. The classic 'rumor-spreading' or 'epidemic' algorithm.",
+    "medium",
+    ["gossip", "membership"]
+  ),
+  q(
+    "7-2-q14",
+    "7-2",
+    "multiple-choice",
+    "Bloom filters are widely used in distributed systems. What do they let you do?",
+    [
+      "Verify a network packet's integrity.",
+      "Check 'is X probably in this set?' with no false negatives but possible false positives, using far less memory than storing the set itself.",
+      "Find the shortest path between two nodes.",
+      "Encrypt small messages.",
+    ],
+    1,
+    "A Bloom filter is a bit array + k hash functions. 'Definitely not in set' or 'maybe in set' — never 'definitely in'. Cassandra uses them to avoid disk reads for non-existent keys; CDNs use them for cache lookup; Chrome used them for malicious URL checks.",
+    "medium",
+    ["bloom-filter", "probabilistic"]
+  ),
+  q(
+    "7-2-q15",
+    "7-2",
+    "multiple-choice",
+    "PACELC extends CAP with a 'normal operations' axis. What does it actually say?",
+    [
+      "PACELC is a different name for CAP with no extra meaning.",
+      "If there is a Partition (P), choose Availability or Consistency; Else (during normal operation), choose Latency or Consistency. Real systems make BOTH tradeoffs, not just CAP's partition one.",
+      "PACELC is for relational DBs only; CAP is for NoSQL only.",
+      "PACELC stands for 'Parallel Asynchronous Consensus, Eventually Linearizable Consistency'.",
+    ],
+    1,
+    "CAP only describes behavior during partitions. PACELC (Abadi) points out that even with no partition, you trade Latency for Consistency on every operation. A DB is 'PA/EL' (partition-available, else-latency-priority) like Dynamo, or 'PC/EC' like a single-leader RDBMS.",
+    "hard",
+    ["pacelc", "cap", "consistency"]
   ),
 
   // ── Module 7-3: Rust Fundamentals ────────────────────────────────────────
@@ -487,6 +642,86 @@ export const PHASE_7_QUESTIONS: AssessmentQuestion[] = [
     "hard",
     ["lifetime", "static"]
   ),
+  q(
+    "7-3-q11",
+    "7-3",
+    "multiple-choice",
+    "What is Cargo in the Rust ecosystem?",
+    [
+      "A linter for Rust code.",
+      "The build tool and package manager — runs builds, tests, docs, and pulls dependencies from crates.io.",
+      "An IDE.",
+      "A profiler.",
+    ],
+    1,
+    "cargo new, cargo build, cargo test, cargo run, cargo doc, cargo publish. Single tool for the full project lifecycle; reads Cargo.toml for project metadata and dependencies.",
+    "easy",
+    ["cargo", "tooling"]
+  ),
+  q(
+    "7-3-q12",
+    "7-3",
+    "multiple-choice",
+    "When would you use `cargo check` instead of `cargo build`?",
+    [
+      "When you don't have a network connection.",
+      "When you want fast feedback that the code compiles (type-checks and borrow-checks) without producing executables — useful during iterative editing.",
+      "When you only want to run the tests.",
+      "When you're publishing the crate.",
+    ],
+    1,
+    "cargo check skips codegen and linking, so it's much faster than a full build. Editor integrations (rust-analyzer) run check on save for live diagnostics. Use build when you actually need the artifact.",
+    "easy",
+    ["cargo", "tooling"]
+  ),
+  q(
+    "7-3-q13",
+    "7-3",
+    "multiple-choice",
+    "What does `Box<T>` give you that a plain `T` does not?",
+    [
+      "Garbage collection.",
+      "Heap allocation with a stable address — useful for recursive data structures, trait objects (Box<dyn Trait>), and large values you don't want on the stack.",
+      "Reference counting.",
+      "Thread safety.",
+    ],
+    1,
+    "Box owns a single heap allocation. Recursive types like enum Node { Branch(Box<Node>) } need Box because their size is otherwise undefined. Trait objects need Box because their size depends on the concrete type. For shared ownership, use Rc or Arc.",
+    "medium",
+    ["box", "heap", "smart-pointer"]
+  ),
+  q(
+    "7-3-q14",
+    "7-3",
+    "multiple-choice",
+    "What do the marker traits `Send` and `Sync` indicate?",
+    [
+      "Send means the type can be encrypted; Sync means it can be cached.",
+      "Send means the type can be safely transferred to another thread; Sync means it can be safely shared between threads via &T. Rc<T> is neither; Arc<T> is both.",
+      "Send means the type is a network message; Sync means it's synchronous.",
+      "They're identical traits with different names.",
+    ],
+    1,
+    "Auto-derived by the compiler when components allow. Send + Sync drive the compiler's data-race-freedom guarantee: passing a !Send value across thread boundaries is a compile-time error.",
+    "medium",
+    ["send", "sync", "concurrency"]
+  ),
+  q(
+    "7-3-q15",
+    "7-3",
+    "multiple-choice",
+    "What problem does `Pin<T>` solve?",
+    [
+      "Lets you pin a tab in the terminal.",
+      "Prevents a value from being moved in memory — necessary for self-referential structures (where one field holds a pointer into another field of the same value), which async generators rely on.",
+      "Pins a dependency version in Cargo.toml.",
+      "Marks a function as inlined.",
+    ],
+    1,
+    "Async/await desugars into state machines whose generated structs may hold pointers into themselves (e.g., across an .await across local data). If such a struct is moved, those pointers become dangling. Pin<T> tells the compiler 'this value's memory address must not change'.",
+    "hard",
+    ["pin", "async", "self-referential"]
+  ),
 
   // ── Module 7-4: Performance Engineering ──────────────────────────────────
   q(
@@ -643,5 +878,85 @@ export const PHASE_7_QUESTIONS: AssessmentQuestion[] = [
     "Web Workers run on separate threads. Use them for heavy computation; DOM access must stay on the main thread.",
     "hard",
     ["web-workers", "concurrency"]
+  ),
+  q(
+    "7-4-q11",
+    "7-4",
+    "multiple-choice",
+    "What's the broadest performance lesson behind 'algorithm beats constant factor'?",
+    [
+      "Constants don't matter — only choose the algorithm.",
+      "A better-complexity algorithm (O(n log n) over O(n^2)) usually beats microoptimizations on the wrong algorithm. Pick the right shape first, then tune constants if you still need to.",
+      "Algorithms are only theoretical; in practice, constants always dominate.",
+      "Constant factors and algorithmic complexity are unrelated.",
+    ],
+    1,
+    "Replacing O(n^2) with O(n log n) is a structural win that scales. Replacing one O(n) with a 2x faster O(n) helps a fixed amount. The first principle of performance work: don't tune what should be replaced.",
+    "easy",
+    ["algorithm", "complexity"]
+  ),
+  q(
+    "7-4-q12",
+    "7-4",
+    "multiple-choice",
+    "What does the Linux `perf` tool primarily do?",
+    [
+      "Compiles code with optimization flags.",
+      "Samples performance counters (CPU cycles, cache misses, branch mispredicts, function call counts) on running processes — letting you see where time is actually going at hardware granularity.",
+      "Runs unit tests.",
+      "Profiles network throughput.",
+    ],
+    1,
+    "perf hooks into Linux's hardware performance counters and kernel tracepoints. Outputs include flame graphs, hot-function reports, and per-instruction sampling. Pair with debug symbols for actionable results.",
+    "easy",
+    ["perf", "profiling"]
+  ),
+  q(
+    "7-4-q13",
+    "7-4",
+    "multiple-choice",
+    "Two threads write to different elements of the same struct, on different CPU cores. Why might this be far slower than expected?",
+    [
+      "Compiler bug.",
+      "False sharing: even though the threads touch different bytes, those bytes share a cache line, so each write invalidates the other core's copy of the entire line. Solution: pad fields to separate cache lines.",
+      "Cosmic-ray bit flips.",
+      "The kernel pre-empts both threads simultaneously.",
+    ],
+    1,
+    "Cache coherence operates at cache-line granularity (usually 64 bytes). Independent variables that happen to live in the same line ping-pong between cores. Diagnose with perf c2c; fix with padding or layout changes.",
+    "medium",
+    ["false-sharing", "cache"]
+  ),
+  q(
+    "7-4-q14",
+    "7-4",
+    "multiple-choice",
+    "Pushing to a dynamic array (Vec, ArrayList) is described as 'amortized O(1)' even though occasional resizes copy every element. What does that mean?",
+    [
+      "Every push is exactly the same cost.",
+      "The total cost of N pushes is O(N), so the per-push cost averaged over the sequence is O(1) — even though individual resize pushes are O(n).",
+      "Push is always free in practice.",
+      "Amortized just means 'usually fast'.",
+    ],
+    1,
+    "When you double capacity on overflow, the geometric series of copy costs sums to O(N) over N pushes. So the AVERAGE cost is constant, even though individual operations vary. Don't confuse amortized cost with average-case cost.",
+    "medium",
+    ["amortized", "complexity"]
+  ),
+  q(
+    "7-4-q15",
+    "7-4",
+    "multiple-choice",
+    "Why can a branch misprediction be more expensive than a memory access on a modern CPU?",
+    [
+      "Branches don't actually cost anything.",
+      "Modern CPUs speculatively execute the predicted branch path; a misprediction flushes the entire pipeline (often 15-20 stages of partially-executed work), which costs more than a single L1 or L2 cache access.",
+      "Branches require kernel mode switches.",
+      "Memory access is free on modern CPUs.",
+    ],
+    1,
+    "The pipeline-flush penalty on a misprediction can be ~15-20 cycles of wasted work. Compare to an L1 hit at ~4 cycles. This is why branchless code (cmov, predication, sorted data) can be dramatically faster on hot paths — even if it does more total work.",
+    "hard",
+    ["branch-prediction", "pipeline"]
   ),
 ];
