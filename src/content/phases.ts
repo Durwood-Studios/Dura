@@ -28,22 +28,46 @@ export const PHASES: Phase[] = [
     title: "Phase 0: Digital Literacy",
     tagline: "The absolute foundations.",
     description:
-      "Computers, files, networks, the command line. The vocabulary and mental models every engineer assumes you already have.",
+      "How computers think, your first terminal, how the internet works, and setting up a real dev environment. The vocabulary and mental models every engineer assumes you already have.",
     color: "#6ee7b7",
     estimatedHours: 50,
     moduleCount: 4,
     lessonCount: 16,
     order: 0,
     modules: [
-      mod("0", 1, "computer-basics", "Computer Basics", "Hardware, OS, files, processes.", 12, 4),
-      mod("0", 2, "the-internet", "The Internet", "DNS, HTTP, browsers, the web.", 12, 4),
-      mod("0", 3, "command-line", "The Command Line", "Shell, paths, files, pipes.", 14, 4),
+      mod(
+        "0",
+        1,
+        "how-computers-think",
+        "How Computers Think",
+        "Binary, hardware, files, processes — the model under the surface.",
+        12,
+        4
+      ),
+      mod(
+        "0",
+        2,
+        "your-first-terminal",
+        "Your First Terminal",
+        "Shell, paths, files, pipes — the keyboard interface to your machine.",
+        12,
+        4
+      ),
+      mod(
+        "0",
+        3,
+        "how-the-internet-works",
+        "How the Internet Works",
+        "DNS, HTTP, browsers, the web — what happens when you type a URL.",
+        14,
+        4
+      ),
       mod(
         "0",
         4,
-        "digital-hygiene",
-        "Digital Hygiene",
-        "Passwords, backups, security basics.",
+        "your-dev-environment",
+        "Your Dev Environment",
+        "Editors, git basics, dotfiles, package managers — the workshop you'll spend years in.",
         12,
         4
       ),
@@ -246,9 +270,9 @@ export const PHASES: Phase[] = [
     id: "5",
     slug: "systems-engineering",
     title: "Phase 5: Systems Engineering",
-    tagline: "Architect for scale.",
+    tagline: "Understand the machine.",
     description:
-      "Distributed systems, networking, performance, reliability. How real systems survive the real world.",
+      "Operating systems, computer networking, database internals, and cloud infrastructure. The systems-layer fundamentals that explain why production behaves the way it does.",
     color: "#f0abfc",
     estimatedHours: 350,
     moduleCount: 4,
@@ -258,15 +282,39 @@ export const PHASES: Phase[] = [
       mod(
         "5",
         1,
-        "distributed-systems",
-        "Distributed Systems",
-        "CAP, consensus, replication.",
+        "operating-systems",
+        "Operating Systems",
+        "Processes, memory, IO, schedulers, syscalls.",
         90,
         9
       ),
-      mod("5", 2, "networking", "Networking", "TCP/IP, TLS, load balancing, CDNs.", 85, 9),
-      mod("5", 3, "performance", "Performance", "Profiling, caching, hot paths.", 90, 9),
-      mod("5", 4, "reliability", "Reliability", "SLOs, observability, incidents.", 85, 8),
+      mod(
+        "5",
+        2,
+        "computer-networking",
+        "Computer Networking",
+        "TCP/IP, TLS, DNS, load balancing, CDNs.",
+        85,
+        9
+      ),
+      mod(
+        "5",
+        3,
+        "database-internals",
+        "Database Internals",
+        "Storage engines, indexes, transactions, replication, query planners.",
+        90,
+        9
+      ),
+      mod(
+        "5",
+        4,
+        "cloud-infrastructure",
+        "Cloud Infrastructure",
+        "Compute, storage, networking, IAM, IaC across the major clouds.",
+        85,
+        8
+      ),
     ],
   },
   {
@@ -275,35 +323,67 @@ export const PHASES: Phase[] = [
     title: "Phase 6: AI/ML Engineering",
     tagline: "Build with intelligence.",
     description:
-      "Math, ML fundamentals, deep learning, LLMs, RAG, agents, evaluation. From the math to the production system.",
+      "Applied AI engineering: foundations, RAG pipelines, agentic AI, MCP server development, fine-tuning, and shipping AI in production.",
     color: "#67e8f9",
-    estimatedHours: 400,
+    estimatedHours: 420,
     moduleCount: 6,
-    lessonCount: 50,
+    lessonCount: 55,
     order: 6,
     modules: [
       mod(
         "6",
         1,
-        "math-foundations",
-        "Math Foundations",
-        "Linear algebra, calculus, stats.",
+        "ai-fundamentals",
+        "AI Fundamentals",
+        "How modern models work: transformers, tokens, context windows, sampling.",
         70,
+        8
+      ),
+      mod(
+        "6",
+        2,
+        "rag-pipelines",
+        "RAG Pipelines",
+        "Embeddings, retrieval, chunking, reranking, evaluation.",
+        75,
         9
       ),
-      mod("6", 2, "classical-ml", "Classical ML", "Regression, trees, clustering, eval.", 70, 9),
-      mod("6", 3, "deep-learning", "Deep Learning", "Networks, training, transformers.", 70, 9),
-      mod("6", 4, "llms", "LLMs", "Prompting, fine-tuning, evaluation.", 60, 8),
+      mod(
+        "6",
+        3,
+        "agentic-ai",
+        "Agentic AI",
+        "Tool calling, planning, memory, multi-step reasoning, evaluation harnesses.",
+        75,
+        9
+      ),
+      mod(
+        "6",
+        4,
+        "mcp-development",
+        "MCP Development",
+        "The Model Context Protocol end to end: primitives, transports, OAuth, agentic features, production.",
+        90,
+        13
+      ),
       mod(
         "6",
         5,
-        "rag-and-tools",
-        "RAG and Tool Use",
-        "Retrieval, embeddings, tool calling.",
-        65,
+        "fine-tuning",
+        "Fine-Tuning",
+        "When to fine-tune, dataset construction, training loops, eval, deployment.",
+        60,
         8
       ),
-      mod("6", 6, "agents", "Agents", "Planning, memory, multi-step reasoning.", 65, 7),
+      mod(
+        "6",
+        6,
+        "ai-in-production",
+        "AI in Production",
+        "Observability, cost controls, evals, guardrails, model versioning, incident playbooks.",
+        50,
+        8
+      ),
     ],
   },
   {
@@ -312,40 +392,48 @@ export const PHASES: Phase[] = [
     title: "Phase 7: Advanced Systems",
     tagline: "The deep end.",
     description:
-      "Compilers, OS internals, security engineering, advanced architecture. Where engineering becomes craft.",
+      "Compilers and interpreters, distributed systems, Rust fundamentals, performance engineering. Where engineering becomes craft.",
     color: "#fcd34d",
-    estimatedHours: 350,
+    estimatedHours: 300,
     moduleCount: 4,
     lessonCount: 30,
     order: 7,
     modules: [
-      mod("7", 1, "compilers", "Compilers", "Parsing, IR, codegen, optimization.", 90, 8),
+      mod(
+        "7",
+        1,
+        "compilers-interpreters",
+        "Compilers and Interpreters",
+        "Lexing, parsing, IR, codegen, optimization, JITs.",
+        90,
+        8
+      ),
       mod(
         "7",
         2,
-        "operating-systems",
-        "Operating Systems",
-        "Processes, memory, IO, schedulers.",
+        "distributed-systems",
+        "Distributed Systems",
+        "CAP, consensus, replication, time, failure modes.",
         90,
         8
       ),
       mod(
         "7",
         3,
-        "security-engineering",
-        "Security Engineering",
-        "Threat modeling, crypto, hardening.",
-        85,
-        7
+        "rust-fundamentals",
+        "Rust Fundamentals",
+        "Ownership, borrowing, lifetimes, async, FFI.",
+        80,
+        8
       ),
       mod(
         "7",
         4,
-        "advanced-architecture",
-        "Advanced Architecture",
-        "Patterns at scale, tradeoffs.",
-        85,
-        7
+        "performance-engineering",
+        "Performance Engineering",
+        "Profiling, hot paths, allocations, cache lines, microbenchmarks.",
+        40,
+        6
       ),
     ],
   },
@@ -355,7 +443,7 @@ export const PHASES: Phase[] = [
     title: "Phase 8: Professional Practice",
     tagline: "Engineering as a profession.",
     description:
-      "Process, testing, code review, communication, ethics. The non-code skills that define senior engineers.",
+      "Testing, CI/CD and DevOps, architecture patterns, security, and code quality. The engineering practices that separate code that ships from code that survives.",
     color: "#a3e635",
     estimatedHours: 200,
     moduleCount: 5,
@@ -365,16 +453,48 @@ export const PHASES: Phase[] = [
       mod(
         "8",
         1,
-        "engineering-process",
-        "Engineering Process",
-        "Agile, planning, estimation.",
+        "testing",
+        "Testing",
+        "Unit, integration, e2e, TDD, property-based, mocking discipline.",
         40,
         7
       ),
-      mod("8", 2, "testing", "Testing", "Unit, integration, e2e, TDD.", 40, 7),
-      mod("8", 3, "code-review", "Code Review", "Reading code, giving feedback.", 40, 7),
-      mod("8", 4, "communication", "Communication", "Writing, docs, RFCs, standups.", 40, 7),
-      mod("8", 5, "ethics", "Ethics", "Responsibility, privacy, impact.", 40, 7),
+      mod(
+        "8",
+        2,
+        "cicd-devops",
+        "CI/CD and DevOps",
+        "Pipelines, environments, deploys, infrastructure as code, observability.",
+        40,
+        7
+      ),
+      mod(
+        "8",
+        3,
+        "architecture-patterns",
+        "Architecture Patterns",
+        "Layering, hexagonal, event-driven, CQRS, modular monoliths vs microservices.",
+        40,
+        7
+      ),
+      mod(
+        "8",
+        4,
+        "security",
+        "Security",
+        "Threat modeling, OWASP, authn/authz, secrets, supply chain.",
+        40,
+        7
+      ),
+      mod(
+        "8",
+        5,
+        "code-quality",
+        "Code Quality",
+        "Reviews, refactoring, design heuristics, code smells, technical debt management.",
+        40,
+        7
+      ),
     ],
   },
   {
@@ -383,7 +503,7 @@ export const PHASES: Phase[] = [
     title: "Phase 9: CTO Track",
     tagline: "Lead the engineering org.",
     description:
-      "Management, architecture at scale, org design, product, business, and the day-to-day of CTO life at every company stage.",
+      "The transition into engineering management, architecture at scale, org design, product strategy, business fundamentals, and the day-to-day of CTO life from startup through enterprise.",
     color: "#f472b6",
     estimatedHours: 500,
     moduleCount: 8,
@@ -393,36 +513,36 @@ export const PHASES: Phase[] = [
       mod(
         "9",
         1,
-        "engineering-manager-transition",
+        "engineering-manager",
         "The Engineering Manager Transition",
-        "1:1s, reviews, hiring.",
+        "1:1s, performance reviews, hiring, delegation, the IC-to-manager shift.",
         60,
         8
       ),
       mod(
         "9",
         2,
-        "technical-architecture-at-scale",
-        "Technical Architecture at Scale",
-        "10K to 100M users.",
+        "architecture-at-scale",
+        "Architecture at Scale",
+        "10K to 100M users: scaling reads/writes, regional infra, platform teams.",
         80,
         8
       ),
       mod(
         "9",
         3,
-        "team-building-org-design",
-        "Team Building and Org Design",
-        "Topologies, scaling teams.",
+        "org-design",
+        "Org Design",
+        "Topologies, team boundaries, Conway's law, scaling without breaking.",
         60,
-        8
+        7
       ),
       mod(
         "9",
         4,
-        "product-strategy-roadmapping",
-        "Product Strategy and Roadmapping",
-        "Prioritization, tech debt.",
+        "product-strategy",
+        "Product Strategy",
+        "Roadmapping, prioritization, tech-debt economics, sequencing.",
         50,
         7
       ),
@@ -431,18 +551,34 @@ export const PHASES: Phase[] = [
         5,
         "business-fundamentals",
         "Business Fundamentals for CTOs",
-        "Unit economics, budgeting.",
+        "Unit economics, budgeting, fundraising vocabulary, board reporting.",
         60,
+        8
+      ),
+      mod(
+        "9",
+        6,
+        "startup-cto",
+        "The Startup CTO",
+        "Founding engineer reality: shipping fast, hiring early, technical debt as a tool.",
+        70,
         7
       ),
-      mod("9", 6, "the-startup-cto", "The Startup CTO", "Founding engineer reality.", 70, 8),
-      mod("9", 7, "the-scale-up-cto", "The Scale-Up CTO", "Builder to enabler.", 60, 7),
+      mod(
+        "9",
+        7,
+        "scaleup-cto",
+        "The Scale-Up CTO",
+        "Builder to enabler: platform teams, on-call culture, the second 100 hires.",
+        60,
+        8
+      ),
       mod(
         "9",
         8,
-        "the-enterprise-cto",
+        "enterprise-cto",
         "The Enterprise CTO",
-        "Strategy, board, innovation.",
+        "Strategy, board engagement, M&A integration, innovation portfolios.",
         60,
         7
       ),
