@@ -1,13 +1,13 @@
 ---
 title: "MCP Security"
-description: "Input validation, authentication, rate limiting, audit logging, and least privilege — securing your MCP servers for production."
+description: "Input validation, consent contracts, the Roots permission model, rate limiting, audit logging, and the trail of real-world MCP advisories that proves why every line of this lesson matters."
 phase: 6
 module: "6-4-mcp-development"
 order: 7
-estimatedMinutes: 9
+estimatedMinutes: 12
 difficulty: "advanced"
 standards:
-  cs2023: ["AI-1"]
+  cs2023: ["AI-1", "SEC-1"]
   swebok: ["Software Design"]
   bloom: "apply"
   sfia: 5
@@ -18,25 +18,33 @@ vocabulary:
 
 ## Why this matters
 
-An MCP server is an API that an AI model calls autonomously. The model decides when to invoke tools and what arguments to pass — sometimes based on untrusted user input. If your server blindly executes whatever it receives, you have built an injection vector with a natural language interface. Security is not optional. Every MCP server that touches real data or systems needs input validation, authentication, rate limiting, and audit logging from day one.
+An MCP server is an API that an AI model calls autonomously. The model decides when to invoke tools and what arguments to pass, sometimes based on untrusted user input. If your server blindly executes what it receives, you have built an injection vector with a natural-language interface.
+
+This is not theoretical. The MCP ecosystem has been shipping for ~18 months as of mid-2026, and the advisory trail through that window is real:
+
+- **CVE-2025-6514** (CVSS 9.6): RCE in `mcp-remote` v0.0.5–0.1.15 when connecting to a malicious server.
+- **CVE-2025-68143/-68144/-68145**: chained vulns in Anthropic's `mcp-server-git` enabling RCE via a crafted `.git/config`.
+- **CVE-2025-65719**: RCE in a Kubectl MCP server via a malicious-website attack vector.
+- SSRF in Microsoft's MarkItDown MCP server exposing AWS instance metadata.
+- A "tool redefinition" attack class where a malicious server in a multi-server host overrides legitimate tools to redirect calls.
+- Design-level vulnerability disclosures in 2026 showing the same class of failures keep recurring — the spec's MUST/SHOULD language exists for a reason.
+
+The spec writes its security requirements as `MUST` and `SHOULD` because the actual MCP ecosystem has paid the tuition. Every section below maps to a control the spec requires or a failure pattern that bit a real shipped server.
 
 ## Input validation
 
-The inputSchema in your tool definition provides structural validation — the SDK rejects requests that do not match the JSON Schema. But structural validation is not enough. You must validate the semantics of inputs in your handler.
+The `inputSchema` (and `outputSchema`, since `2025-11-25`) in your tool definition provides structural validation — the SDK rejects requests that do not match the JSON Schema. Structural validation is necessary but never sufficient. You must validate the **semantics** of inputs in your handler.
 
 ```javascript
 server.tool(
   "query_database",
   "Execute a read-only SQL query",
-  {
-    sql: { type: "string", description: "A SELECT query" },
-  },
+  { sql: { type: "string", description: "A SELECT query" } },
   async ({ sql }) => {
-    // Structural validation: SDK ensures sql is a string
-    // Semantic validation: you ensure it is safe
+    // Structural validation already happened (SDK ensures sql is a string).
+    // Semantic validation: you ensure it is safe.
     const normalized = sql.trim().toUpperCase();
 
-    // Block anything that is not a SELECT
     const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE"];
     for (const keyword of forbidden) {
       if (normalized.includes(keyword)) {
@@ -47,7 +55,6 @@ server.tool(
       }
     }
 
-    // Block multiple statements (SQL injection via semicolons)
     if (sql.includes(";")) {
       return {
         content: [{ type: "text", text: "Blocked: multiple statements not allowed." }],
@@ -68,19 +75,31 @@ server.tool(
 );
 ```
 
-For file system tools, validate paths to prevent directory traversal. For URL-based tools, validate against an allowlist. Never trust that the model will only send reasonable inputs — it might be following a prompt injection.
+For filesystem tools, validate paths against directory traversal. For URL-based tools, validate against an allowlist. Never trust that the model will only send reasonable inputs — it might be following a prompt injection embedded in conversation context.
 
 ```javascript
-// Path validation to prevent directory traversal
+import path from "node:path";
+
+// Path validation: resolved path must stay under the allowed root.
 function isPathSafe(requestedPath, allowedRoot) {
   const resolved = path.resolve(allowedRoot, requestedPath);
   return resolved.startsWith(path.resolve(allowedRoot));
 }
 
-// URL validation against an allowlist
+// URL validation against an allowlist (this is how MarkItDown should have shipped).
 function isUrlAllowed(url, allowedDomains) {
   try {
     const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    // Block cloud-metadata addresses outright.
+    if (
+      parsed.hostname === "169.254.169.254" ||
+      parsed.hostname === "metadata.google.internal" ||
+      parsed.hostname.startsWith("10.") ||
+      parsed.hostname.startsWith("127.")
+    ) {
+      return false;
+    }
     return allowedDomains.includes(parsed.hostname);
   } catch {
     return false;
@@ -88,49 +107,118 @@ function isUrlAllowed(url, allowedDomains) {
 }
 ```
 
+That second function is exactly the kind of allowlist the MarkItDown SSRF would have needed. A URL-fetching tool with no validation is one prompt injection away from leaking your cloud credentials.
+
+## The consent contract
+
+The `2025-11-25` spec defines a consent model that runs through every primitive. The client is expected to put the user in the loop at specific decision points:
+
+- **Tool invocations** — the user MUST consent. Clients should not silently auto-approve tools in production unless the user has explicitly opted in to that tool.
+- **Sampling requests** — when your server calls back to the client's LLM via `sampling/createMessage`, the user MUST approve. Clients SHOULD let users view and edit the prompt before it goes to the model, and review the response before it comes back to your server.
+- **Elicitation forms** — the spec explicitly **forbids** form-mode elicitation for passwords, API keys, or tokens. If your server needs a secret, use URL-mode elicitation (out-of-band browser flow) — never ask for a credential in the form schema.
+- **Roots disclosure** — the client MUST get user consent before exposing filesystem paths to your server.
+
+Your server cannot enforce these contracts on the client. But your server SHOULD design as if they exist — never assume a tool call has been silently auto-approved, never request credentials in a form elicitation, never ask a user to paste secrets into the conversation.
+
+```javascript
+// Wrong: asking for an API key via form-mode elicitation.
+// The spec forbids this — the host SHOULD refuse.
+await server.requestElicitation({
+  message: "Enter your GitHub token",
+  requestedSchema: {
+    type: "object",
+    properties: { token: { type: "string" } },
+    required: ["token"],
+  },
+});
+
+// Right: URL-mode elicitation that sends the user through OAuth.
+await server.requestElicitation({
+  mode: "url",
+  url: "https://app.example.com/connect-github?session=" + sessionId,
+  message: "Connect your GitHub account",
+});
+```
+
+## Roots: the filesystem permission contract
+
+The **Roots** primitive lets a client tell a server which filesystem paths it's allowed to see. The spec is narrow on purpose:
+
+- Root URIs **MUST** use the `file://` scheme. No `https://`, no `git://`, no custom schemes.
+- The client is the source of truth — servers cannot push roots, only request them via `roots/list`.
+- The user MUST consent before any path is exposed.
+- Servers MUST validate every path operation against the granted roots and MUST reject anything outside the boundary, including path traversal attempts (`../`, symlinks pointing outside the root, etc.).
+
+A server that accepts a tool argument like `{ "path": "/etc/passwd" }` and reads it without checking against the current roots is the design pattern behind multiple 2025 file-server CVEs. The Roots primitive exists so you can write the check once and apply it everywhere.
+
+```javascript
+async function withinAnyRoot(absolutePath) {
+  const { roots } = await client.listRoots(); // cached, refreshed on notification
+  return roots.some((r) => {
+    const rootPath = new URL(r.uri).pathname;
+    return path.resolve(absolutePath).startsWith(path.resolve(rootPath));
+  });
+}
+
+server.tool(
+  "read_file",
+  "Read a file from the workspace",
+  { path: { type: "string" } },
+  async ({ path: requestedPath }) => {
+    const resolved = path.resolve(requestedPath);
+    if (!(await withinAnyRoot(resolved))) {
+      return {
+        content: [{ type: "text", text: "Refused: path is outside any granted root." }],
+        isError: true,
+      };
+    }
+    return { content: [{ type: "text", text: await fs.readFile(resolved, "utf8") }] };
+  }
+);
+```
+
 ## Authentication
 
-For remote MCP servers (SSE and HTTP transports), you need to verify that the connecting client is authorized. The most common patterns are bearer tokens and OAuth.
+For remote MCP servers running over Streamable HTTP, the spec endorses **OAuth 2.1 with PKCE-S256** as the canonical auth model. It's an entire contract — Protected Resource Metadata (RFC 9728), Resource Indicators (RFC 8707), Client ID Metadata Documents — and it gets its own lesson. For the security overview, three rules from that lesson matter here:
+
+1. **PKCE with S256 is MUST.** Anything weaker (plain code verifier, no PKCE) is non-conformant — clients are required to refuse.
+2. **Token passthrough is FORBIDDEN.** An MCP server **MUST NOT** forward the client's token to upstream APIs it calls on the client's behalf. The server must obtain its own credentials. Token passthrough collapses every audience boundary — one stolen token now hits multiple services.
+3. **Stdio servers MUST NOT use the OAuth spec.** They read credentials from environment variables — the parent client is the authorization boundary, not OAuth.
+
+For development against an HTTP server that hasn't wired up OAuth yet, a static bearer token check is fine — just understand it's a dev shortcut, not a production posture.
 
 ```javascript
 import express from "express";
 
 const app = express();
 
-// Middleware: validate bearer token on every request
-function authenticate(req, res, next) {
+// DEV ONLY — production servers use OAuth 2.1 with PKCE (see lesson 09).
+function authenticateDev(req, res, next) {
   const authHeader = req.headers.authorization;
-
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing or invalid authorization header" });
+    res.set("WWW-Authenticate", 'Bearer realm="mcp"');
+    return res.status(401).json({ error: "Missing bearer token" });
   }
-
   const token = authHeader.slice(7);
-
-  // Validate against your auth system
-  if (!isValidToken(token)) {
-    return res.status(403).json({ error: "Invalid or expired token" });
+  if (!isValidDevToken(token)) {
+    return res.status(403).json({ error: "Invalid token" });
   }
-
   req.userId = getUserIdFromToken(token);
   next();
 }
 
-// Apply to MCP endpoints
-app.post("/mcp", authenticate, async (req, res) => {
-  // Only authenticated requests reach the MCP server
+app.post("/mcp", authenticateDev, async (req, res) => {
   await handleMcpRequest(req, res);
 });
 ```
 
-For stdio servers, authentication is implicit — the server runs as the user's own process with their permissions. But you still need to validate inputs, because the model might forward untrusted content from the conversation.
+For stdio servers, authentication is implicit — the server runs as a child process of the user's own shell with their filesystem permissions. But you still must validate inputs, because the model may forward content from anywhere in the conversation.
 
 ## Rate limiting
 
-MCP tools that call external APIs or databases should be rate limited. A model in a loop can fire hundreds of tool calls per minute if something goes wrong.
+The spec says servers **MUST rate-limit tool invocations** as a security best practice, but it doesn't tell you how — that's implementation-defined. The reason this is a security control (not just a cost control) is that a model in a loop, or a malicious prompt that tricks the model into a fork bomb of tool calls, can saturate downstream APIs and exhaust quota in seconds.
 
 ```javascript
-// Simple in-memory rate limiter
 class RateLimiter {
   constructor(maxRequests, windowMs) {
     this.maxRequests = maxRequests;
@@ -143,9 +231,7 @@ class RateLimiter {
     const windowStart = now - this.windowMs;
     const timestamps = (this.requests.get(key) || []).filter((t) => t > windowStart);
 
-    if (timestamps.length >= this.maxRequests) {
-      return false;
-    }
+    if (timestamps.length >= this.maxRequests) return false;
 
     timestamps.push(now);
     this.requests.set(key, timestamps);
@@ -153,68 +239,60 @@ class RateLimiter {
   }
 }
 
-const limiter = new RateLimiter(30, 60000); // 30 requests per minute
+const limiter = new RateLimiter(30, 60_000); // 30 calls per minute per key
 
 server.tool(
   "search_api",
   "Search external API",
-  {
-    query: { type: "string" },
-  },
-  async ({ query }) => {
-    if (!limiter.isAllowed("search_api")) {
+  { query: { type: "string" } },
+  async ({ query }, { sessionId }) => {
+    // Key the limit per session so one client can't starve others.
+    if (!limiter.isAllowed(`search_api:${sessionId}`)) {
       return {
         content: [{ type: "text", text: "Rate limit exceeded. Try again in a moment." }],
         isError: true,
       };
     }
-
-    const results = await externalApi.search(query);
-    return { content: [{ type: "text", text: JSON.stringify(results) }] };
+    return { content: [{ type: "text", text: JSON.stringify(await externalApi.search(query)) }] };
   }
 );
 ```
 
+In production, key the limit on the authenticated user identity (or session ID for unauthenticated dev). Logging-only rate limits (alert, but don't block) are a useful first step on a new server — see what real usage looks like before you ship a hard cap.
+
 ## Audit logging
 
-Every tool invocation should be logged. When something goes wrong — or when you need to understand what the model did and why — the audit log is your forensic trail.
+The spec defines a Logging utility (`logging/setLevel`, `notifications/message`) using RFC 5424 syslog levels (`debug` through `emergency`). That's the standardized channel for **server-emitted** logs the client can subscribe to. For server-side **audit** logging — what tool was called, by whom, with what arguments, with what result — you write your own structured log to stdout (or your log pipeline) so a forensic investigation has a trail.
 
 ```javascript
 function auditLog(toolName, args, result, metadata) {
   const entry = {
     timestamp: new Date().toISOString(),
     tool: toolName,
-    arguments: args,
+    arguments: redactSecrets(args),
     success: !result.isError,
     userId: metadata.userId || "anonymous",
-    duration: metadata.durationMs,
+    sessionId: metadata.sessionId,
+    durationMs: metadata.durationMs,
+    // For OAuth-protected servers, also log token jti/aud for revocation traceability.
+    tokenJti: metadata.tokenJti,
   };
-
-  // Write to structured log (stdout as JSON for production log pipelines)
   console.log(JSON.stringify(entry));
 }
 
-// Wrap tool handlers with audit logging
 function withAuditLog(toolName, handler) {
   return async (args, metadata) => {
     const start = Date.now();
     try {
-      const result = await handler(args);
-      auditLog(toolName, args, result, {
-        ...metadata,
-        durationMs: Date.now() - start,
-      });
+      const result = await handler(args, metadata);
+      auditLog(toolName, args, result, { ...metadata, durationMs: Date.now() - start });
       return result;
     } catch (error) {
       auditLog(
         toolName,
         args,
         { isError: true },
-        {
-          ...metadata,
-          durationMs: Date.now() - start,
-          error: error.message,
-        }
+        { ...metadata, durationMs: Date.now() - start, error: error.message }
       );
       throw error;
     }
@@ -222,19 +300,21 @@ function withAuditLog(toolName, handler) {
 }
 ```
 
+`redactSecrets` is non-optional — never log raw tokens, raw passwords, or raw PII. If you can't think of a value that needs to be redacted in your tool's arguments, look harder.
+
 ## The principle of least privilege
 
-Give each MCP server the minimum permissions it needs. A server that reads files should not have write access. A server that queries a database should use a read-only database user. A server that calls one API should not have credentials for others.
+Give each MCP server the minimum permissions it needs. A server that reads files should not have write access. A server that queries a database should use a read-only role. A server that calls one API should not have credentials for others.
 
 ```javascript
-// Bad: one server with god-mode access
+// Bad: one server with god-mode access.
 const godServer = {
   tools: ["read_file", "write_file", "delete_file", "query_db", "modify_db", "send_email"],
   dbUser: "admin",
   fileAccess: "/",
 };
 
-// Good: separate servers with minimal permissions
+// Good: separate servers with minimal permissions.
 const fileReader = {
   tools: ["read_file", "list_files"],
   fileAccess: "/project/docs", // scoped to one directory
@@ -243,50 +323,61 @@ const fileReader = {
 
 const dbQuery = {
   tools: ["query_database"],
-  dbUser: "readonly_user", // read-only database role
+  dbUser: "readonly_user", // read-only DB role
   allowedTables: ["users", "logs"], // scoped to specific tables
 };
 ```
 
-Separate concerns into separate servers. If a file-reading server is compromised, it cannot touch the database. If the database server has a bug, it cannot delete files. Defense in depth starts at architecture.
+Separate concerns into separate servers. If a file-reading server is compromised, it cannot touch the database. If the database server has a bug, it cannot delete files. Defense in depth starts at architecture — and in a multi-server host, the spec's lack of cross-server isolation means architecture is the only defense you get.
+
+## What the advisory trail taught us
+
+The CVEs at the top of this lesson all map to specific failures. The MCP ecosystem is now far enough into production that the failure patterns repeat — save yourself the embarrassment:
+
+- **`mcp-remote` RCE (CVE-2025-6514)** — a client trusted untyped server output and passed it to a shell. Always treat tool results as untrusted data, never as executable instructions. The `annotations` field on tools is explicitly marked untrusted in the spec for this reason.
+- **`mcp-server-git` chain (CVE-2025-68143/-68144/-68145)** — a server read a config file under user control and used values from it without sanitization. Any user-controllable input is an attacker-controlled input — `.git/config`, environment variables, file headers, all of it.
+- **MarkItDown SSRF** — a URL-fetching tool with no allowlist hit cloud metadata at `169.254.169.254` and leaked AWS instance credentials. Allowlist the URLs your tools can fetch, block private IP ranges, block cloud-metadata hostnames.
+- **Tool redefinition** — a malicious server in a multi-server host registered a tool with the same name as a legitimate one and silently intercepted calls. Clients are responsible for namespacing across servers; servers are responsible for not assuming uniqueness.
+
+The pattern is the same in every entry: someone treated untrusted input as trusted, or skipped a check the spec said was MUST. Every control in this lesson exists because something downstream of a missing check made headlines.
 
 ## Try it
 
 <SandboxExercise
   language="javascript"
-  instructions="Write a function validateToolInput(sql) that returns { valid: true } if the SQL is a safe SELECT query, or { valid: false, reason: '...' } if it contains dangerous keywords (INSERT, UPDATE, DELETE, DROP) or multiple statements (semicolons)."
-  initialCode={`function validateToolInput(sql) {
-  // Validate that sql is a safe SELECT query
+  instructions="Write validateUrl(url, allowedDomains) that returns true only if the URL uses http/https, is in the allowedDomains list, and is NOT pointing at cloud metadata (169.254.169.254) or private ranges (10.x, 127.x). Otherwise return false."
+  initialCode={`function validateUrl(url, allowedDomains) {
+  // Block protocols other than http/https, cloud metadata, and private ranges.
+  // Allow only if the hostname is in allowedDomains.
 }
 
-console.log(validateToolInput("SELECT \* FROM users"));
-console.log(validateToolInput("DROP TABLE users"));
-console.log(validateToolInput("SELECT 1; DELETE FROM users"));`}
-  solution={`function validateToolInput(sql) {
-const normalized = sql.trim().toUpperCase();
-const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE"];
-
-for (const keyword of forbidden) {
-if (normalized.includes(keyword)) {
-return { valid: false, reason: keyword + " statements are not allowed" };
+console.log(validateUrl("https://api.example.com/data", ["api.example.com"])); // true
+console.log(validateUrl("http://169.254.169.254/latest/", ["169.254.169.254"])); // false
+console.log(validateUrl("file:///etc/passwd", ["etc"])); // false
+console.log(validateUrl("https://evil.com/", ["api.example.com"])); // false`}
+  solution={`function validateUrl(url, allowedDomains) {
+try {
+const parsed = new URL(url);
+if (!["http:", "https:"].includes(parsed.protocol)) return false;
+if (
+parsed.hostname === "169.254.169.254" ||
+parsed.hostname === "metadata.google.internal" ||
+parsed.hostname.startsWith("10.") ||
+parsed.hostname.startsWith("127.")
+) {
+return false;
+}
+return allowedDomains.includes(parsed.hostname);
+} catch {
+return false;
 }
 }
 
-if (sql.includes(";")) {
-return { valid: false, reason: "Multiple statements are not allowed" };
-}
-
-if (!normalized.startsWith("SELECT")) {
-return { valid: false, reason: "Only SELECT queries are allowed" };
-}
-
-return { valid: true };
-}
-
-console.log(validateToolInput("SELECT \* FROM users"));
-console.log(validateToolInput("DROP TABLE users"));
-console.log(validateToolInput("SELECT 1; DELETE FROM users"));`}
-testCases={["returns valid:true for SELECT, valid:false for DROP and multi-statement"]}
+console.log(validateUrl("https://api.example.com/data", ["api.example.com"]));
+console.log(validateUrl("http://169.254.169.254/latest/", ["169.254.169.254"]));
+console.log(validateUrl("file:///etc/passwd", ["etc"]));
+console.log(validateUrl("https://evil.com/", ["api.example.com"]));`}
+testCases={["allows allowlisted https hostname; blocks metadata IP, file://, and non-allowlisted host"]}
 />
 
 ## Check your understanding
@@ -296,46 +387,63 @@ testCases={["returns valid:true for SELECT, valid:false for DROP and multi-state
     {
       type: "multiple-choice",
       question:
-        "Why is input validation especially critical for MCP tools compared to traditional APIs?",
+        "An MCP server calls an upstream API on the user's behalf. According to the 2025-11-25 spec, can it forward the client's OAuth access token to that upstream API?",
       options: [
-        "MCP uses a slower protocol",
-        "The model may forward untrusted user input or follow prompt injections",
-        "MCP does not support HTTPS",
-        "Tool definitions cannot include type constraints",
+        "Yes, that's the standard pattern.",
+        "Yes, but only if the token has a wildcard audience.",
+        "No — token passthrough is forbidden. The server must obtain its own credentials.",
+        "Only if the upstream API also implements OAuth 2.1.",
       ],
-      correct: 1,
+      correct: 2,
       explanation:
-        "AI models autonomously decide tool arguments, sometimes based on untrusted user input. A prompt injection could cause the model to send malicious arguments to your tools.",
+        "The spec FORBIDS token passthrough. An MCP server must obtain its own credentials for upstream APIs. Passing the client's token through collapses audience boundaries and turns one compromised token into a multi-service breach.",
     },
     {
       type: "multiple-choice",
-      question: "What does the principle of least privilege mean for MCP server design?",
+      question: "Why does the spec forbid asking for API keys via form-mode elicitation?",
       options: [
-        "Use the simplest transport available",
-        "Give each server only the minimum permissions it needs",
-        "Limit the number of tools per server to five",
-        "Require admin approval for every tool call",
+        "Forms can't represent string fields longer than 64 characters.",
+        "The form is rendered in the client without any TLS layer.",
+        "Form mode is for primitive structured input; credentials must go through URL mode (an out-of-band browser flow) so they never travel as conversation content.",
+        "Elicitation is a server-initiated primitive and servers can never receive credentials.",
       ],
-      correct: 1,
+      correct: 2,
       explanation:
-        "Least privilege means scoping each server to the minimum access required — read-only DB users, limited file paths, scoped API keys. If one server is compromised, the blast radius is contained.",
+        "Form-mode elicitation is for simple structured input. Credentials must use URL mode so the secret travels through an out-of-band browser flow, never embedded in the MCP conversation stream where it could be logged, cached, or leaked.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Roots in the 2025-11-25 spec MUST use which URI scheme?",
+      options: [
+        "Any scheme the server understands",
+        "https:// only",
+        "file:// only",
+        "Any scheme starting with mcp://",
+      ],
+      correct: 2,
+      explanation:
+        "Roots MUST use the file:// scheme. They represent filesystem workspace boundaries — not HTTP resources or arbitrary URIs. Other schemes would defeat the permission contract.",
     },
   ]}
 />
 
 <FillBlank
-  prompt="Four key MCP security practices are input ___, ___ (verifying who is connecting), rate ___, and ___ logging."
-  answers={["validation", "authentication", "limiting", "audit"]}
+  prompt="The 2025-11-25 spec's consent contract requires user approval before any ___ invocation, before any ___ request (server-initiated LLM call), and before any ___ are exposed to a server. Credentials must NEVER be requested via form-mode ___."
+  answers={["tool", "sampling", "roots", "elicitation"]}
   hints={[
-    "Checking inputs.",
-    "Verifying identity.",
-    "Controlling request frequency.",
-    "Recording what happened.",
+    "The primary action primitive.",
+    "Server-initiated LLM call.",
+    "Filesystem workspace boundaries.",
+    "Server-initiated user input collection.",
   ]}
 />
 
 ## What you learned
 
-- **Input validation** must go beyond JSON Schema — validate semantics (safe SQL, allowed paths, permitted URLs) because models may forward untrusted content.
-- **Authentication** and **rate limiting** protect remote MCP servers from unauthorized access and runaway model loops.
-- The **principle of least privilege** means separating concerns into scoped servers with minimal permissions — defense in depth at the architecture level.
+- **Input validation must go beyond JSON Schema** — validate semantics (safe SQL, allowed paths, allowlisted URLs, blocked cloud-metadata IPs) because models may forward untrusted content from prompt injections.
+- The spec defines a **consent contract**: tool invocations require user approval, sampling requires user approval, form-mode elicitation MUST NOT collect credentials (use URL mode), and Roots disclosure requires user consent.
+- **Roots use `file://` only** and bound every filesystem operation. Validate against them; reject path traversal.
+- **Token passthrough is FORBIDDEN** — servers must obtain their own credentials for upstream APIs.
+- **Rate limiting** and **audit logging** are MUST controls — rate limit per session/user; redact secrets in logs.
+- **Least privilege** is the architecture-level defense: one capability per server, scoped credentials, no cross-server trust.
+- The advisory trail from 2025 through 2026 is what the spec language is _for_. Every MUST has a story behind it.
