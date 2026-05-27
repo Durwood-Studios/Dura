@@ -39,6 +39,14 @@ function difficultyToNumber(d: LessonFrontmatter["difficulty"]): 1 | 2 | 3 | 4 |
   if (d === "beginner") return 1;
   if (d === "intermediate") return 3;
   if (d === "advanced") return 5;
+  // Unknown string slipped past TS (gray-matter parses MDX frontmatter as untyped).
+  // Warn loudly in dev so this can't drift silently again — see the 2026-05 audit
+  // that found "medium"/"hard" Phase 5 outliers all silently falling through to 1.
+  if (d !== undefined) {
+    console.warn(
+      `[content] Unknown difficulty value "${String(d)}" — using fallback 1. Canonical values: beginner | intermediate | advanced.`
+    );
+  }
   return 1;
 }
 
