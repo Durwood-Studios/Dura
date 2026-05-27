@@ -1,0 +1,390 @@
+---
+title: "Cost Engineering for Agents"
+description: "Model routing, prompt caching, batch APIs, and the cost-per-task framing that production teams actually use. Stack caching with batching and you can hit ~5% of base rate-card."
+phase: 6
+module: "6-7-agent-engineering"
+order: 3
+estimatedMinutes: 14
+difficulty: "advanced"
+standards:
+  cs2023: ["AI-2", "SE-2"]
+  swebok: ["Software Engineering Management"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - llm
+  - agent
+---
+
+## Why this matters
+
+Agents burn money in ways workflows don't. An agent that loops takes ten times the tokens of one that doesn't. A coding agent given a generous context window will fill it. A multi-step agent that re-reads the same system prompt on every turn pays for it every turn unless you've explicitly cached.
+
+The teams that ship agents profitably in 2025-2026 share a discipline: every agent has a **per-task budget**, every model call is **routed to the cheapest model that can do the job**, every long-lived prompt is **cached**, and any non-interactive workload runs through a **batch API**. Combined, these levers move production economics from "we can't afford to run this" to "this costs ~5% of the original rate-card."
+
+This lesson walks through each lever with current (mid-2026) numbers, then shows how they stack.
+
+## The five cost levers
+
+The order matters — apply them in this sequence for biggest-bang-for-effort:
+
+1. **Model routing** — pick the smallest model that reliably solves each turn. 40-70% reported savings.
+2. **Prompt caching** — never re-pay for static prefixes (system prompts, tool definitions, in-context docs).
+3. **Batch APIs** — for non-interactive workloads, accept a 24h SLA in exchange for ~50% off.
+4. **Hard caps in the harness** — enforce a per-task token / cost ceiling so a loop can't drain the account.
+5. **Prompt shrinkage** — remove tokens that don't earn their cost (verbose system prompts, redundant tool descriptions, oversized few-shot examples).
+
+We'll cover the first four in depth. Prompt shrinkage is universal LLM hygiene and doesn't need agent-specific treatment.
+
+## Lever 1 — Model routing
+
+The single biggest production lever. Most agent turns don't need the smartest model; they need the cheapest one that gets it right.
+
+**Concrete 2026 pattern (coding agents):**
+
+| Model      | Role in the agent                                | Cost / MTok (in / out) |
+| ---------- | ------------------------------------------------ | ---------------------- |
+| Opus 4.7   | Coordination, planning, hard reasoning           | $5 / $25               |
+| Sonnet 4.6 | Implementation — writing code, calling tools     | $3 / $15               |
+| Haiku 4.5  | File navigation, triage, classification, routing | $1 / $5                |
+
+Same agent, three models, picked per turn. The orchestrator decides "this is a triage step" → Haiku; "this is a code generation step" → Sonnet; "this requires planning across the whole codebase" → Opus.
+
+```javascript
+// Simplified routing layer
+function pickModel(turn) {
+  if (turn.kind === "triage" || turn.kind === "classify" || turn.kind === "file-nav") {
+    return "claude-haiku-4-5";
+  }
+  if (turn.kind === "implementation" || turn.kind === "tool-call") {
+    return "claude-sonnet-4-6";
+  }
+  // "plan", "review", "ambiguous-decision"
+  return "claude-opus-4-7";
+}
+
+async function runTurn(turn, messages) {
+  const model = pickModel(turn);
+  return await client.messages.create({ model, messages, ... });
+}
+```
+
+A common refinement: **adversarial review across providers**. Use a different vendor's frontier model (GPT-5-class) as the reviewer of code another model wrote. The two models disagreeing on something is a strong signal to slow down. The two agreeing is a strong signal to ship.
+
+## Lever 2 — Prompt caching across providers
+
+Every major provider supports caching the static prefix of a prompt. The exact mechanics differ.
+
+| Provider      | Mechanism                                                                              | Discount                                          | TTL                                          | Gotcha                                                                       |
+| ------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------- |
+| **Anthropic** | Explicit `cache_control` blocks                                                        | 0.10× (90% off) cached input                      | 5 min default; 1h with write-cost premium    | Cache write costs more than uncached; only saves on the read                 |
+| **OpenAI**    | Automatic on prompts ≥ 1,024 tokens                                                    | Roughly 25-50% off cached input (model-dependent) | Short, auto-managed                          | You don't control what gets cached; ordering of message content matters      |
+| **Gemini**    | Implicit (auto, 75% off on 2.5+ models) AND explicit (manual lifecycle, up to 90% off) | 75-90%                                            | Manual lifecycle (explicit); auto (implicit) | Explicit cache adds a per-MTok-per-hour storage cost — a unique pricing axis |
+| **DeepSeek**  | Automatic                                                                              | Strong default                                    | Auto                                         | Less control than Anthropic / Gemini                                         |
+
+**The Anthropic pattern in code:**
+
+```javascript
+const response = await anthropic.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 1024,
+  system: [
+    {
+      type: "text",
+      text: SYSTEM_PROMPT, // long, static
+      cache_control: { type: "ephemeral" }, // mark for caching
+    },
+  ],
+  tools: TOOLS_DEFINITION.map((t) => ({
+    ...t,
+    cache_control: { type: "ephemeral" }, // cache tool defs too
+  })),
+  messages: [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: IN_CONTEXT_DOCS, // long, static
+          cache_control: { type: "ephemeral" },
+        },
+        { type: "text", text: userMessage }, // dynamic — NOT cached
+      ],
+    },
+  ],
+});
+```
+
+**Where caching most pays off in agent workloads:**
+
+- **System prompt** — usually 500-5,000 tokens, identical every turn. Cache it.
+- **Tool definitions** — same set of tools across the agent's life. Cache them.
+- **In-context documents (RAG injections, file contents)** — large and static within a session. Cache them.
+- **Few-shot examples** — large and static. Cache them.
+
+The pattern: anything that doesn't change between turns of the same agent run, mark for caching. The savings compound across long sessions — a 50-turn agent run with a 4K-token static prefix saves the cost of 200K tokens of input.
+
+## Lever 3 — Batch APIs
+
+For non-interactive agent workloads (overnight analyses, scheduled report generation, bulk classification, evaluation runs against regression sets), batch APIs trade latency for cost.
+
+| Provider                      | Discount                    | SLA       | Notes                                             |
+| ----------------------------- | --------------------------- | --------- | ------------------------------------------------- |
+| **Anthropic Message Batches** | 50% off on input AND output | Up to 24h | No volume threshold; combines with prompt caching |
+| **OpenAI Batch API**          | ~50% off                    | 24h       | Combines with caching                             |
+| **Gemini Batch API**          | ~50% off                    | Variable  | Available for most Gemini models                  |
+
+```javascript
+// Anthropic Messages Batches — bulk classification example
+const batch = await anthropic.messages.batches.create({
+  requests: candidateMessages.map((msg, i) => ({
+    custom_id: `classify-${i}`,
+    params: {
+      model: "claude-haiku-4-5",
+      max_tokens: 100,
+      messages: [{ role: "user", content: `Classify: ${msg}` }],
+    },
+  })),
+});
+// Poll batch.id; results return within 24h, billed at 50% off.
+```
+
+When to reach for batch:
+
+- **Eval runs against your regression set** (lesson 02) — perfect fit, you'd never run those interactively.
+- **Nightly digest / report generation** — your readers don't care if the report finished at 2am or 6am.
+- **Bulk classification / extraction** — pipelining work that has no user waiting.
+- **Synthetic data generation** — same.
+
+When NOT to use batch:
+
+- **Anything a user is waiting for in real time.** A 24h SLA is fine for a nightly job; it's a disaster for a chat reply.
+
+## The stacking math
+
+Caching and batching combine multiplicatively. Walk the math for an Anthropic Sonnet 4.6 workload:
+
+| Optimization                             | Effective input cost                           |
+| ---------------------------------------- | ---------------------------------------------- |
+| Base rate                                | $3 / MTok                                      |
+| Caching only (90% off on cached portion) | $0.30 / MTok on cached input                   |
+| Batch only (50% off)                     | $1.50 / MTok                                   |
+| **Caching + Batch**                      | **$0.15 / MTok on cached input** — ~5% of base |
+
+For a workload where ~80% of input is cacheable (typical agent — long static prefix, short dynamic suffix) and you can tolerate the 24h batch SLA, you've cut your input bill to roughly 7-10% of rate-card. Multiply across an evaluation set of 10,000 traces and the difference is real money.
+
+The discipline: design your agent so the **cacheable prefix is long** and the **dynamic suffix is short**. Move tool definitions, system prompts, and few-shot examples to the front. Append only the user's actual message at the end.
+
+## Lever 4 — Hard caps in the harness
+
+The fail-deadly mode for agents is the unbounded loop. The agent decides to keep going, the keep-going decision keeps validating itself, and you wake up to a $4,000 single-task bill.
+
+The mitigation is structural: **the agent harness, not the model, enforces the ceiling.**
+
+```javascript
+class TaskBudget {
+  constructor({ maxTokens, maxCostUsd, maxTurns, maxWallClockMs }) {
+    this.usedTokens = 0;
+    this.usedCostUsd = 0;
+    this.turns = 0;
+    this.startedAt = Date.now();
+    this.maxTokens = maxTokens;
+    this.maxCostUsd = maxCostUsd;
+    this.maxTurns = maxTurns;
+    this.maxWallClockMs = maxWallClockMs;
+  }
+
+  recordTurn({ inputTokens, outputTokens, costUsd }) {
+    this.usedTokens += inputTokens + outputTokens;
+    this.usedCostUsd += costUsd;
+    this.turns += 1;
+  }
+
+  enforce() {
+    if (this.usedTokens >= this.maxTokens) throw new BudgetError("tokens");
+    if (this.usedCostUsd >= this.maxCostUsd) throw new BudgetError("cost");
+    if (this.turns >= this.maxTurns) throw new BudgetError("turns");
+    if (Date.now() - this.startedAt >= this.maxWallClockMs) throw new BudgetError("wall_clock");
+  }
+}
+
+// In the agent loop:
+const budget = new TaskBudget({
+  maxTokens: 500_000,
+  maxCostUsd: 0.4,
+  maxTurns: 50,
+  maxWallClockMs: 10 * 60 * 1000,
+});
+
+while (!done) {
+  budget.enforce();
+  const turn = await runTurn(/* ... */);
+  budget.recordTurn(turn.usage);
+  // ...
+}
+```
+
+The most useful number to pick is `maxCostUsd` — the **cost-per-task budget**. Production teams now set this explicitly and tune it per task class. "Max $0.40 per SWE-bench-style code-fix attempt." "Max $0.05 per support classification." When the budget hits zero, the harness raises, the agent stops, and a fallback path (escalate to human, return partial result, retry from checkpoint) takes over.
+
+## A worked end-to-end example
+
+Take a coding-agent task: "fix the failing test in this file."
+
+**Without optimization:**
+
+- Opus 4.7 for every turn.
+- No caching of system prompt, tool definitions, or file contents.
+- 40 turns; average 8K input + 1.5K output per turn.
+- Input: 40 × 8K × $5/MTok = $1.60. Output: 40 × 1.5K × $25/MTok = $1.50. **Total: $3.10 per task.**
+
+**With routing + caching:**
+
+- Haiku 4.5 for file-nav + triage (16 turns), Sonnet 4.6 for implementation (20 turns), Opus 4.7 for planning + review (4 turns).
+- 90% of input is the static system+tools+file prefix; cached.
+- Cached input billed at 0.10× rate-card; dynamic input at full rate-card.
+- Input: 4 × (0.8K dyn + 7.2K cached at 0.10×) × $5 = $0.058 + 20 × (0.8K dyn + 7.2K cached) × $3 = $0.092 + 16 × (0.8K dyn + 7.2K cached) × $1 = $0.024. Output stays at full rate-card: 4 × 1.5K × $25 + 20 × 1.5K × $15 + 16 × 1.5K × $5 = $0.15 + $0.45 + $0.12. **Total: ~$0.91 per task.**
+
+**A ~70% reduction**, without changing what the agent does — only how the harness arranges to do it.
+
+(Batch is excluded because this example is interactive. For eval runs against a regression set of 1,000 similar tasks, batch would cut another ~50%, bringing per-task cost to roughly $0.45 of which most is output tokens that aren't discounted by caching.)
+
+## Try it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Write computeBudgetUsage(turns, budget) that takes an array of turn objects (each with inputTokens, outputTokens, costUsd) and a budget object (maxTokens, maxCostUsd, maxTurns). Return an object: { usedTokens, usedCostUsd, turns, exceeded } where exceeded is one of 'tokens' / 'cost' / 'turns' / null (no limit exceeded)."
+  initialCode={`function computeBudgetUsage(turns, budget) {
+  // Aggregate the turns and check which (if any) limit was first crossed
+}
+
+console.log(computeBudgetUsage(
+[
+{ inputTokens: 100, outputTokens: 50, costUsd: 0.01 },
+{ inputTokens: 200, outputTokens: 80, costUsd: 0.02 },
+],
+{ maxTokens: 1000, maxCostUsd: 0.50, maxTurns: 10 }
+));
+// { usedTokens: 430, usedCostUsd: 0.03, turns: 2, exceeded: null }
+
+console.log(computeBudgetUsage(
+[
+{ inputTokens: 100, outputTokens: 50, costUsd: 0.30 },
+{ inputTokens: 200, outputTokens: 80, costUsd: 0.25 },
+],
+{ maxTokens: 1000, maxCostUsd: 0.50, maxTurns: 10 }
+));
+// { usedTokens: 430, usedCostUsd: 0.55, turns: 2, exceeded: 'cost' }`}
+  solution={`function computeBudgetUsage(turns, budget) {
+let usedTokens = 0;
+let usedCostUsd = 0;
+let turnCount = turns.length;
+for (const t of turns) {
+usedTokens += (t.inputTokens || 0) + (t.outputTokens || 0);
+usedCostUsd += (t.costUsd || 0);
+}
+let exceeded = null;
+if (turnCount >= budget.maxTurns) exceeded = "turns";
+if (usedCostUsd >= budget.maxCostUsd) exceeded = "cost";
+if (usedTokens >= budget.maxTokens) exceeded = "tokens";
+return { usedTokens, usedCostUsd, turns: turnCount, exceeded };
+}
+
+console.log(computeBudgetUsage(
+[{ inputTokens: 100, outputTokens: 50, costUsd: 0.01 }, { inputTokens: 200, outputTokens: 80, costUsd: 0.02 }],
+{ maxTokens: 1000, maxCostUsd: 0.50, maxTurns: 10 }
+));
+console.log(computeBudgetUsage(
+[{ inputTokens: 100, outputTokens: 50, costUsd: 0.30 }, { inputTokens: 200, outputTokens: 80, costUsd: 0.25 }],
+{ maxTokens: 1000, maxCostUsd: 0.50, maxTurns: 10 }
+));`}
+testCases={["aggregates turn tokens/cost; returns the right exceeded flag (or null) when limits are crossed"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Your agent burns budget by re-sending an 8K-token system prompt and tool definitions on every turn. Cheapest single intervention?",
+      options: [
+        "Switch to a smaller model.",
+        "Mark the system prompt + tool definitions with cache_control (Anthropic) or equivalent — cached input bills at ~0.10× standard.",
+        "Truncate the conversation history more aggressively.",
+        "Move to a different vendor.",
+      ],
+      correct: 1,
+      explanation:
+        "Prompt caching on Anthropic charges 0.10× rate for cached input (90% off). For an 8K static prefix on a 50-turn run, you save ~360K input tokens worth of billing. Free if the prefix is already long enough to qualify; just add cache_control to the static blocks.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Stack prompt caching (90% off on cached input) with the Anthropic Batch API (50% off on input AND output). What's the rough effective discount on a workload where ~80% of input is cacheable?",
+      options: [
+        "Roughly 50% — the discounts don't combine.",
+        "Roughly 60% — the second discount applies only to the uncached portion.",
+        "Roughly 90-95% effective input savings — the multiplicative stacking puts you near 5% of base rate-card on input.",
+        "100% — Anthropic gives free tokens when you batch.",
+      ],
+      correct: 2,
+      explanation:
+        "Discounts stack multiplicatively. Cached input at 0.10× then batched at 0.5× becomes 0.05× — about 5% of base rate. For a workload where 80% of input is cacheable, your input bill is ~7-10% of rate-card. Output tokens still aren't discounted by caching, so your total saving depends on the input-to-output ratio.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your agent loop has no token / cost / turn limit and an Opus model. The agent gets into a loop. What's the next thing that happens?",
+      options: [
+        "The model self-corrects after a few iterations.",
+        "Anthropic rate-limits you and you find out tomorrow.",
+        "Your account gets a single-task bill that could run into the hundreds or thousands of dollars before anyone notices.",
+        "The loop times out automatically at one minute.",
+      ],
+      correct: 2,
+      explanation:
+        "Unbounded loops are the fail-deadly mode for agents. Models don't self-correct; rate-limits are loose at the per-account level; there's no automatic timeout. The harness MUST enforce maxTokens / maxCostUsd / maxTurns / maxWallClockMs. Production teams set cost-per-task explicitly.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "You're running a 10,000-trace evaluation against your agent's regression set after a prompt change. Interactive latency doesn't matter — the eval can take overnight. Which lever has the biggest effect for this specific workload?",
+      options: [
+        "Switch to a smaller model.",
+        "Submit through the Batch API (24h SLA, ~50% off) instead of interactively.",
+        "Disable caching to save on cache-write overhead.",
+        "Run the eval against a smaller sample to reduce volume.",
+      ],
+      correct: 1,
+      explanation:
+        "Batch APIs are designed for exactly this: large non-interactive workloads where 24h is plenty. ~50% off, stacks with caching. Reducing the sample size loses statistical power; disabling caching is exactly backwards.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The five cost levers in order: model ___, prompt ___, ___ APIs (24h SLA, 50% off), hard caps in the ___, and prompt shrinkage. Stacking caching at 0.10× with batching at 0.5× lands at ~5% of rate-card on cacheable input."
+  answers={["routing", "caching", "batch", "harness"]}
+  hints={[
+    "Pick the cheapest model that reliably solves each turn.",
+    "Never pay full price for the static prefix twice.",
+    "Trade latency for cost on non-interactive workloads.",
+    "The harness, not the model, enforces budget ceilings.",
+  ]}
+/>
+
+## What you learned
+
+- **Five cost levers in order**: model routing → prompt caching → batch APIs → hard caps → prompt shrinkage.
+- **Model routing** is the biggest single lever (40-70% savings). Concrete 2026 pattern: Haiku 4.5 for triage, Sonnet 4.6 for implementation, Opus 4.7 for planning.
+- **Prompt caching** discount table varies by provider: Anthropic 90% off (explicit `cache_control`), Gemini 75-90% (implicit + explicit), OpenAI 25-50% (auto on ≥1024 tokens), DeepSeek auto.
+- **Batch APIs** trade interactivity for 50% off on input AND output. Anthropic + OpenAI + Gemini all support this; SLA is up to 24h.
+- **Stacking multiplies**. Cached + batched can hit ~5% of base rate-card on input.
+- **Hard caps in the harness** (maxTokens / maxCostUsd / maxTurns / maxWallClockMs) are non-optional — unbounded loops are how single-task bills hit four digits.
+- **Cost-per-task is the framing teams converged on.** Set the budget, route to the cheapest model that meets it, cache everything static, batch what isn't interactive.
+
+Next: [Prompt Injection at Agent Depth](./04-prompt-injection-agentic.mdx) — indirect injection, the Lethal Trifecta, dual-LLM defence.
+
+**Canonical references:** [Anthropic — prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) · [Anthropic Message Batches API](https://docs.anthropic.com/en/api/creating-message-batches) · [Gemini context caching](https://ai.google.dev/gemini-api/docs/caching) · [OpenAI Batch API](https://platform.openai.com/docs/guides/batch).
