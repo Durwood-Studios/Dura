@@ -48,17 +48,17 @@ export const PHASE_8_QUESTIONS: AssessmentQuestion[] = [
     "8-1-q2",
     "8-1",
     "multiple-choice",
-    "What does the 'Arrange, Act, Assert' pattern describe?",
+    "Beyond just structuring a test, what anti-pattern does the 'Arrange, Act, Assert' (AAA) discipline help prevent in mature test suites?",
     [
-      "Three deployment stages",
-      "The structure of a test: set up inputs, call the function, check the output",
-      "Three types of tests",
-      "A CI pipeline",
+      "Tests written in the wrong language.",
+      "Interleaved arrange / act / assert blocks where setup, action, and verification are tangled together — making the test hard to read, prone to multiple-assertion-per-test bloat, and fragile when behavior changes.",
+      "Slow tests.",
+      "Tests that fail intermittently.",
     ],
     1,
-    "AAA is the universal test structure.",
+    "Phase 1 introduces AAA as the structure for an individual test. Professional practice goes further: AAA enforces a separation discipline that, when followed strictly, surfaces tests trying to do too much (multiple acts) and tests where assertions interleave with setup (a pattern that breaks under any refactor). The discipline scales test suites; the shape alone does not.",
     "easy",
-    ["testing", "aaa"]
+    ["testing", "aaa", "test-discipline"]
   ),
   q(
     "8-1-q3",
@@ -296,17 +296,17 @@ export const PHASE_8_QUESTIONS: AssessmentQuestion[] = [
     "8-2-q8",
     "8-2",
     "multiple-choice",
-    "What is a feature flag?",
+    "What's the key engineering discipline feature flags require to avoid becoming long-term technical debt?",
     [
-      "A Git tag",
-      "A runtime toggle that enables/disables features without deploying new code",
-      "A CSS class",
-      "A test assertion",
+      "Always enable new flags in production immediately.",
+      "Flag retirement — each flag has a lifecycle (introduced → rolled out → permanent or retired). Stale flags left in code accumulate dead conditional branches and obscure intent.",
+      "Use only boolean flags, never percentage rollouts.",
+      "Store flag definitions in source code, never in a flag service.",
     ],
     1,
-    "Feature flags decouple deployment from release — deploy code with the feature off, enable it gradually.",
+    "Phase 4 introduces feature flags as 'decouple deploy from release.' Professional-practice teams know each flag needs a planned end-of-life. Unretired flags create combinatorial conditional code paths that are hard to test and reason about. Tools like LaunchDarkly, Unleash, and Flagsmith surface flag-staleness metrics specifically for this reason.",
     "hard",
-    ["feature-flag"]
+    ["feature-flag", "release-engineering", "tech-debt"]
   ),
   q(
     "8-2-q9",
