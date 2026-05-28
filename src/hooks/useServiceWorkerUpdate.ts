@@ -51,7 +51,6 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdateState {
     }
 
     let cancelled = false;
-    let registration: ServiceWorkerRegistration | null = null;
 
     const handleWaiting = (sw: ServiceWorker | null): void => {
       if (!sw || cancelled) return;
@@ -75,7 +74,6 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdateState {
       .getRegistration()
       .then((reg) => {
         if (!reg || cancelled) return;
-        registration = reg;
 
         // Catch the case where a new SW finished installing before
         // this hook mounted (e.g. user returns to a tab after a deploy).
@@ -107,7 +105,6 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdateState {
 
     return (): void => {
       cancelled = true;
-      registration = null;
     };
   }, []);
 

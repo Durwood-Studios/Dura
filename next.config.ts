@@ -73,7 +73,13 @@ const nextConfig: NextConfig = {
               // text weather string. It fails silently so users never saw
               // the CSP-blocked request, but the feature was broken since
               // c4bfac3. Allowed here as a single-host exception.
-              "connect-src 'self' https://*.supabase.co https://*.codesandbox.io wss://*.codesandbox.io https://vitals.vercel-insights.com https://wttr.in",
+              //
+              // api.anthropic.com: BYOK AI features (Settings → AI
+              // Features). Requests go browser → Anthropic direct with
+              // the learner's own key in localStorage. No Durwood-side
+              // proxy. Design rationale: xDocs/active/ai-surfaces-
+              // design-2026-05.md.
+              "connect-src 'self' https://*.supabase.co https://*.codesandbox.io wss://*.codesandbox.io https://vitals.vercel-insights.com https://wttr.in https://api.anthropic.com",
               "frame-src 'self' https://*.codesandbox.io https://*.csb.app",
               "worker-src 'self' blob:",
               "object-src 'none'",
