@@ -12,6 +12,8 @@ import {
   Smartphone,
   Users,
   Compass,
+  Landmark,
+  WifiOff,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Role } from "@/types/career-track";
@@ -29,6 +31,8 @@ const ICON_MAP: Record<string, LucideIcon> = {
   Smartphone,
   Users,
   Compass,
+  Landmark,
+  WifiOff,
 };
 
 const DEMAND_STYLES: Record<string, { label: string; className: string }> = {

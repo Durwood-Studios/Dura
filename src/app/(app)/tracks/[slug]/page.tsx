@@ -13,6 +13,8 @@ import {
   Smartphone,
   Users,
   Compass,
+  Landmark,
+  WifiOff,
   ExternalLink,
   ArrowRight,
 } from "lucide-react";
@@ -35,6 +37,8 @@ const ICON_MAP: Record<string, LucideIcon> = {
   Smartphone,
   Users,
   Compass,
+  Landmark,
+  WifiOff,
 };
 
 const DEMAND_STYLES: Record<string, { label: string; className: string }> = {
