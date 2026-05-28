@@ -42,23 +42,36 @@ const nextConfig: NextConfig = {
             key: "Content-Security-Policy",
             value: [
               "default-src 'self'",
-              // 'unsafe-inline' dropped — theme bootstrap moved to /theme-bootstrap.js,
-              // console easter-egg removed. JSON-LD remains inline but
-              // type="application/ld+json" is not script-executable so CSP doesn't gate it.
+              // 'unsafe-inline' is required because Next.js 15 App Router
+              // emits inline <script> tags during streaming SSR (flight
+              // payload pushes, render data, hydration). The 2026-05-27
+              // hardening commit (c4bfac3) dropped 'unsafe-inline' without
+              // catching that those streaming-SSR scripts would be blocked
+              // — Playwright e2e (2026-05-28) flagged the regression: pages
+              // SSR but hydrate-time chunks are CSP-blocked. Restored here.
               //
-              // 'unsafe-eval' kept for Sandpack. Sandpack itself runs in the
-              // codesandbox.io iframe (governed by that iframe's own CSP), but the
-              // host-side bundler can use Function() in some configurations. To drop
-              // 'unsafe-eval' safely we need runtime verification that every Sandpack
-              // flow still works — staged as a separate work item.
-              "script-src 'self' 'unsafe-eval' https://*.codesandbox.io",
+              // The right long-term fix is a nonce-based CSP: middleware
+              // generates a per-request nonce, sets it on the CSP header,
+              // and Next applies it to its emitted scripts. That requires a
+              // middleware refactor and is filed for the next security
+              // sweep — see ROADMAP.md "Security & supply chain".
+              //
+              // 'unsafe-eval' kept for Sandpack. Sandpack runs user code in
+              // the codesandbox.io iframe (governed by that iframe's own
+              // CSP), but the host bundler can use Function() in some
+              // configurations. Drop together with the nonce migration.
+              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.codesandbox.io",
               "style-src 'self' 'unsafe-inline'",
               // Tightened from 'self' data: blob: https: — only Supabase storage
               // (avatars / certificates / shared assets) is a legitimate external
               // image source. data: + blob: stay for canvas exports and inline UI primitives.
               "img-src 'self' data: blob: https://*.supabase.co",
               "font-src 'self' data:",
-              "connect-src 'self' https://*.supabase.co https://*.codesandbox.io wss://*.codesandbox.io https://vitals.vercel-insights.com",
+              // wttr.in: the AikenWeather splash easter-egg fetches a short
+              // text weather string. It fails silently so users never saw
+              // the CSP-blocked request, but the feature was broken since
+              // c4bfac3. Allowed here as a single-host exception.
+              "connect-src 'self' https://*.supabase.co https://*.codesandbox.io wss://*.codesandbox.io https://vitals.vercel-insights.com https://wttr.in",
               "frame-src 'self' https://*.codesandbox.io https://*.csb.app",
               "worker-src 'self' blob:",
               "object-src 'none'",
