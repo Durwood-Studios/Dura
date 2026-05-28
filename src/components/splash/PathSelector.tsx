@@ -14,18 +14,18 @@ interface PathCard {
 
 const PATHS: PathCard[] = [
   {
-    title: "I'm curious about computers",
+    title: "First time? Start here.",
     icon: <Lightbulb className="h-7 w-7" />,
     description:
-      "Interactive activities that teach how computers think. No reading walls, no accounts, just play.",
+      "Twenty interactive activities that teach how computers think. No reading walls, no account, no English fluency required. Built for everyone — including kids, beginners, and anyone curious.",
     href: "/discover",
     color: "#f472b6",
   },
   {
-    title: "I'm learning to code",
+    title: "I'm ready to learn to code",
     icon: <Sprout className="h-7 w-7" />,
     description:
-      "A 35-question assessment finds where you belong, then guides you step by step. Best when you've used a computer before — if not, start with Discovery above.",
+      "A 35-question assessment finds where you belong in the curriculum, then guides you step by step. Best when you've used a computer before — if not, the Discovery card above is your front door.",
     href: "/assess",
     color: "#10b981",
   },
