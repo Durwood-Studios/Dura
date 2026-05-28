@@ -43,13 +43,16 @@ export function AikenWeather(): React.ReactElement | null {
           }
         }
 
-        const res = await fetch("https://wttr.in/Aiken,SC?format=%t+%C", {
+        // Same-origin proxy — the server fetches wttr.in with a curl UA so we
+        // get the compact text form instead of wttr.in's browser HTML page.
+        const res = await fetch("/api/v1/weather", {
           signal: AbortSignal.timeout(5000),
         });
         if (!res.ok) return;
 
         const text = (await res.text()).trim().replace(/^\+/, "");
-        if (!text || text.includes("Unknown")) return;
+        // Defense in depth: never render an oversized/HTML payload.
+        if (!text || text.length > 60 || text.includes("<") || text.includes("Unknown")) return;
 
         sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ text, timestamp: Date.now() }));
         setWeather(text);
