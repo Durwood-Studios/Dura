@@ -1,10 +1,12 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Menu, Search, Sun, Moon } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { usePreferencesStore } from "@/stores/preferences";
 import { SprintTimer } from "@/components/study/SprintTimer";
 import { TopBarGamification } from "@/components/gamification/TopBarGamification";
+import { UpdateAvailable } from "@/components/pwa/UpdateAvailable";
 
 export function TopBar(): React.ReactElement {
   const toggleMobileNav = useUIStore((s) => s.toggleMobileNav);
@@ -12,11 +14,20 @@ export function TopBar(): React.ReactElement {
   const theme = usePreferencesStore((s) => s.prefs.theme);
   const update = usePreferencesStore((s) => s.update);
 
-  const isDark =
-    theme === "dark" ||
-    (theme === "system" &&
-      typeof window !== "undefined" &&
-      window.matchMedia("(prefers-color-scheme: dark)").matches);
+  // System-resolved dark state lives in post-mount state so SSR and the
+  // first client render agree. Reading `window.matchMedia` directly here
+  // caused React #418 on /settings when a learner's OS preferred dark and
+  // theme was "system": server rendered `<Moon />`, client rendered `<Sun />`.
+  const [systemDark, setSystemDark] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    setSystemDark(mq.matches);
+    const handler = (e: MediaQueryListEvent): void => setSystemDark(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  const isDark = theme === "dark" || (theme === "system" && systemDark);
 
   const cycleTheme = () => {
     const next = theme === "light" ? "dark" : theme === "dark" ? "system" : "light";
@@ -34,6 +45,7 @@ export function TopBar(): React.ReactElement {
         <Menu className="h-5 w-5" />
       </button>
       <div className="ml-auto flex items-center gap-3">
+        <UpdateAvailable />
         <TopBarGamification />
         <SprintTimer />
       </div>
