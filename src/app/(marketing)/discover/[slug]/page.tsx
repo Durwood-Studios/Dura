@@ -288,6 +288,83 @@ const ROOMS: Record<string, Room> = {
       },
     ],
   },
+  "web-platform": {
+    name: "Web Platform",
+    tagline: "The browser is your stage. The event loop, the DOM, hydration, layout, paint.",
+    emoji: "\u{1F310}",
+    color: "#3b82f6",
+    concept: "Frontend internals",
+    intro:
+      "Every web app you have ever used runs on the same platform — the browser. Underneath the framework of the week sits the same handful of mechanisms: an event loop that decides what runs when, a DOM that the browser parses and paints, a hydration handshake between server-rendered HTML and client JavaScript. These activities make those mechanisms visible. They are the things you reach for when a button feels slow and the framework can't tell you why.",
+    activities: [
+      {
+        slug: "event-loop",
+        name: "Event Loop",
+        description:
+          "Schedule setTimeout, Promise.then, requestAnimationFrame, and a synchronous CPU block. Step the loop and watch microtasks drain to exhaustion between every macrotask, rAF fire right before paint, and a 50ms sync block freeze the renderer cold.",
+        concept: "Event loop · Microtasks · rAF",
+        teaches: { label: "Phase 2 · Web Development", href: "/paths/2" },
+      },
+    ],
+  },
+  "data-vault": {
+    name: "Data Vault",
+    tagline: "Where data lives, why it disagrees with itself, and how queries actually run.",
+    emoji: "\u{1F5C4}",
+    color: "#a855f7",
+    concept: "Databases & queries",
+    intro:
+      "The database is the part of your stack that survives the longest. Frameworks rotate; schemas accumulate. These activities make the mechanics of queries, indexes, transactions, and replication visible — so when a dashboard hits 8 seconds in production at the size where it ran in 80 milliseconds in dev, you can read the explain plan and know which bug you are looking at.",
+    activities: [
+      {
+        slug: "n-plus-one",
+        name: "N+1 Query Problem",
+        description:
+          "Side-by-side: loop over users and fetch their posts one-at-a-time vs one IN-clause query. Watch query count and elapsed time fan out as users grow. The most common backend performance bug in the world, made impossible to miss.",
+        concept: "Database performance · ORM traps",
+        teaches: { label: "Phase 4 · Backend Engineering", href: "/paths/4" },
+      },
+    ],
+  },
+  "state-machine": {
+    name: "State Machine",
+    tagline: "When two computers disagree about what's true — and how UIs survive it.",
+    emoji: "\u{1F501}",
+    color: "#f43f5e",
+    concept: "Distributed state · Sync",
+    intro:
+      "Every modern app is two computers pretending to agree. The browser holds a copy of the state; the server holds the truth. These activities surface the contract — what happens when the browser updates first and asks later, what conflicts look like when two clients edit at once, why CRDTs and version vectors exist. The full-stack engineer's mental model lives here.",
+    activities: [
+      {
+        slug: "optimistic-ui",
+        name: "Optimistic UI",
+        description:
+          "Like a post with latency and failure-rate sliders. Optimistic mode updates instantly and rolls back on server failure; pessimistic mode waits. Burst five clicks and watch the trade between user-felt speed and rollback complexity play out in real time.",
+        concept: "Optimistic updates · FE/BE contract · Rollback paths",
+        teaches: { label: "Phase 4 · Backend Engineering", href: "/paths/4" },
+      },
+    ],
+  },
+  "live-wire": {
+    name: "Live Wire",
+    tagline:
+      "Real-time systems — sockets, streams, and the live data your phone never stops receiving.",
+    emoji: "\u{1F4E1}",
+    color: "#06B6D4",
+    concept: "Real-time + pub/sub",
+    intro:
+      "Every chat app, live sports score, push notification, and real-time dashboard belongs to the same category of system: a broker fans messages out from publishers to many subscribers, in something close to real time. These activities make the mechanics visible — the fan-out pattern, the queue depth that grows when a consumer is too slow, the disconnect-and-replay dance that decides whether your inbox catches up or silently loses what it missed.",
+    activities: [
+      {
+        slug: "pubsub",
+        name: "Pub/Sub",
+        description:
+          "Drive publishers, watch a broker fan messages out to subscribers, and surface the dynamics that wreck real-time systems in production — runaway queues from backpressure, lost messages on disconnect, the trade-off between at-most-once and at-least-once delivery. Crank one publisher to 50 msg/s with a 1 msg/s consumer and watch the queue go red.",
+        concept: "Real-time messaging · Fan-out · Backpressure",
+        teaches: { label: "Phase 5 · Systems Engineering", href: "/paths/5" },
+      },
+    ],
+  },
 };
 
 const VALID_SLUGS = Object.keys(ROOMS);

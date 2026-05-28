@@ -326,6 +326,27 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     ),
   },
 
+  "event-loop": {
+    title: "Event Loop",
+    description:
+      "Schedule setTimeout, Promise.then, and requestAnimationFrame. Watch the loop drain microtasks before macrotasks, and watch a sync block freeze the paint counter.",
+    concept: "Event loop · Microtasks · rAF",
+    intro:
+      "JavaScript runs one thing at a time. The event loop is the scheduler that decides which queued thing runs next — and the order it picks is the difference between a smooth UI and a janky one. This demo simulates the loop one tick at a time: schedule the four kinds of work, click Step, and watch the call stack pull from the microtask queue, the macrotask queue, and the animation-frame queue in the order the spec says it must.",
+    underTheHood: [
+      "Microtasks (Promise.then, queueMicrotask, MutationObserver) drain to EXHAUSTION between every macrotask. The loop will never take the next setTimeout while a single microtask is still queued — which is why a deep .then chain can postpone macrotasks indefinitely. Queue a `.then chain ×5` and watch the setTimeout sit there waiting.",
+      "requestAnimationFrame is wired to RENDER, not to the microtask queue. The browser runs rAF callbacks immediately before committing the next frame — which is what makes rAF the right hook for animation work (it runs at the display's pace) and the wrong hook for general async coordination.",
+      "A synchronous CPU loop blocks EVERYTHING: no microtasks drain, no rAFs fire, no paint commits. This is the pathology behind every FE perf war story — a long for-loop, a sync JSON.parse on a big blob, a heavy markdown render — and the original argument for moving work off the main thread (workers, idle callbacks, streaming, time-slicing).",
+    ],
+    teaches: { label: "Phase 2 · Web Development", href: "/paths/2" },
+    roomSlug: "web-platform",
+    roomName: "Web Platform",
+    roomColor: "#3b82f6",
+    Component: dynamic(() => import("@/components/discover/EventLoop").then((m) => m.EventLoop), {
+      loading: () => <ActivitySkeleton />,
+    }),
+  },
+
   // ─── Pattern Factory — loops & recursion ────────────────────────────────
   "pattern-machine": {
     title: "Pattern Machine",
@@ -539,6 +560,49 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     ),
   },
 
+  "n-plus-one": {
+    title: "N+1 Query Problem",
+    description:
+      "Loop over users, fetch each user's posts. Watch query count and elapsed time explode — then watch one IN-clause make it disappear.",
+    concept: "Database performance · ORM traps",
+    intro:
+      "The most common backend performance bug in the world hides in three lines of innocent-looking ORM code: fetch a list of users, then for each user, fetch their posts. In development with 5 fake users it runs in milliseconds. In production with 200 real users it issues 201 round-trips and ships a dashboard that takes 8 seconds to load. Run both patterns side-by-side; watch the gap grow linearly with users; reveal the antidote — one line in every major ORM.",
+    underTheHood: [
+      "The ORM convenience trap: `user.posts` looks like a property access but is a network call. The code reads like a list comprehension; the runtime behavior is a tight loop of round-trips. This is why N+1 survives every code review — it doesn't look like a database access at all.",
+      "Production data is what surfaces this. With 5 seed-data users the latency is invisible; with 200 real users at 20 ms each it's a 4-second page. By the time the bug is felt, the schema, the API contract, and the UI are all already shipped — so the fix shows up as a frantic patch instead of a design choice.",
+      "Every major ORM ships a one-line antidote: Django `prefetch_related` / `select_related`, Prisma `include`, Laravel `with`, ActiveRecord `includes`, SQLAlchemy `joinedload`, GraphQL `DataLoader`. They all do the same thing: collect the parent IDs, fire one `IN`-clause or `JOIN` query, distribute the results to the right parents. The hard part is noticing the bug exists.",
+    ],
+    teaches: { label: "Phase 4 · Backend Engineering", href: "/paths/4" },
+    roomSlug: "data-vault",
+    roomName: "Data Vault",
+    roomColor: "#a855f7",
+    Component: dynamic(() => import("@/components/discover/NPlusOne").then((m) => m.NPlusOne), {
+      loading: () => <ActivitySkeleton />,
+    }),
+  },
+
+  "optimistic-ui": {
+    title: "Optimistic UI",
+    description:
+      "Like a post under varying latency and failure rates. Toggle optimistic vs pessimistic; watch the rollback flicker and the queued wait.",
+    concept: "Optimistic updates · FE/BE contract · Rollback paths",
+    intro:
+      "Optimistic UI lies to the user, kindly. The local state updates the moment they click; the server gets told later, and on the rare day the server says no, the lie has to be undone. This simulator runs a like button against a fake server you control — latency slider, failure-rate slider — and surfaces what feels different. Flip to pessimistic mode and the heart waits for the round trip; flip back to optimistic and it fires instantly, with the rollback path doing quiet work behind the scenes. The stats panel shows perceived latency and rollback counts diverging in real time. The whole point: optimism feels faster, but ships more code.",
+    underTheHood: [
+      "Perceived latency vs complexity: optimistic mode collapses time-to-feedback to a single frame (~16ms) at the cost of a reconcile path that must exist, must be tested, and must handle the case where the user kept interacting before the server got back to you. Pessimistic mode pays a real round trip every click, and stops a class of bugs from being possible at all. There is no free choice — the trade is between user-felt speed and code surface area.",
+      "Rollback-path-exists invariant: every optimistic update in production must have a corresponding revert. The simulator makes the rollback visible as a flicker because real codebases hide it behind a toast — and the day the rollback path is missing or wrong is the day users see counts that disagree across refreshes. Idempotency keys (so retries don't double-apply) and version numbers (so a late-arriving response can't overwrite a newer one) are how real systems make the rollback safe; the rapid-click burst in this demo is the closest thing to seeing why both are necessary.",
+      "Irreversible-ops boundary: never go optimistic for payments, deletes, account changes, or any action whose rollback can't be made truly invisible. The cost of a wrong rollback on a like is a flicker; the cost on a charge is a refund ticket and a furious user. The rule of thumb: optimistic for actions the user repeats freely and won't notice a 200ms hiccup on; pessimistic for actions where being wrong has a tail.",
+    ],
+    teaches: { label: "Phase 4 · Backend Engineering", href: "/paths/4" },
+    roomSlug: "state-machine",
+    roomName: "State Machine",
+    roomColor: "#f43f5e",
+    Component: dynamic(
+      () => import("@/components/discover/OptimisticUI").then((m) => m.OptimisticUI),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
+
   "gc-visualizer": {
     title: "GC Visualizer",
     description:
@@ -560,6 +624,28 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
       { loading: () => <ActivitySkeleton /> }
     ),
   },
+
+  // ─── Live Wire — real-time pub/sub mechanics ────────────────────────────
+  pubsub: {
+    title: "Pub/Sub",
+    description:
+      "Publishers, topics, subscribers. Watch fan-out, backpressure, disconnect and replay — the dynamics every real-time system has to survive.",
+    concept: "Real-time messaging · Fan-out · Backpressure",
+    intro:
+      "Every chat app, live dashboard, push notification, and stock ticker is built on the same primitive: a broker fans messages out from publishers to many subscribers in real time. This simulation runs that primitive at a slowed-down pace — turn up a publisher's rate, drop a subscriber's drain speed, and watch a queue climb until it's backpressured. Disconnect a consumer, flip the 'broker buffers' toggle, and see why the same gap can either replay cleanly or silently drop everything depending on one configuration choice.",
+    underTheHood: [
+      "Fan-out: one publisher writes once, the broker delivers to every subscriber whose subscription set matches the topic. Crucially different from point-to-point queues (where each message goes to one consumer). Redis pub/sub, Kafka consumer groups in broadcast mode, MQTT, and every WebSocket fan-out server implement this same shape — your phone gets the push notification because it subscribed to a topic, not because the server addressed it directly.",
+      "Backpressure: the queue grows whenever inbound rate exceeds drain rate. In a single-machine sim this is a `q=12` indicator. In production it's a slow consumer melting a Kafka broker's disk, a WebSocket server running out of socket buffer, or a Lambda hitting its concurrency cap. The dominant production failure mode in real-time systems is not 'the message got lost' — it's 'one consumer is slow and now everyone is'.",
+      "Delivery semantics live on a spectrum. At-most-once: fire and forget (UDP, raw WebSockets, default Redis pub/sub) — fast, simple, lossy under failure. At-least-once: the broker holds the message until the consumer acks, redelivering on disconnect (Kafka, RabbitMQ with acks, SQS) — durable, but the consumer must be idempotent because duplicates happen. Exactly-once: only achievable with transactional brokers, idempotent producers, and ack protocols (Kafka with transactions, Pulsar) — the most expensive guarantee in distributed systems, and the one most teams don't actually need.",
+    ],
+    teaches: { label: "Phase 5 · Systems Engineering", href: "/paths/5" },
+    roomSlug: "live-wire",
+    roomName: "Live Wire",
+    roomColor: "#06B6D4",
+    Component: dynamic(() => import("@/components/discover/PubSub").then((m) => m.PubSub), {
+      loading: () => <ActivitySkeleton />,
+    }),
+  },
 };
 
 /** Room-to-activities mapping for generateStaticParams. */
@@ -576,6 +662,15 @@ const ROOM_ACTIVITIES: Record<string, string[]> = {
     "embedding-galaxy",
   ],
   "bug-lab": ["bug-detective", "logic-gates", "story-builder", "race-condition", "gc-visualizer"],
+  // New rooms (2026-05-28) — each anchored by one well-built activity
+  // with room to grow as more land. The four below cover frontend (web
+  // platform), backend (databases + queries), full-stack (distributed
+  // state), and live data (sockets + pub/sub) — the "frontend, backend,
+  // full stack, sockets" axis the universality audit asked for.
+  "web-platform": ["event-loop"],
+  "data-vault": ["n-plus-one"],
+  "state-machine": ["optimistic-ui"],
+  "live-wire": ["pubsub"],
 };
 
 /** Pre-render all room+activity combinations at build time. */

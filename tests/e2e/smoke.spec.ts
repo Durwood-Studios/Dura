@@ -43,6 +43,22 @@ const HOT_PATHS = [
   // (2026-05-28). Guards the lazy-import wiring and the BFS/sweep state
   // machine on first mount.
   { name: "gc-visualizer", url: "/discover/bug-lab/gc-visualizer" },
+  // discover/event-loop: Phase 2 web-platform activity (2026-05-28).
+  // Simulates microtask vs macrotask vs rAF ordering and the sync-block
+  // pathology. Guards the lazy-import wiring + idle-state first mount.
+  { name: "event-loop", url: "/discover/web-platform/event-loop" },
+  // discover/n-plus-one: Phase 4 backend-engineering activity
+  // (2026-05-28). Same role as the others — guards the lazy-import wiring
+  // and the side-by-side simulation state machine on first mount.
+  { name: "n-plus-one", url: "/discover/data-vault/n-plus-one" },
+  // discover/optimistic-ui: Phase 4 backend-engineering activity
+  // (2026-05-28). Guards the lazy-import wiring; the fake-server
+  // setTimeout only fires on user input, so mount alone should be quiet.
+  { name: "optimistic-ui", url: "/discover/state-machine/optimistic-ui" },
+  // discover/pubsub: Phase 5 real-time pub/sub simulation (2026-05-28).
+  // First activity in the new "live-wire" room. Guards the setInterval-
+  // driven message pipeline + the new room registration.
+  { name: "pubsub", url: "/discover/live-wire/pubsub" },
   // review-code: BYOK code-review surface. Test runs without consent +
   // key in localStorage, so the route renders the consent-prompt state
   // — same kind of hydration coverage as /settings.
