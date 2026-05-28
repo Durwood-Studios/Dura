@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePreferencesStore } from "@/stores/preferences";
 import { isModuleUnlocked, getPrerequisiteModule } from "@/lib/gating";
 import { LockedModule } from "@/components/paths/LockedModule";
+import { MasteryUnlockBanner } from "@/components/celebration/MasteryUnlockBanner";
 import { Skeleton } from "@/components/ui/Skeleton";
 
 interface GatingGuardProps {
@@ -59,5 +60,17 @@ export function GatingGuard({
     return <LockedModule moduleTitle={moduleTitle} prerequisite={prerequisite} />;
   }
 
-  return <>{children}</>;
+  // Module is unlocked — show the celebration banner on first observed
+  // visit, then the lesson content. The banner self-checks localStorage
+  // for prior-seen state and returns null if it has already fired.
+  // Entry-point module 0-1 is excluded because it was never gated.
+  const isEntryPoint = phaseId === "0" && moduleId === "0-1";
+  return (
+    <>
+      {!isEntryPoint && (
+        <MasteryUnlockBanner phaseId={phaseId} moduleId={moduleId} moduleTitle={moduleTitle} />
+      )}
+      {children}
+    </>
+  );
 }
