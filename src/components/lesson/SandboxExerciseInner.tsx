@@ -52,7 +52,7 @@ const SANDPACK_THEME = {
   font: {
     body: "var(--font-sans)",
     mono: "var(--font-mono)",
-    size: "13px",
+    size: "14px",
     lineHeight: "1.6",
   },
 } as const;
@@ -202,7 +202,7 @@ function SandboxControls({
         <button
           type="button"
           onClick={run}
-          className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600"
+          className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 px-3.5 py-2 text-sm font-semibold text-white hover:bg-emerald-600"
         >
           <Play className="h-3 w-3" />
           Run
@@ -210,7 +210,7 @@ function SandboxControls({
         <button
           type="button"
           onClick={reset}
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
         >
           <RotateCcw className="h-3 w-3" />
           Reset
@@ -219,7 +219,7 @@ function SandboxControls({
           <button
             type="button"
             onClick={showSolution}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3.5 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
           >
             <Eye className="h-3 w-3" />
             Show solution
@@ -228,7 +228,7 @@ function SandboxControls({
         {verdict !== "idle" && (
           <span
             className={cn(
-              "ml-auto inline-flex items-center gap-1 text-xs font-medium",
+              "inline-flex w-full items-center gap-1 text-xs font-medium sm:ml-auto sm:w-auto",
               verdictColor
             )}
           >
@@ -320,7 +320,7 @@ export default function SandboxExerciseInner({
           testCases={testCases}
           language={language}
         />
-        <SandpackLayout>
+        <SandpackLayout className="!flex-col sm:!flex-row">
           <SandpackCodeEditor showLineNumbers showTabs={false} wrapContent />
         </SandpackLayout>
         <SandpackConsole standalone />
