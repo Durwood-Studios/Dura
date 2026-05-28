@@ -43,6 +43,10 @@ const HOT_PATHS = [
   // (2026-05-28). Guards the lazy-import wiring and the BFS/sweep state
   // machine on first mount.
   { name: "gc-visualizer", url: "/discover/bug-lab/gc-visualizer" },
+  // review-code: BYOK code-review surface. Test runs without consent +
+  // key in localStorage, so the route renders the consent-prompt state
+  // — same kind of hydration coverage as /settings.
+  { name: "review-code", url: "/review-code" },
 ];
 
 // Console noise we deliberately ignore. Each entry must explain WHY.
