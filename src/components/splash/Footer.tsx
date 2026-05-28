@@ -33,15 +33,10 @@ export function Footer(): React.ReactElement {
       />
 
       <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-6 text-sm text-[#525252] sm:flex-row dark:text-[#a0a0a8]">
-        <div className="flex flex-col items-center gap-1.5 sm:items-start">
-          <div className="text-[#171717] dark:text-[#f0f0f0]">
-            Durwood Studios LLC &middot; Built by Dustin Snellings
-          </div>
+        <div className="flex flex-col items-center gap-2 sm:items-start">
+          <div className="text-[#171717] dark:text-[#f0f0f0]">Durwood Studios LLC</div>
           <div className="text-xs text-[#A3A3A3] dark:text-[#6b6b75]">
             Open source &middot; AGPLv3 &middot; Built for everyone
-          </div>
-          <div className="mt-1 text-xs text-[#A3A3A3] dark:text-[#6b6b75]">
-            Made with care in pursuit of better engineering education
           </div>
           <AikenWeather />
         </div>
