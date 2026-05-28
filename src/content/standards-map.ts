@@ -356,6 +356,20 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     sfia: "Level 4–5 — Solution architecture (ARCH)",
     ieee7000: ["IEEE 7007-2021 (Ontological standards for ethical AI)"],
   },
+  {
+    phaseId: "6",
+    moduleId: "6-7",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+    sfia: "Level 4–5 — Programming / agent engineering (PROG, EMRG)",
+    ieee7000: [
+      "IEEE 7000-2021 (Model process for addressing ethical concerns during system design)",
+      "IEEE 7001-2021 (Transparency of autonomous systems)",
+    ],
+    owasp: ["LLM01 Prompt Injection", "LLM02 Insecure Output Handling", "LLM08 Excessive Agency"],
+  },
 
   // Phase 7: Advanced Systems → SFIA L5 + NICE (security) + OWASP
   {
