@@ -30,6 +30,24 @@
 
 import JSZip from "jszip";
 import { getDB } from "@/lib/db";
+
+/**
+ * Defensive limits applied before the ZIP is parsed. Aimed at a class
+ * of attack where a malicious actor convinces a learner to import a
+ * crafted save file that decompresses to gigabytes ("zip bomb"). All
+ * three bounds must hold or parseLearnerRecordZip throws before any
+ * entry is read into memory.
+ *
+ * Tuned for the actual shape DURA exports: typical learner-record ZIPs
+ * are well under 1 MB; the README + summary + xAPI projection take a
+ * few hundred KB even for power users. 50 MB compressed + 200 MB
+ * uncompressed leaves ~50x headroom while still bounding worst-case
+ * RAM use.
+ */
+const MAX_ZIP_BYTES = 50 * 1024 * 1024; // 50 MB compressed
+const MAX_ENTRIES = 64; // way more than the 4 files DURA writes
+const MAX_ENTRY_BYTES = 200 * 1024 * 1024; // 200 MB per file decompressed
+const MAX_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024; // 200 MB across all entries
 import {
   CanonicalLearnerRecordSchema,
   fromCanonicalCard,
@@ -88,12 +106,57 @@ export async function parseLearnerRecordZip(file: Blob): Promise<{
   sidecar: DuraSidecar;
   summary: ImportSummary;
 }> {
+  // Bound the raw archive size BEFORE asking JSZip to parse it. JSZip
+  // reads the central directory eagerly; a multi-GB blob hands off all
+  // the work before our checks would run otherwise.
+  if (file.size > MAX_ZIP_BYTES) {
+    throw new LearnerRecordImportError(
+      `Save file is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). ` +
+        `DURA save files are under 50 MB.`
+    );
+  }
+
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(file);
   } catch (err) {
     throw new LearnerRecordImportError(
       `Couldn't open the file as a ZIP archive: ${(err as Error).message}`
+    );
+  }
+
+  // Bound the number of entries — DURA writes 4 (learner-record.json,
+  // xapi-statements.json, summary.md, README.txt). Anything dramatically
+  // higher is either a malformed export or a hostile archive.
+  const entryNames = Object.keys(zip.files);
+  if (entryNames.length > MAX_ENTRIES) {
+    throw new LearnerRecordImportError(
+      `Save file has ${entryNames.length} entries; DURA exports never exceed ${MAX_ENTRIES}. ` +
+        `This doesn't look like a DURA save.`
+    );
+  }
+  // Per-entry size sanity. JSZip exposes the central-directory
+  // uncompressed size before we read the entry, so this is cheap to
+  // check.
+  let totalUncompressed = 0;
+  for (const name of entryNames) {
+    const entry = zip.files[name];
+    if (!entry || entry.dir) continue;
+    // _data may be absent in older JSZip; guard defensively.
+    const meta = (entry as unknown as { _data?: { uncompressedSize?: number } })._data;
+    const uncompressed = meta?.uncompressedSize ?? 0;
+    if (uncompressed > MAX_ENTRY_BYTES) {
+      throw new LearnerRecordImportError(
+        `Save file entry "${name}" claims ${(uncompressed / 1024 / 1024).toFixed(1)} MB ` +
+          `uncompressed — over the per-entry limit. Refusing to decompress.`
+      );
+    }
+    totalUncompressed += uncompressed;
+  }
+  if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES) {
+    throw new LearnerRecordImportError(
+      `Save file would decompress to ${(totalUncompressed / 1024 / 1024).toFixed(1)} MB ` +
+        `total — over the safety limit. Refusing to proceed.`
     );
   }
 

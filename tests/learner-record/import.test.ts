@@ -91,6 +91,22 @@ describe("parseLearnerRecordZip", () => {
     expect(summary.cardsSkippedNoContent).toBe(2);
   });
 
+  it("rejects oversized blobs before parsing (zip-bomb guard)", async () => {
+    // 51 MB blob trips the MAX_ZIP_BYTES (50 MB) gate.
+    const big = new Uint8Array(51 * 1024 * 1024);
+    const blob = new Blob([big.buffer], { type: "application/zip" });
+    await expect(parseLearnerRecordZip(blob)).rejects.toThrow(/too large/i);
+  });
+
+  it("rejects ZIPs with too many entries (zip-bomb guard)", async () => {
+    const zip = new JSZip();
+    zip.file("learner-record.json", JSON.stringify(validCanonical()));
+    // 64 entries is the cap; add 65 extras to push over.
+    for (let i = 0; i < 65; i++) zip.file(`bogus-${i}.txt`, "x");
+    const blob = await zip.generateAsync({ type: "blob" });
+    await expect(parseLearnerRecordZip(blob)).rejects.toThrow(/entries/i);
+  });
+
   it("reads x-dura sidecar lesson_progress + goals counts", async () => {
     const payload = {
       ...validCanonical(),
