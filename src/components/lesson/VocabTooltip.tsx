@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Plus, Check } from "lucide-react";
 import { getCardByTermSlug, putCard } from "@/lib/db/flashcards";
@@ -52,6 +52,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
   const [inDeck, setInDeck] = useState(false);
   const [justAdded, setJustAdded] = useState(false);
   const [tier, setTier] = useState<DictionaryDifficulty>("intermediate");
+  const containerRef = useRef<HTMLSpanElement | null>(null);
 
   const userTier = usePreferencesStore((s) => {
     const v = (s.prefs as unknown as { dictionaryTier?: DictionaryDifficulty }).dictionaryTier;
@@ -75,6 +76,24 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
       if (card) setInDeck(true);
     });
   }, [open, slug, inDeck]);
+
+  // Close on outside tap / Escape — mirrors StandardsBadges so vocab
+  // popovers don't get stuck covering body text on mobile.
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent): void => {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
   const toggle = () => {
     setOpen((v) => {
@@ -108,7 +127,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
   };
 
   return (
-    <span className="relative inline-block">
+    <span ref={containerRef} className="relative inline-block">
       <button
         type="button"
         onClick={toggle}
@@ -123,7 +142,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
       {open && (
         <span
           role="tooltip"
-          className="absolute top-full left-0 z-30 mt-2 block w-80 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4 text-left shadow-xl"
+          className="absolute top-full right-0 z-30 mt-2 block w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4 text-left shadow-xl sm:right-auto sm:left-0"
         >
           {!term ? (
             <span className="block text-xs text-[var(--color-text-muted)]">Loading…</span>
@@ -149,7 +168,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
                   ))}
                 </span>
               </span>
-              <span className="mb-3 block text-xs leading-relaxed text-[var(--color-text-secondary)]">
+              <span className="mb-3 block text-sm leading-relaxed text-[var(--color-text-secondary)]">
                 {term.definitions[tier]}
               </span>
               {term.seeAlso.length > 0 && (
