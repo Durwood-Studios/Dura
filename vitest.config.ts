@@ -17,7 +17,9 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.{test,spec}.{ts,tsx}", "tests/**/*.{test,spec}.{ts,tsx}"],
-    exclude: ["node_modules", ".next", "dist"],
+    // tests/e2e/ is Playwright, not Vitest. Different runner, different APIs;
+    // Vitest would otherwise try to load and fail on @playwright/test imports.
+    exclude: ["node_modules", ".next", "dist", "tests/e2e/**"],
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
