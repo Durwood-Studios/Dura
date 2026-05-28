@@ -3,7 +3,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HAPTICS, __resetHapticDebounce, haptic, type HapticPattern } from "@/lib/haptics";
+import {
+  HAPTICS,
+  __resetHapticDebounce,
+  __armHapticForTest,
+  haptic,
+  type HapticPattern,
+} from "@/lib/haptics";
 
 describe("DLS-2.0 HAPTICS — canonical patterns", () => {
   it("rating haptics — distinct per rating, ON tap timing", () => {
@@ -52,6 +58,7 @@ describe("haptic() behavior", () => {
 
   beforeEach(() => {
     __resetHapticDebounce();
+    __armHapticForTest();
     originalVibrate = navigator.vibrate;
     vibrateSpy = vi.fn().mockReturnValue(true);
     Object.defineProperty(navigator, "vibrate", {

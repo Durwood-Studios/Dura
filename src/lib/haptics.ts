@@ -43,6 +43,28 @@ export type HapticPattern = keyof typeof HAPTICS;
 const DEBOUNCE_MS = 500;
 let lastHapticAt = 0;
 
+// First-gesture gate. Chromium 90+ logs a console error on every
+// navigator.vibrate() call that happens before the page has received
+// a user gesture — even though the call still resolves successfully.
+// (https://www.chromestatus.com/feature/5644273861001216.) Some
+// learner-positive haptics fire as soon as a session screen mounts
+// (e.g. sessionStart), which is exactly when the gesture quota hasn't
+// landed yet. Flip the flag on first interaction and gate haptics
+// behind it; the user can't perceive a haptic before their first
+// interaction anyway.
+let userHasInteracted = false;
+if (typeof window !== "undefined") {
+  const armed = (): void => {
+    userHasInteracted = true;
+    window.removeEventListener("pointerdown", armed);
+    window.removeEventListener("keydown", armed);
+    window.removeEventListener("touchstart", armed);
+  };
+  window.addEventListener("pointerdown", armed, { once: true, passive: true });
+  window.addEventListener("keydown", armed, { once: true });
+  window.addEventListener("touchstart", armed, { once: true, passive: true });
+}
+
 function prefersReducedMotion(): boolean {
   if (typeof window === "undefined" || !window.matchMedia) return false;
   try {
@@ -64,6 +86,7 @@ export function haptic(pattern: HapticPattern): void {
   if (typeof navigator === "undefined" || typeof navigator.vibrate !== "function") {
     return;
   }
+  if (!userHasInteracted) return;
   if (prefersReducedMotion()) return;
 
   const now = Date.now();
@@ -80,4 +103,13 @@ export function haptic(pattern: HapticPattern): void {
  */
 export function __resetHapticDebounce(): void {
   lastHapticAt = 0;
+}
+
+/**
+ * Test-only helper. The first-gesture gate suppresses haptics until
+ * the user interacts; tests assert pattern values without a real
+ * gesture, so they flip the flag manually.
+ */
+export function __armHapticForTest(): void {
+  userHasInteracted = true;
 }

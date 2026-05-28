@@ -22,6 +22,12 @@ const HOT_PATHS = [
   { name: "lesson", url: "/paths/0-digital-literacy/0-1-how-computers-think/01-binary" },
   { name: "review", url: "/review" },
   { name: "settings", url: "/settings" },
+  // sandbox: exercises the Sandpack host bundle. Catches CSP regressions
+  // around script-src 'unsafe-eval' — Sandpack v2 runs user code in the
+  // codesandbox.io iframe (its own CSP), but the host wrapper has been
+  // historically suspect for eval/Function. If this passes with eval
+  // dropped, the CSP can be tightened.
+  { name: "sandbox", url: "/sandbox" },
 ];
 
 // Console noise we deliberately ignore. Each entry must explain WHY.
@@ -60,9 +66,19 @@ for (const route of HOT_PATHS) {
       pageErrors.push(`[pageerror] ${err.message}`);
     });
 
-    const response = await page.goto(route.url, { waitUntil: "networkidle" });
+    // `networkidle` hangs on routes with persistent connections
+    // (Sandpack's iframe bundler holds a WebSocket open). `load` fires
+    // after all blocking resources but is still safe for catching
+    // runtime errors — anything that throws at mount lands within the
+    // 2s settle window below.
+    const response = await page.goto(route.url, { waitUntil: "load" });
     expect(response, `no response for ${route.url}`).not.toBeNull();
     expect(response!.status(), `${route.url} returned ${response!.status()}`).toBe(200);
+    // Give late-mounting client components a beat to register their
+    // own console errors / promise rejections (e.g. lazy imports,
+    // useEffect-fired fetches). 2s is generous on a healthy build and
+    // short enough to keep the suite fast.
+    await page.waitForTimeout(2000);
 
     expect(
       consoleErrors,

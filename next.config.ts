@@ -56,11 +56,13 @@ const nextConfig: NextConfig = {
               // middleware refactor and is filed for the next security
               // sweep — see ROADMAP.md "Security & supply chain".
               //
-              // 'unsafe-eval' kept for Sandpack. Sandpack runs user code in
-              // the codesandbox.io iframe (governed by that iframe's own
-              // CSP), but the host bundler can use Function() in some
-              // configurations. Drop together with the nonce migration.
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.codesandbox.io",
+              // 'unsafe-eval' dropped 2026-05-28. Sandpack v2 runs user
+              // code inside the codesandbox.io iframe — eval lives there,
+              // not on the host. The Playwright sandbox-route test
+              // (tests/e2e/smoke.spec.ts) keeps this honest: any future
+              // regression that needs eval on the host will fail the
+              // /sandbox smoke check before it ships.
+              "script-src 'self' 'unsafe-inline' https://*.codesandbox.io",
               "style-src 'self' 'unsafe-inline'",
               // Tightened from 'self' data: blob: https: — only Supabase storage
               // (avatars / certificates / shared assets) is a legitimate external
