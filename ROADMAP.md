@@ -75,7 +75,7 @@ Roughly in priority order. Dates are intent, not commitments.
 
 ### Curriculum extension
 
-- Discovery activities for Phases 3–9 — Pathfinding shipped 2026-05-28; race-condition demo, embedding galaxy, and garbage-collection visualizer still to come
+- Discovery activities for Phases 3–9 — Pathfinding, Race Condition, Embedding Galaxy, and GC Visualizer all shipped 2026-05-28
 - Standards-alignment audit across 418 lessons — automated reconciliation against ACM CS2023, SWEBOK v4, SFIA 9, CSTA K-12, AP CS Principles/A, ISTE (audit script shipped 2026-05-28; first run found one missing module registration, fixed in the same commit)
 
 ### Learning surfaces

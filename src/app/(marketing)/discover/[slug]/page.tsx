@@ -227,6 +227,14 @@ const ROOMS: Record<string, Room> = {
         concept: "Memoization · Dynamic programming",
         teaches: { label: "Phase 1 · Functions", href: "/paths/1" },
       },
+      {
+        slug: "embedding-galaxy",
+        name: "Embedding Galaxy",
+        description:
+          "Click any of 36 CS concepts plotted on a 2D semantic map and watch its three nearest neighbors light up. Toggle cosine similarity vs euclidean distance to see why every vector database defaults to cosine — and feel, in your hand, what 'meaning is a position' actually means.",
+        concept: "Vector embeddings · Semantic similarity",
+        teaches: { label: "Phase 6 · AI/ML Engineering", href: "/paths/6" },
+      },
     ],
   },
   "bug-lab": {
@@ -261,6 +269,22 @@ const ROOMS: Record<string, Room> = {
           "Reorder a sequence of story beats. A different framing of the same skill that breaks Algorithm Kitchen if you skip a step: getting ordered logic right.",
         concept: "Sequence reasoning · Causal chains",
         teaches: { label: "Phase 1 · Control Flow", href: "/paths/1" },
+      },
+      {
+        slug: "race-condition",
+        name: "Race Condition",
+        description:
+          "Two threads share a counter; each runs read/+1/write fifty times. Without coordination, increments get lost — final values fan out below 100. Flip the atomic switch and every run lands on exactly 100. The histogram tells the whole story.",
+        concept: "Concurrency · Interleaving · Atomicity",
+        teaches: { label: "Phase 5 · Concurrency", href: "/paths/5" },
+      },
+      {
+        slug: "gc-visualizer",
+        name: "GC Visualizer",
+        description:
+          "Allocate objects on a tiny heap, mutate references, then run mark-and-sweep. Watch the BFS wave paint reachable objects green and the sweep phase reclaim the rest. Toggle reference counting and build a cycle to see the failure mode every modern runtime had to work around.",
+        concept: "Garbage collection · Memory management",
+        teaches: { label: "Phase 7 · Advanced Systems", href: "/paths/7" },
       },
     ],
   },

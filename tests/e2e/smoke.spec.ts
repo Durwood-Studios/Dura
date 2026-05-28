@@ -32,6 +32,17 @@ const HOT_PATHS = [
   // regressions on the activity registry, route param wiring, and any
   // runtime errors in the new component itself.
   { name: "pathfinding", url: "/discover/robot-chef/pathfinding" },
+  // discover/embedding-galaxy: Phase 6 AI/ML activity. Same role as
+  // pathfinding — guards the lazy-import wiring + the SVG/state render
+  // path of the new component.
+  { name: "embedding-galaxy", url: "/discover/pattern-factory/embedding-galaxy" },
+  // discover/race-condition: Phase 5 concurrency activity (2026-05-28).
+  // Same coverage role as pathfinding/embedding-galaxy.
+  { name: "race-condition", url: "/discover/bug-lab/race-condition" },
+  // discover/gc-visualizer: Phase 7 mark-and-sweep heap simulation
+  // (2026-05-28). Guards the lazy-import wiring and the BFS/sweep state
+  // machine on first mount.
+  { name: "gc-visualizer", url: "/discover/bug-lab/gc-visualizer" },
 ];
 
 // Console noise we deliberately ignore. Each entry must explain WHY.

@@ -432,6 +432,28 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     ),
   },
 
+  "embedding-galaxy": {
+    title: "Embedding Galaxy",
+    description:
+      "Click a concept; watch its semantic neighbors light up. Toggle cosine vs euclidean and see why every vector database uses cosine.",
+    concept: "Vector embeddings · Semantic similarity",
+    intro:
+      "Modern AI represents meaning as position in a high-dimensional space — text, images, audio all become vectors of numbers, where semantically related things land near each other. This demo plots 36 CS concepts on a 2D map we hand-placed by meaning. Click any concept to highlight its three nearest neighbors by cosine similarity; toggle to euclidean distance and watch the ranking shift. The math you're running here is the same math a vector database (Pinecone, Weaviate, pgvector) runs at query time — just in 2 dimensions instead of 1,536.",
+    underTheHood: [
+      "Real embeddings come from neural networks (BERT, OpenAI's text-embedding-3, sentence-transformers) pre-trained on massive text corpora with objectives that pull semantically related pieces of text close together — typically into a 768- or 1,536-dimensional vector space. Models don't 'understand' meaning; they learn a geometry in which proximity correlates with meaning.",
+      "Cosine similarity measures the angle between two vectors, ignoring their lengths. Euclidean measures absolute distance. Embedding spaces care about direction — a long document and a short one about the same topic point the same way but live at different distances from the origin. Cosine catches the similarity; euclidean misses it. Every production vector search engine defaults to cosine for this reason.",
+      "“Semantic space” means a coordinate system where geometric operations have meaning — the famous example is `vector('king') - vector('man') + vector('woman') ≈ vector('queen')`. The model never stored these analogies; they emerged from the training objective. Nearest-neighbor lookup over that space is what powers retrieval-augmented generation, image search, recommendation systems, and the “related lessons” surface DURA may eventually ship.",
+    ],
+    teaches: { label: "Phase 6 · AI/ML Engineering", href: "/paths/6" },
+    roomSlug: "pattern-factory",
+    roomName: "Pattern Factory",
+    roomColor: "#a78bfa",
+    Component: dynamic(
+      () => import("@/components/discover/EmbeddingGalaxy").then((m) => m.EmbeddingGalaxy),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
+
   // ─── Bug Lab — debugging & logic ────────────────────────────────────────
   "bug-detective": {
     title: "Bug Detective",
@@ -494,6 +516,50 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
       { loading: () => <ActivitySkeleton /> }
     ),
   },
+
+  "race-condition": {
+    title: "Race Condition",
+    description:
+      "Two threads share a counter. Run it; watch the final value drift. Add a lock; watch the variance go away.",
+    concept: "Concurrency · Interleaving · Atomicity",
+    intro:
+      "Both threads do the same job: read the shared counter, add one, write it back, fifty times each. With one thread that's 100. With two threads and no coordination, the answer drifts — sometimes 100, sometimes 87, sometimes 64 — because the steps of one thread's increment slot in between the steps of the other's. Run it a few times, watch the histogram fan out, then flip the atomic switch and watch every run land on exactly 100.",
+    underTheHood: [
+      "The bug lives in the gap between read and write — a classic TOCTOU (time-of-check / time-of-use). Thread A reads 41, thread B reads 41, both compute 42, both write 42. One increment is lost. The hardware ran the code correctly; the program just told it to race.",
+      "The atomic toggle adds a single global lock around the read/+1/write triple. The cost is real: threads now wait on each other inside the critical section, throughput drops, and a careless second lock can deadlock the program. Real systems use atomic CPU instructions (CAS, fetch-add) when they can — they're the same idea, baked into one uninterruptible memory operation.",
+      "Modern CPUs and JIT compilers reorder reads and writes for speed; the memory model is the contract that says which reorderings a program can observe. Java's volatile, C++'s std::atomic, and JavaScript's SharedArrayBuffer + Atomics all exist because the naive 'just read and write the variable' you can write in a single thread is not safe across threads. The concept here is the floor; the memory model is the rest of the building.",
+    ],
+    teaches: { label: "Phase 5 · Concurrency", href: "/paths/5" },
+    roomSlug: "bug-lab",
+    roomName: "Bug Lab",
+    roomColor: "#34d399",
+    Component: dynamic(
+      () => import("@/components/discover/RaceCondition").then((m) => m.RaceCondition),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
+
+  "gc-visualizer": {
+    title: "GC Visualizer",
+    description:
+      "Allocate objects, mutate references, run mark-and-sweep. Watch the reachable set glow green and the rest get reclaimed.",
+    concept: "Garbage collection · Memory management",
+    intro:
+      "Every modern language manages heap memory for you — but only by running an algorithm under the hood. This is that algorithm, slowed down. Build a small object graph from roots, then run GC and watch the mark phase BFS outward from the roots, painting everything reachable. The sweep phase reclaims the rest. Toggle to reference counting and build a cycle to see why most modern runtimes still ship a tracing collector alongside any RC scheme.",
+    underTheHood: [
+      "Memory bugs (use-after-free, double-free, leaks) were the dominant security-bug class for decades — Microsoft and Google have each reported that ~70% of their critical vulnerabilities trace back to manual memory errors. GC trades a small runtime cost for an entire class of bugs disappearing.",
+      "The reachability invariant: an object is live iff it can be reached from a root by following references. Roots are the stack frames + global registers + CPU registers a real runtime walks at GC time. Everything else is, by definition, garbage.",
+      "Three regimes: manual (C, C++, Zig) — fastest, most error-prone; reference counting (Swift, CPython) — incremental, cheap, but cycles leak without a cycle-detector; tracing (Java, JavaScript, Go, .NET) — periodic stop-the-world or concurrent walks, handles cycles natively, costs throughput and tail latency. There is no free lunch — every language picks its trade-off.",
+    ],
+    teaches: { label: "Phase 7 · Advanced Systems", href: "/paths/7" },
+    roomSlug: "bug-lab",
+    roomName: "Bug Lab",
+    roomColor: "#34d399",
+    Component: dynamic(
+      () => import("@/components/discover/GcVisualizer").then((m) => m.GcVisualizer),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
 };
 
 /** Room-to-activities mapping for generateStaticParams. */
@@ -507,8 +573,9 @@ const ROOM_ACTIVITIES: Record<string, string[]> = {
     "music-beats",
     "tile-designer",
     "memoization-cliff",
+    "embedding-galaxy",
   ],
-  "bug-lab": ["bug-detective", "logic-gates", "story-builder"],
+  "bug-lab": ["bug-detective", "logic-gates", "story-builder", "race-condition", "gc-visualizer"],
 };
 
 /** Pre-render all room+activity combinations at build time. */
