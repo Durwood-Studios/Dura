@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { SearchBar } from "@/components/dictionary/SearchBar";
 import { DifficultyToggle } from "@/components/dictionary/DifficultyToggle";
 import { TermCard } from "@/components/dictionary/TermCard";
@@ -8,30 +9,34 @@ import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
 import type { DictionaryDifficulty, DictionaryTerm } from "@/types/dictionary";
 
-/** Phase colors for filter chips. */
-const PHASE_CHIP_COLORS: Record<string, string> = {
-  "0": "#6ee7b7",
-  "1": "#93c5fd",
-  "2": "#c4b5fd",
-  "3": "#fda4af",
-  "4": "#fdba74",
-  "5": "#f0abfc",
-  "6": "#67e8f9",
-  "7": "#fcd34d",
-  "8": "#a3e635",
-  "9": "#f472b6",
-};
-
 interface DictionaryClientProps {
   /** Initial batch of terms (first 50, server-rendered). */
   initialTerms: DictionaryTerm[];
-  /** Pre-computed category list from the server. */
+  /** Pre-computed category list from the server, ordered by term count. */
   categories: string[];
   totalCount: number;
 }
 
-/** Phase IDs for the filter bar. */
-const PHASE_IDS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+/** Display labels for the canonical 12-category taxonomy (post-migration
+ *  per xDocs/active/universality-and-dictionary-audit-2026-05.md §3). */
+const CATEGORY_LABELS: Record<string, string> = {
+  fundamentals: "Fundamentals",
+  professional: "Professional",
+  ai: "AI & ML",
+  web: "Web & frontend",
+  systems: "Systems",
+  backend: "Backend",
+  devops: "DevOps & infra",
+  databases: "Databases",
+  networking: "Networking",
+  quality: "Quality",
+  security: "Security",
+  languages: "Languages",
+};
+
+/** How many category chips show by default on mobile before the "More"
+ *  expander kicks in. Desktop shows all (they fit on one row). */
+const MOBILE_VISIBLE_CHIPS = 5;
 
 export function DictionaryClient({
   initialTerms,
@@ -39,26 +44,23 @@ export function DictionaryClient({
   totalCount,
 }: DictionaryClientProps): React.ReactElement {
   const [query, setQuery] = useState("");
-  const [phaseId, setPhaseId] = useState<string | undefined>(undefined);
   const [category, setCategory] = useState<string | undefined>(undefined);
   const [difficulty, setDifficulty] = useState<DictionaryDifficulty>("intermediate");
   const [terms, setTerms] = useState<DictionaryTerm[]>(initialTerms);
   const [loading, setLoading] = useState(false);
+  const [showAllChips, setShowAllChips] = useState(false);
 
-  const fetchTerms = useCallback(async (q: string, phase?: string, cat?: string) => {
+  const fetchTerms = useCallback(async (q: string, cat?: string) => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
       if (q) params.set("q", q);
-      if (phase) params.set("phase", phase);
       if (cat) params.set("category", cat);
       params.set("limit", "200");
 
       const res = await fetch(`/api/v1/terms?${params.toString()}`);
       if (!res.ok) return;
       const json = await res.json();
-      // API returns { ok, data: { terms: [...] } } — terms are slim (slug, term, category, phaseIds, definition)
-      // We need to map them to DictionaryTerm shape for TermCard
       const fetched: DictionaryTerm[] = json.data.terms.map(
         (t: {
           slug: string;
@@ -89,107 +91,106 @@ export function DictionaryClient({
     }
   }, []);
 
-  // Fetch on filter change (skip initial render — initialTerms covers that)
-  const hasFilters = query || phaseId || category;
+  const hasFilters = query || category;
   useEffect(() => {
     if (!hasFilters) {
       setTerms(initialTerms);
       return;
     }
-    void fetchTerms(query, phaseId, category);
-  }, [query, phaseId, category, fetchTerms, hasFilters, initialTerms]);
+    void fetchTerms(query, category);
+  }, [query, category, fetchTerms, hasFilters, initialTerms]);
 
   useEffect(() => {
     if (query) void track("dictionary_searched", { query, resultCount: terms.length });
   }, [query, terms.length]);
 
-  const resetFilters = () => {
+  const resetFilters = (): void => {
     setQuery("");
-    setPhaseId(undefined);
     setCategory(undefined);
   };
 
   const results = terms;
+  const hasHiddenChips = categories.length > MOBILE_VISIBLE_CHIPS;
+  const visibleCategories = showAllChips ? categories : categories.slice(0, MOBILE_VISIBLE_CHIPS);
 
   return (
     <div className="flex flex-col gap-6">
       <SearchBar value={query} onChange={setQuery} placeholder={`Search ${totalCount} terms…`} />
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        {/* Phase filter chips */}
+        {/* Category chips — single filter axis. Phase filter dropped per
+            xDocs/active/universality-and-dictionary-audit-2026-05.md §3:
+            phases are about lesson progression; the dictionary is reference
+            material every learner uses regardless of where they are in the
+            curriculum. */}
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setPhaseId(undefined)}
-            className={cn(
-              "rounded-full px-3.5 py-1.5 text-xs font-medium transition",
-              phaseId === undefined
-                ? "dura-glow-emerald bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
-                : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
-            )}
-          >
-            All phases
-          </button>
-          {PHASE_IDS.map((id) => {
-            const color = PHASE_CHIP_COLORS[id];
-            const isActive = phaseId === id;
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setPhaseId(id)}
-                className={cn(
-                  "rounded-full px-3.5 py-1.5 text-xs font-medium transition",
-                  isActive
-                    ? "font-semibold text-white dark:text-[var(--color-bg-primary)]"
-                    : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
-                )}
-                style={
-                  isActive ? { background: color, boxShadow: `0 0 12px ${color}40` } : undefined
-                }
-              >
-                Phase {id}
-              </button>
-            );
-          })}
-        </div>
-        <DifficultyToggle value={difficulty} onChange={setDifficulty} />
-      </div>
-
-      {categories.length > 1 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
-            Category
-          </span>
           <button
             type="button"
             onClick={() => setCategory(undefined)}
             className={cn(
-              "rounded-full px-3 py-1 text-xs font-medium transition",
+              "rounded-full px-3.5 py-1.5 text-xs font-medium transition",
               category === undefined
-                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                ? "dura-glow-emerald bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
                 : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
             )}
           >
-            all
+            All
           </button>
-          {categories.map((c) => (
+          {visibleCategories.map((c) => {
+            const isActive = category === c;
+            return (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setCategory(c)}
+                className={cn(
+                  "rounded-full px-3.5 py-1.5 text-xs font-medium transition",
+                  isActive
+                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                    : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                )}
+              >
+                {CATEGORY_LABELS[c] ?? c}
+              </button>
+            );
+          })}
+          {hasHiddenChips && (
             <button
-              key={c}
               type="button"
-              onClick={() => setCategory(c)}
-              className={cn(
-                "rounded-full px-3 py-1 text-xs font-medium transition",
-                category === c
-                  ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
-                  : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
-              )}
+              onClick={() => setShowAllChips((v) => !v)}
+              aria-expanded={showAllChips}
+              className="flex items-center gap-1 rounded-full border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-subtle)] sm:hidden"
             >
-              {c}
+              {showAllChips ? "Fewer" : `More (${categories.length - MOBILE_VISIBLE_CHIPS})`}
+              <ChevronDown
+                className={cn("h-3 w-3 transition-transform", showAllChips && "rotate-180")}
+                aria-hidden
+              />
             </button>
-          ))}
+          )}
+          {/* On sm+ render the remaining chips inline instead of behind the expander. */}
+          {hasHiddenChips &&
+            categories.slice(MOBILE_VISIBLE_CHIPS).map((c) => {
+              const isActive = category === c;
+              return (
+                <button
+                  key={`sm-${c}`}
+                  type="button"
+                  onClick={() => setCategory(c)}
+                  className={cn(
+                    "hidden rounded-full px-3.5 py-1.5 text-xs font-medium transition sm:inline-block",
+                    isActive
+                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                      : "border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                  )}
+                >
+                  {CATEGORY_LABELS[c] ?? c}
+                </button>
+              );
+            })}
         </div>
-      )}
+        <DifficultyToggle value={difficulty} onChange={setDifficulty} />
+      </div>
 
       {loading && <p className="text-center text-sm text-[var(--color-text-muted)]">Loading…</p>}
 

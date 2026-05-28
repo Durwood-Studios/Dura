@@ -357,7 +357,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "jsx",
     term: "JSX",
     aliases: ["JavaScript XML"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -374,7 +374,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "component",
     term: "Component",
     aliases: ["React component"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -391,7 +391,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "props",
     term: "Props",
     aliases: ["properties", "component props"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -408,7 +408,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "state-hook",
     term: "useState",
     aliases: ["state hook", "React state"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -425,7 +425,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "use-effect",
     term: "useEffect",
     aliases: ["effect hook"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -442,7 +442,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "virtual-dom",
     term: "Virtual DOM",
     aliases: ["VDOM"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -459,7 +459,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "reconciliation",
     term: "Reconciliation",
     aliases: ["React diffing"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -476,7 +476,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "react-context",
     term: "React Context",
     aliases: ["Context API", "createContext", "useContext"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -493,7 +493,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "custom-hook",
     term: "Custom Hook",
     aliases: ["React custom hook"],
-    category: "react",
+    category: "web",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -510,7 +510,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "server-component",
     term: "Server Component",
     aliases: ["React Server Component", "RSC"],
-    category: "react",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -530,7 +530,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "nextjs",
     term: "Next.js",
     aliases: ["Next"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -547,7 +547,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "app-router",
     term: "App Router",
     aliases: ["Next.js App Router"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -564,7 +564,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "server-action",
     term: "Server Action",
     aliases: ["Next.js Server Action"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -581,7 +581,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "route-handler",
     term: "Route Handler",
     aliases: ["Next.js route handler", "route.ts"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -598,7 +598,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "middleware-nextjs",
     term: "Middleware (Next.js)",
     aliases: ["Next.js middleware"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -615,7 +615,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "static-generation",
     term: "Static Generation",
     aliases: ["SSG", "static site generation"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -632,7 +632,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "incremental-static-regeneration",
     term: "Incremental Static Regeneration",
     aliases: ["ISR"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -649,7 +649,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "image-optimization",
     term: "Image Optimization",
     aliases: ["next/image"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -666,7 +666,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "layout-component",
     term: "Layout Component",
     aliases: ["Next.js layout", "layout.tsx"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {
@@ -683,7 +683,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "streaming-ssr",
     term: "Streaming SSR",
     aliases: ["streaming server-side rendering"],
-    category: "nextjs",
+    category: "web",
     phaseIds: ["4"],
     lessonIds: [],
     definitions: {

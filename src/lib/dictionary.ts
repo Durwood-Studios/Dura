@@ -84,6 +84,17 @@ export function getTermsByPhase(phaseId: string): DictionaryTerm[] {
   return DICTIONARY.filter((t) => t.phaseIds.includes(phaseId));
 }
 
+/**
+ * Categories returned ordered by frequency (most-populated first), so the
+ * dictionary filter row surfaces the chips a learner is most likely to
+ * tap before falling off the screen.
+ */
 export function getCategories(): string[] {
-  return Array.from(new Set(DICTIONARY.map((t) => t.category))).sort();
+  const counts = new Map<string, number>();
+  for (const term of DICTIONARY) {
+    counts.set(term.category, (counts.get(term.category) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([category]) => category);
 }

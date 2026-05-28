@@ -122,7 +122,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "big-o",
     term: "Big O Notation",
     aliases: ["asymptotic notation"],
-    category: "complexity",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -171,7 +171,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "ram",
     term: "RAM",
     aliases: ["random access memory", "memory"],
-    category: "hardware",
+    category: "systems",
     phaseIds: ["0"],
     lessonIds: [],
     definitions: {
@@ -187,7 +187,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "cpu",
     term: "CPU",
     aliases: ["central processing unit", "processor"],
-    category: "hardware",
+    category: "systems",
     phaseIds: ["0"],
     lessonIds: [],
     definitions: {
@@ -204,7 +204,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "terminal",
     term: "Terminal",
     aliases: ["console", "tty"],
-    category: "tools",
+    category: "professional",
     phaseIds: ["0"],
     lessonIds: [],
     definitions: {
@@ -220,7 +220,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "shell",
     term: "Shell",
     aliases: ["bash", "zsh"],
-    category: "tools",
+    category: "professional",
     phaseIds: ["0"],
     lessonIds: [],
     definitions: {
@@ -288,7 +288,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "git",
     term: "Git",
     aliases: ["version control"],
-    category: "tools",
+    category: "professional",
     phaseIds: ["0"],
     lessonIds: [],
     definitions: {
@@ -304,7 +304,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "commit",
     term: "Commit",
     aliases: ["snapshot", "revision"],
-    category: "tools",
+    category: "professional",
     phaseIds: ["0"],
     lessonIds: [],
     definitions: {
@@ -699,7 +699,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "breakpoint",
     term: "Breakpoint",
     aliases: [],
-    category: "tools",
+    category: "professional",
     phaseIds: ["1"],
     lessonIds: [],
     definitions: {
@@ -716,7 +716,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "linter",
     term: "Linter",
     aliases: ["ESLint"],
-    category: "tools",
+    category: "professional",
     phaseIds: ["1"],
     lessonIds: [],
     definitions: {
@@ -979,7 +979,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "time-complexity",
     term: "Time Complexity",
     aliases: ["runtime complexity"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -995,7 +995,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "space-complexity",
     term: "Space Complexity",
     aliases: ["memory complexity"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1011,7 +1011,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "linked-list",
     term: "Linked List",
     aliases: ["singly linked list"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1033,7 +1033,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "stack",
     term: "Stack",
     aliases: ["LIFO"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["1", "3"],
     lessonIds: [],
     definitions: {
@@ -1049,7 +1049,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "queue",
     term: "Queue",
     aliases: ["FIFO"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1066,7 +1066,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "heap",
     term: "Heap",
     aliases: ["binary heap", "priority queue"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1083,7 +1083,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "binary-tree",
     term: "Binary Tree",
     aliases: ["tree"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1099,7 +1099,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "bst",
     term: "Binary Search Tree",
     aliases: ["BST"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1116,7 +1116,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "balanced-tree",
     term: "Balanced Tree",
     aliases: ["AVL tree", "red-black tree"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1132,7 +1132,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "graph",
     term: "Graph",
     aliases: ["network"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1149,7 +1149,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "bfs",
     term: "BFS",
     aliases: ["breadth-first search"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1165,7 +1165,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "dfs",
     term: "DFS",
     aliases: ["depth-first search"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1181,7 +1181,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "dijkstra",
     term: "Dijkstra's Algorithm",
     aliases: ["Dijkstra"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1197,7 +1197,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "sorting",
     term: "Sorting",
     aliases: ["sort"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1213,7 +1213,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "binary-search",
     term: "Binary Search",
     aliases: ["bisection"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1229,7 +1229,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "dynamic-programming",
     term: "Dynamic Programming",
     aliases: ["DP"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1246,7 +1246,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "greedy",
     term: "Greedy Algorithm",
     aliases: ["greedy"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1262,7 +1262,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "backtracking",
     term: "Backtracking",
     aliases: ["pruning"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1278,7 +1278,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "two-pointer",
     term: "Two-Pointer Technique",
     aliases: ["two pointers"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1294,7 +1294,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "sliding-window-term",
     term: "Sliding Window",
     aliases: ["sliding window"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -1913,7 +1913,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "b-tree",
     term: "B-Tree",
     aliases: ["b+ tree", "btree"],
-    category: "database-internals",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1931,7 +1931,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "wal",
     term: "Write-Ahead Log",
     aliases: ["WAL", "write ahead log", "redo log"],
-    category: "database-internals",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1948,7 +1948,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "mvcc",
     term: "MVCC",
     aliases: ["multi-version concurrency control"],
-    category: "database-internals",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1965,7 +1965,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "replication",
     term: "Database Replication",
     aliases: ["leader-follower", "primary-replica"],
-    category: "database-internals",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1982,7 +1982,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "sharding",
     term: "Sharding",
     aliases: ["horizontal partitioning", "database sharding"],
-    category: "database-internals",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -2000,7 +2000,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "cdn",
     term: "CDN",
     aliases: ["content delivery network", "edge network"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -2017,7 +2017,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "terraform",
     term: "Terraform",
     aliases: ["iac", "infrastructure as code"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -2034,7 +2034,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "slo",
     term: "SLO",
     aliases: ["service level objective", "sli", "sla"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -2051,7 +2051,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "observability",
     term: "Observability",
     aliases: ["o11y", "monitoring"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -2068,7 +2068,7 @@ const CORE_TERMS: DictionaryTerm[] = [
     slug: "opentelemetry",
     term: "OpenTelemetry",
     aliases: ["otel"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {

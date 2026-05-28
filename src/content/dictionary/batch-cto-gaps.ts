@@ -10,7 +10,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "engineering-manager",
     term: "Engineering Manager",
     aliases: ["EM"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -27,7 +27,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "tech-lead",
     term: "Tech Lead",
     aliases: ["TL", "technical lead"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -43,7 +43,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "staff-engineer",
     term: "Staff Engineer",
     aliases: ["staff+", "principal engineer"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -60,7 +60,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "one-on-one",
     term: "One-on-One",
     aliases: ["1:1", "1-on-1"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -77,7 +77,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "performance-review",
     term: "Performance Review",
     aliases: ["perf review", "performance evaluation"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -94,7 +94,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "hiring-rubric",
     term: "Hiring Rubric",
     aliases: ["interview scorecard", "evaluation criteria"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -111,7 +111,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "pip-performance",
     term: "Performance Improvement Plan",
     aliases: ["PIP"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -128,7 +128,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "skip-level",
     term: "Skip-Level Meeting",
     aliases: ["skip-level 1:1"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -147,7 +147,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "team-topology-term",
     term: "Team Topologies",
     aliases: ["team topology"],
-    category: "org-design",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -164,7 +164,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "conways-law-term",
     term: "Conway's Law",
     aliases: ["Conway's law"],
-    category: "org-design",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -181,7 +181,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "span-of-control",
     term: "Span of Control",
     aliases: ["management ratio"],
-    category: "org-design",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -198,7 +198,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "platform-team",
     term: "Platform Team",
     aliases: ["platform engineering team"],
-    category: "org-design",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -215,7 +215,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "stream-aligned-team",
     term: "Stream-Aligned Team",
     aliases: ["product team", "feature team"],
-    category: "org-design",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -232,7 +232,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "enabling-team",
     term: "Enabling Team",
     aliases: ["coaching team"],
-    category: "org-design",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -249,7 +249,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "cognitive-load",
     term: "Cognitive Load",
     aliases: ["mental overhead"],
-    category: "org-design",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -268,7 +268,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "roadmap-term",
     term: "Roadmap",
     aliases: ["product roadmap"],
-    category: "product",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -285,7 +285,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "rice-scoring",
     term: "RICE Scoring",
     aliases: ["RICE framework", "RICE"],
-    category: "product",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -302,7 +302,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "moscow-method",
     term: "MoSCoW Method",
     aliases: ["MoSCoW prioritization", "MoSCoW"],
-    category: "product",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -319,7 +319,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "product-market-fit-term",
     term: "Product-Market Fit",
     aliases: ["PMF"],
-    category: "product",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -336,7 +336,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "north-star-metric",
     term: "North Star Metric",
     aliases: ["NSM"],
-    category: "product",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -353,7 +353,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "okr",
     term: "OKR",
     aliases: ["Objectives and Key Results"],
-    category: "product",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -370,7 +370,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "sprint-velocity",
     term: "Sprint Velocity",
     aliases: ["velocity", "team velocity"],
-    category: "product",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -389,7 +389,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "unit-economics-term",
     term: "Unit Economics",
     aliases: ["per-unit economics"],
-    category: "business",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -406,7 +406,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "customer-acquisition-cost",
     term: "Customer Acquisition Cost",
     aliases: ["CAC"],
-    category: "business",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -423,7 +423,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "lifetime-value",
     term: "Lifetime Value",
     aliases: ["LTV", "CLV", "customer lifetime value"],
-    category: "business",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -440,7 +440,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "burn-rate-term",
     term: "Burn Rate",
     aliases: ["cash burn", "monthly burn"],
-    category: "business",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -457,7 +457,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "runway-term",
     term: "Runway",
     aliases: ["cash runway"],
-    category: "business",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -473,7 +473,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "series-a",
     term: "Series A",
     aliases: ["Series A round", "Series A funding"],
-    category: "business",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -490,7 +490,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "cap-table",
     term: "Cap Table",
     aliases: ["capitalization table"],
-    category: "business",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -507,7 +507,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "technical-due-diligence",
     term: "Technical Due Diligence",
     aliases: ["tech DD", "technical audit"],
-    category: "business",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -526,7 +526,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "technology-radar-term",
     term: "Technology Radar",
     aliases: ["tech radar"],
-    category: "strategy",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -543,7 +543,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "architecture-review-board-term",
     term: "Architecture Review Board",
     aliases: ["ARB"],
-    category: "strategy",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -560,7 +560,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "request-for-comments",
     term: "Request for Comments",
     aliases: ["RFC", "design doc"],
-    category: "strategy",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -577,7 +577,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "dora-metrics-term",
     term: "DORA Metrics",
     aliases: ["DORA", "Accelerate metrics"],
-    category: "strategy",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -594,7 +594,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "incident-response-term",
     term: "Incident Response",
     aliases: ["IR", "incident management"],
-    category: "strategy",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -611,7 +611,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "slo-term",
     term: "Service Level Objective",
     aliases: ["SLO", "SLA", "SLI"],
-    category: "strategy",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -630,7 +630,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "psychological-safety-term",
     term: "Psychological Safety",
     aliases: ["psych safety"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -647,7 +647,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "blameless-postmortem-term",
     term: "Blameless Postmortem",
     aliases: ["blameless retrospective", "incident review"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -664,7 +664,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "servant-leadership",
     term: "Servant Leadership",
     aliases: [],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -681,7 +681,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "delegation-framework",
     term: "Delegation Framework",
     aliases: ["delegation levels", "delegation poker"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -698,7 +698,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "maker-manager-schedule",
     term: "Maker-Manager Schedule",
     aliases: ["maker schedule", "manager schedule"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -715,7 +715,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "managing-up-term",
     term: "Managing Up",
     aliases: ["upward management"],
-    category: "leadership",
+    category: "professional",
     phaseIds: ["9"],
     lessonIds: [],
     definitions: {
@@ -734,7 +734,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "api-gateway",
     term: "API Gateway",
     aliases: ["gateway"],
-    category: "infrastructure",
+    category: "devops",
     phaseIds: ["7", "8"],
     lessonIds: [],
     definitions: {
@@ -751,7 +751,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "webhook",
     term: "Webhook",
     aliases: ["HTTP callback", "web callback"],
-    category: "infrastructure",
+    category: "devops",
     phaseIds: ["7", "8"],
     lessonIds: [],
     definitions: {
@@ -768,7 +768,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "idempotency",
     term: "Idempotency",
     aliases: ["idempotent"],
-    category: "infrastructure",
+    category: "devops",
     phaseIds: ["7", "8"],
     lessonIds: [],
     definitions: {
@@ -785,7 +785,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "eventual-consistency-term",
     term: "Eventual Consistency",
     aliases: ["eventually consistent"],
-    category: "infrastructure",
+    category: "devops",
     phaseIds: ["7", "8"],
     lessonIds: [],
     definitions: {
@@ -802,7 +802,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "circuit-breaker",
     term: "Circuit Breaker",
     aliases: ["circuit breaker pattern"],
-    category: "infrastructure",
+    category: "devops",
     phaseIds: ["7", "8"],
     lessonIds: [],
     definitions: {
@@ -819,7 +819,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "retry-pattern",
     term: "Retry Pattern",
     aliases: ["retry with backoff", "exponential backoff"],
-    category: "infrastructure",
+    category: "devops",
     phaseIds: ["7", "8"],
     lessonIds: [],
     definitions: {
@@ -836,7 +836,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "health-check",
     term: "Health Check",
     aliases: ["healthcheck", "liveness probe", "readiness probe"],
-    category: "infrastructure",
+    category: "devops",
     phaseIds: ["7", "8"],
     lessonIds: [],
     definitions: {
@@ -853,7 +853,7 @@ export const CTO_GAPS_TERMS: DictionaryTerm[] = [
     slug: "graceful-shutdown",
     term: "Graceful Shutdown",
     aliases: ["graceful termination"],
-    category: "infrastructure",
+    category: "devops",
     phaseIds: ["7", "8"],
     lessonIds: [],
     definitions: {

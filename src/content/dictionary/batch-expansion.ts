@@ -462,7 +462,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "hash-function",
     term: "Hash Function",
     aliases: ["hashing", "hash"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -479,7 +479,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "trie",
     term: "Trie",
     aliases: ["prefix tree", "digital tree"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -496,7 +496,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "topological-sort",
     term: "Topological Sort",
     aliases: ["topo sort", "dependency ordering"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -513,7 +513,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "amortized-analysis",
     term: "Amortized Analysis",
     aliases: ["amortized cost", "amortized time"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -530,7 +530,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "union-find",
     term: "Union-Find",
     aliases: ["disjoint set", "disjoint set union"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -547,7 +547,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "np-complete",
     term: "NP-Complete",
     aliases: ["NP-hard", "computational complexity"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -564,7 +564,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "minimum-spanning-tree",
     term: "Minimum Spanning Tree",
     aliases: ["MST", "spanning tree"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -581,7 +581,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "segment-tree",
     term: "Segment Tree",
     aliases: ["range query tree"],
-    category: "cs-fundamentals",
+    category: "fundamentals",
     phaseIds: ["3"],
     lessonIds: [],
     definitions: {
@@ -706,7 +706,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "gradient-descent",
     term: "Gradient Descent",
     aliases: ["SGD", "stochastic gradient descent"],
-    category: "ai-ml",
+    category: "ai",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -723,7 +723,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "loss-function",
     term: "Loss Function",
     aliases: ["cost function", "objective function"],
-    category: "ai-ml",
+    category: "ai",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -740,7 +740,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "overfitting",
     term: "Overfitting",
     aliases: ["overfit", "memorization"],
-    category: "ai-ml",
+    category: "ai",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -757,7 +757,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "tokenizer",
     term: "Tokenizer",
     aliases: ["tokenization", "text tokenizer"],
-    category: "ai-ml",
+    category: "ai",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -774,7 +774,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "transfer-learning",
     term: "Transfer Learning",
     aliases: ["pretrained model", "fine-tuning"],
-    category: "ai-ml",
+    category: "ai",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -791,7 +791,7 @@ export const EXPANSION_TERMS: DictionaryTerm[] = [
     slug: "beam-search",
     term: "Beam Search",
     aliases: ["beam decoding"],
-    category: "ai-ml",
+    category: "ai",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {

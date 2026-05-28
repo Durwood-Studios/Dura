@@ -429,7 +429,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "cpu-profiling",
     term: "CPU Profiling",
     aliases: ["profiling", "performance profiling"],
-    category: "performance",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -446,7 +446,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "heap-snapshot",
     term: "Heap Snapshot",
     aliases: ["memory snapshot"],
-    category: "performance",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -463,7 +463,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "memory-leak",
     term: "Memory Leak",
     aliases: [],
-    category: "performance",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -480,7 +480,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "request-animation-frame",
     term: "requestAnimationFrame",
     aliases: ["rAF"],
-    category: "performance",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -497,7 +497,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "data-locality",
     term: "Data Locality",
     aliases: ["cache-friendly layout", "data-oriented design"],
-    category: "performance",
+    category: "professional",
     phaseIds: ["7"],
     lessonIds: [],
     definitions: {
@@ -514,7 +514,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "work-stealing",
     term: "Work Stealing",
     aliases: ["work-stealing scheduler"],
-    category: "performance",
+    category: "professional",
     phaseIds: ["7"],
     lessonIds: [],
     definitions: {
@@ -534,7 +534,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "test-pyramid",
     term: "Test Pyramid",
     aliases: ["testing pyramid"],
-    category: "testing",
+    category: "quality",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -551,7 +551,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "integration-test-deep",
     term: "Integration Test",
     aliases: ["integration testing"],
-    category: "testing",
+    category: "quality",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -568,7 +568,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "e2e-test-deep",
     term: "End-to-End Test",
     aliases: ["E2E test", "system test"],
-    category: "testing",
+    category: "quality",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -585,7 +585,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "test-double",
     term: "Test Double",
     aliases: ["fake", "stub", "dummy"],
-    category: "testing",
+    category: "quality",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -602,7 +602,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "mock-object",
     term: "Mock Object",
     aliases: ["mock", "spy"],
-    category: "testing",
+    category: "quality",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -619,7 +619,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "test-fixture",
     term: "Test Fixture",
     aliases: ["setup", "test context"],
-    category: "testing",
+    category: "quality",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -636,7 +636,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "snapshot-testing",
     term: "Snapshot Testing",
     aliases: ["snapshot test"],
-    category: "testing",
+    category: "quality",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -653,7 +653,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "property-based-testing",
     term: "Property-Based Testing",
     aliases: ["PBT", "generative testing", "QuickCheck"],
-    category: "testing",
+    category: "quality",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -812,7 +812,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "dependency-inversion",
     term: "Dependency Inversion Principle",
     aliases: ["DIP"],
-    category: "architecture",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -829,7 +829,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "factory-pattern",
     term: "Factory Pattern",
     aliases: ["factory method", "abstract factory"],
-    category: "architecture",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -846,7 +846,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "strategy-pattern",
     term: "Strategy Pattern",
     aliases: ["policy pattern"],
-    category: "architecture",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -863,7 +863,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "observer-pattern",
     term: "Observer Pattern",
     aliases: ["pub-sub", "publish-subscribe"],
-    category: "architecture",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -880,7 +880,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "decorator-pattern",
     term: "Decorator Pattern",
     aliases: ["wrapper pattern"],
-    category: "architecture",
+    category: "professional",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -897,7 +897,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "bounded-context",
     term: "Bounded Context",
     aliases: [],
-    category: "architecture",
+    category: "professional",
     phaseIds: ["8"],
     lessonIds: [],
     definitions: {
@@ -914,7 +914,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "aggregate-root",
     term: "Aggregate Root",
     aliases: ["aggregate"],
-    category: "architecture",
+    category: "professional",
     phaseIds: ["8"],
     lessonIds: [],
     definitions: {
@@ -931,7 +931,7 @@ export const ADVANCED_PROFESSIONAL_TERMS: DictionaryTerm[] = [
     slug: "ubiquitous-language",
     term: "Ubiquitous Language",
     aliases: [],
-    category: "architecture",
+    category: "professional",
     phaseIds: ["8"],
     lessonIds: [],
     definitions: {

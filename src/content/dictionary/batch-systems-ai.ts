@@ -526,7 +526,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "vpc",
     term: "VPC",
     aliases: ["Virtual Private Cloud"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -543,7 +543,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "subnet",
     term: "Subnet",
     aliases: ["subnetwork"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -560,7 +560,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "security-group",
     term: "Security Group",
     aliases: ["SG", "firewall rules"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -577,7 +577,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "s3-storage",
     term: "S3",
     aliases: ["Simple Storage Service", "object storage"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -594,7 +594,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "lambda-function",
     term: "Lambda Function",
     aliases: ["serverless function", "FaaS"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -611,7 +611,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "cdn-edge",
     term: "CDN Edge",
     aliases: ["content delivery network", "edge location"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -628,7 +628,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "auto-scaling",
     term: "Auto Scaling",
     aliases: ["autoscaling", "elastic scaling"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -645,7 +645,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "kubernetes",
     term: "Kubernetes",
     aliases: ["K8s"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -662,7 +662,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "helm-chart",
     term: "Helm Chart",
     aliases: ["Helm"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
@@ -679,7 +679,7 @@ export const SYSTEMS_AI_TERMS: DictionaryTerm[] = [
     slug: "infrastructure-as-code",
     term: "Infrastructure as Code",
     aliases: ["IaC"],
-    category: "cloud",
+    category: "devops",
     phaseIds: ["6"],
     lessonIds: [],
     definitions: {
