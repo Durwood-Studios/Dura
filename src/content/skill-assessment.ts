@@ -1,5 +1,100 @@
 import type { SkillQuestion } from "@/types/skill-assessment";
 
+/**
+ * 5 "below Phase 0" prefix questions probing basic mental model of computers.
+ *
+ * Rationale: the main assessment opens with "What is a file extension?" which
+ * implicitly assumes desktop-OS familiarity. For learners who have only used
+ * a phone/tablet, or have never used any computing device, that question reads
+ * as nonsense and mis-places them into the wrong path.
+ *
+ * The prefix flight branches:
+ *   - 5/5 correct → continue to the main 35-question assessment
+ *   - 3–4/5 correct → continue (warmly nudged)
+ *   - ≤2/5 correct → suggest Discovery Zone instead (no reading wall)
+ *
+ * These are NOT gate-keep questions — they're "do you have a mental model of
+ * computers as something you interact with" probes. Every option is non-judgmental;
+ * "I'm not sure" is always a valid answer that simply maps to the discovery branch.
+ *
+ * Phase level is recorded as -1 so these never pollute the bracket scoring in
+ * `scoreAssessment()` — that function buckets by phase 0–9 only.
+ *
+ * See: xDocs/active/universality-and-dictionary-audit-2026-05.md §2, §6 Tier 4 item 9.
+ */
+export const PREFIX_QUESTIONS: SkillQuestion[] = [
+  {
+    id: "pre-01",
+    phaseLevel: -1,
+    question: "Have you ever used a phone, tablet, or computer to do anything on the internet?",
+    options: [
+      "Yes — I use one most days (mine or a shared one)",
+      "Sometimes — I've used one a few times",
+      "Not really — someone else usually does it for me",
+      "Never — this is genuinely my first time",
+    ],
+    correctIndex: 0,
+    explanation:
+      "Whatever you answered is the right answer for you — there's no wrong one. We just want to meet you where you are.",
+  },
+  {
+    id: "pre-02",
+    phaseLevel: -1,
+    question: "When you tap an icon on a phone screen, what is actually happening?",
+    options: [
+      "I'm not sure — it just opens",
+      "The screen senses where my finger is and the phone runs the matching app",
+      "The icon physically moves under my finger",
+      "The phone takes a picture of my finger to identify me",
+    ],
+    correctIndex: 1,
+    explanation:
+      "The screen detects where you tapped, and software decides what should happen next. That's it. If you weren't sure — totally fine. We'll cover this.",
+  },
+  {
+    id: "pre-03",
+    phaseLevel: -1,
+    question: "If someone said 'send me that photo as a file', would you know what they meant?",
+    options: [
+      "Yes — a file is a saved chunk of data with a name, like photo.jpg",
+      "Sort of — I think a file is a thing on a computer",
+      "Not really — I'd just send them the photo somehow",
+      "No — I've never thought about it that way",
+    ],
+    correctIndex: 0,
+    explanation:
+      "A file is just data with a name. You don't need to know this yet — the curriculum teaches it. We're checking whether the word 'file' already means something to you.",
+  },
+  {
+    id: "pre-04",
+    phaseLevel: -1,
+    question: "In your own words, what is 'the internet'?",
+    options: [
+      "A worldwide network of computers that can send messages and files to each other",
+      "A thing on my phone that shows me videos and apps",
+      "Something my house has that makes things work",
+      "I've heard the word but couldn't really explain it",
+    ],
+    correctIndex: 0,
+    explanation:
+      "All four of those answers are pointing at something real. The first one is the most technical. If you picked any other, that's fine — we'll build the mental model with you.",
+  },
+  {
+    id: "pre-05",
+    phaseLevel: -1,
+    question: "When you tap a link and a webpage appears, what do you think made it appear?",
+    options: [
+      "My device asked a far-away computer for the page, and that computer sent it back",
+      "The page was already on my phone, hidden until I tapped",
+      "Magic — I genuinely don't know",
+      "I've never really thought about it",
+    ],
+    correctIndex: 0,
+    explanation:
+      "Your device sends a request over the internet, a server somewhere sends back the page, and your browser draws it on the screen. We'll teach the whole pipeline — this question is just checking what's already there.",
+  },
+];
+
 /** 35 placement questions across all 10 phases. */
 export const SKILL_QUESTIONS: SkillQuestion[] = [
   // Phase 0-1: Digital Literacy & Programming Fundamentals (8 questions)

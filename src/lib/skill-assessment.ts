@@ -1,5 +1,26 @@
 import type { SkillAnswer, SkillScore, DreyfusLevel, PathId } from "@/types/skill-assessment";
 
+/**
+ * Outcome of the 5-question prefix flight.
+ *   - "continue" → learner has enough mental model to take the main 35-question assessment
+ *   - "discovery" → curriculum's reading-heavy structure isn't the right starting point;
+ *     suggest the Discovery Zone instead (interactive, no reading wall, no account needed)
+ *
+ * Threshold rationale: 3/5 correct = the learner recognizes the words "file",
+ * "internet", "tap an icon" as referring to something concrete. ≤2/5 means the
+ * curriculum's first lesson will land as a wall of jargon — Discovery is the
+ * kinder first touch.
+ *
+ * See: xDocs/active/universality-and-dictionary-audit-2026-05.md §2.
+ */
+export type PrefixOutcome = "continue" | "discovery";
+
+/** Score the 5-question prefix flight. ≥3 correct → continue; ≤2 → discovery. */
+export function scorePrefix(answers: SkillAnswer[]): PrefixOutcome {
+  const correct = answers.filter((a) => a.correct).length;
+  return correct >= 3 ? "continue" : "discovery";
+}
+
 const BRACKETS: [string, number[]][] = [
   ["0-1", [0, 1]],
   ["2-3", [2, 3]],

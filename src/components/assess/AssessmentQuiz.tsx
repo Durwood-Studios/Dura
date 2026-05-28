@@ -1,17 +1,31 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Check, X } from "lucide-react";
-import { SKILL_QUESTIONS } from "@/content/skill-assessment";
-import { scoreAssessment, recommendPath, dreyfusLabel } from "@/lib/skill-assessment";
+import { ArrowRight, Check, Sparkles, X } from "lucide-react";
+import { PREFIX_QUESTIONS, SKILL_QUESTIONS } from "@/content/skill-assessment";
+import { scoreAssessment, scorePrefix, recommendPath, dreyfusLabel } from "@/lib/skill-assessment";
 import { LEARNING_PATHS } from "@/lib/paths";
 import { useAssessmentStore } from "@/stores/assessment";
 import { PathCard } from "@/components/assess/PathCard";
 import { generateId, cn } from "@/lib/utils";
 import type { SkillAnswer, PathId, SkillAssessmentResult } from "@/types/skill-assessment";
 
-type Stage = "intro" | "quiz" | "feedback" | "results";
+/**
+ * Stages:
+ *   intro → prefix (5 below-Phase-0 questions) → prefix-result
+ *     → if "discovery": show Discovery suggestion (with "continue anyway" escape)
+ *     → if "continue": straight into quiz (35 main questions) → feedback → results
+ */
+type Stage =
+  | "intro"
+  | "prefix"
+  | "prefix-feedback"
+  | "prefix-result"
+  | "quiz"
+  | "feedback"
+  | "results";
 
 export function AssessmentQuiz(): React.ReactElement {
   const router = useRouter();
@@ -27,6 +41,50 @@ export function AssessmentQuiz(): React.ReactElement {
   const [result, setLocalResult] = useState<SkillAssessmentResult | null>(null);
   const [selectedPath, setSelectedPath] = useState<PathId | null>(null);
   const [startTime] = useState(Date.now());
+
+  // Prefix flight state (the 5 "below Phase 0" questions, scored separately).
+  const [prefixIndex, setPrefixIndex] = useState(0);
+  const [prefixSelected, setPrefixSelected] = useState<number | null>(null);
+  const [prefixAnswers, setPrefixAnswers] = useState<SkillAnswer[]>([]);
+  const [prefixCorrect, setPrefixCorrect] = useState(0);
+
+  const prefixTotal = PREFIX_QUESTIONS.length;
+  const currentPrefix = PREFIX_QUESTIONS[prefixIndex];
+
+  const handlePrefixAnswer = useCallback(
+    (optionIdx: number) => {
+      if (stage !== "prefix") return;
+      setPrefixSelected(optionIdx);
+      const answer: SkillAnswer = {
+        questionId: currentPrefix.id,
+        selectedOption: optionIdx,
+        correct: optionIdx === currentPrefix.correctIndex,
+        phaseLevel: currentPrefix.phaseLevel,
+      };
+      setPrefixAnswers((prev) => [...prev, answer]);
+      setStage("prefix-feedback");
+    },
+    [stage, currentPrefix]
+  );
+
+  const advancePrefix = useCallback(() => {
+    if (prefixIndex + 1 < prefixTotal) {
+      setPrefixIndex((i) => i + 1);
+      setPrefixSelected(null);
+      setStage("prefix");
+    } else {
+      // Prefix flight complete — score and branch.
+      const outcome = scorePrefix(prefixAnswers);
+      setPrefixCorrect(prefixAnswers.filter((a) => a.correct).length);
+      if (outcome === "continue") {
+        // Straight into the main quiz.
+        setStage("quiz");
+      } else {
+        // Show the Discovery suggestion (with "continue anyway" escape).
+        setStage("prefix-result");
+      }
+    }
+  }, [prefixIndex, prefixTotal, prefixAnswers]);
 
   useEffect(() => {
     if (!hydrated) void hydrate();
@@ -98,8 +156,18 @@ export function AssessmentQuiz(): React.ReactElement {
           Skill Assessment
         </h1>
         <p className="mt-3 text-[var(--color-text-secondary)]">
-          35 questions across all engineering topics. Takes about 10 minutes. We&apos;ll recommend
-          the best starting point based on your answers.
+          A few warm-up questions, then 35 across all engineering topics. Takes about 10 minutes.
+          We&apos;ll recommend the best starting point based on your answers.
+        </p>
+        <p className="mt-2 text-sm text-[var(--color-text-muted)]">
+          Want to play with the concepts first instead?{" "}
+          <Link
+            href="/discover"
+            className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-text-secondary)]"
+          >
+            Try Discovery
+          </Link>{" "}
+          — no account, no pressure.
         </p>
         {existingResult && (
           <p className="mt-2 text-sm text-[var(--color-text-muted)]">
@@ -110,7 +178,7 @@ export function AssessmentQuiz(): React.ReactElement {
         )}
         <div className="mt-8 flex flex-col items-center gap-3">
           <button
-            onClick={() => setStage("quiz")}
+            onClick={() => setStage("prefix")}
             className="rounded-lg bg-emerald-500 px-6 py-3 text-sm font-semibold text-white transition hover:bg-emerald-600"
           >
             Begin Assessment
@@ -208,6 +276,122 @@ export function AssessmentQuiz(): React.ReactElement {
             Start {selectedPath ? LEARNING_PATHS[selectedPath].name : ""} Path
           </button>
         </div>
+      </div>
+    );
+  }
+
+  // Prefix-result screen — shown only when ≤2/5 prefix answers were correct.
+  // Suggests Discovery Zone as a warmer first touch, with a "continue anyway" escape.
+  if (stage === "prefix-result") {
+    return (
+      <div className="mx-auto max-w-lg text-center">
+        <Sparkles className="mx-auto h-10 w-10 text-emerald-500" aria-hidden="true" />
+        <h2 className="mt-4 text-2xl font-semibold text-[var(--color-text-primary)]">
+          We&apos;ve got a kinder first step
+        </h2>
+        <p className="mt-3 text-[var(--color-text-secondary)]">
+          The main assessment assumes you&apos;ve used a computer with files and folders before.
+          Based on your answers ({prefixCorrect}/{prefixTotal}), the curriculum&apos;s reading-heavy
+          start probably isn&apos;t the right place to land first.
+        </p>
+        <p className="mt-3 text-[var(--color-text-secondary)]">
+          <strong>Discovery</strong> is hands-on — twenty interactive activities you can play with,
+          no reading wall, no account. Most learners who start there feel ready for the curriculum
+          afterwards.
+        </p>
+        <div className="mt-8 flex flex-col items-center gap-3">
+          <Link
+            href="/discover"
+            className="inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-6 py-3 text-sm font-semibold text-white transition hover:bg-emerald-600"
+          >
+            Try Discovery first <ArrowRight className="h-4 w-4" />
+          </Link>
+          <button
+            onClick={() => setStage("quiz")}
+            className="text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
+          >
+            Continue to the full assessment anyway
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Prefix flight screens (5 below-Phase-0 questions).
+  if (stage === "prefix" || stage === "prefix-feedback") {
+    return (
+      <div className="mx-auto max-w-lg">
+        {/* Progress bar */}
+        <div className="mb-6">
+          <div className="mb-1 flex items-center justify-between text-xs text-[var(--color-text-muted)]">
+            <span>
+              Warm-up {prefixIndex + 1} of {prefixTotal}
+            </span>
+            <span>Getting to know you</span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-[var(--color-bg-subtle)]">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+              style={{
+                width: `${((prefixIndex + (stage === "prefix-feedback" ? 1 : 0)) / prefixTotal) * 100}%`,
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Question */}
+        <h2 className="mb-6 text-xl font-semibold text-[var(--color-text-primary)]">
+          {currentPrefix.question}
+        </h2>
+
+        {/* Options */}
+        <div className="flex flex-col gap-2">
+          {currentPrefix.options.map((option, i) => {
+            const isSelected = prefixSelected === i;
+            const showResult = stage === "prefix-feedback";
+
+            return (
+              <button
+                key={i}
+                type="button"
+                onClick={() => handlePrefixAnswer(i)}
+                disabled={stage === "prefix-feedback"}
+                className={cn(
+                  "flex items-center gap-3 rounded-lg border px-4 py-3 text-left text-sm transition",
+                  !showResult &&
+                    "border-[var(--color-border)] bg-[var(--color-bg-surface)] hover:border-emerald-300",
+                  showResult &&
+                    isSelected &&
+                    "border-emerald-400 bg-emerald-50 dark:bg-emerald-500/10",
+                  !showResult &&
+                    isSelected &&
+                    "border-emerald-400 bg-emerald-50 dark:bg-emerald-500/10"
+                )}
+              >
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-[var(--color-border)] text-xs font-medium">
+                  {String.fromCharCode(65 + i)}
+                </span>
+                <span className="text-[var(--color-text-primary)]">{option}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Feedback — warm, never gatekeepy. We don't mark prefix answers right/wrong in the UI. */}
+        {stage === "prefix-feedback" && (
+          <div className="mt-4">
+            <p className="rounded-lg bg-[var(--color-bg-subtle)] p-3 text-sm text-[var(--color-text-secondary)]">
+              {currentPrefix.explanation}
+            </p>
+            <button
+              onClick={advancePrefix}
+              className="mt-3 inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600"
+            >
+              {prefixIndex + 1 < prefixTotal ? "Next" : "Continue"}{" "}
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
+        )}
       </div>
     );
   }
