@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ArrowRight, BookOpen, Wrench, ShieldCheck } from "lucide-react";
 import { buildMetadata } from "@/lib/og";
 import { AITransparencyDisclosure } from "@/components/about/AITransparencyDisclosure";
+import { GenerativeAIDisclosure } from "@/components/about/GenerativeAIDisclosure";
 
 export const metadata: Metadata = buildMetadata({
   title: "How it works",
@@ -86,9 +87,14 @@ export default function HowItWorksPage(): React.ReactElement {
         </p>
       </section>
 
-      {/* AI transparency — EU AI Act Art. 13/14 */}
+      {/* AI transparency — EU AI Act Art. 13/14, FSRS (algorithmic decisions) */}
       <section className="mb-12">
         <AITransparencyDisclosure />
+      </section>
+
+      {/* AI transparency — EU AI Act Art. 13/14, generative AI (Tutor + Code Review) */}
+      <section className="mb-12">
+        <GenerativeAIDisclosure />
       </section>
 
       {/* Standards */}
