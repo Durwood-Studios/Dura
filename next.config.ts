@@ -38,6 +38,28 @@ const nextConfig: NextConfig = {
             key: "Permissions-Policy",
             value: "camera=(), microphone=(), geolocation=()",
           },
+          // HSTS — pin the browser to HTTPS for 2 years + include subdomains.
+          // `preload` makes the site eligible for the browser-shipped
+          // preload list (still requires hstspreload.org submission to
+          // actually be preloaded; the directive is the prerequisite).
+          // Vercel auto-sets HSTS on prod HTTPS, but explicit > implicit:
+          // belt-and-suspenders so dev/preview deploys behave the same as
+          // prod and a future infra change can't silently drop it.
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=63072000; includeSubDomains; preload",
+          },
+          // COOP isolates the top-level browsing context from cross-origin
+          // openers. Prevents window-reference attacks (where a cross-
+          // origin opener reaches into DURA's window) and is a prerequisite
+          // for browser-level process isolation. `same-origin` is the
+          // strictest level; `same-origin-allow-popups` would relax for
+          // /auth/callback if the OAuth provider needed a window handle
+          // back, but Supabase's redirect-callback flow doesn't.
+          {
+            key: "Cross-Origin-Opener-Policy",
+            value: "same-origin",
+          },
           {
             key: "Content-Security-Policy",
             value: [
