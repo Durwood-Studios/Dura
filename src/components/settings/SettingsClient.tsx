@@ -23,6 +23,7 @@ import {
   requestPermission,
   disableNotifications,
 } from "@/lib/notifications";
+import { AIFeaturesPanel } from "@/components/settings/AIFeaturesPanel";
 import type { FontSize, StudyMode } from "@/types/preferences";
 
 // Lazy-loaded below the fold — avoids pulling jszip + the full export pipeline into the initial bundle
@@ -225,6 +226,9 @@ export function SettingsClient(): React.ReactElement {
           <AITransparencyDisclosure />
         </Suspense>
       </div>
+
+      {/* ── AI features (BYOK, opt-in) ──────────────────────────────── */}
+      <AIFeaturesPanel />
 
       {/* ── Data ───────────────────────────────────────────────────── */}
       <Section title="Data">
