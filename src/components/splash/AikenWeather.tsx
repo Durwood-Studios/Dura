@@ -2,12 +2,19 @@
 
 import { useEffect, useState } from "react";
 
-const STORAGE_KEY = "dura-aiken-weather";
+// v2: v1 cached wttr.in's full HTML page (browser UA bug); the key bump
+// abandons any poisoned v1 entry instead of serving it for up to 30 min.
+const STORAGE_KEY = "dura-aiken-weather-v2";
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 interface CachedWeather {
   text: string;
   timestamp: number;
+}
+
+/** A valid reading is short, plain text — never HTML or an error sentinel. */
+function isValidWeather(text: string): boolean {
+  return text.length > 0 && text.length <= 60 && !text.includes("<") && !text.includes("Unknown");
 }
 
 /** Displays current time and weather for Aiken, SC. Fails silently. */
@@ -37,10 +44,12 @@ export function AikenWeather(): React.ReactElement | null {
         const cached = sessionStorage.getItem(STORAGE_KEY);
         if (cached) {
           const parsed: CachedWeather = JSON.parse(cached) as CachedWeather;
-          if (Date.now() - parsed.timestamp < CACHE_TTL_MS) {
+          // Validate the cached value too — never trust storage blindly.
+          if (Date.now() - parsed.timestamp < CACHE_TTL_MS && isValidWeather(parsed.text)) {
             setWeather(parsed.text);
             return;
           }
+          sessionStorage.removeItem(STORAGE_KEY);
         }
 
         // Same-origin proxy — the server fetches wttr.in with a curl UA so we
@@ -52,7 +61,7 @@ export function AikenWeather(): React.ReactElement | null {
 
         const text = (await res.text()).trim().replace(/^\+/, "");
         // Defense in depth: never render an oversized/HTML payload.
-        if (!text || text.length > 60 || text.includes("<") || text.includes("Unknown")) return;
+        if (!isValidWeather(text)) return;
 
         sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ text, timestamp: Date.now() }));
         setWeather(text);
