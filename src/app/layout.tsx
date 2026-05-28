@@ -35,7 +35,7 @@ export const metadata: Metadata = {
     template: "%s | DURA",
   },
   description:
-    "From absolute zero to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.",
+    "From your first click to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.",
   keywords: ["engineering education", "learn to code", "LMS", "free", "open source", "CTO"],
   authors: [{ name: "Durwood Studios LLC" }],
   openGraph: {
@@ -44,13 +44,13 @@ export const metadata: Metadata = {
     siteName: "DURA",
     title: "DURA — Engineering education, hardened by design",
     description:
-      "From absolute zero to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.",
+      "From your first click to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.",
   },
   twitter: {
     card: "summary_large_image",
     title: "DURA — Engineering education, hardened by design",
     description:
-      "From absolute zero to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.",
+      "From your first click to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.",
   },
   robots: { index: true, follow: true },
 };
@@ -98,7 +98,7 @@ export default function RootLayout({
               name: "DURA",
               url: "https://dura.dev",
               description:
-                "From absolute zero to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.",
+                "From your first click to engineering leadership. 10 phases. 2,850 hours. Standards-backed. Free forever.",
               publisher: {
                 "@type": "Organization",
                 name: "Durwood Studios LLC",

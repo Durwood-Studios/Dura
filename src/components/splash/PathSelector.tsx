@@ -25,7 +25,7 @@ const PATHS: PathCard[] = [
     title: "I'm learning to code",
     icon: <Sprout className="h-7 w-7" />,
     description:
-      "Start from absolute zero. A 35-question assessment finds where you belong, then guides you step by step.",
+      "A 35-question assessment finds where you belong, then guides you step by step. Best when you've used a computer before — if not, start with Discovery above.",
     href: "/assess",
     color: "#10b981",
   },

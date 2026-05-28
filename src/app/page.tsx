@@ -15,7 +15,7 @@ const CTA = dynamic(() => import("@/components/splash/CTA").then((m) => m.CTA));
 export const metadata: Metadata = {
   title: "DURA — Engineering Education, Free Forever",
   description:
-    "An open-source learning platform that takes you from absolute beginner to engineering leadership. 10 phases, 400+ lessons, offline-first.",
+    "An open-source learning platform from your first click to engineering leadership. 10 phases, 400+ lessons, offline-first.",
 };
 
 export default function Home(): React.ReactElement {
