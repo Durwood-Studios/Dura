@@ -7,6 +7,7 @@ import { ScrollTracker } from "@/components/lesson/ScrollTracker";
 import { CompletionGate } from "@/components/lesson/CompletionGate";
 import { BiteMode } from "@/components/lesson/BiteMode";
 import { StandardsBadges } from "@/components/lesson/StandardsBadges";
+import { AITutorMount } from "@/components/lesson/AITutor/AITutorMount";
 import { formatMinutes } from "@/lib/utils";
 import { ShareButton } from "@/components/seo/ShareButton";
 import { buildBadges } from "@/lib/standards";
@@ -116,6 +117,8 @@ export async function LessonReader({
           </Link>
         </nav>
       )}
+
+      <AITutorMount meta={meta} lessonBody={body} />
     </article>
   );
 }
