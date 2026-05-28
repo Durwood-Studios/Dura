@@ -1049,7 +1049,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "postgresql",
     term: "PostgreSQL",
     aliases: ["Postgres", "PG"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1066,7 +1066,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "sql-query",
     term: "SQL Query",
     aliases: ["SQL", "Structured Query Language"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1083,7 +1083,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "join-sql",
     term: "JOIN",
     aliases: ["SQL join", "table join"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1100,7 +1100,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "index-db",
     term: "Database Index",
     aliases: ["index", "B-tree index"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1117,7 +1117,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "migration-db",
     term: "Database Migration",
     aliases: ["schema migration", "migration"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1134,7 +1134,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "transaction-db",
     term: "Transaction",
     aliases: ["database transaction", "ACID transaction"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1151,7 +1151,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "normalization",
     term: "Normalization",
     aliases: ["database normalization", "normal form"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1168,7 +1168,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "foreign-key",
     term: "Foreign Key",
     aliases: ["FK", "foreign key constraint"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1185,7 +1185,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "primary-key",
     term: "Primary Key",
     aliases: ["PK", "primary key constraint"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
@@ -1202,7 +1202,7 @@ export const WEB_BACKEND_TERMS: DictionaryTerm[] = [
     slug: "connection-pool",
     term: "Connection Pool",
     aliases: ["database pool", "connection pooling"],
-    category: "database",
+    category: "databases",
     phaseIds: ["5"],
     lessonIds: [],
     definitions: {
