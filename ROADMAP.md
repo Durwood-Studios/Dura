@@ -85,14 +85,27 @@ Roughly in priority order. Dates are intent, not commitments.
 
 ### Mobile
 
-- Mobile lesson UX audit — tap targets, scroll behavior, font scaling, reader mode on small screens
+- Mobile lesson UX audit — first pass shipped 2026-05-28 (3 commits: chrome tap targets + breadcrumb collapse + accent canonical, VocabTooltip dismissal + viewport positioning, Sandpack mobile collapse). Deferred follow-ups in [`xDocs/active/mobile-ux-audit-2026-05.md`](xDocs/active/mobile-ux-audit-2026-05.md)
+
+### Global reach + i18n
+
+DURA's framing is "a global tool for all software engineers". The
+language registry now declares ~38 languages matching Apple's iOS 18
+localization list ([`src/lib/i18n/languages.ts`](src/lib/i18n/languages.ts)).
+Only English is enabled today; the phased plan:
+
+1. **Phase 1 — extraction.** Audit the ~2,000 UI strings across components; route them through a `t()` helper backed by `next-intl` (or equivalent). English baseline file ships first. No user-visible change.
+2. **Phase 2 — RTL + bidi.** Wire `dir="rtl"` swap on `<html>` driven by the locale registry; verify the lesson reader, sidebar, and dictionary in Arabic + Hebrew. RTL CSS pass.
+3. **Phase 3 — machine-translated baseline.** Translate the UI string catalog into all enabled locales via an LLM-assisted pipeline; flip each locale's `enabled` flag once a native speaker validates a representative sample. Lessons remain English-only at this phase.
+4. **Phase 4 — community + AI-assisted lesson translation.** This is the big one — 418 lessons × N languages is a six-to-seven-figure translation surface. The plan is community-first, with AI-translated drafts as a baseline that learners and contributors can refine. Provenance + credit tracked per lesson per locale.
+
+This will not happen in a single sprint. The scaffolding is here so contributions can flow in piece by piece.
 
 ---
 
 ## Later — on the list, no timeline yet
 
 - Discord launch (community gathering point)
-- Multi-language support (i18n)
 - Instructor mode — host a cohort, see learner progress (opt-in only, no surveillance defaults)
 - Native mobile shell (Capacitor or equivalent) — only if PWA-on-iOS limitations become a real problem
 - Project tutorial library expansion past 100
