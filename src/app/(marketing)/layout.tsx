@@ -1,11 +1,17 @@
 import Link from "next/link";
 import { UpdateAvailable } from "@/components/pwa/UpdateAvailable";
+import { Footer } from "@/components/splash/Footer";
 
 /**
- * Marketing group layout — a minimal header, plain footer, and no app
- * chrome. Used for /about, /how-it-works, /open-source (and eventually
- * /howto and /tutorials). Kept deliberately light: these are read-once
- * pages, not the learning surface.
+ * Marketing group layout — a minimal header, no app chrome. Used for
+ * /about, /how-it-works, /open-source, /discover, /standards, /privacy,
+ * /terms, /install. Kept deliberately light: these are read-once pages,
+ * not the learning surface.
+ *
+ * The Footer is the shared splash Footer so home and marketing pages
+ * render identical chrome — previously the marketing layout had its
+ * own sparse inline footer (with "Dashboard" as one of five links)
+ * which produced a jarring inconsistency between / and /about etc.
  *
  * The UpdateAvailable pill rides into the header here too. Web-only
  * visitors (no PWA install) need a way to accept service-worker
@@ -52,38 +58,7 @@ export default function MarketingLayout({
 
       <div className="flex-1">{children}</div>
 
-      <footer className="border-t border-[var(--color-border)] bg-[var(--color-bg-surface)]">
-        <div className="mx-auto flex max-w-[960px] flex-col gap-4 px-6 py-10 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-sm font-semibold text-[var(--color-text-primary)]">DURA</p>
-            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-              Durwood Studios LLC · AGPLv3 · Free forever
-            </p>
-          </div>
-          <nav className="flex flex-wrap gap-4 text-xs text-[var(--color-text-secondary)]">
-            <Link href="/about" className="hover:text-emerald-700">
-              About
-            </Link>
-            <Link href="/how-it-works" className="hover:text-emerald-700">
-              How it works
-            </Link>
-            <Link href="/open-source" className="hover:text-emerald-700">
-              Open source
-            </Link>
-            <a
-              href="https://github.com/Durwood-Studios/Dura"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-emerald-700"
-            >
-              GitHub
-            </a>
-            <Link href="/dashboard" className="hover:text-emerald-700">
-              Dashboard
-            </Link>
-          </nav>
-        </div>
-      </footer>
+      <Footer />
     </div>
   );
 }

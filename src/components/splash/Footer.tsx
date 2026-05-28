@@ -45,13 +45,7 @@ export function Footer(): React.ReactElement {
           </div>
           <AikenWeather />
         </div>
-        <nav className="flex flex-wrap justify-center gap-6 sm:justify-end">
-          <Link
-            href="https://github.com/Durwood-Studios/Dura"
-            className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
-          >
-            GitHub
-          </Link>
+        <nav className="flex flex-wrap justify-center gap-x-6 gap-y-2 sm:justify-end">
           <Link
             href="/about"
             className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
@@ -59,29 +53,49 @@ export function Footer(): React.ReactElement {
             About
           </Link>
           <Link
+            href="/how-it-works"
+            className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
+          >
+            How it works
+          </Link>
+          <Link
+            href="/standards"
+            className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
+          >
+            Standards
+          </Link>
+          <Link
             href="/open-source"
             className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
           >
-            Open Source
+            Open source
           </Link>
           <Link
             href="/install"
             className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
           >
-            Install App
+            Install
           </Link>
           <Link
             href="/privacy"
             className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
           >
-            Privacy Policy
+            Privacy
           </Link>
           <Link
             href="/terms"
             className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
           >
-            Terms of Service
+            Terms
           </Link>
+          <a
+            href="https://github.com/Durwood-Studios/Dura"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
+          >
+            GitHub
+          </a>
         </nav>
       </div>
     </footer>
