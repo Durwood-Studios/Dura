@@ -1,10 +1,16 @@
 import Link from "next/link";
+import { UpdateAvailable } from "@/components/pwa/UpdateAvailable";
 
 /**
  * Marketing group layout — a minimal header, plain footer, and no app
  * chrome. Used for /about, /how-it-works, /open-source (and eventually
  * /howto and /tutorials). Kept deliberately light: these are read-once
  * pages, not the learning surface.
+ *
+ * The UpdateAvailable pill rides into the header here too. Web-only
+ * visitors (no PWA install) need a way to accept service-worker
+ * updates; without this mount they'd be held on the cached version
+ * indefinitely.
  */
 export default function MarketingLayout({
   children,
@@ -32,12 +38,15 @@ export default function MarketingLayout({
               Open source
             </Link>
           </div>
-          <Link
-            href="/paths/0/0-1/01"
-            className="ml-auto inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-600"
-          >
-            Start learning
-          </Link>
+          <div className="ml-auto flex items-center gap-3">
+            <UpdateAvailable />
+            <Link
+              href="/paths/0/0-1/01"
+              className="inline-flex items-center gap-1 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-600"
+            >
+              Start learning
+            </Link>
+          </div>
         </nav>
       </header>
 
