@@ -25,6 +25,7 @@ import {
 } from "@/lib/notifications";
 import { AIFeaturesPanel } from "@/components/settings/AIFeaturesPanel";
 import { RestoreFromFile } from "@/components/settings/RestoreFromFile";
+import { LocalePicker } from "@/components/settings/LocalePicker";
 import type { FontSize, StudyMode } from "@/types/preferences";
 
 // Lazy-loaded below the fold — avoids pulling jszip + the full export pipeline into the initial bundle
@@ -100,6 +101,9 @@ export function SettingsClient(): React.ReactElement {
     <div className="flex flex-col gap-8">
       {/* ── Appearance ──────────────────────────────────────────────── */}
       <Section title="Appearance">
+        <SettingRow label="Language" hint="DURA's interface language">
+          <LocalePicker />
+        </SettingRow>
         <SettingRow label="Theme" hint="Light, dark, or follow your system">
           <ThemeToggle />
         </SettingRow>

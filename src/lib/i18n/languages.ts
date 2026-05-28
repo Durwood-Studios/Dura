@@ -233,7 +233,11 @@ export const LOCALES: LocaleEntry[] = [
     englishName: "Spanish (Latin America)",
     nativeName: "Español (Latinoamérica)",
     direction: "ltr",
-    enabled: false,
+    // Machine-translated UI catalog with human review on the
+    // most-visible surfaces (locale picker copy, Discovery tagline,
+    // Settings section titles). Lessons + dictionary stay English
+    // for now — phased per ROADMAP §"Global reach + i18n".
+    enabled: true,
   },
   { code: "sv", englishName: "Swedish", nativeName: "Svenska", direction: "ltr", enabled: false },
   {
