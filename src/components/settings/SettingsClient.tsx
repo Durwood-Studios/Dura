@@ -24,6 +24,7 @@ import {
   disableNotifications,
 } from "@/lib/notifications";
 import { AIFeaturesPanel } from "@/components/settings/AIFeaturesPanel";
+import { RestoreFromFile } from "@/components/settings/RestoreFromFile";
 import type { FontSize, StudyMode } from "@/types/preferences";
 
 // Lazy-loaded below the fold — avoids pulling jszip + the full export pipeline into the initial bundle
@@ -233,7 +234,8 @@ export function SettingsClient(): React.ReactElement {
       {/* ── Data ───────────────────────────────────────────────────── */}
       <Section title="Data">
         <p className="text-xs text-[var(--color-text-secondary)]">
-          Your data is stored locally on this device. Nothing is sent to any server.
+          Your progress is stored locally on this device. Browsers can clear site data under storage
+          pressure — save a copy you can restore later, like a game save.
         </p>
         <div className="flex flex-wrap gap-2">
           <button
@@ -242,7 +244,7 @@ export function SettingsClient(): React.ReactElement {
             className="inline-flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition hover:bg-[var(--color-bg-subtle)]"
           >
             <Download className="h-3.5 w-3.5" />
-            Export my data
+            Save progress to file
           </button>
           <button
             type="button"
@@ -253,6 +255,7 @@ export function SettingsClient(): React.ReactElement {
             Clear all data
           </button>
         </div>
+        <RestoreFromFile />
       </Section>
 
       {/* ── Privacy ────────────────────────────────────────────────── */}
