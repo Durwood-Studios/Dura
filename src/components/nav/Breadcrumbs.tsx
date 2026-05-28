@@ -37,18 +37,30 @@ export function Breadcrumbs(): React.ReactElement | null {
             Home
           </Link>
         </li>
-        {crumbs.map((crumb, i) => (
-          <li key={crumb.href} className="flex items-center gap-1">
-            <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" aria-hidden />
-            {i === crumbs.length - 1 ? (
-              <span className="text-[var(--color-text-primary)]">{crumb.label}</span>
-            ) : (
-              <Link href={crumb.href} className="hover:text-[var(--color-text-primary)]">
-                {crumb.label}
-              </Link>
-            )}
-          </li>
-        ))}
+        {crumbs.map((crumb, i) => {
+          const isLast = i === crumbs.length - 1;
+          // On <sm, only Home + the final segment render — intermediates
+          // get hidden so a 4-segment chain (Home › Paths › Phase 01 › …)
+          // doesn't wrap to two lines and push the lesson H1 below the fold.
+          const hideOnMobile = !isLast;
+          return (
+            <li
+              key={crumb.href}
+              className={
+                hideOnMobile ? "hidden items-center gap-1 sm:flex" : "flex items-center gap-1"
+              }
+            >
+              <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" aria-hidden />
+              {isLast ? (
+                <span className="text-[var(--color-text-primary)]">{crumb.label}</span>
+              ) : (
+                <Link href={crumb.href} className="hover:text-[var(--color-text-primary)]">
+                  {crumb.label}
+                </Link>
+              )}
+            </li>
+          );
+        })}
       </ol>
     </nav>
   );

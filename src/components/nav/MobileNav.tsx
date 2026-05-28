@@ -52,10 +52,12 @@ export function MobileBottomTabs(): React.ReactElement {
             href={href}
             className={cn(
               "relative flex flex-1 flex-col items-center justify-center gap-1 text-xs font-medium",
-              active ? "text-emerald-600" : "text-[var(--color-text-secondary)]"
+              active ? "text-[var(--color-accent)]" : "text-[var(--color-text-secondary)]"
             )}
           >
-            {active && <span className="absolute top-1 h-0.5 w-5 rounded-full bg-emerald-500" />}
+            {active && (
+              <span className="absolute top-1 h-0.5 w-5 rounded-full bg-[var(--color-accent)]" />
+            )}
             <span className="relative">
               <Icon className="h-5 w-5" aria-hidden />
               {href === "/review" && (
@@ -167,7 +169,7 @@ export function MobileDrawer(): React.ReactElement | null {
             type="button"
             onClick={() => close(false)}
             aria-label="Close"
-            className="rounded-lg p-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+            className="rounded-lg p-3 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
           >
             <X className="h-5 w-5" />
           </button>
@@ -193,16 +195,16 @@ export function MobileDrawer(): React.ReactElement | null {
                     href={href}
                     onClick={() => close(false)}
                     className={cn(
-                      "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition",
+                      "flex items-center gap-3 rounded-lg px-3 py-3.5 text-sm transition",
                       active
-                        ? "bg-emerald-500/10 font-medium text-emerald-600 dark:text-emerald-400"
+                        ? "bg-[var(--color-bg-accent)] font-medium text-[var(--color-accent)]"
                         : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
                     )}
                   >
                     <Icon
                       className={cn(
                         "h-4 w-4 shrink-0",
-                        active ? "text-emerald-500" : "text-[var(--color-text-muted)]"
+                        active ? "text-[var(--color-accent)]" : "text-[var(--color-text-muted)]"
                       )}
                       aria-hidden
                     />

@@ -40,7 +40,7 @@ export function TopBar(): React.ReactElement {
         type="button"
         onClick={toggleMobileNav}
         aria-label="Open navigation"
-        className="rounded-lg p-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-surface)] lg:hidden"
+        className="rounded-lg p-3 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-surface)] lg:hidden lg:p-2"
       >
         <Menu className="h-5 w-5" />
       </button>
@@ -53,14 +53,14 @@ export function TopBar(): React.ReactElement {
         type="button"
         onClick={cycleTheme}
         aria-label={`Theme: ${theme}. Click to change.`}
-        className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-text-primary)]"
+        className="flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-text-primary)] lg:h-8 lg:w-8"
       >
         {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
       </button>
       <button
         type="button"
         onClick={toggleCommandPalette}
-        className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-1.5 text-sm text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-subtle)]"
+        className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-2.5 text-sm text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-subtle)] lg:py-1.5"
       >
         <Search className="h-4 w-4" />
         <span className="hidden sm:inline">Search</span>

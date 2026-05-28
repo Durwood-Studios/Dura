@@ -19,7 +19,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
     <div className="flex min-h-screen bg-[var(--color-bg-primary)] text-[var(--color-text-primary)]">
       <a
         href="#main-content"
-        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[100] focus:rounded-lg focus:bg-emerald-600 focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white focus:shadow-lg"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[100] focus:rounded-lg focus:bg-[var(--color-accent)] focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white focus:shadow-lg"
       >
         Skip to content
       </a>
@@ -29,7 +29,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
         <div className="flex min-w-0 flex-1 flex-col">
           <TopBar />
           <Breadcrumbs />
-          <main id="main-content" className="flex-1 pb-24 lg:pb-0">
+          <main id="main-content" className="flex-1 pb-28 lg:pb-0">
             <RestReminder />
             <PageTransition>{children}</PageTransition>
           </main>
