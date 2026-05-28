@@ -133,6 +133,14 @@ const ROOMS: Record<string, Room> = {
         concept: "Sorting algorithms · Big-O complexity",
         teaches: { label: "Phase 3 · Complexity and Big O", href: "/paths/3" },
       },
+      {
+        slug: "pathfinding",
+        name: "Pathfinding",
+        description:
+          "BFS, Dijkstra, and A* race across the same grid. Drop walls and mud, watch each algorithm sweep. The heuristic that makes A* goal-directed becomes obvious when you compare cell counts side-by-side.",
+        concept: "Graph search · Heuristics · A*",
+        teaches: { label: "Phase 3 · Algorithms & Complexity", href: "/paths/3" },
+      },
     ],
   },
   "internet-explorer": {

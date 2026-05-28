@@ -28,6 +28,10 @@ const HOT_PATHS = [
   // historically suspect for eval/Function. If this passes with eval
   // dropped, the CSP can be tightened.
   { name: "sandbox", url: "/sandbox" },
+  // discover/pathfinding: new activity (2026-05-28). Catches lazy-import
+  // regressions on the activity registry, route param wiring, and any
+  // runtime errors in the new component itself.
+  { name: "pathfinding", url: "/discover/robot-chef/pathfinding" },
 ];
 
 // Console noise we deliberately ignore. Each entry must explain WHY.

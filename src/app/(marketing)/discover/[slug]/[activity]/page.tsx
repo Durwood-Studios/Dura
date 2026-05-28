@@ -240,6 +240,28 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     ),
   },
 
+  pathfinding: {
+    title: "Pathfinding",
+    description:
+      "BFS, Dijkstra, and A* race across the same grid. Watch the heuristic shape the search.",
+    concept: "Graph search · Heuristics · A*",
+    intro:
+      "Three classic search algorithms run on one grid. BFS explores layer by layer; Dijkstra factors in weights; A* uses a heuristic — an informed guess at the remaining distance — to bias the search toward the goal. Drop walls, drop mud (cost 5), and load the maze preset to see how each algorithm trades exploration for guarantees.",
+    underTheHood: [
+      "BFS finds the shortest unweighted path. Optimal when every step costs the same. It does not understand mud — it counts steps, not cost.",
+      "Dijkstra generalizes BFS to weighted graphs by pulling the lowest-cost frontier cell next. Optimal when edge costs are non-negative. Explores symmetrically because it has no sense of direction.",
+      "A* keeps Dijkstra's optimality (when the heuristic never overestimates) but pulls the cell that minimizes cost-so-far + estimated-remaining. With Manhattan distance as the heuristic, exploration becomes goal-directed — fewer cells touched, same path quality.",
+    ],
+    teaches: { label: "Phase 3 · Algorithms & Complexity", href: "/paths/3" },
+    roomSlug: "robot-chef",
+    roomName: "Robot Chef",
+    roomColor: "#fbbf24",
+    Component: dynamic(
+      () => import("@/components/discover/Pathfinding").then((m) => m.Pathfinding),
+      { loading: () => <ActivitySkeleton /> }
+    ),
+  },
+
   // ─── Internet Explorer — networking fundamentals ────────────────────────
   "network-post-office": {
     title: "Network Post Office",
@@ -477,7 +499,7 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
 /** Room-to-activities mapping for generateStaticParams. */
 const ROOM_ACTIVITIES: Record<string, string[]> = {
   "secret-codes": ["binary-painter", "morse-code", "pixel-art", "secret-encoder", "hash-avalanche"],
-  "robot-chef": ["algorithm-kitchen", "robot-dance", "treasure-map", "sorting-race"],
+  "robot-chef": ["algorithm-kitchen", "robot-dance", "treasure-map", "sorting-race", "pathfinding"],
   "internet-explorer": ["network-post-office", "dns-phonebook", "website-builder"],
   "pattern-factory": [
     "pattern-machine",

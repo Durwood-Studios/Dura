@@ -32,7 +32,7 @@ These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 - Offline-first PWA — works fully without internet after first load
 - Mastery-gated progression — advance when you prove it, not when time passes
 - Dual point system — Activity Points (effort) and Mastery Points (proof) tracked separately
-- FSRS-5 spaced repetition for vocabulary review
+- FSRS-5 spaced repetition for vocabulary review (dictionary terms promote into the same flashcard deck — one review surface for everything)
 - 500+ dictionary terms with 3-tier definitions, individually indexed
 - 100 project tutorials across 12 career tracks
 - 35 how-to guides
@@ -75,13 +75,12 @@ Roughly in priority order. Dates are intent, not commitments.
 
 ### Curriculum extension
 
-- Discovery activities for Phases 3–9 (pathfinding visualizer, race-condition demo, embedding galaxy, garbage-collection visualizer, etc.)
-- Standards-alignment audit across 411 lessons — automated reconciliation against ACM CS2023, SWEBOK v4, SFIA 9, CSTA K-12, AP CS Principles/A, ISTE
+- Discovery activities for Phases 3–9 — Pathfinding shipped 2026-05-28; race-condition demo, embedding galaxy, and garbage-collection visualizer still to come
+- Standards-alignment audit across 418 lessons — automated reconciliation against ACM CS2023, SWEBOK v4, SFIA 9, CSTA K-12, AP CS Principles/A, ISTE (audit script shipped 2026-05-28; first run found one missing module registration, fixed in the same commit)
 
 ### Learning surfaces
 
 - AI tutor — Claude-API-backed Q&A scoped to lesson context, consent-gated, no training-data retention
-- FSRS spaced-repetition for dictionary vocabulary (today's FSRS engine covers flashcards only)
 - Code review surface — submit a code sample, receive structured feedback with explanations
 
 ### Mobile
