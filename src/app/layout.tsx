@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
-import { ThemeProvider, themeBootstrapScript } from "@/components/providers/ThemeProvider";
+import { ThemeProvider } from "@/components/providers/ThemeProvider";
 import { AnalyticsProvider } from "@/components/providers/AnalyticsProvider";
 import "./globals.css";
 
@@ -79,12 +79,16 @@ export default function RootLayout({
         <link rel="icon" href="/favicon.png" type="image/png" sizes="32x32" />
         <link rel="apple-touch-icon" href="/icons/icon-192x192.png" />
         <link rel="manifest" href="/manifest.json" />
-        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `console.log('%c\\u{1F44B} Hey, you found the console. You\\'re going to do great in Phase 1.','color:#10b981;font-size:14px;font-weight:bold;padding:8px 0;');console.log('%cDURA is open source: https://github.com/Durwood-Studios/Dura','color:#525252;font-size:12px;');`,
-          }}
-        />
+        {/* Theme bootstrap — external script so CSP can drop `'unsafe-inline'`.
+            Source: public/theme-bootstrap.js. INTENTIONALLY synchronous (no async/defer):
+            it must run before first paint to avoid a flash of the wrong theme.
+            The async/defer attribute would let the browser paint with the wrong
+            theme momentarily before the script swaps classes. */}
+        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
+        <script src="/theme-bootstrap.js" />
+        {/* JSON-LD structured data. `type="application/ld+json"` is NOT executable
+            JS — CSP `script-src` does not apply to non-executable script types,
+            so this remains inline without needing `'unsafe-inline'`. */}
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{

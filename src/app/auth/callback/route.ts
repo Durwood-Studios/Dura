@@ -1,15 +1,21 @@
 import { createClient } from "@/lib/supabase/server";
+import { safeRedirectPath } from "@/lib/safe-url";
 import { NextResponse } from "next/server";
 
 /**
  * Handle the OAuth callback from Supabase.
  * Exchanges the authorization code for a session, then redirects
  * to the requested destination (defaults to /dashboard).
+ *
+ * The `next` query parameter is user-controlled — see safeRedirectPath for
+ * why we don't pass it straight to `new URL(next, origin)`. Protocol-relative
+ * inputs (`//evil.com/...`) would silently escape the intended origin and
+ * produce an open redirect.
  */
 export async function GET(request: Request): Promise<NextResponse> {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/dashboard";
+  const next = safeRedirectPath(searchParams.get("next"), "/dashboard");
 
   if (code) {
     try {
