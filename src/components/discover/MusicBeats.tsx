@@ -189,7 +189,9 @@ export function MusicBeats(): React.ReactElement {
       <div className="flex flex-col gap-2">
         {INSTRUMENTS.map((inst, row) => (
           <div key={inst} className="flex items-center gap-2">
-            <span className="w-16 text-right text-base font-medium text-white/80">{inst}</span>
+            <span className="w-16 text-right text-base font-medium text-[var(--color-text-secondary)]">
+              {inst}
+            </span>
             <div className="flex gap-1.5">
               {Array.from({ length: BEATS }, (_, col) => {
                 const isActive = grid[row][col];
@@ -203,12 +205,12 @@ export function MusicBeats(): React.ReactElement {
                     style={{
                       backgroundColor: isActive
                         ? INSTRUMENT_COLORS[inst]
-                        : "rgba(255,255,255,0.06)",
+                        : "var(--color-bg-surface)",
                       borderColor: isCurrent
-                        ? "#fff"
+                        ? "var(--color-accent)"
                         : isActive
                           ? INSTRUMENT_COLORS[inst]
-                          : "rgba(255,255,255,0.1)",
+                          : "var(--color-border)",
                       opacity: isCurrent && !isActive ? 0.6 : 1,
                     }}
                   />
@@ -222,7 +224,7 @@ export function MusicBeats(): React.ReactElement {
       {/* Controls */}
       <div className="flex w-full max-w-md flex-col gap-4">
         <label className="flex flex-col gap-1">
-          <span className="text-lg font-medium text-white/90">BPM: {bpm}</span>
+          <span className="text-lg font-medium text-[var(--color-text-primary)]">BPM: {bpm}</span>
           <input
             type="range"
             min={80}
@@ -237,7 +239,7 @@ export function MusicBeats(): React.ReactElement {
                 setTimeout(() => play(), 50);
               }
             }}
-            className="h-3 w-full cursor-pointer appearance-none rounded-full bg-white/10 accent-orange-400"
+            className="h-3 w-full cursor-pointer appearance-none rounded-full bg-[var(--color-border)] accent-orange-400"
           />
         </label>
 
@@ -250,25 +252,28 @@ export function MusicBeats(): React.ReactElement {
           </button>
           <button
             onClick={randomize}
-            className="min-h-12 rounded-xl border border-white/10 bg-white/5 px-5 text-lg font-medium text-white/90 transition-colors hover:bg-white/10"
+            className="min-h-12 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-5 text-lg font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-surface-hover)]"
           >
             Randomize
           </button>
           <button
             onClick={clear}
-            className="min-h-12 rounded-xl border border-white/10 bg-white/5 px-5 text-lg font-medium text-white/90 transition-colors hover:bg-white/10"
+            className="min-h-12 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-5 text-lg font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-surface-hover)]"
           >
             Clear
           </button>
         </div>
       </div>
 
-      {/* Learning callout */}
-      <div className="w-full max-w-md rounded-2xl border border-orange-400/20 bg-orange-400/5 p-5">
-        <p className="text-lg leading-relaxed text-orange-200">
-          <strong className="text-orange-300">What you just learned:</strong> You just created a{" "}
-          <em>loop</em> &mdash; the beat repeats the same 8 steps over and over. Loops are one of
-          the most important ideas in programming. Every song, animation, and game uses them.
+      {/* What you just learned */}
+      <div className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 backdrop-blur-xl">
+        <h3 className="mb-2 text-sm font-semibold text-[var(--color-accent-emerald)]">
+          What you just learned
+        </h3>
+        <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
+          You just created a <em>loop</em> &mdash; the beat repeats the same 8 steps over and over.
+          Loops are one of the most important ideas in programming. Every song, animation, and game
+          uses them.
         </p>
       </div>
     </div>

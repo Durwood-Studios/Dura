@@ -105,7 +105,7 @@ export function TileDesigner(): React.ReactElement {
     <div className="flex flex-col items-center gap-6">
       {/* Color palette */}
       <div className="flex items-center gap-3">
-        <span className="text-lg font-medium text-white/90">Color:</span>
+        <span className="text-lg font-medium text-[var(--color-text-primary)]">Color:</span>
         {PALETTE.map((c, i) => {
           if (i === 0) return null; // Skip "empty" color in picker
           return (
@@ -116,7 +116,7 @@ export function TileDesigner(): React.ReactElement {
               className="size-12 min-h-12 min-w-12 rounded-xl border-2 transition-transform hover:scale-110"
               style={{
                 backgroundColor: c.value,
-                borderColor: i === activeColor ? "#fff" : "transparent",
+                borderColor: i === activeColor ? "var(--color-accent)" : "transparent",
               }}
             />
           );
@@ -125,9 +125,11 @@ export function TileDesigner(): React.ReactElement {
 
       {/* Tile editor */}
       <div>
-        <p className="mb-2 text-center text-base font-medium text-white/70">Design your tile</p>
+        <p className="mb-2 text-center text-base font-medium text-[var(--color-text-secondary)]">
+          Design your tile
+        </p>
         <div
-          className="mx-auto grid gap-1 rounded-2xl border border-white/10 bg-white/5 p-3"
+          className="mx-auto grid gap-1 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-3"
           style={{
             gridTemplateColumns: `repeat(${TILE_SIZE}, 1fr)`,
             width: 220,
@@ -139,7 +141,7 @@ export function TileDesigner(): React.ReactElement {
                 key={`${r}-${c}`}
                 onClick={() => handleCellClick(r, c)}
                 aria-label={`Tile cell row ${r + 1} column ${c + 1}`}
-                className="aspect-square w-full rounded-lg border border-white/5 transition-transform hover:scale-105"
+                className="aspect-square w-full rounded-lg border border-[var(--color-border)] transition-transform hover:scale-105"
                 style={{
                   backgroundColor: PALETTE[colorIdx].value,
                   opacity: colorIdx === 0 ? 0.15 : 1,
@@ -156,8 +158,8 @@ export function TileDesigner(): React.ReactElement {
           onClick={() => setIsMirrorH(!isMirrorH)}
           className={`min-h-12 rounded-xl border px-5 text-lg font-medium transition-colors ${
             isMirrorH
-              ? "border-teal-400 bg-teal-400/20 text-teal-300"
-              : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"
+              ? "border-teal-400 bg-teal-400/20 text-teal-500"
+              : "border-[var(--color-border)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-surface-hover)]"
           }`}
         >
           Mirror Horizontal
@@ -166,8 +168,8 @@ export function TileDesigner(): React.ReactElement {
           onClick={() => setIsMirrorV(!isMirrorV)}
           className={`min-h-12 rounded-xl border px-5 text-lg font-medium transition-colors ${
             isMirrorV
-              ? "border-teal-400 bg-teal-400/20 text-teal-300"
-              : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"
+              ? "border-teal-400 bg-teal-400/20 text-teal-500"
+              : "border-[var(--color-border)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-surface-hover)]"
           }`}
         >
           Mirror Vertical
@@ -176,9 +178,11 @@ export function TileDesigner(): React.ReactElement {
 
       {/* Mosaic preview */}
       <div>
-        <p className="mb-2 text-center text-base font-medium text-white/70">Your mosaic</p>
+        <p className="mb-2 text-center text-base font-medium text-[var(--color-text-secondary)]">
+          Your mosaic
+        </p>
         <div
-          className="mx-auto grid rounded-2xl border border-white/10 bg-[#0c0c14] p-2"
+          className="mx-auto grid rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-2"
           style={{
             gridTemplateColumns: `repeat(${MOSAIC_SIZE}, 1fr)`,
             gap: 1,
@@ -192,13 +196,15 @@ export function TileDesigner(): React.ReactElement {
         </div>
       </div>
 
-      {/* Learning callout */}
-      <div className="w-full max-w-md rounded-2xl border border-teal-400/20 bg-teal-400/5 p-5">
-        <p className="text-lg leading-relaxed text-teal-200">
-          <strong className="text-teal-300">What you just learned:</strong> You designed one small
-          piece and the computer repeated it to fill a wall. This is how computers handle big tasks
-          &mdash; do something small, then scale it up. Video game worlds, website layouts, and
-          factory floors all work this way.
+      {/* What you just learned */}
+      <div className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 backdrop-blur-xl">
+        <h3 className="mb-2 text-sm font-semibold text-[var(--color-accent-emerald)]">
+          What you just learned
+        </h3>
+        <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
+          You designed one small piece and the computer repeated it to fill a wall. This is how
+          computers handle big tasks &mdash; do something small, then scale it up. Video game
+          worlds, website layouts, and factory floors all work this way.
         </p>
       </div>
     </div>

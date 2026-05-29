@@ -253,7 +253,7 @@ export function NetworkPostOffice(): React.ReactElement {
           role="img"
           aria-label="Network topology with nodes and connections"
         >
-          {/* Edges */}
+          {/* Edges — stroke via style so the CSS var resolves under theme switches */}
           {EDGES.map((edge) => {
             const from = getNodePos(edge.from);
             const to = getNodePos(edge.to);
@@ -264,7 +264,7 @@ export function NetworkPostOffice(): React.ReactElement {
                 y1={from.y}
                 x2={to.x}
                 y2={to.y}
-                stroke="rgba(255,255,255,0.08)"
+                style={{ stroke: "var(--color-border)" }}
                 strokeWidth={2}
               />
             );
@@ -279,8 +279,10 @@ export function NetworkPostOffice(): React.ReactElement {
                   cx={node.x}
                   cy={node.y}
                   r={24}
-                  fill={isActive ? "rgba(16,185,129,0.3)" : "rgba(255,255,255,0.04)"}
-                  stroke={isActive ? "rgb(16,185,129)" : "rgba(255,255,255,0.12)"}
+                  style={{
+                    fill: isActive ? "rgba(16,185,129,0.3)" : "var(--color-bg-surface)",
+                    stroke: isActive ? "rgb(16,185,129)" : "var(--color-border)",
+                  }}
                   strokeWidth={2}
                   className="transition-all duration-300"
                 />
@@ -289,13 +291,19 @@ export function NetworkPostOffice(): React.ReactElement {
                   y={node.y + 1}
                   textAnchor="middle"
                   dominantBaseline="middle"
-                  fill="#f0f0f0"
+                  style={{ fill: "var(--color-text-primary)" }}
                   fontSize={12}
                   fontWeight={600}
                 >
                   {node.id}
                 </text>
-                <text x={node.x} y={node.y + 42} textAnchor="middle" fill="#6b6b75" fontSize={10}>
+                <text
+                  x={node.x}
+                  y={node.y + 42}
+                  textAnchor="middle"
+                  style={{ fill: "var(--color-text-muted)" }}
+                  fontSize={10}
+                >
                   {node.label}
                 </text>
               </g>

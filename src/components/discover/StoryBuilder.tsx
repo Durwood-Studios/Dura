@@ -116,12 +116,16 @@ export function StoryBuilder(): React.ReactElement {
                 key={`${nodeId}-${i}`}
                 className="rounded-2xl border p-4 transition-opacity"
                 style={{
-                  borderColor: isLatest ? NODE_COLORS[nodeId] : "rgba(255,255,255,0.06)",
-                  backgroundColor: isLatest ? `${NODE_COLORS[nodeId]}10` : "rgba(255,255,255,0.02)",
+                  borderColor: isLatest ? NODE_COLORS[nodeId] : "var(--color-border)",
+                  backgroundColor: isLatest
+                    ? `${NODE_COLORS[nodeId]}10`
+                    : "var(--color-bg-surface)",
                   opacity: isLatest ? 1 : 0.6,
                 }}
               >
-                <p className="text-lg leading-relaxed text-white/90">{node.text}</p>
+                <p className="text-lg leading-relaxed text-[var(--color-text-primary)]">
+                  {node.text}
+                </p>
               </div>
             );
           })}
@@ -160,11 +164,13 @@ export function StoryBuilder(): React.ReactElement {
 
       {/* Flowchart sidebar */}
       <div className="w-full max-w-xs">
-        <p className="mb-3 text-center text-base font-medium text-white/50">Your path</p>
+        <p className="mb-3 text-center text-base font-medium text-[var(--color-text-muted)]">
+          Your path
+        </p>
         <div className="flex flex-col items-center gap-1">
           {path.map((nodeId, i) => (
             <div key={`flow-${nodeId}-${i}`} className="flex flex-col items-center">
-              {i > 0 && <div className="h-5 w-0.5 bg-white/20" />}
+              {i > 0 && <div className="h-5 w-0.5 bg-[var(--color-border)]" />}
               <div
                 className="flex min-h-10 min-w-28 items-center justify-center rounded-xl px-4 text-base font-semibold text-white"
                 style={{ backgroundColor: NODE_COLORS[nodeId] }}
@@ -176,7 +182,7 @@ export function StoryBuilder(): React.ReactElement {
           {/* Show remaining unchosen branches as faded */}
           {currentNode.choices && (
             <>
-              <div className="h-5 w-0.5 bg-white/10" />
+              <div className="h-5 w-0.5 bg-[var(--color-border)]" />
               <div className="flex gap-3">
                 {currentNode.choices.map((choice) => (
                   <div
@@ -197,22 +203,26 @@ export function StoryBuilder(): React.ReactElement {
       </div>
 
       {/* Learning callout — full width below on mobile */}
-      <div className="w-full max-w-md rounded-2xl border border-cyan-400/20 bg-cyan-400/5 p-5 lg:hidden">
-        <p className="text-lg leading-relaxed text-cyan-200">
-          <strong className="text-cyan-300">What you just learned:</strong> You just used{" "}
-          <em>conditional logic</em> &mdash; if this, then that. Every time an app checks your
-          password, a game decides if you won, or a website shows you content based on your choices,
-          it&apos;s using if/then logic.
+      <div className="w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 lg:hidden">
+        <h3 className="mb-2 text-sm font-semibold text-[var(--color-accent-emerald)]">
+          What you just learned
+        </h3>
+        <p className="text-base leading-relaxed text-[var(--color-text-secondary)]">
+          You just used <em>conditional logic</em> &mdash; if this, then that. Every time an app
+          checks your password, a game decides if you won, or a website shows you content based on
+          your choices, it&apos;s using if/then logic.
         </p>
       </div>
 
       {/* Desktop callout — shown in sidebar area */}
-      <div className="hidden w-full max-w-xs rounded-2xl border border-cyan-400/20 bg-cyan-400/5 p-5 lg:block">
-        <p className="text-lg leading-relaxed text-cyan-200">
-          <strong className="text-cyan-300">What you just learned:</strong> You just used{" "}
-          <em>conditional logic</em> &mdash; if this, then that. Every time an app checks your
-          password, a game decides if you won, or a website shows you content based on your choices,
-          it&apos;s using if/then logic.
+      <div className="hidden w-full max-w-xs rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 lg:block">
+        <h3 className="mb-2 text-sm font-semibold text-[var(--color-accent-emerald)]">
+          What you just learned
+        </h3>
+        <p className="text-base leading-relaxed text-[var(--color-text-secondary)]">
+          You just used <em>conditional logic</em> &mdash; if this, then that. Every time an app
+          checks your password, a game decides if you won, or a website shows you content based on
+          your choices, it&apos;s using if/then logic.
         </p>
       </div>
     </div>

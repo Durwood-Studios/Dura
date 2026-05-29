@@ -36,9 +36,9 @@ function InputToggle({
       aria-label={`${label}: ${isOn ? "on" : "off"}`}
       className="flex min-h-12 min-w-16 items-center justify-center rounded-xl border-2 px-4 text-lg font-bold transition-colors"
       style={{
-        backgroundColor: isOn ? "#22c55e" : "rgba(255,255,255,0.06)",
-        borderColor: isOn ? "#22c55e" : "rgba(255,255,255,0.15)",
-        color: isOn ? "#fff" : "rgba(255,255,255,0.5)",
+        backgroundColor: isOn ? "#22c55e" : "var(--color-bg-surface)",
+        borderColor: isOn ? "#22c55e" : "var(--color-border)",
+        color: isOn ? "#fff" : "var(--color-text-muted)",
       }}
     >
       {label}: {isOn ? "1" : "0"}
@@ -52,8 +52,8 @@ function OutputLight({ isOn }: { isOn: boolean }): React.ReactElement {
     <div
       className="flex size-14 items-center justify-center rounded-full text-lg font-bold"
       style={{
-        backgroundColor: isOn ? "#22c55e" : "rgba(255,255,255,0.08)",
-        color: isOn ? "#fff" : "rgba(255,255,255,0.3)",
+        backgroundColor: isOn ? "#22c55e" : "var(--color-bg-surface)",
+        color: isOn ? "#fff" : "var(--color-text-muted)",
         boxShadow: isOn ? "0 0 20px rgba(34,197,94,0.4)" : "none",
       }}
     >
@@ -73,7 +73,7 @@ function TruthTable({
   return (
     <table className="text-base">
       <thead>
-        <tr className="text-white/50">
+        <tr className="text-[var(--color-text-muted)]">
           {inputCount === 2 ? (
             <>
               <th className="px-3 py-1">A</th>
@@ -87,7 +87,7 @@ function TruthTable({
       </thead>
       <tbody>
         {rows.map((row, i) => (
-          <tr key={i} className="text-center text-white/80">
+          <tr key={i} className="text-center text-[var(--color-text-primary)]">
             {row.inputs.map((inp, j) => (
               <td key={j} className="px-3 py-0.5">
                 {inp ? "1" : "0"}
@@ -95,7 +95,7 @@ function TruthTable({
             ))}
             <td
               className="px-3 py-0.5 font-bold"
-              style={{ color: row.output ? "#22c55e" : "#6b7280" }}
+              style={{ color: row.output ? "#22c55e" : "var(--color-text-muted)" }}
             >
               {row.output ? "1" : "0"}
             </td>
@@ -153,9 +153,9 @@ export function LogicGates(): React.ReactElement {
   return (
     <div className="flex flex-col items-center gap-8">
       {/* AND Gate */}
-      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-white/5 p-5">
-        <h3 className="mb-3 text-center text-xl font-bold text-white">
-          AND Gate <span className="text-white/40">&amp;</span>
+      <div className="w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5">
+        <h3 className="mb-3 text-center text-xl font-bold text-[var(--color-text-primary)]">
+          AND Gate <span className="text-[var(--color-text-muted)]">&amp;</span>
         </h3>
         <div className="flex items-center justify-center gap-4">
           <div className="flex flex-col gap-2">
@@ -176,21 +176,21 @@ export function LogicGates(): React.ReactElement {
               }}
             />
           </div>
-          <span className="text-2xl text-white/30">&rarr;</span>
+          <span className="text-2xl text-[var(--color-text-muted)]">&rarr;</span>
           <OutputLight isOn={evalAND(andA, andB)} />
           <div className="ml-4">
             <TruthTable rows={andTruth} inputCount={2} />
           </div>
         </div>
-        <p className="mt-2 text-center text-base text-white/50">
+        <p className="mt-2 text-center text-base text-[var(--color-text-secondary)]">
           Output is 1 only when <strong>both</strong> inputs are 1
         </p>
       </div>
 
       {/* OR Gate */}
-      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-white/5 p-5">
-        <h3 className="mb-3 text-center text-xl font-bold text-white">
-          OR Gate <span className="text-white/40">|</span>
+      <div className="w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5">
+        <h3 className="mb-3 text-center text-xl font-bold text-[var(--color-text-primary)]">
+          OR Gate <span className="text-[var(--color-text-muted)]">|</span>
         </h3>
         <div className="flex items-center justify-center gap-4">
           <div className="flex flex-col gap-2">
@@ -211,21 +211,21 @@ export function LogicGates(): React.ReactElement {
               }}
             />
           </div>
-          <span className="text-2xl text-white/30">&rarr;</span>
+          <span className="text-2xl text-[var(--color-text-muted)]">&rarr;</span>
           <OutputLight isOn={evalOR(orA, orB)} />
           <div className="ml-4">
             <TruthTable rows={orTruth} inputCount={2} />
           </div>
         </div>
-        <p className="mt-2 text-center text-base text-white/50">
+        <p className="mt-2 text-center text-base text-[var(--color-text-secondary)]">
           Output is 1 when <strong>either</strong> input is 1
         </p>
       </div>
 
       {/* NOT Gate */}
-      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-white/5 p-5">
-        <h3 className="mb-3 text-center text-xl font-bold text-white">
-          NOT Gate <span className="text-white/40">!</span>
+      <div className="w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5">
+        <h3 className="mb-3 text-center text-xl font-bold text-[var(--color-text-primary)]">
+          NOT Gate <span className="text-[var(--color-text-muted)]">!</span>
         </h3>
         <div className="flex items-center justify-center gap-4">
           <InputToggle
@@ -236,24 +236,28 @@ export function LogicGates(): React.ReactElement {
               trackToggle();
             }}
           />
-          <span className="text-2xl text-white/30">&rarr;</span>
+          <span className="text-2xl text-[var(--color-text-muted)]">&rarr;</span>
           <OutputLight isOn={evalNOT(notA)} />
           <div className="ml-4">
             <TruthTable rows={notTruth} inputCount={1} />
           </div>
         </div>
-        <p className="mt-2 text-center text-base text-white/50">
+        <p className="mt-2 text-center text-base text-[var(--color-text-secondary)]">
           Output is the <strong>opposite</strong> of the input
         </p>
       </div>
 
       {/* Challenge */}
-      <div className="w-full max-w-md rounded-2xl border border-yellow-400/20 bg-yellow-400/5 p-5">
-        <h3 className="mb-2 text-center text-xl font-bold text-yellow-300">Challenge</h3>
-        <p className="mb-3 text-center text-lg text-yellow-200">
+      <div className="w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5">
+        <h3 className="mb-2 text-center text-xl font-bold text-[var(--color-text-primary)]">
+          Challenge
+        </h3>
+        <p className="mb-3 text-center text-lg text-[var(--color-text-secondary)]">
           Make the light turn green! The rule is: A AND (NOT B).
           <br />
-          <span className="text-base text-yellow-200/60">Turn on A and turn off B.</span>
+          <span className="text-base text-[var(--color-text-muted)]">
+            Turn on A and turn off B.
+          </span>
         </p>
         <div className="flex items-center justify-center gap-4">
           <div className="flex flex-col gap-2">
@@ -274,22 +278,27 @@ export function LogicGates(): React.ReactElement {
               }}
             />
           </div>
-          <span className="text-2xl text-white/30">&rarr;</span>
-          <span className="text-white/40">NOT B &rarr;</span>
-          <span className="text-white/40">AND &rarr;</span>
+          <span className="text-2xl text-[var(--color-text-muted)]">&rarr;</span>
+          <span className="text-[var(--color-text-muted)]">NOT B &rarr;</span>
+          <span className="text-[var(--color-text-muted)]">AND &rarr;</span>
           <OutputLight isOn={challengeOutput} />
         </div>
         {challengeOutput && (
-          <p className="mt-3 text-center text-lg font-bold text-green-400">You got it!</p>
+          <p className="mt-3 text-center text-lg font-bold text-[var(--color-accent-emerald)]">
+            You got it!
+          </p>
         )}
       </div>
 
-      {/* Learning callout */}
-      <div className="w-full max-w-md rounded-2xl border border-green-400/20 bg-green-400/5 p-5">
-        <p className="text-lg leading-relaxed text-green-200">
-          <strong className="text-green-300">What you just learned:</strong> Every computer is made
-          of billions of tiny logic gates &mdash; switches that decide yes or no based on simple
-          rules. AND, OR, and NOT are the building blocks of everything a computer does.
+      {/* What you just learned */}
+      <div className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 backdrop-blur-xl">
+        <h3 className="mb-2 text-sm font-semibold text-[var(--color-accent-emerald)]">
+          What you just learned
+        </h3>
+        <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
+          Every computer is made of billions of tiny logic gates &mdash; switches that decide yes or
+          no based on simple rules. AND, OR, and NOT are the building blocks of everything a
+          computer does.
         </p>
       </div>
     </div>

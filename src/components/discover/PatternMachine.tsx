@@ -213,7 +213,7 @@ export default function PatternMachine(): React.ReactElement {
                 className={cn(
                   "h-10 w-10 rounded-full border-2 transition-transform duration-150",
                   color === c.value
-                    ? "scale-110 border-white"
+                    ? "scale-110 border-[var(--color-accent)]"
                     : "border-transparent hover:scale-105"
                 )}
                 style={{ backgroundColor: c.value }}
