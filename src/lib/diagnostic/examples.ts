@@ -576,6 +576,95 @@ export const GDPR_BASELINE: MCQQuestion = {
   tags: ["gdpr", "ccpa", "privacy", "compliance", "phase-9"],
 };
 
+// ─── Phase R · ISO 12100 risk assessment ──────────────────────────────────
+// Anchored to ISO 12100:2010 (Safety of machinery — General principles for
+// design — Risk assessment and risk reduction). Catches the folk-count
+// drift that produces audit-finding paperwork mismatched to the standard.
+
+export const ISO_12100_STEPS: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-r-iso12100-steps-01",
+  difficulty: "core",
+  prompt:
+    "Per ISO 12100, how many steps does the canonical machinery risk-assessment process have, and what are they?",
+  correct: {
+    text: "Four: determination of the limits of the machinery; hazard identification; risk estimation; risk evaluation",
+    explanation:
+      "ISO 12100 specifies a 4-step risk assessment process. Risk reduction is a separate, downstream activity (Clause 6 of the standard); the assessment itself is the four steps that decide what the risk is before any reduction is attempted.",
+  },
+  distractors: [
+    {
+      text: "Six: limits, hazard ID, risk estimation, risk evaluation, risk reduction, residual risk review",
+      misconception: "risk-assessment-step-count",
+    },
+    {
+      text: "Three: identify, estimate, evaluate",
+      misconception: "risk-assessment-step-count",
+    },
+    {
+      text: "Five: scope, hazard, severity, likelihood, control selection",
+      misconception: "risk-assessment-step-count",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "ISO 12100:2010 is the parent machinery-safety standard cited by virtually every robotics, manufacturing, and process-equipment standard.",
+      "Clause 5 defines the risk assessment process as a sequence of four steps.",
+      "Step 1 — Determination of the limits of the machinery: physical boundaries, operational limits (modes, lifecycle phases), spatial limits, environmental limits.",
+      "Step 2 — Hazard identification: systematic listing of every hazard that can occur during each lifecycle phase identified in Step 1.",
+      "Step 3 — Risk estimation: for each identified hazard, estimate severity of harm and probability (frequency + duration of exposure, probability of occurrence, ability to avoid).",
+      "Step 4 — Risk evaluation: decide whether the estimated risk is acceptable. If not, iterate to risk reduction (Clause 6) and re-assess.",
+      "Folk counts that add 'risk reduction' or 'residual review' as steps mix the ASSESSMENT process (which decides what the risk is) with the REDUCTION process (which acts on that decision). The standard separates them deliberately — the assessment must produce its judgment before the reduction designs the controls.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["iso-12100", "risk-assessment", "machinery-safety", "phase-r"],
+};
+
+// ─── Phase R · PFL cobot application validation ───────────────────────────
+// Anchored to ISO 10218-1:2025 + ISO/TS 15066 (now absorbed into the 2025
+// revision) + RIA TR R15.806. The "safe out of the box" misread is the
+// single most expensive cobot-deployment misconception in industry.
+
+export const COBOT_PFL_VALIDATION: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-r-cobot-pfl-validation-01",
+  difficulty: "stretch",
+  prompt:
+    "Your team buys a power-and-force-limiting (PFL) cobot certified per ISO 10218-1:2025 + ISO/TS 15066. The vendor data sheet says it's 'safe for collaborative operation.' What's the structural gap before deploying it in a real application?",
+  correct: {
+    text: "The robot's PFL functions are certified; the application has to be PFL-validated. Contact forces in your specific application depend on end-effector geometry, payload, speed, and operator body position — and must be measured against ISO/TS 15066's body-region limits using RIA TR R15.806's test methodology. PFL-capable robot ≠ PFL-validated application.",
+    explanation:
+      "ISO/TS 15066 publishes biomechanical pain/injury threshold tables. The standard's compliance posture is application-specific: the cobot certification covers the robot's safety functions, but whether actual contact in YOUR cell stays within those thresholds requires application measurement.",
+  },
+  distractors: [
+    {
+      text: "No structural gap — a PFL-certified cobot is inherently safe for any collaborative operation",
+      misconception: "cobot-safe-out-of-box",
+    },
+    {
+      text: "The gap is mode confusion — the vendor certified Speed and Separation Monitoring, not Power and Force Limiting; pick the right mode for the application",
+      misconception: "collaborative-modes-conflation",
+    },
+    {
+      text: "The gap is that ISO 10218-1:2025 added cybersecurity requirements that duplicate IEC 62443 — review the cybersecurity controls before deploying",
+      misconception: "iec62443-vs-iso10218-cyber",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "ISO/TS 15066 (now absorbed into ISO 10218-1:2025) publishes tables of biomechanical pain and injury thresholds for body regions (forehead, sternum, hand, finger, etc.), expressed as quasi-static and transient force and pressure limits.",
+      "The cobot's PFL safety functions guarantee the controller can limit motor torque/power/speed in response to contact detection. The functions are certified by the manufacturer against the controller's design envelope.",
+      "Application-level safety depends on factors the manufacturer does not know: the end-effector you mount, the payload mass and shape, the path speed at the contact point, the body region the operator is most likely to be struck on.",
+      "RIA TR R15.806 specifies the test methodology: quasi-static (sustained press) and transient (impact) measurements against the body-region limits, using calibrated measurement devices (force/pressure pads, dummy body regions).",
+      "Deploying without application validation: a PFL cobot with a sharp end-effector + heavy payload + high speed near a face-height operator can exceed the forehead transient limit by 5×+ while still operating within the robot's certified PFL envelope.",
+      "The right deployment workflow: (a) cobot PFL functions certified by manufacturer (this is what 'PFL-certified cobot' means); (b) application PFL validation by integrator (measure forces against 15066 limits per R15.806 in YOUR cell); (c) risk assessment per 10218-2 and ISO 12100 covering the residual risks the PFL functions don't address; (d) operator training and signage. Skipping (b) is the most common cobot deployment failure mode.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["iso-10218", "iso-15066", "cobot", "pfl", "ria-tr-r15806", "phase-r"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -591,4 +680,6 @@ export const ALL_EXAMPLES = [
   IEC_62443_PRIORITY,
   CSF_GOVERN_FUNCTION,
   GDPR_BASELINE,
+  ISO_12100_STEPS,
+  COBOT_PFL_VALIDATION,
 ] as const;
