@@ -665,6 +665,100 @@ export const COBOT_PFL_VALIDATION: MCQQuestion = {
   tags: ["iso-10218", "iso-15066", "cobot", "pfl", "ria-tr-r15806", "phase-r"],
 };
 
+// ─── Phase M · ISO 22400 OEE family ───────────────────────────────────────
+// Anchored to ISO 22400 (manufacturing operations KPIs). Catches the most
+// common KPI-reporting trap — treating OEE as a single number when it's
+// a family of definitions.
+
+export const OEE_FORMULA_FAMILY: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-m-oee-formula-family-01",
+  difficulty: "core",
+  prompt:
+    "Your manager asks for the line's OEE. You compute Availability × Performance × Quality = 73%. Per ISO 22400, what should you note when reporting the number?",
+  correct: {
+    text: "ISO 22400 does NOT mandate a single OEE formula — it standardizes the vocabulary and gives reference calculations with plant-specific latitude on definitions (planned vs unplanned downtime, target vs design rate, first-pass yield vs after-rework). The 73% is correct against your chosen assumptions, but the number is comparable across teams only if everyone documents what they chose.",
+    explanation:
+      "The standard publishes 34 KPI definitions across manufacturing operations. OEE = A × P × Q is the canonical structure, but each factor has documented latitude — and the latitude is the source of cross-team disagreement.",
+  },
+  distractors: [
+    {
+      text: "The 73% is THE standardized OEE per ISO 22400 — no further documentation needed",
+      misconception: "oee-as-fixed-formula",
+    },
+    {
+      text: "The 73% is fine but ISO 22400 requires reporting all three factor values separately",
+      misconception: "oee-as-fixed-formula",
+    },
+    {
+      text: "Recompute against the official OEE formula in ISO 22400 Annex A — A × P × Q is an industry shorthand that the standard supersedes",
+      misconception: "oee-as-fixed-formula",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "ISO 22400 (ISO 22400-1 vocabulary, ISO 22400-2 KPI definitions) is the standard that ENDED most arguments about manufacturing KPI vocabulary.",
+      "It defines 34 standardized KPIs across the manufacturing operations management domain — including OEE, OOE, NEE, throughput, scrap ratio, schedule effectiveness.",
+      "OEE is canonically structured as Availability × Performance × Quality. The structure is universal; the factor definitions have documented latitude.",
+      "Availability latitude: do you include planned maintenance time? scheduled changeovers? meal breaks? the 'planned production time' vs 'operating time' vs 'net operating time' choices are real.",
+      "Performance latitude: against what target? Design rate (ideal cycle time)? Standard rate? Actual achievable rate? Each choice changes the number.",
+      "Quality latitude: first-pass yield? After-rework yield? Including or excluding scrap that's reworkable?",
+      "Consequence: a plant reporting OEE = 73% under one set of assumptions and another plant reporting OEE = 82% under a different set may have IDENTICAL physical performance. Cross-team comparison without documented assumptions is meaningless.",
+      "The defensible reporting pattern: report OEE, then attach the assumptions sheet (or reference a plant-wide Standard Operating Procedure for OEE computation). The standard's value is making the assumptions explicit; the value is NOT in the number itself.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["iso-22400", "oee", "manufacturing-kpis", "phase-m"],
+};
+
+// ─── Phase M · ISA-95 as a control hierarchy ──────────────────────────────
+// Anchored to ISA-95 / IEC 62264. Catches the most expensive manufacturing-
+// architecture misconception — reading the 5-level pyramid as a network
+// diagram instead of as the integration-contract model it actually is.
+
+export const ISA95_PYRAMID_MEANING: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-m-isa95-pyramid-meaning-01",
+  difficulty: "stretch",
+  prompt:
+    "A new engineer asks you to explain what the ISA-95 5-level 'automation pyramid' actually means for plant architecture. What's the right framing?",
+  correct: {
+    text: "ISA-95 defines a CONTROL HIERARCHY: each level (L0 physical process → L4 ERP) describes who is responsible for what kind of decision, plus the information-flow obligations between levels. The model's value is the integration contract — L3 MES ↔ L4 ERP via B2MML, L2 SCADA ↔ L3 MES via OPC UA or MTConnect. The network topology that ends up implementing it is a downstream consequence, not the model itself.",
+    explanation:
+      "ISA-95 (also IEC 62264) is the model that lets people from different roles — controls engineers, MES vendors, ERP consultants — agree on what they're integrating, who owns each datum, and where the contract boundaries are.",
+  },
+  distractors: [
+    {
+      text: "ISA-95 is the canonical network diagram for factory automation — every modern plant uses the 5-level VLAN structure",
+      misconception: "isa95-as-network-diagram",
+    },
+    {
+      text: "ISA-95 is essentially an organizational chart for factory IT — a way to draw who reports to whom across plant operations and corporate",
+      misconception: "isa95-as-network-diagram",
+    },
+    {
+      text: "The pyramid is obsolete since Industry 4.0 introduced flat IIoT architectures via RAMI 4.0; modern plants skip ISA-95",
+      misconception: "isa95-as-network-diagram",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "ISA-95 (the ISA standard) and IEC 62264 (the IEC adoption) are two names for the same model. The standard partitions a manufacturing enterprise into five functional levels.",
+      "L0 — Physical process: the actual mechanical/chemical activity happening on the shop floor.",
+      "L1 — Sensing and manipulation: instruments, actuators, sensors. The interface between the physical world and the control system.",
+      "L2 — Monitoring and supervisory control: SCADA, PLCs, DCS. Real-time control loops. Time horizon: milliseconds to seconds.",
+      "L3 — Manufacturing Operations Management (MOM): MES — dispatching, recipes, scheduling, quality, traceability. Time horizon: minutes to days.",
+      "L4 — Business planning and logistics: ERP — orders, materials planning, finance. Time horizon: days to months.",
+      "The model's POWER is in specifying the INTEGRATION CONTRACTS between levels: ISA-95 Part 5 defines B2MML (Business to Manufacturing Markup Language) as the schema for L3↔L4 messages. OPC UA companion specs cover L2↔L3.",
+      "Network topology is downstream. A plant might segment its OT network into a Purdue Model (which heavily references ISA-95) implementation, but the topology serves the model — not the other way around.",
+      "Industry 4.0 / RAMI 4.0 do NOT supersede ISA-95. RAMI 4.0 explicitly CITES IEC 62264 / ISA-95 as one of its three axes. The 'flat IIoT' interpretation is a misread — RAMI 4.0 layers a lifecycle/value-stream view and a layered architecture view on top of the hierarchy that ISA-95 still provides.",
+      "Right framing to give the new engineer: 'ISA-95 tells you who owns each decision and what message format crosses each boundary. The network diagram is what you build to satisfy the model.'",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["isa-95", "iec-62264", "manufacturing", "rami-4-0", "phase-m"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -682,4 +776,6 @@ export const ALL_EXAMPLES = [
   GDPR_BASELINE,
   ISO_12100_STEPS,
   COBOT_PFL_VALIDATION,
+  OEE_FORMULA_FAMILY,
+  ISA95_PYRAMID_MEANING,
 ] as const;

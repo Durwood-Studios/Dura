@@ -530,6 +530,77 @@ const ENTRIES: Misconception[] = [
       label: "Phase R · Robot cybersecurity — 10218 + 62443",
     },
   },
+
+  // ─── Phase M · Manufacturing (ISO 9001 family, ASME Y14.5, ISA-95, ─────
+  // ISO 22400, MTConnect + OPC UA, Six Sigma). Anchored to the bounded-
+  // research Track 3 findings. Phase M is viable for non-CS learners
+  // (prereqs only through Phase 5); content slots in a 12-lesson track.
+  {
+    id: "oee-as-fixed-formula",
+    name: "Treats OEE as a single ISO-mandated formula",
+    description:
+      "Computes Overall Equipment Effectiveness as Availability × Performance × Quality and reports the number as 'the ISO 22400 OEE.' ISO 22400 standardizes the VOCABULARY of manufacturing KPIs and provides REFERENCE calculations, but deliberately gives plant-specific latitude on the definitions: what counts as planned vs unplanned downtime (Availability), against what target rate (Performance), first-pass yield vs after-rework (Quality). Two plants computing 'the same' OEE under different assumptions get different numbers, both correct per the standard. Reporting the bare number without the assumptions hides the disagreement.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/m/m-10/01",
+      label: "Phase M · ISO 22400 KPIs + OEE",
+    },
+  },
+  {
+    id: "iatf-core-tools-count",
+    name: "Misnames or miscounts the IATF Core Tools",
+    description:
+      "Cites the IATF 16949 'Core Tools' as four (skipping MSA), six (adding a non-Core), or as a different set. The Core Tools are exactly FIVE, originating from AIAG (GM/Ford/Chrysler) under QS-9000 and carried into IATF 16949: APQP (Advanced Product Quality Planning), PPAP (Production Part Approval Process), FMEA (Failure Mode and Effects Analysis), MSA (Measurement System Analysis), SPC (Statistical Process Control). Misciting the list in an automotive supplier audit is a finding.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/m/m-3/01",
+      label: "Phase M · IATF Core Tools",
+    },
+  },
+  {
+    id: "gdt-as-tolerance-notation",
+    name: "Reads GD&T as fancy tolerance notation",
+    description:
+      "Treats Geometric Dimensioning and Tolerancing as a richer way to write tolerances on a drawing. ASME Y14.5 is a MODEL — datum reference frames define the coordinate system the part is measured in, Rule #1 (envelope principle) ties form to size, MMC/LMC modifiers create dynamic tolerance zones that change with feature size, virtual conditions are the worst-case mating boundaries. Tolerance stack-up under GD&T is a different math than +/- tolerancing. Treating it as notation produces drawings that pass review but parts that don't assemble.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/m/m-6/01",
+      label: "Phase M · ASME Y14.5 GD&T",
+    },
+  },
+  {
+    id: "isa95-as-network-diagram",
+    name: "Reads ISA-95 as a factory network topology",
+    description:
+      "Treats the ISA-95 5-level pyramid (L0 process → L4 ERP) as a VLAN diagram or an org chart. ISA-95 / IEC 62264 defines a CONTROL HIERARCHY — who is responsible for what kind of decision at each level — and specifies the INFORMATION FLOW obligations between levels (L3 MES ↔ L4 ERP via B2MML, L2 SCADA ↔ L3 MES via OPC UA / MTConnect). The model's value is the integration contract it imposes; the network segmentation that follows is a downstream consequence, not the model itself.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/m/m-10/01",
+      label: "Phase M · ISA-95 + ISA-88",
+    },
+  },
+  {
+    id: "mtconnect-opcua-rivals",
+    name: "Reads MTConnect and OPC UA as competing standards",
+    description:
+      "Treats MTConnect and OPC UA as alternatives to pick between for industrial data. They serve different but compatible layers: MTConnect is a domain-specific schema for machine-tool data (spindles, axes, alarms, conditions), exposed via REST/XML or as an OPC UA Companion Specification. OPC UA is a broader industrial interoperability framework. The OFFICIAL OPC UA Companion Specification for MTConnect (released by the joint working group) is the modern integration path — neither vendor lock-in nor a forced choice.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/m/m-11/01",
+      label: "Phase M · MTConnect + OPC UA + TSN",
+    },
+  },
+  {
+    id: "dmaic-as-iterative",
+    name: "Runs Six Sigma DMAIC phases in parallel or iteratively",
+    description:
+      "Skips ahead to Improve before Measure is complete, or runs Analyze and Improve in parallel because 'we already know the cause.' DMAIC phases are SEQUENTIAL: Define (project charter + voice-of-customer), Measure (data collection + baseline + measurement system validity), Analyze (root cause via statistical hypothesis), Improve (countermeasure design + pilot), Control (sustain plan + monitoring). Each phase has a gate review. Skipping ahead produces 'Improve' interventions that solve the wrong problem because Measure never validated the metric.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/m/m-5/01",
+      label: "Phase M · Six Sigma DMAIC",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(
