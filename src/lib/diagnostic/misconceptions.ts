@@ -142,6 +142,115 @@ const ENTRIES: Misconception[] = [
       label: "Phase 1 · POSIX signals & async-safety",
     },
   },
+
+  // ─── RFC 2119 / BCP 14 (Phase 2 integration) ────────────────────────────
+  // Anchored to RFC 2119 + RFC 8174 (BCP 14). The MUST/SHOULD/MAY vocabulary
+  // appears in virtually every IETF spec and leaks into general API docs;
+  // engineers misread the gradient daily in PR reviews.
+  {
+    id: "confuses-rfc2119-vocabulary",
+    name: "Reads RFC 2119 keywords as plain English",
+    description:
+      "Treats 'SHOULD' as either equivalent to 'MUST' (over-strict) or 'MAY' (over-lax). Per RFC 2119, 'SHOULD' means there may exist valid reasons to ignore the requirement, but the implications must be understood and weighed. The vocabulary is normative when in ALL CAPS and conventional English otherwise — and the convention is enforced by RFC 8174.",
+    remediation: {
+      kind: "reading",
+      href: "https://datatracker.ietf.org/doc/html/rfc2119",
+      label: "RFC 2119 · BCP 14 normative vocabulary",
+    },
+  },
+  {
+    id: "informational-vs-standards-track",
+    name: "Treats every RFC as a standard",
+    description:
+      "Assumes every RFC carries normative weight. IETF RFCs have status categories — Standards Track (Proposed/Internet/Historic), Informational, Experimental, and Best Current Practice (BCP). Cite-by-number without checking status leads to implementing an Experimental draft as if it were a Proposed Standard.",
+    remediation: {
+      kind: "reading",
+      href: "https://datatracker.ietf.org/doc/html/rfc7322",
+      label: "RFC 7322 · RFC Style Guide",
+    },
+  },
+
+  // ─── WHATWG / W3C ownership (Phase 2 integration) ───────────────────────
+  // Anchored to the 2019 W3C/WHATWG Memorandum of Understanding. The web
+  // platform's ownership split is widely misunderstood; engineers reach for
+  // outdated specs when the authoritative document moved.
+  {
+    id: "html-spec-ownership",
+    name: "Assumes W3C still owns the HTML spec",
+    description:
+      "Treats the W3C HTML 5.x Recommendation as the current source of truth. Since the 2019 W3C/WHATWG MoU, the HTML Living Standard is owned by WHATWG and the W3C versioned snapshots are frozen reference points, not the moving target. For HTML behavior questions, html.spec.whatwg.org is canonical.",
+    remediation: {
+      kind: "reading",
+      href: "https://html.spec.whatwg.org/",
+      label: "WHATWG · HTML Living Standard",
+    },
+  },
+  {
+    id: "w3c-rec-vs-whatwg-living",
+    name: "Confuses W3C Recommendation with the living spec",
+    description:
+      "Cites a W3C 'Recommendation' status as if it implies currentness. W3C still owns CSS, ARIA, WCAG, WebAuthn — but their REC track and WHATWG's Living Standard process have different freshness contracts. A REC is a stable snapshot; a Living Standard is the continuously-updated current state. Picking the right one for a given question matters.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.w3.org/TR/",
+      label: "W3C · Technical Reports index",
+    },
+  },
+
+  // ─── ECMA TC39 process (Phase 2 integration) ────────────────────────────
+  // Anchored to the TC39 staging process (Stage 0-4). Engineers misread
+  // stage gates daily, leading to either over-cautious avoidance of
+  // shipped features or premature production use of Stage 1 proposals.
+  {
+    id: "tc39-stage-readiness",
+    name: "Assumes a Stage 1-3 proposal is safe to ship",
+    description:
+      "Reads a 'Stage 2' or 'Stage 3' badge as 'standardized'. Stage 4 is the only stage where ECMA-262 has accepted the proposal and two spec-compliant implementations exist with tests. Prior stages can have breaking semantic changes — a Stage 2 you ship today may not match the Stage 4 that lands.",
+    remediation: {
+      kind: "reading",
+      href: "https://tc39.es/process-document/",
+      label: "TC39 · The TC39 Process",
+    },
+  },
+  {
+    id: "tc39-cross-runtime",
+    name: "Assumes Stage 4 ships everywhere at once",
+    description:
+      "Treats Stage 4 acceptance as universal availability. ECMA-262 acceptance is the spec-level gate; V8, JavaScriptCore, SpiderMonkey, and runtime targets (Node, Bun, Deno) ship features at independent paces. A feature can be Stage 4 in the spec and still not present in a target browser for years. Compat tables (MDN, caniuse, kangax) are the runtime-availability source of truth.",
+    remediation: {
+      kind: "reading",
+      href: "https://compat-table.github.io/compat-table/es2016plus/",
+      label: "ECMAScript compat table",
+    },
+  },
+
+  // ─── WCAG 2.2 (Phase 2 integration) ─────────────────────────────────────
+  // Anchored to WCAG 2.2 (W3C Recommendation, Oct 2023, updated Dec 2024).
+  // The accessibility gradient is widely misread — engineers treat axe-clean
+  // as conformance, conflate level AA with legal compliance, and miss that
+  // the success criteria require human review for most of the standard.
+  {
+    id: "wcag-conformance-level",
+    name: "Treats AA as the universal legal floor",
+    description:
+      "Assumes 'WCAG AA' is the same legal requirement everywhere. ADA Title II requires WCAG 2.1 AA for US public-sector sites; private-sector lawsuits often cite 2.1 AA by precedent but WCAG 2.2 added 9 new success criteria that may apply contextually. Compliance is jurisdictional and version-specific — 'we hit AA' is a partial answer, not a complete one.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.w3.org/WAI/standards-guidelines/wcag/",
+      label: "W3C WAI · WCAG overview",
+    },
+  },
+  {
+    id: "wcag-auto-tools-coverage",
+    name: "Equates an axe-clean run with WCAG conformance",
+    description:
+      "Treats a 100% score from axe-core, Lighthouse, or WAVE as evidence the site meets WCAG. Automated tools catch roughly 30-40% of WCAG violations by validity volume — they cannot evaluate keyboard navigation flow, screen reader narration quality, alt-text adequacy, or judgment-based success criteria. Conformance requires manual review on top of automated CI.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.w3.org/WAI/test-evaluate/",
+      label: "W3C WAI · Test and evaluate",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(

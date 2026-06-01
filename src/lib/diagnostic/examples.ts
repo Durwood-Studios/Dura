@@ -183,10 +183,142 @@ export const POSIX_SIGNAL_SAFETY: MCQQuestion = {
   tags: ["posix", "signals", "async-signal-safety", "c", "phase-1"],
 };
 
+// ─── Phase 2 · RFC 2119 / BCP 14 ──────────────────────────────────────────
+// Anchored to RFC 2119 + RFC 8174. The MUST/SHOULD/MAY gradient drives daily
+// PR-review disagreements; this question pinpoints the most-missed nuance.
+
+export const RFC_2119_SHOULD: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-2-rfc2119-should-01",
+  difficulty: "core",
+  prompt:
+    "An IETF spec says: 'Implementations SHOULD reject malformed payloads.' Per RFC 2119 / BCP 14, what is the obligation on a conforming implementation?",
+  correct: {
+    text: "Reject by default; if you do not reject, you must understand the implications and have a documented reason",
+    explanation:
+      "RFC 2119 defines SHOULD as: there may exist valid reasons in particular circumstances to ignore this requirement, but the full implications must be understood and weighed before choosing a different course.",
+  },
+  distractors: [
+    {
+      text: "Reject malformed payloads — SHOULD is binding identically to MUST",
+      misconception: "confuses-rfc2119-vocabulary",
+    },
+    {
+      text: "Implementations may safely ignore the recommendation — SHOULD is optional",
+      misconception: "confuses-rfc2119-vocabulary",
+    },
+    {
+      text: "The lowercase 'should' has no normative weight; only RFC 2119 uppercase MUST is binding",
+      misconception: "informational-vs-standards-track",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "RFC 2119 (and the updating RFC 8174) define the normative vocabulary used across IETF documents.",
+      "ALL CAPS keywords (MUST, SHOULD, MAY) carry the normative meaning when used as defined. Lowercase or conventional usage does not.",
+      "MUST means absolute requirement. MAY means truly optional. SHOULD sits between: there may be valid reasons to ignore, but those reasons must be weighed and documented.",
+      "A spec that uses 'SHOULD reject' is saying: rejection is the default conforming behavior, but you can deviate if you have a documented and understood reason.",
+      "The wrong answers either over-strict (treating SHOULD as MUST), over-lax (treating SHOULD as MAY), or wrongly dismiss the keyword entirely.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["rfc-2119", "bcp-14", "ietf", "phase-2"],
+};
+
+// ─── Phase 2 · ECMA TC39 process ──────────────────────────────────────────
+// Anchored to the TC39 staging process. Engineers shipping JS features at
+// the wrong stage gate is a real production-breakage source.
+
+export const TC39_STAGE_READINESS: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-2-tc39-stage-readiness-01",
+  difficulty: "core",
+  prompt:
+    "A TC39 proposal you want to use for a production browser app is currently at Stage 2 (Draft). What is the safest characterization of shipping it?",
+  correct: {
+    text: "Stage 2 means the spec authors agree on the problem and a rough solution, but semantics can still change before Stage 4. Production use requires a transpiler pinning current semantics, plus accepting that the spec may diverge later.",
+    explanation:
+      "Per the TC39 Process Document, only Stage 4 is a 'Finished' proposal — the only stage where ECMA-262 has accepted the proposal with two spec-compliant implementations and tests.",
+  },
+  distractors: [
+    {
+      text: "Stage 2 means the proposal is implementation-ready — safe to use directly in modern engines",
+      misconception: "tc39-stage-readiness",
+    },
+    {
+      text: "Stage 2 is part of the most recent ECMAScript yearly edition; it's standardized",
+      misconception: "tc39-stage-readiness",
+    },
+    {
+      text: "Once any proposal reaches Stage 4, it ships in all major runtimes simultaneously",
+      misconception: "tc39-cross-runtime",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "TC39 stages: 0 (Strawperson), 1 (Proposal), 2 (Draft), 3 (Candidate), 4 (Finished).",
+      "Stage 2 = the committee has accepted the problem statement and has a rough solution sketched, but the spec text and semantics can still change materially.",
+      "Stage 3 = spec text is essentially final; awaiting implementation feedback. Breaking changes still possible but rare.",
+      "Stage 4 = at least two spec-compliant implementations exist with test262 coverage, and the ECMA-262 editor has signed off for inclusion in the next yearly edition.",
+      "Production use of pre-Stage-4 features is possible via Babel/SWC transpilation, but the transpiled output reflects the proposal at compile time — if the spec changes before Stage 4, your shipped code may not match the eventual standard.",
+      "Even Stage 4 doesn't mean universal runtime availability. V8, JavaScriptCore, SpiderMonkey, and runtime targets (Node/Bun/Deno) implement on their own schedules. Always check compat tables before relying on a feature in production.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["tc39", "ecmascript", "javascript", "phase-2"],
+};
+
+// ─── Phase 2 · WCAG 2.2 conformance ───────────────────────────────────────
+// Anchored to WCAG 2.2 (Oct 2023, updated Dec 2024). The "axe-clean = WCAG
+// compliant" misread is the most expensive accessibility misconception in
+// the industry — it produces over-confident shipping that gets sued.
+
+export const WCAG_AUTO_TOOLS: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-2-wcag-automated-tools-01",
+  difficulty: "stretch",
+  prompt:
+    "Your CI runs axe-core against every page and the report shows 100% pass. Per WCAG 2.2, what is a defensible conclusion about the site's AA conformance?",
+  correct: {
+    text: "An axe-clean run is a necessary but insufficient signal. Automated tools cover roughly 30-40% of WCAG success criteria — keyboard navigation, screen reader narration, alt-text adequacy, and judgment-based criteria still require manual review.",
+    explanation:
+      "WCAG 2.2 AA requires conformance across all applicable Level A and Level AA success criteria. Many of them — focus order, meaningful sequence, label adequacy, error identification quality — cannot be evaluated mechanically.",
+  },
+  distractors: [
+    {
+      text: "100% axe-core pass means the site is WCAG 2.2 AA conformant — CI is sufficient",
+      misconception: "wcag-auto-tools-coverage",
+    },
+    {
+      text: "axe-core covers WCAG 2.1 only; the 2.2 success criteria require a separate tool",
+      misconception: "wcag-auto-tools-coverage",
+    },
+    {
+      text: "ADA Title II accepts a clean automated scan as compliance evidence in litigation",
+      misconception: "wcag-conformance-level",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "WCAG 2.2 organizes accessibility requirements as testable success criteria (SC) across four principles: Perceivable, Operable, Understandable, Robust.",
+      "Each SC has Level A, AA, or AAA. AA is the level most legal regimes and industry contracts cite as the conformance floor.",
+      "Studies and tool vendors broadly converge: automated tools catch ~30-40% of SC violations by validity volume. Deque, Microsoft, and the W3C all publish similar figures.",
+      "Automated tools detect: missing alt text, missing form labels, contrast violations, ARIA misuse, heading order. They CANNOT evaluate: whether alt text is meaningful, whether focus order matches reading order, whether the error message helps a real user recover, whether the page is keyboard-navigable end-to-end.",
+      "A WCAG AA conformance claim requires: automated scan + manual keyboard walkthrough + screen reader testing + content review for plain-language SC + cognitive review for judgment-based SC. Any single tool's 100% score is one signal among many.",
+      "Legal posture: the ADA Title II rule (2024) requires public-sector US sites to meet WCAG 2.1 AA. Private-sector lawsuits often cite WCAG by precedent but no court accepts a CI report as standalone compliance evidence.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["wcag", "accessibility", "a11y", "phase-2"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
   N_PLUS_ONE_LOOP,
   IEEE_754_DECIMAL,
   POSIX_SIGNAL_SAFETY,
+  RFC_2119_SHOULD,
+  TC39_STAGE_READINESS,
+  WCAG_AUTO_TOOLS,
 ] as const;
