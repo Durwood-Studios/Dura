@@ -312,6 +312,92 @@ export const WCAG_AUTO_TOOLS: MCQQuestion = {
   tags: ["wcag", "accessibility", "a11y", "phase-2"],
 };
 
+// ─── Phase 3 · OWASP Top 10:2025 awareness ────────────────────────────────
+// Anchored to OWASP Top 10:2025 (RC1 Nov 2025, final Jan 2026). Catches the
+// most expensive security-curriculum mistake: anchoring to the 2021 list
+// when the 2025 list has materially different categories.
+
+export const OWASP_2025_NEW_CATEGORY: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-3-owasp-2025-new-category-01",
+  difficulty: "core",
+  prompt:
+    "Which of the following is a NEW top-level category introduced in OWASP Top 10:2025 (RC1, Nov 2025) compared to the 2021 list?",
+  correct: {
+    text: "Software Supply Chain Failures — spanning CI/CD pipeline integrity, build-environment trust, post-install scripts, registry compromise, dependency confusion",
+    explanation:
+      "Software Supply Chain Failures was elevated to its own category in 2025 to capture the rise of pipeline-targeted attacks (xz-utils, event-stream, SolarWinds-shaped incidents) that the 2021 list folded into 'Vulnerable and Outdated Components.'",
+  },
+  distractors: [
+    {
+      text: "Server-Side Request Forgery (SSRF)",
+      misconception: "outdated-owasp-list",
+    },
+    {
+      text: "Injection (SQL, command, LDAP)",
+      misconception: "outdated-owasp-list",
+    },
+    {
+      text: "Cryptographic Failures",
+      misconception: "outdated-owasp-list",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "OWASP Top 10 is revised periodically as the threat landscape and CVE data shift. The 2017 → 2021 revision renamed and re-ranked; the 2021 → 2025 revision introduced new categories.",
+      "Top 10:2025 introduced two new top-level categories: Software Supply Chain Failures and Mishandling Exceptional Conditions.",
+      "SSRF was a new category in 2021, but the 2025 revision absorbed it into Broken Access Control (A01) — so it's no longer its own top-level item.",
+      "Injection has been on the Top 10 since at least 2017 — not new in 2025 (and ranked lower than in 2017 because of widespread ORM adoption shifting the prevalence data).",
+      "Cryptographic Failures was renamed from 'Sensitive Data Exposure' in the 2021 revision — present in both 2021 and 2025, not new in 2025.",
+      "Picking SSRF, Injection, or Cryptographic Failures here is the 'I learned the 2021 list and never updated' anchoring error. Curriculum must teach the current revision; otherwise students learn the wrong threat model.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["owasp", "top10", "security", "2025", "phase-3"],
+};
+
+// ─── Phase 3 · OWASP Top 10 vs ASVS scope ─────────────────────────────────
+// The most common security-team / engineer disconnect: treating the Top 10
+// as a verification standard when it's an awareness document.
+
+export const OWASP_VERIFICATION_REQUEST: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-3-owasp-vs-asvs-01",
+  difficulty: "core",
+  prompt:
+    "Your security team asks you to 'verify the app conforms to the OWASP Top 10.' What's the right pushback?",
+  correct: {
+    text: "The Top 10 is an awareness document, not a verification standard. Ask whether they want OWASP ASVS L1 (baseline), L2 (most applications), or L3 (high-assurance) — that's the actual verification catalog, 14 control families across 3 levels.",
+    explanation:
+      "OWASP itself is explicit that the Top 10 is awareness-only. Verification uses ASVS. Conflating them produces test plans that don't map cleanly to either the Top 10's categories or ASVS's requirements.",
+  },
+  distractors: [
+    {
+      text: "Run an automated scan against the OWASP ZAP rule set — that's the standard verification",
+      misconception: "owasp-top10-as-verification",
+    },
+    {
+      text: "Sign off based on Top 10 awareness training completion by the engineering team",
+      misconception: "owasp-top10-as-verification",
+    },
+    {
+      text: "Verification is implicit — if no Top 10 categories appear in pen-test findings, you conform",
+      misconception: "owasp-top10-as-verification",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "OWASP publishes several flagship projects with different purposes: Top 10 (awareness), ASVS (verification), SAMM (governance maturity), ZAP (a scanning tool).",
+      "The Top 10 describes ten broad vulnerability categories with prevalence data — its job is to make engineers and stakeholders aware of what matters. It is explicitly not a checklist.",
+      "ASVS is the verification standard: 14 control families (architecture, authentication, session, access control, validation/sanitization/encoding, cryptography, error/logging, data, communication, malicious code, business logic, file/resource, API/web service, configuration), 3 conformance levels, hundreds of testable requirements per level.",
+      "An automated tool's clean run is one input to ASVS verification, not the verification itself. Many ASVS requirements (business logic flaws, secret management policy, key rotation) cannot be evaluated by scanners.",
+      "When a stakeholder asks 'verify Top 10 conformance,' the productive translation is: 'do you want ASVS L1, L2, or L3, and can we agree on a scope?'",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["owasp", "asvs", "top10", "security", "phase-3"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -321,4 +407,6 @@ export const ALL_EXAMPLES = [
   RFC_2119_SHOULD,
   TC39_STAGE_READINESS,
   WCAG_AUTO_TOOLS,
+  OWASP_2025_NEW_CATEGORY,
+  OWASP_VERIFICATION_REQUEST,
 ] as const;

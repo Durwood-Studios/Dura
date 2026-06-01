@@ -251,6 +251,69 @@ const ENTRIES: Misconception[] = [
       label: "W3C WAI · Test and evaluate",
     },
   },
+
+  // ─── OWASP Top 10:2025 + ASVS (Phase 3 integration) ─────────────────────
+  // Anchored to OWASP Top 10:2025 (RC1 published Nov 6, 2025; final Jan 2026)
+  // and OWASP ASVS. Security misconceptions in this group are the most cited
+  // in real incident postmortems — engineers anchor on the 2021 list, treat
+  // Top 10 as a verification checklist, and underweight the new 2025
+  // categories (Software Supply Chain Failures, Mishandling Exceptional
+  // Conditions).
+  {
+    id: "owasp-top10-as-verification",
+    name: "Treats OWASP Top 10 as a verification standard",
+    description:
+      "Treats 'we conform to the OWASP Top 10' as a security verification claim. The Top 10 is explicitly an awareness document — it describes the categories of vulnerability engineers should know about, not a verification catalog. OWASP ASVS (Application Security Verification Standard) is the verification side: 14 control families across 3 levels. Mixing them up means 'security testing' that doesn't actually test anything.",
+    remediation: {
+      kind: "reading",
+      href: "https://owasp.org/www-project-application-security-verification-standard/",
+      label: "OWASP · ASVS",
+    },
+  },
+  {
+    id: "outdated-owasp-list",
+    name: "Anchors on the 2021 Top 10 instead of 2025",
+    description:
+      "References the 2021 list (Broken Access Control at #1, SSRF as its own category, etc.) without checking the 2025 revision. The 2025 list introduces Software Supply Chain Failures and Mishandling Exceptional Conditions as new categories, absorbs SSRF into Broken Access Control, and re-ranks the prevalence-weighted ordering. Lessons anchored to the 2021 list ship stale on day one.",
+    remediation: {
+      kind: "reading",
+      href: "https://owasp.org/Top10/2025/",
+      label: "OWASP Top 10:2025",
+    },
+  },
+  {
+    id: "broken-access-control-narrow",
+    name: "Reads Broken Access Control as 'missing auth check'",
+    description:
+      "Treats A01 Broken Access Control as just 'forgot to check the JWT.' The category spans IDOR with privileged operations, force-browse, CORS misconfiguration, JWT signature/claim verification gaps, privilege escalation via parameter tampering — and in the 2025 revision, all of SSRF. A narrow read produces test suites that catch 10% of the actual category.",
+    remediation: {
+      kind: "reading",
+      href: "https://owasp.org/Top10/2025/",
+      label: "OWASP Top 10:2025 · A01",
+    },
+  },
+  {
+    id: "supply-chain-just-dependencies",
+    name: "Reduces Software Supply Chain Failures to 'outdated dependencies'",
+    description:
+      "Treats the 2025 supply-chain category as 'run npm audit periodically.' The category spans CI/CD pipeline integrity, build environment trust, post-install script execution, namespace squatting and typosquatting, registry compromise, dependency confusion, and the SLSA framework's provenance requirements. Outdated dependencies are one row of a multi-row threat model.",
+    remediation: {
+      kind: "reading",
+      href: "https://slsa.dev/",
+      label: "SLSA · Supply-chain Levels for Software Artifacts",
+    },
+  },
+  {
+    id: "exception-as-defense",
+    name: "Treats exception catching as inherently secure",
+    description:
+      "Reads catch-and-log as a defensive pattern when it can be the opposite. The 2025 Mishandling Exceptional Conditions category covers: generic catch-blocks that mask security-relevant failures, info-leak via stack traces returned to the client, error-handling that fails-open instead of fails-closed, and exception flow that bypasses authentication or authorization checks. Catching is not securing.",
+    remediation: {
+      kind: "reading",
+      href: "https://owasp.org/Top10/2025/",
+      label: "OWASP Top 10:2025 · Mishandling Exceptional Conditions",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(
