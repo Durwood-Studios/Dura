@@ -398,6 +398,95 @@ export const OWASP_VERIFICATION_REQUEST: MCQQuestion = {
   tags: ["owasp", "asvs", "top10", "security", "phase-3"],
 };
 
+// ─── Phase 8 · ISO 27001 scope ────────────────────────────────────────────
+// Anchored to ISO/IEC 27001:2022. The canonical "is the product secure
+// because we have the cert?" customer-conversation question — most-asked
+// in B2B sales processes.
+
+export const ISO_27001_SCOPE: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-8-iso27001-scope-01",
+  difficulty: "core",
+  prompt:
+    "Your company says 'we are ISO 27001 certified.' A prospective customer asks whether the product handling their data is therefore secure. What's the accurate answer?",
+  correct: {
+    text: "ISO 27001 certifies the organization's Information Security Management System — the processes for managing risk. It does not certify any individual product. Whether the product is secure depends on how the ISMS controls were applied to it, which is documented in the Statement of Applicability.",
+    explanation:
+      "ISO 27001 is a Management System Standard. The audit evaluates whether the company has a working risk-management process and whether it applies controls per the SoA. Product-level security is implied only to the extent the product is in scope and the relevant controls were chosen.",
+  },
+  distractors: [
+    {
+      text: "Yes — ISO 27001 means every product the company ships meets a baseline security standard",
+      misconception: "iso27001-as-product-cert",
+    },
+    {
+      text: "It's roughly equivalent to a SOC 2 Type 2 report — same coverage, different name",
+      misconception: "iso27001-vs-soc2",
+    },
+    {
+      text: "Yes — ISO 27001 includes mandatory product penetration testing as part of the audit",
+      misconception: "iso27001-as-product-cert",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "ISO 27001 is a Management System Standard (MSS) — it specifies requirements for an Information Security Management System (ISMS), not for a product.",
+      "The certification audit checks: is there a risk-assessment process, is there a Statement of Applicability listing chosen controls, is there management review, are records kept, are non-conformities addressed.",
+      "The Statement of Applicability defines the SCOPE — which sites, services, products are inside the ISMS. A product can be out of scope while the company is certified.",
+      "ISO 27001 ≠ SOC 2. SOC 2 is an attestation against AICPA Trust Services Criteria, sampling controls during a reporting period. ISO 27001 is a certification against ISO requirements. Different evidence, different audiences, different maintenance cycles.",
+      "Product-level pen-testing is not required by ISO 27001. The standard requires technical vulnerability management as a control (Annex A 8.8), but the implementation is up to the ISMS — annual scans, third-party pen-tests, or nothing beyond CVE monitoring can all satisfy that control.",
+      "The honest answer to the customer: 'we're certified — let me share our Statement of Applicability and what controls apply to your data path.'",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["iso-27001", "isms", "compliance", "phase-8"],
+};
+
+// ─── Phase 8 · IEC 62443 OT security ──────────────────────────────────────
+// Anchored to IEC 62443. The most expensive misconception in industrial
+// control system security — lifting IT controls onto OT without
+// understanding the priority inversion (availability + safety before
+// confidentiality).
+
+export const IEC_62443_PRIORITY: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-8-iec62443-priority-01",
+  difficulty: "stretch",
+  prompt:
+    "Your team applies the same security controls and audit process to factory PLCs and HVAC controllers that they use for enterprise IT systems. Per IEC 62443, what's the structural problem?",
+  correct: {
+    text: "IT and OT have a different priority order. In OT, availability and safety come before confidentiality — patching a PLC mid-shift to close a CVE can be more dangerous than the CVE. Controls must be designed around uptime, deterministic timing, decade-long asset lifecycles, and process-safety constraints. Lifting NIST CSF or ISO 27001 controls directly produces an outcome that's worse than doing nothing.",
+    explanation:
+      "IEC 62443 exists because the standard IT-security stack assumes business-system characteristics (frequent patching tolerance, encrypted everything, short asset lifecycles). OT systems break under those assumptions.",
+  },
+  distractors: [
+    {
+      text: "There's no structural problem — IT security controls translate directly to OT",
+      misconception: "iec62443-as-it-security",
+    },
+    {
+      text: "IEC 62443 requires the same controls as ISO 27001; the gap is that PLCs lack modern crypto",
+      misconception: "iec62443-as-it-security",
+    },
+    {
+      text: "The mistake is just network — zones and conduits are VLANs, and the IT controls themselves are fine",
+      misconception: "zones-conduits-overlay",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "IT security frameworks (NIST CSF, ISO 27001, CIS Controls) implicitly prioritize CONFIDENTIALITY > INTEGRITY > AVAILABILITY. Sensitive data leaking is the worst case; an outage is recoverable.",
+      "OT security inverts this: AVAILABILITY > SAFETY > INTEGRITY > CONFIDENTIALITY. An outage on a refinery, a hospital HVAC, a power-grid SCADA system can cause injury, death, or cascading failure. Disclosure of process data is usually the least-bad outcome.",
+      "IEC 62443 is built around that inversion. The zones-and-conduits model is a TRUST boundary model — zones group assets with shared security requirements, conduits are the controlled paths between them. The model drives WHERE controls live.",
+      "Security Levels (SL1 = protection against casual / coincidental violation, through SL4 = protection against deliberate violation with extended resources, sophisticated methods, IACS-specific motivation) are graded per zone and per conduit.",
+      "Practical consequences: patches go through change-control windows aligned with maintenance shutdowns, not on the IT calendar. Encryption may be unsafe if it adds latency that breaks deterministic control loops. Authentication adds boot-time delay that can be safety-critical.",
+      "Lifting IT controls onto OT directly produces outcomes like 'patched PLC firmware caused a six-hour process outage' or 'security tool encrypted memory and broke the safety controller's deterministic loop.' Both are real published incidents.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["iec-62443", "ot-security", "ics", "industrial", "phase-8"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -409,4 +498,6 @@ export const ALL_EXAMPLES = [
   WCAG_AUTO_TOOLS,
   OWASP_2025_NEW_CATEGORY,
   OWASP_VERIFICATION_REQUEST,
+  ISO_27001_SCOPE,
+  IEC_62443_PRIORITY,
 ] as const;

@@ -314,6 +314,78 @@ const ENTRIES: Misconception[] = [
       label: "OWASP Top 10:2025 · Mishandling Exceptional Conditions",
     },
   },
+
+  // ─── ISO 27001 + ASVS + IEC 62443 (Phase 8 integration) ─────────────────
+  // Anchored to ISO/IEC 27001:2022, OWASP ASVS, and IEC 62443. These three
+  // standards anchor the Phase 8 compliance density. The misconceptions
+  // below catch the most common mistakes when engineers represent their
+  // company's security posture to customers, auditors, and procurement.
+  {
+    id: "iso27001-as-product-cert",
+    name: "Treats ISO 27001 as a product certification",
+    description:
+      "Reads 'we are ISO 27001 certified' as a per-product security claim. ISO 27001 certifies the organization's Information Security Management System (ISMS) — the processes for identifying, treating, and reviewing risk. It does not pen-test products, certify code, or guarantee a given product's security. The certified scope is defined by a Statement of Applicability that may include or exclude specific products and services.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/8/8-2/01",
+      label: "Phase 8 · ISO 27001 + ISMS",
+    },
+  },
+  {
+    id: "iso27001-vs-soc2",
+    name: "Conflates ISO 27001 with SOC 2",
+    description:
+      "Treats ISO 27001 and SOC 2 as interchangeable. They differ on audit model (certification vs attestation), evidence requirements (Statement of Applicability + ISMS records vs Trust Services Criteria sampling), audience (global, especially EU/APAC vs US-centric SaaS), and maintenance posture (annual surveillance + 3-year recertification vs Type 2 reporting period). A B2B sales process asking 'do you have SOC 2?' is asking a different question than 'are you ISO 27001 certified?'",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/8/8-2/02",
+      label: "Phase 8 · Compliance frameworks compared",
+    },
+  },
+  {
+    id: "asvs-level-shopping",
+    name: "Claims ASVS conformance without picking a level",
+    description:
+      "Says 'we conform to ASVS' without specifying L1, L2, or L3. The three levels exist because applications have different threat models: L1 is opportunistic-attack baseline (minimum viable security), L2 is most applications handling sensitive data (the realistic default), L3 is high-assurance for critical systems (defense, medical, financial). Claiming 'ASVS' without a level is structurally meaningless; a real verification engagement names the level and the scope.",
+    remediation: {
+      kind: "reading",
+      href: "https://owasp.org/www-project-application-security-verification-standard/",
+      label: "OWASP · ASVS levels",
+    },
+  },
+  {
+    id: "asvs-control-family-cherry-pick",
+    name: "Cherry-picks ASVS control families and claims conformance",
+    description:
+      "Verifies a few ASVS control families (say, authentication and cryptography) and claims overall conformance. ASVS conformance at a level requires meeting all applicable requirements within all 14 control families at that level. Selective adoption produces a security posture that's strong at the verified families and unverified elsewhere — and unverified elsewhere is where attackers actually go.",
+    remediation: {
+      kind: "reading",
+      href: "https://owasp.org/www-project-application-security-verification-standard/",
+      label: "OWASP · ASVS 14 control families",
+    },
+  },
+  {
+    id: "iec62443-as-it-security",
+    name: "Applies IT security frameworks to OT systems",
+    description:
+      "Lifts NIST CSF / ISO 27001 controls onto factory PLCs, HVAC controllers, and SCADA without adaptation. IEC 62443 has a different priority order: availability and safety come before confidentiality, because patching a controller mid-shift may be more dangerous than the CVE itself. OT security controls have to be designed around uptime, deterministic timing, process safety constraints, and decade-long asset lifecycles — not lifted from IT.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/8/8-3/01",
+      label: "Phase 8 · IEC 62443 OT security",
+    },
+  },
+  {
+    id: "zones-conduits-overlay",
+    name: "Reads zones and conduits as network segmentation",
+    description:
+      "Treats IEC 62443's zones and conduits as a VLAN diagram. Zones and conduits are a TRUST boundary model used for risk assessment — a zone is a grouping of assets sharing security requirements (a process cell, a safety system, the enterprise IT network), a conduit is the controlled communication path between zones. The model drives where you place security controls and how you grade them (Security Levels SL1-SL4); the network segmentation that follows is a consequence, not the model itself.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/8/8-3/02",
+      label: "Phase 8 · Zones, conduits, security levels",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(
