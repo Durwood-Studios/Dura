@@ -1139,6 +1139,96 @@ export const RAFT_VS_PAXOS: MCQQuestion = {
   tags: ["consensus", "raft", "paxos", "distributed-systems", "phase-7"],
 };
 
+// ─── Phase 0 · WiFi vs Internet ───────────────────────────────────────────
+// Background-knowledge scaffold (not from the bounded-research session).
+// Foundational digital-literacy question — the most common misdiagnosis
+// when home networks fail.
+
+export const WIFI_VS_INTERNET: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-0-wifi-vs-internet-01",
+  difficulty: "intro",
+  prompt:
+    "Your WiFi shows full bars on your phone, but websites won't load. What's actually happening?",
+  correct: {
+    text: "Your phone is connected to the router (that's WiFi), but the router can't reach the internet. WiFi is the local wireless link between your device and your router; the internet is everything beyond the router. The two can fail independently.",
+    explanation:
+      "Full WiFi bars mean the wireless signal to the router is strong. They say nothing about whether the router itself can reach the internet — that depends on the cable to your ISP, the ISP's network, and DNS resolution.",
+  },
+  distractors: [
+    {
+      text: "If WiFi shows full bars, the internet is working — the websites themselves must be down",
+      misconception: "wifi-as-internet",
+    },
+    {
+      text: "Full bars means the device is too far from the router and needs to move closer",
+      misconception: "wifi-as-internet",
+    },
+    {
+      text: "WiFi and internet are the same thing — full bars means everything's fine; reload the page",
+      misconception: "wifi-as-internet",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "WiFi is the wireless connection from your device to your router. Your phone's bars show signal strength to the router.",
+      "The internet is the global network beyond your router. To reach it, your router uses a wired connection (usually cable, fiber, or DSL) to your Internet Service Provider.",
+      "WiFi can work perfectly while the internet is down: the link from your router to the ISP can fail (cable cut, ISP outage), DNS servers can be unreachable, or your ISP's broader network can have issues.",
+      "Diagnosing 'no internet' starts with figuring out which link is broken: (a) Is your device connected to WiFi? (b) Can the router reach the ISP? (c) Can DNS resolve names? (d) Can the actual website respond?",
+      "Quick test: try multiple websites. If all fail, the problem is likely between you and the wider internet. If one fails, it's probably that specific site.",
+      "Better test on a router: check the WAN status light or admin page — it shows whether the router has an active connection to the ISP, separately from WiFi status.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["wifi", "internet", "networking-basics", "phase-0"],
+};
+
+// ─── Phase 0 · "Delete" vs actual erasure ─────────────────────────────────
+// Background-knowledge scaffold. The "deleted = gone" misconception is the
+// most important digital-literacy concept for personal-safety reasoning
+// (selling old phones, donating computers, etc.).
+
+export const DELETE_VS_ERASE: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-0-delete-vs-erase-01",
+  difficulty: "intro",
+  prompt:
+    "You're about to sell your old laptop. You delete all your personal files and empty the trash. Is your data safe from the buyer?",
+  correct: {
+    text: "No. 'Delete' usually just marks the storage as available for reuse — the actual bytes stay on disk until something else writes over them. Forensic tools can recover deleted files for days, weeks, or longer. To actually protect your data, you need a secure-erase tool that overwrites the storage, or a factory-reset on a device with full-disk encryption (which renders the data unrecoverable by destroying the key).",
+    explanation:
+      "Most operating systems prioritize 'delete' being fast, not 'delete' being thorough. The file system bookkeeping says 'this space is free'; the bytes are unchanged.",
+  },
+  distractors: [
+    {
+      text: "Yes — deleting files and emptying the trash physically removes them from the disk",
+      misconception: "delete-as-erase",
+    },
+    {
+      text: "Yes — modern operating systems automatically overwrite deleted files for security",
+      misconception: "delete-as-erase",
+    },
+    {
+      text: "Yes — once the file is gone from the trash, it's gone everywhere; cloud sync handles the rest",
+      misconception: "delete-as-erase",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "When you 'delete' a file on most computers, the operating system updates the file system's index — marking the file's entry as removed and the storage blocks as available for reuse.",
+      "The data itself stays on disk until the operating system actually writes new data over those blocks. That could happen in seconds (if you're creating new files immediately) or never (if you leave the computer alone).",
+      "Emptying the trash bypasses the trash's holding area but follows the same pattern: index updated, bytes remain.",
+      "Forensic recovery tools read the raw disk and scan for file patterns (headers, metadata signatures). They routinely recover files that were 'deleted' hours, days, or months ago.",
+      "Solid-state drives (SSDs) are slightly different — TRIM commands tell the SSD to actively wipe blocks for wear-leveling reasons. But this is opportunistic and not guaranteed; assuming TRIM happened is unsafe.",
+      "Proper data destruction options: (a) secure-erase tools that explicitly overwrite the entire drive (DBAN, manufacturer utilities, the macOS 'Secure Erase' option on HDDs); (b) full-disk encryption on the device from day one — then a factory reset destroys the encryption key, rendering the data unrecoverable without ever overwriting bytes; (c) physical destruction (drilling holes, shredding) for highest assurance.",
+      "Modern Apple devices, recent Android phones, and Windows BitLocker / macOS FileVault devices are encrypted by default — for them, factory reset IS effective because of (b). For older devices and most desktops with HDDs, secure-erase is required.",
+      "The implication: a stolen or sold device's 'deleted' files are not gone. Plan disposal accordingly.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["data-erasure", "privacy", "digital-literacy", "phase-0"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -1166,4 +1256,6 @@ export const ALL_EXAMPLES = [
   INDIRECT_PROMPT_INJECTION,
   FALSE_SHARING,
   RAFT_VS_PAXOS,
+  WIFI_VS_INTERNET,
+  DELETE_VS_ERASE,
 ] as const;

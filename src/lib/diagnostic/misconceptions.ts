@@ -904,6 +904,56 @@ const ENTRIES: Misconception[] = [
       label: "Boehm · Why the C++ memory model matters",
     },
   },
+
+  // ─── Phase 0 · Digital Literacy (PRE-RESEARCH SCAFFOLD — not from the ──
+  // bounded-research session). The foundational mental-model traps that
+  // surface when first learners encounter computing. These are accessible
+  // by design — first lessons for anyone whose mental model of computers
+  // came from years of using them rather than studying them.
+  {
+    id: "computer-as-intelligent",
+    name: "Anthropomorphizes the computer",
+    description:
+      "Says things like 'the computer figured out what I wanted' or 'it understood that I meant to save.' Computers follow programmed instructions — every action you see is the result of code a human wrote, executing step by step. The appearance of intelligence (auto-complete suggestions, search results, app behavior) is the product of careful engineering by people, not the computer 'thinking.' Even ML models that look intelligent are mechanical: they compute predictions, they don't reason.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/0/0-1/01",
+      label: "Phase 0 · What computers actually do",
+    },
+  },
+  {
+    id: "wifi-as-internet",
+    name: "Confuses WiFi with the Internet",
+    description:
+      "Treats 'WiFi is working' and 'I'm on the internet' as the same statement. WiFi is the LOCAL wireless connection between your device and your router. The internet is the network beyond your router. Your WiFi can be perfect (full bars, fast handshake) while the internet is unavailable (the cable from your house to the ISP is cut, the ISP is down, DNS isn't resolving). Diagnosing 'no internet' starts with figuring out which link is broken.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/0/0-2/03",
+      label: "Phase 0 · How networks connect",
+    },
+  },
+  {
+    id: "delete-as-erase",
+    name: "Assumes 'delete' permanently erases data",
+    description:
+      "Treats clicking 'Delete' or emptying the trash as physically removing the data. Most file systems mark the storage as available for reuse but leave the actual bytes in place until something else writes over them. The data is recoverable with forensic tools for hours, days, or longer. Secure deletion requires overwriting (with tools like shred) or hardware-level wipes. The implication: 'deleted' on a stolen device is not 'gone.'",
+    remediation: {
+      kind: "reading",
+      href: "https://en.wikipedia.org/wiki/Data_erasure",
+      label: "Data erasure",
+    },
+  },
+  {
+    id: "binary-as-just-digits",
+    name: "Treats 0s and 1s as abstract digits without context",
+    description:
+      "Reads 'computers use binary' as a quirky design choice — 'they could use any number system.' Binary is the physical reality of how computers store and transmit information: a transistor is either conducting (1) or not (0), a magnetic spot is one polarity or the other, a voltage level is high or low. Bits are interpretable: depending on context, the same bit pattern can be a number, a character, a pixel, an instruction. Without the context (the file format, the type system, the protocol), bits have no meaning.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/0/0-1/04",
+      label: "Phase 0 · Bits, bytes, and what they mean",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(
