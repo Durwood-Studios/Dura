@@ -487,6 +487,95 @@ export const IEC_62443_PRIORITY: MCQQuestion = {
   tags: ["iec-62443", "ot-security", "ics", "industrial", "phase-8"],
 };
 
+// ─── Phase 9 · NIST CSF 2.0 Govern function ───────────────────────────────
+// Anchored to NIST CSF 2.0 (released Feb 26, 2024). Catches engineers
+// referencing the pre-2024 five-function model — the most common version-
+// drift error in security-governance discussions.
+
+export const CSF_GOVERN_FUNCTION: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-9-csf-govern-01",
+  difficulty: "core",
+  prompt:
+    "Your team built a security program around NIST CSF using the five functions: Identify, Protect, Detect, Respond, Recover. Per CSF 2.0 (Feb 2024), what is the structural gap?",
+  correct: {
+    text: "CSF 2.0 added Govern as a sixth function — explicitly because earlier versions assumed governance happened upstream and most organizations never connected the dots. Govern covers risk-management strategy, roles and responsibilities, policy, oversight, and supply-chain risk. A program built on the five-function model has no defined authority to make security trade-offs.",
+    explanation:
+      "NIST released CSF 2.0 in February 2024 with Govern as a new top-level function. The five-function model (CSF 1.0 from 2014, CSF 1.1 from 2018) is now superseded.",
+  },
+  distractors: [
+    {
+      text: "No gap — CSF 2.0 kept the five-function model and just added subcategories",
+      misconception: "csf-govern-missing",
+    },
+    {
+      text: "CSF 2.0 split Protect into Protect and Prevent — six functions but a different split",
+      misconception: "csf-govern-missing",
+    },
+    {
+      text: "The gap is that CSF is now a control checklist; you need to map each subcategory to specific NIST 800-53 controls to claim conformance",
+      misconception: "csf-as-checklist",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "NIST CSF 1.0 (2014) and 1.1 (2018) defined five functions: Identify, Protect, Detect, Respond, Recover.",
+      "CSF 2.0 (Feb 2024) added Govern as a sixth function — placed BEFORE Identify in the function ordering because governance shapes everything that follows.",
+      "Govern subcategories cover: organizational context, risk-management strategy, roles/responsibilities/authority, policy, oversight, cybersecurity supply-chain risk management.",
+      "Empirical reason for the addition: in feedback gathered by NIST during the 2.0 revision, most organizations had implemented Detect / Respond capabilities well but had no clear governance hooking those capabilities into risk-based decisions. Programs could see attacks but had no authority to make trade-offs.",
+      "CSF is also explicitly outcome-based, not a control checklist. The artifact is a Profile — Current state vs Target state per subcategory — that drives an improvement plan. Mapping subcategories to 800-53 (or any other catalog) is one way to inform Profile construction, but the conformance claim is about the Profile and the closure plan, not the catalog mapping.",
+      "A security program anchored to the five-function model is not 'wrong' but is referencing a superseded version. Updated programs add Govern as the first function and rework the Profile to include governance subcategories.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["nist-csf", "governance", "security", "phase-9"],
+};
+
+// ─── Phase 9 · GDPR baseline obligations ──────────────────────────────────
+// Anchored to GDPR + CCPA/CPRA. Catches the most expensive privacy-compliance
+// misconception: treating a cookie banner as a complete privacy program.
+
+export const GDPR_BASELINE: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-9-gdpr-baseline-01",
+  difficulty: "core",
+  prompt:
+    "Your app collects user emails for account registration and displays a cookie consent banner with a 'Reject All' button. A customer asks whether the app meets the GDPR baseline. What's the accurate answer?",
+  correct: {
+    text: "A cookie banner is one obligation among many. The GDPR baseline also requires: a lawful basis recorded for the email collection (consent is one of six bases, not the only one), a purpose-limitation statement, a published privacy notice, a Record of Processing Activities where applicable, a DPIA for high-risk processing, breach notification within 72 hours, and mechanisms for data-subject rights (access, erasure, portability, rectification) within 30 days.",
+    explanation:
+      "GDPR is structurally a comprehensive data-protection framework. The cookie banner addresses one obligation (ePrivacy / consent for non-essential cookies). It does not address lawful basis, RoPA, DPIA, breach notification, or DSR fulfillment.",
+  },
+  distractors: [
+    {
+      text: "The cookie banner with a 'Reject All' button is sufficient — that's the core GDPR obligation",
+      misconception: "gdpr-as-consent-popup",
+    },
+    {
+      text: "A cookie banner plus a privacy policy URL completes the GDPR baseline",
+      misconception: "gdpr-as-consent-popup",
+    },
+    {
+      text: "If users in California are blocked from the app, the app is CCPA-only and the GDPR cookie banner becomes optional",
+      misconception: "ccpa-as-gdpr-clone",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "GDPR Article 6 lists six lawful bases for processing personal data: consent, contract, legal obligation, vital interests, public task, legitimate interests. Account registration is typically contract — the email is needed to perform the contract with the user — not consent. Picking the wrong lawful basis is a documented finding in audits.",
+      "Article 5 imposes data-minimization and purpose-limitation. Collecting the email for account registration cannot be used for unrelated marketing without a new lawful basis.",
+      "Article 12-22 grants data-subject rights. The controller must provide a mechanism — typically a request endpoint, a published email address, or an in-app flow — to fulfill access, rectification, erasure, restriction, portability, and objection requests within 30 days (extendable by 60 days for complex requests).",
+      "Article 30 requires a Record of Processing Activities for controllers above small-business thresholds. This is an internal document, not published, but auditable.",
+      "Article 35 requires a Data Protection Impact Assessment for processing 'likely to result in a high risk' to data subjects — large-scale, sensitive categories, automated decision-making with legal effect.",
+      "Article 33 requires breach notification to the supervisory authority within 72 hours of becoming aware of a personal data breach.",
+      "The cookie banner addresses ePrivacy Directive consent requirements for non-essential cookies — a separate regime that the banner discharges one obligation under.",
+      "Blocking California users does not opt the app out of GDPR; GDPR applies to processing the personal data of anyone in the EU regardless of where the controller is located. Different scope from CCPA, which is California-residency-based.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["gdpr", "ccpa", "privacy", "compliance", "phase-9"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -500,4 +589,6 @@ export const ALL_EXAMPLES = [
   OWASP_VERIFICATION_REQUEST,
   ISO_27001_SCOPE,
   IEC_62443_PRIORITY,
+  CSF_GOVERN_FUNCTION,
+  GDPR_BASELINE,
 ] as const;

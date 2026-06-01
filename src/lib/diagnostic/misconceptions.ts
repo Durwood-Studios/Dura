@@ -386,6 +386,78 @@ const ENTRIES: Misconception[] = [
       label: "Phase 8 · Zones, conduits, security levels",
     },
   },
+
+  // ─── NIST CSF 2.0 + AI RMF + GDPR/CCPA + 27701 (Phase 9 integration) ─────
+  // Anchored to NIST CSF 2.0 (Feb 2024), NIST AI RMF 1.0 (Jan 2023) + AI 600-1
+  // Generative AI Profile (Jul 2024), GDPR + CCPA/CPRA, and ISO/IEC 27701.
+  // Phase 9 is the compliance capstone — these are the misconceptions that
+  // produce shippable-but-non-compliant products under audit.
+  {
+    id: "csf-as-checklist",
+    name: "Treats NIST CSF as a control checklist",
+    description:
+      "Reads NIST CSF subcategories as a tickable to-do list to copy into a GRC tool. CSF is explicitly outcome-based — the artifact is a Profile (Current state vs Target state) that drives an organization-specific improvement plan. Treating it as a checklist produces a security program that maps to CSF on paper but never actually closes the gap between Current and Target.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/9/9-1/01",
+      label: "Phase 9 · NIST CSF 2.0",
+    },
+  },
+  {
+    id: "csf-govern-missing",
+    name: "Anchors on the legacy five-function CSF model",
+    description:
+      "References the Identify / Protect / Detect / Respond / Recover model from CSF 1.0 / 1.1 without recognizing that CSF 2.0 (Feb 2024) added a sixth function: Govern. The new function covers risk-management strategy, roles and responsibilities, policy, oversight, and supply-chain risk management. CSF 1.x implicitly assumed governance happened upstream; CSF 2.0 makes it explicit because most organizations were skipping it.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/9/9-1/02",
+      label: "Phase 9 · CSF 2.0 — what changed",
+    },
+  },
+  {
+    id: "ai-rmf-as-policy",
+    name: "Reads NIST AI RMF as a static policy framework",
+    description:
+      "Adopts the four AI RMF functions (Govern, Map, Measure, Manage) as a one-time policy authoring exercise. The framework is explicitly a continuous risk-management cycle — Map, Measure, and Manage must be re-run as the AI system changes (new training data, new prompts, new downstream uses) or as new harms surface. The AI 600-1 Generative AI Profile adds 12 risk categories (confabulation, prompt injection, data privacy, etc.) that compound the need for continuous review.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/9/9-2/01",
+      label: "Phase 9 · NIST AI RMF + GenAI Profile",
+    },
+  },
+  {
+    id: "gdpr-as-consent-popup",
+    name: "Reduces GDPR to a cookie consent banner",
+    description:
+      "Treats deploying a 'Reject All / Accept All' banner as GDPR compliance. The actual baseline requires: a lawful basis for each processing activity (consent is one of six, not the only one), purpose limitation and data minimization, a published privacy notice, a Record of Processing Activities (RoPA) where applicable, a Data Protection Impact Assessment (DPIA) for high-risk processing, a Data Protection Officer for some categories of controller, breach notification within 72 hours, and mechanisms to fulfill data subject rights (access, erasure, portability, rectification) within 30 days.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/9/9-3/01",
+      label: "Phase 9 · GDPR baseline obligations",
+    },
+  },
+  {
+    id: "ccpa-as-gdpr-clone",
+    name: "Treats CCPA as US GDPR",
+    description:
+      "Reads CCPA/CPRA as a copy of GDPR with California branding. They differ structurally: GDPR requires a lawful basis up front and constrains processing (opt-in model); CCPA grants residents the right to opt out after the fact (opt-out model). Scope differs (CCPA is residency-based for California consumers, GDPR is presence-based for anyone in the EU). Enforcement differs (CCPA: California Privacy Protection Agency; GDPR: supervisory authorities across member states). Designing one privacy program assuming GDPR conformance covers CCPA produces gaps in the opt-out flow and 'Do Not Sell or Share' disclosures.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/9/9-3/02",
+      label: "Phase 9 · CCPA + GDPR differences",
+    },
+  },
+  {
+    id: "pims-as-privacy-policy",
+    name: "Treats ISO 27701 as a privacy policy add-on to 27001",
+    description:
+      "Reads ISO/IEC 27701 as a policy document bolted onto an existing ISMS. 27701 is a Privacy Information Management System (PIMS) — a management system in its own right, requiring its own scope, Statement of Applicability, RoPA, DPIA process, and continuous review. It extends 27001 (you must be 27001-compliant to claim 27701) but adds substantial obligations beyond a written policy. Treating it as policy produces audits that fail the management-system requirements.",
+    remediation: {
+      kind: "lesson",
+      path: "/paths/9/9-3/03",
+      label: "Phase 9 · ISO 27701 as a PIMS",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(
