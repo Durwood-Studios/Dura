@@ -602,16 +602,19 @@ const ENTRIES: Misconception[] = [
     },
   },
 
-  // ─── Phase 5 · Systems engineering (background knowledge — NOT from the ─
-  // bounded-research session). The misconceptions below come from durable
-  // canonical knowledge of distributed systems, database internals, and
-  // OS-level behaviors that working systems engineers hit in production.
-  // Sources for any future lesson author: Bailis et al. on isolation
-  // anomalies, Gilbert/Lynch CAP proof + Abadi PACELC extension, the
-  // Aphyr Jepsen analyses, and the Linux Documentation Project's docs
-  // on load average semantics. Mark these as PRE-RESEARCH SCAFFOLD —
-  // before publishing, re-verify against a freshly-sourced research
-  // pass per the bounded-research discipline.
+  // ─── Phase 5 · Systems engineering (VERIFIED 2026-06-01). Distributed-────
+  // systems, database, and OS-level misconceptions working engineers hit
+  // in production. Verified against Marc Brooker's PACELC writeup +
+  // Abadi's PACELC paper; Shapiro et al. on CRDTs (SSS 2011) + Gomes et
+  // al. on SEC verification (arXiv); CockroachDB consistency-model docs
+  // for strict serializability semantics; RFC 9293 (TCP) + Systems
+  // Approach §5.2 for delivery semantics; Postgres 18 docs §13.2 +
+  // Cybertec for RC race-condition fixes; Brendan Gregg's 2017 +
+  // LISA19 + Netflix 60-second analyses for load-average semantics.
+  // eventual-consistency-as-weak was sharpened (SEC is a precise 3-part
+  // property, not "stronger eventual consistency by degree"). Two
+  // additions: exactly-once-delivery-myth, wall-clocks-give-ordering —
+  // both anchor DURA's offline-first sync architecture correctly.
   {
     id: "cap-theorem-misread",
     name: "Reads CAP as a universal 'pick 2 of 3' trade-off",
@@ -627,11 +630,11 @@ const ENTRIES: Misconception[] = [
     id: "eventual-consistency-as-weak",
     name: "Treats eventual consistency as 'broken consistency'",
     description:
-      "Reads eventual consistency as 'might be wrong, no guarantees' when it's actually a precise convergence model: in the absence of new updates, all replicas converge to the same value. CRDTs provide STRONG eventual consistency with rigorous mathematical guarantees on convergence regardless of message order. Confusing 'eventually consistent' with 'weakly consistent' produces design discussions that reject viable solutions on bad grounds.",
+      "Reads eventual consistency as 'might be wrong, no guarantees.' It's actually a precise convergence model. Strong Eventual Consistency (SEC), as defined by Shapiro et al., is a three-part property: (1) eventual delivery, (2) termination, (3) strong convergence — replicas that have received the same set of updates reach the same state, regardless of delivery order. CRDTs achieve SEC by SACRIFICING LINEARIZABILITY in exchange for order-independence (a safety property, not 'stronger eventual consistency by degree'). The convergence holds despite any number of failures (self-stabilizing). Confusing 'eventually consistent' with 'weakly consistent' rejects viable solutions on bad grounds.",
     remediation: {
       kind: "reading",
-      href: "https://en.wikipedia.org/wiki/Eventual_consistency",
-      label: "Eventual consistency",
+      href: "https://www.lip6.fr/Marc.Shapiro/papers/2011/CRDTs_SSS-2011.pdf",
+      label: "Shapiro et al. · Conflict-free Replicated Data Types",
     },
   },
   {
@@ -671,23 +674,48 @@ const ENTRIES: Misconception[] = [
     id: "load-average-as-cpu",
     name: "Reads Linux load average as CPU utilization",
     description:
-      "Treats /proc/loadavg as 'how busy the CPU is.' Linux load average counts processes in TASK_RUNNING (on CPU or ready to run) AND TASK_UNINTERRUPTIBLE (D state — usually blocked on I/O, sometimes on locks). A load of 8 on a 4-core machine could be CPU saturation, I/O saturation, or any mix. Diagnose with vmstat, iostat, pidstat, mpstat — not from loadavg alone. The 1/5/15 minute exponential decay also means the number trails reality, which makes loadavg a lagging indicator regardless.",
+      "Treats /proc/loadavg as 'how busy the CPU is.' Linux loadavg counts processes in TASK_RUNNING (on CPU or ready to run) AND TASK_UNINTERRUPTIBLE (D state). By Linux 4.12 there are ~400 codepaths that set TASK_UNINTERRUPTIBLE (lock primitives, not just disk I/O), so loadavg is a 'system load' indicator rather than CPU utilization (per the 1993 Matias Sørensen patch that introduced this semantic). A load of 8 on a 4-core machine could be CPU saturation, I/O saturation, lock contention, or any mix. The 1/5/15 minute exponentially-damped average makes it a lagging indicator. Real diagnosis stack: vmstat 1, mpstat -P ALL 1, pidstat 1, iostat -xz 1, sar.",
     remediation: {
       kind: "reading",
       href: "https://www.brendangregg.com/blog/2017-08-08/linux-load-averages.html",
       label: "Brendan Gregg · Linux Load Averages",
     },
   },
+  {
+    id: "exactly-once-delivery-myth",
+    name: "Believes exactly-once delivery is achievable",
+    description:
+      "Trusts a queue or service that promises 'exactly-once delivery.' Exactly-once delivery is provably impossible over asynchronous lossy networks (reduces to Two Generals / FLP impossibility). What Kafka, SQS, Stripe, and AWS call 'exactly-once' is at-least-once delivery PLUS idempotent receiver PLUS a deduplication window. Every retry path in a distributed system must assume duplicate arrival. The canonical pattern: client-generated UUID idempotency keys + transactional outbox at producer + dedup at consumer. Production code that treats 'exactly-once' as a primitive is presumptively broken under retry.",
+    remediation: {
+      kind: "reading",
+      href: "https://medium.com/swlh/the-impossibility-of-exactly-once-delivery-11daa0ed3914",
+      label: "Kleanthous · The Impossibility of Exactly-Once Delivery",
+    },
+  },
+  {
+    id: "wall-clocks-give-ordering",
+    name: "Uses wall-clock timestamps to order events across nodes",
+    description:
+      "Compares System.currentTimeMillis() (or any wall-clock read) across machines to decide which event happened first. NTP-synced wall clocks drift tens to hundreds of milliseconds between nodes and can go BACKWARD during slew/step corrections. Ordering events by wall clock for causal logic is broken by construction. Use Lamport timestamps for happens-before, vector clocks for concurrency detection, or HLCs (hybrid logical clocks — CockroachDB, YugabyteDB) for monotonic causality + bounded skew. Spanner's TrueTime gives [earliest, latest] intervals (≤~7ms with GPS/atomic clocks) and forces explicit commit-wait. 'Last write wins by wall clock' silently loses writes in any multi-device sync — directly relevant to DURA's offline-first record.",
+    remediation: {
+      kind: "reading",
+      href: "https://lamport.azurewebsites.net/pubs/time-clocks.pdf",
+      label: "Lamport · Time, Clocks, and the Ordering of Events",
+    },
+  },
 
-  // ─── Phase 4 · Backend + networking (PRE-RESEARCH SCAFFOLD — not from ──
-  // the bounded-research session). Background knowledge of the production
-  // misconceptions that drive backend incident postmortems: HTTP semantics
-  // beyond status codes, queueing theory basics, idempotency, distributed
-  // timing, retry storms. Sources for future verification: RFC 9110 (HTTP
-  // Semantics, June 2022), RFC 9112 (HTTP/1.1), RFC 9113 (HTTP/2), RFC 9114
-  // (HTTP/3), Little's Law for queueing, the AWS Builders' Library on
-  // timeouts/retries/backoff. Mark as SCAFFOLD pending freshly-sourced
-  // research before lessons publish.
+  // ─── Phase 4 · Backend + networking (VERIFIED 2026-06-01). Production ──
+  // misconceptions that drive backend incident postmortems: HTTP semantics,
+  // idempotency, queueing theory, retry storms, distributed timing.
+  // Verified against RFC 9110 (HTTP Semantics) §15 + §9.2.2 for status
+  // semantics + idempotency definitions; Stripe API idempotency docs for
+  // the stricter-than-RFC pattern; Little (1961) for L = λW; the AWS
+  // Builders' Library on timeouts/retries/backoff plus Marc Brooker's
+  // 243× cascade-amplification figure; RFC 9000 (QUIC) for HTTP/3's TCP
+  // HOL fix; POSIX clock_gettime(2) for monotonic semantics. Two
+  // verification-driven additions: coordinated-omission (p99 latency
+  // closed-loop test bug), connection-pool-vs-dns-ttl (silent autoscale
+  // defeat).
   {
     id: "http-status-as-semantics",
     name: "Treats HTTP status codes as the full semantic contract",
@@ -701,20 +729,20 @@ const ENTRIES: Misconception[] = [
   },
   {
     id: "idempotency-as-replay-safe",
-    name: "Equates 'idempotent' with 'safe to retry blindly'",
+    name: "Conflates HTTP method idempotency with replay-safe retries",
     description:
-      "Reads HTTP method idempotency (GET, PUT, DELETE) as 'I can retry without thinking.' RFC 9110's idempotency is about METHOD SEMANTICS — n calls have the same effect as 1 call AT THE PROTOCOL LEVEL. Application idempotency requires explicit idempotency keys: the server stores the first response under the key and replays it on retry. Without that, a PUT that creates a resource then crashes can be retried into a duplicate-but-different resource because the second PUT runs against the new state.",
+      "Reads RFC 9110 method idempotency (GET, PUT, DELETE) as 'I can retry without thinking.' RFC 9110 §9.2.2 defines idempotency as 'the intended effect on the server of multiple identical requests with that method is the same as the effect for a single such request' — note 'intended EFFECT,' not 'identical response body.' Two GETs to /now return different bodies but the method is still idempotent. The Stripe-style pattern goes FURTHER than the RFC: server stores the full response (status + body, including failures) keyed by a client-supplied idempotency key, replays it byte-for-byte for a TTL window (Stripe: 24h), and validates parameter equality on key reuse. Only POST needs explicit keys; GET/DELETE are RFC-idempotent already.",
     remediation: {
       kind: "reading",
-      href: "https://stripe.com/docs/api/idempotent_requests",
-      label: "Stripe · Idempotency keys",
+      href: "https://docs.stripe.com/api/idempotent_requests",
+      label: "Stripe · Idempotent requests",
     },
   },
   {
     id: "littles-law-ignored",
-    name: "Ignores Little's Law when sizing queues and timeouts",
+    name: "Ignores Little's Law when sizing queues and pools",
     description:
-      "Picks queue sizes and request timeouts by intuition. Little's Law (L = λW) gives the relationship: average queue length = arrival rate × average wait time. If your service handles 100 RPS with 50ms average latency, the in-flight request count is 5 — sizing the thread pool below 5 produces queueing; sizing too far above wastes resources. Ignoring this produces queues that overflow under steady-state load (capacity is the average, not the headroom).",
+      "Picks queue sizes, thread-pool sizes, and concurrency limits by intuition. Little's Law (L = λW) makes NO assumption about arrival distribution, service distribution, or service order — it's true for any stationary system. So sizing by intuition is provably wrong, not just empirically risky. Concrete: 100 RPS × 50ms latency = 5 in-flight requests. Thread pool below 5 produces queueing; far above 5 wastes resources. Application sweet spot: every backend pool/limit/timeout is L, and L can be computed from λ (RPS) and W (p50 latency) without statistical modeling.",
     remediation: {
       kind: "reading",
       href: "https://en.wikipedia.org/wiki/Little%27s_law",
@@ -747,43 +775,71 @@ const ENTRIES: Misconception[] = [
     id: "clock-monotonic-vs-realtime",
     name: "Uses wall-clock time for duration measurement",
     description:
-      "Reads CLOCK_REALTIME (or Date.now()) twice to measure how long something took. Real-time clocks can JUMP backward (NTP adjustments, leap-second handling, manual clock changes) — a 'duration' computed from two real-time reads can be negative or nonsense. Duration measurement requires a MONOTONIC clock (CLOCK_MONOTONIC on POSIX, performance.now() in browsers) which is guaranteed not to go backward. The wall-clock-for-duration bug shows up rarely but mysteriously — usually right after a clock adjustment, which is exactly when alerts fire.",
+      "Reads CLOCK_REALTIME (or Date.now()) twice to measure how long something took. Real-time clocks can JUMP backward (NTP adjustments, leap-second handling, manual clock changes) — a 'duration' computed from two real-time reads can be negative or nonsense. Duration measurement requires a MONOTONIC clock: CLOCK_MONOTONIC on POSIX, performance.now() in browsers/Node. In Go, time.Now() carries BOTH wall and monotonic readings — subtraction (t2.Sub(t1)) uses monotonic automatically, but t.Round() and JSON marshaling STRIP the monotonic reading (well-known footgun). The bug shows up rarely but mysteriously — usually right after a clock adjustment, which is exactly when alerts fire (Google + Cloudflare leap-second smearing exists specifically to avoid this).",
     remediation: {
       kind: "reading",
       href: "https://man7.org/linux/man-pages/man2/clock_gettime.2.html",
       label: "clock_gettime(2) · CLOCK_MONOTONIC",
     },
   },
+  {
+    id: "coordinated-omission-in-load-tests",
+    name: "Reports p99 latency from closed-loop load tests",
+    description:
+      "Trusts p99 latency from a closed-loop load generator (send → wait for response → send next). When the system slows under load, the generator slows its request rate — so the long tail is systematically NEVER MEASURED. Production p99 is routinely 10×–100× higher than lab p99 for this exact reason (documented Gil Tene case: lab 47ms → prod 1.8s = 38× miss). Fix: open-loop generators that schedule requests by wall-clock (wrk2, k6 with constant-arrival-rate), or HdrHistogram's copyCorrectedForCoordinatedOmission with a known expected interval. Coordinated omission invalidates the SLOs you're already promising.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.scylladb.com/2021/04/22/on-coordinated-omission/",
+      label: "ScyllaDB · On Coordinated Omission",
+    },
+  },
+  {
+    id: "connection-pool-bound-by-dns-ttl",
+    name: "Lets long-lived connection pools outlive DNS TTL",
+    description:
+      "Trusts long-lived HTTP/2, gRPC, or DB connection pools indefinitely. The pool outlives the DNS TTL of the load balancer it connected through. When the LB scales out or a node is replaced, traffic keeps hitting the original IPs because the pool was opened against a name that has since re-resolved elsewhere. Symptom: 'we scaled the downstream service and tail latency didn't change.' Fix: enforce max connection age tied to expected DNS TTL — Envoy max_connection_duration, gRPC MaxConnectionAge, custom recycling — never infinity.",
+    remediation: {
+      kind: "reading",
+      href: "http://engineering.curalate.com/2016/03/25/elb-and-dns.html",
+      label: "Curalate Engineering · Avoiding Pitfalls with DNS and AWS ELB",
+    },
+  },
 
-  // ─── Phase 6 · AI/ML Engineering (PRE-RESEARCH SCAFFOLD — not from the ──
-  // bounded-research session). Background knowledge of the production
+  // ─── Phase 6 · AI/ML Engineering (VERIFIED 2026-06-01). Production ─────
   // misconceptions in ML engineering, LLM application security, and AI
-  // evaluation. Sources for future verification: Google's Rules of ML,
-  // Sculley et al. on hidden technical debt, OWASP LLM Top 10 (2025),
-  // Greshake et al. on indirect prompt injection, NIST AI 600-1 Generative
-  // AI Profile (already covered in Phase 9), and Stanford's Foundation
-  // Model Transparency Index. Mark as SCAFFOLD pending freshly-sourced
-  // research.
+  // evaluation. Verified against Google's Rules of ML (#29/#32/#37 for
+  // training-serving skew); Sculley et al. NeurIPS 2015 for tech-debt
+  // framing + Rules of ML §3 for diagnostic taxonomy; scikit-learn
+  // balanced_accuracy_score + ML Mastery on PR-AUC vs ROC-AUC for
+  // imbalanced data; OWASP LLM Top 10 (2025) LLM01 + Greshake et al.
+  // arXiv 2302.12173 for indirect-prompt-injection distinction;
+  // MTEB (arXiv 2210.07316) + recent embedding-similarity critique
+  // for task-specific eval-set guidance; Kaufman et al. 2011 (not 2012)
+  // as the foundational leakage paper. Five corrections shipped (Rule
+  // #37 added, Sculley citation reframed, MTEB caveats, jailbreak/
+  // prompt-injection subset relationship, Kaufman year). Two additions:
+  // distribution-shift-as-bug (covariate vs label vs concept shift) +
+  // vibes-as-evaluation (the LLM-era analogue of accuracy-as-metric).
   {
     id: "training-vs-serving-skew",
     name: "Assumes training and serving environments are equivalent",
     description:
-      "Treats the production inference path as a thin wrapper around the trained model. In practice the most common ML bug is training-serving skew: the preprocessing applied during training (cleaned, normalized, feature-joined offline) doesn't match what happens at serving time (raw user input, real-time joins, different timing). Model accuracy that looks great offline collapses in production. Fix: enforce feature parity between training and serving pipelines, validate via shadow scoring against the live path.",
+      "Treats the production inference path as a thin wrapper around the trained model. The most common ML bug is training-serving skew: preprocessing in training (cleaned, normalized, feature-joined offline) doesn't match serving (raw user input, real-time joins, different timing). Model accuracy great offline collapses in production. PREVENTION (Google Rules of ML #29/#32): shared feature library (Feast, Tecton); same code on both paths. DETECTION (Rule #37): explicitly measure training-serving skew by logging served features and comparing distributions to the training set on a schedule. Most teams ship the prevention and skip the detection.",
     remediation: {
       kind: "reading",
       href: "https://developers.google.com/machine-learning/guides/rules-of-ml",
-      label: "Google · Rules of ML",
+      label: "Google · Rules of ML (Rules #29 / #32 / #37)",
     },
   },
   {
     id: "overfit-vs-data-quality",
     name: "Treats overfitting as the only generalization failure mode",
     description:
-      "Diagnoses any poor-generalization symptom as overfitting and reaches for more regularization. Underfitting (model too simple for the function), data quality issues (label noise, missing features, biased sampling), distribution shift (training and production data differ), test-set leakage (train and test share rows or derived features) all produce similar symptoms with different fixes. Fixing overfitting when the actual problem is data quality wastes regularization budget and leaves the root cause untreated.",
+      "Diagnoses any poor-generalization symptom as overfitting and reaches for more regularization. Underfitting (model too simple for the function), data quality (label noise, missing features, biased sampling), distribution shift (training and production data differ), test-set leakage (train and test share rows or derived features) all produce similar symptoms with different fixes. Fixing overfitting when the problem is data quality wastes regularization budget. The diagnostic taxonomy is canonized in Google's Rules of ML §3; the broader pattern that 'model problems' often surface as 'data / pipeline debt' is Sculley et al.'s contribution (NeurIPS 2015 'Hidden Technical Debt in ML Systems').",
     remediation: {
       kind: "reading",
-      href: "https://research.google/pubs/hidden-technical-debt-in-machine-learning-systems/",
-      label: "Sculley et al. · Hidden Technical Debt in ML",
+      href: "https://developers.google.com/machine-learning/guides/rules-of-ml",
+      label: "Google · Rules of ML §3 (debugging)",
     },
   },
   {
@@ -801,43 +857,72 @@ const ENTRIES: Misconception[] = [
     id: "prompt-injection-as-jailbreak",
     name: "Conflates prompt injection with jailbreaks",
     description:
-      "Treats 'prompt injection' as the user typing 'IGNORE ALL INSTRUCTIONS' into a chat. That's direct prompt injection / jailbreaking — manageable with input filtering and stronger system prompts. The actual production threat is INDIRECT prompt injection: untrusted content (a document the user uploads, a webpage the agent reads, a tool output) contains instructions that the LLM cannot distinguish from the system prompt. Defenses: structured prompt boundaries, treating LLM output as untrusted, sandboxing the model from sensitive operations, manual approval for high-stakes actions.",
+      "Treats 'prompt injection' as the user typing 'IGNORE ALL INSTRUCTIONS' into a chat. Per OWASP LLM Top 10:2025 LLM01, that's DIRECT prompt injection — and 'jailbreaking' is a SUBSET of prompt injection, not a synonym. The harder production threat is INDIRECT prompt injection: 'the LLM accepts input from external sources, such as websites or files' (Greshake et al. arXiv 2302.12173) that contain instructions the LLM cannot distinguish from the system prompt. Indirect injection has held the #1 OWASP LLM slot for two consecutive editions. Defenses: structured prompt boundaries, treating LLM output as untrusted, sandboxing from sensitive operations, manual approval for high-stakes actions.",
     remediation: {
       kind: "reading",
-      href: "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
-      label: "OWASP · LLM Top 10",
+      href: "https://genai.owasp.org/llmrisk/llm01-prompt-injection/",
+      label: "OWASP LLM01:2025 · Prompt Injection",
     },
   },
   {
     id: "embeddings-as-similarity",
     name: "Treats vector embeddings as proven semantic similarity",
     description:
-      "Assumes cosine similarity between two embeddings reflects semantic similarity to the user. Embeddings reflect the model's TRAINING OBJECTIVE, which may diverge from user intent: a generic embedding model treats 'iPhone case' and 'iPhone insurance' as similar (both about iPhones); a search relevance system may need them dissimilar. Embedding-space distance is a model artifact, not a ground truth. Evaluate retrieval quality on application-specific queries before relying on similarity for routing decisions.",
+      "Assumes cosine similarity between embeddings reflects semantic similarity to the user. Embeddings reflect the model's TRAINING OBJECTIVE, which may diverge from user intent: a generic embedding model treats 'iPhone case' and 'iPhone insurance' as similar; a search-relevance system may need them dissimilar. MTEB (Massive Text Embedding Benchmark) is a STARTING FILTER not a verdict — it 'blends strengths and weaknesses, concealing trade-offs that matter in practice' and MTEB-top models don't necessarily excel at RAG/ICL retrieval. The right verdict for a production system: a small task-specific labeled retrieval set (~50–200 query/result pairs) you own. Also: many embedding objectives use cosine in saturation zones, so the metric itself isn't a clean read of 'semantic distance.'",
     remediation: {
       kind: "reading",
-      href: "https://huggingface.co/blog/mteb",
-      label: "MTEB · Massive Text Embedding Benchmark",
+      href: "https://arxiv.org/abs/2210.07316",
+      label: "MTEB (arXiv 2210.07316) — caveat: use as starting filter, not verdict",
     },
   },
   {
     id: "ml-test-set-leakage",
     name: "Splits train and test without checking for leakage",
     description:
-      "Uses a random train/test split without checking for: TIME leakage (rows from the test period influence training, e.g., features derived from future data), ID leakage (the same user appears in both sets, so the model memorizes per-user patterns), FEATURE leakage (a feature is derived from the label or from data unavailable at prediction time). All three produce inflated test metrics. For time-series, use forward-chaining splits. For user-level data, split by user. For feature engineering, audit each feature for prediction-time availability.",
+      "Uses a random train/test split without checking for: TIME leakage (features derived from future data), ID leakage (same user in both sets — the model memorizes per-user patterns; Andrew Ng's chest X-ray example: random patient split → memorization of patients, not pneumonia), FEATURE leakage (a feature derived from the label or unavailable at prediction time). All three produce inflated test metrics. Foundational paper: Kaufman, Rosset, Perlich 2011 'Leakage in Data Mining' (not 2012). Real-world: a 2023 review found leakage in ≥294 academic publications across 17 disciplines. For time-series, use forward-chaining splits. For user-level data, split by user. For feature engineering, audit each feature for prediction-time availability.",
     remediation: {
       kind: "reading",
-      href: "https://scikit-learn.org/stable/modules/cross_validation.html",
-      label: "scikit-learn · Cross-validation strategies",
+      href: "https://en.wikipedia.org/wiki/Leakage_(machine_learning)",
+      label: "Leakage (machine learning) — Kaufman, Rosset, Perlich 2011",
+    },
+  },
+  {
+    id: "distribution-shift-as-bug",
+    name: "Treats post-deployment accuracy drop as a model bug",
+    description:
+      "Diagnoses model accuracy degradation in production as 'the model is broken — retrain.' It's usually one of THREE distinct distribution shifts requiring different responses. Covariate shift: P(X) changes (a feature pipeline or input source issue, often fixable upstream — retraining masks the symptom). Label/prior shift: P(Y) changes (class balance moves; rebalance or weight). Concept drift: P(Y|X) changes (the world changed — retraining IS the right move). >70% of orgs hit significant drift within 6 months (Huyen 2022). Diagnose before reacting: monitor input distributions (covariate), output distributions (label/prior), and joint behavior (concept) separately.",
+    remediation: {
+      kind: "reading",
+      href: "https://huyenchip.com/2022/02/07/data-distribution-shifts-and-monitoring.html",
+      label: "Huyen · Data Distribution Shifts and Monitoring",
+    },
+  },
+  {
+    id: "vibes-as-evaluation",
+    name: "Ships LLM applications evaluated by spot-checking",
+    description:
+      "Tests LLM application releases by trying a few prompts and judging the outputs 'by vibes.' Two systemic reasons this fails: (1) 'every popular static benchmark is contaminated to some degree' — model providers train on benchmark data; (2) the same model weights can swing 10–20 evaluation points depending on the evaluation harness alone. Fix: build a HELD-OUT TASK-SPECIFIC EVAL SET (a small labeled set covering the actual use cases) the model has not seen, regression-test it per release, version it with the prompt template. NIST AI 600-1 names confabulation/hallucination as a top-12 GenAI risk requiring pre-deployment testing with content provenance — not vibes.",
+    remediation: {
+      kind: "reading",
+      href: "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf",
+      label: "NIST AI 600-1 · Generative AI Profile",
     },
   },
 
-  // ─── Phase 7 · Advanced Systems (PRE-RESEARCH SCAFFOLD — not from the ──
-  // bounded-research session). Background knowledge of production-grade
-  // misconceptions in distributed consensus, CPU memory hierarchy, and
-  // database internals. Sources for future verification: Diego Ongaro's
-  // Raft paper, Leslie Lamport on Paxos, the Aphyr Jepsen consistency
-  // analyses, Ulrich Drepper's "What Every Programmer Should Know About
-  // Memory," and the C++ memory model documentation. Mark as SCAFFOLD.
+  // ─── Phase 7 · Advanced Systems (VERIFIED 2026-06-01). Production-grade ──
+  // misconceptions in distributed consensus, CPU memory hierarchy, database
+  // internals, formal methods, weak memory. Verified against Ongaro &
+  // Ousterhout's Raft paper (USENIX ATC '14) — the 43-student empirical
+  // study substantiates understandability as a measurable algorithmic
+  // property; Red Hat RHEL 10 docs + Arm Learning Path for false-sharing
+  // detection via perf c2c; TiKV Distributed Algorithms for the 2PC /
+  // Paxos / saga taxonomy; Postgres MVCC + Percona for SSI abort-rate
+  // ranges; Lamport's TLA+ pubs (TLAPS supports unbounded proofs — not
+  // strictly bounded model checking); Maranget on ARM/POWER + Sewell on
+  // C/C++11 mappings + research!rsc on hardware memory models. Three
+  // corrections shipped (2PC blocking + CRDT invariant limits, TLAPS
+  // unbounded proofs, ARMv7-vs-POWER barrier nuance). Exactly-once and
+  // wall-clock-causality additions live in Phase 5 (canonical home).
   {
     id: "raft-as-paxos-simpler",
     name: "Treats Raft as 'just simpler Paxos'",
@@ -864,7 +949,7 @@ const ENTRIES: Misconception[] = [
     id: "consensus-as-correctness",
     name: "Treats consensus as the universal distributed-correctness primitive",
     description:
-      "Reaches for Paxos / Raft / Zookeeper to coordinate every distributed decision. Consensus is the agreement-on-a-single-value primitive. Cross-shard transactions need two-phase commit (or its modern descendants — Calvin, Spanner's TrueTime). Cross-system invariants often need sagas with compensation. Eventually-consistent state needs CRDTs. Using consensus where the problem isn't 'agree on one value' produces architectures that scale poorly and fail in surprising ways under partition.",
+      "Reaches for Paxos / Raft / Zookeeper to coordinate every distributed decision. Consensus is the agreement-on-a-single-value primitive. Cross-shard transactions need two-phase commit (or Paxos Commit — Gray & Lamport 2006 — because vanilla 2PC BLOCKS on coordinator failure). Calvin uses deterministic ordering; Spanner layers Paxos-over-shards with 2PC for cross-shard atomicity. Cross-system invariants often need sagas with compensation. Eventually-consistent state needs CRDTs — but CRDTs cannot enforce GLOBAL INVARIANTS like uniqueness or balance ≥ 0, only commutative/associative/idempotent merge. Picking the wrong primitive produces architectures that scale poorly and fail surprisingly under partition.",
     remediation: {
       kind: "reading",
       href: "https://jepsen.io/consistency",
@@ -884,32 +969,37 @@ const ENTRIES: Misconception[] = [
   },
   {
     id: "tla-as-proof",
-    name: "Treats TLA+ output as a proof of correctness",
+    name: "Treats TLA+ output as a proof of implementation correctness",
     description:
-      "Reads a successful TLC model-check as proof the implementation is correct. TLA+ is a SPECIFICATION language — the model checker verifies that the SPEC satisfies its invariants under all reachable states (within model bounds). The implementation may diverge from the spec; bugs introduced after the spec was written don't appear in the spec's TLC output. TLA+ catches design-level bugs (concurrency races, missing invariants) and is high-leverage there; it does not catch implementation bugs.",
+      "Reads a successful TLC model-check as proof the implementation is correct. TLA+ is a SPECIFICATION language. TLC, the bounded model checker, verifies the spec against invariants and temporal properties within model bounds. TLAPS (TLA+ Proof System) DOES support unbounded mechanically-checked proofs of safety and refinement — so 'model bounds' applies to TLC-style checking, not TLA+ as a language. Either way, the verified object is the SPEC. The implementation may diverge. Lamport: 'implementations are highly optimized and the optimizations are rarely modeled.' TLA+ catches design-level bugs (concurrency races, missing invariants) and is high-leverage there; it does not catch implementation bugs.",
     remediation: {
       kind: "reading",
-      href: "https://lamport.azurewebsites.net/tla/tla.html",
-      label: "Lamport · The TLA+ Home Page",
+      href: "https://lamport.org/pubs/spec-and-verifying.pdf",
+      label: "Lamport · Specifying and Verifying Systems With TLA+",
     },
   },
   {
     id: "weak-memory-as-bug",
     name: "Treats ARM/POWER weak memory ordering as a bug in 'correct' x86 code",
     description:
-      "Assumes code that works on x86 will work on ARM. x86 has a strong memory model (Total Store Order); ARM and POWER are weakly ordered — writes can be reordered, made visible out of order across cores, and require explicit memory barriers (DMB on ARM, lwsync on POWER) where x86 didn't need any. The C++ memory model allows the compiler to reorder freely under sequential-consistency-for-data-race-free programs; non-atomic shared writes are undefined behavior. Multi-threaded code that hasn't been tested on weakly-ordered architectures is presumptively broken on them.",
+      "Assumes code that works on x86 will work on ARM. x86 has a strong memory model (Total Store Order). ARM and POWER are weakly ordered — writes can be reordered, made visible out of order across cores, and require explicit memory barriers. ARMv7's DMB is analogous to POWER's hwsync; ARM has NO analogue of lwsync (POWER's cheaper barrier). ARMv8 adds load-acquire / store-release instructions (LDAR/STLR) as cheaper alternatives. C++ memory model uses sequential-consistency-for-data-race-free (Boehm/Adve); non-atomic shared writes are undefined behavior. On x86, stores can map to xchg for SC atomics. Multi-threaded code untested on weakly-ordered architectures is presumptively broken there.",
     remediation: {
       kind: "reading",
-      href: "https://www.hboehm.info/c++mm/why_undef.html",
-      label: "Boehm · Why the C++ memory model matters",
+      href: "https://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html",
+      label: "Sewell · C/C++11 mappings to processors",
     },
   },
 
-  // ─── Phase 0 · Digital Literacy (PRE-RESEARCH SCAFFOLD — not from the ──
-  // bounded-research session). The foundational mental-model traps that
-  // surface when first learners encounter computing. These are accessible
-  // by design — first lessons for anyone whose mental model of computers
-  // came from years of using them rather than studying them.
+  // ─── Phase 0 · Digital Literacy (VERIFIED 2026-06-01). The foundational ──
+  // mental-model traps that surface when first learners encounter computing.
+  // Verified against canonical sources (NIST SP 800-88 Rev. 2 for media
+  // sanitization, Wikipedia Wi-Fi / Turing-machine / binary-file pages with
+  // primary citations, Coding Horror "Cloud is someone else's computer",
+  // Cambridge research on the expert-layperson knowledge gap for HTTPS
+  // padlock semantics). delete-as-erase was corrected to reflect SSD/TRIM
+  // behavior (HDD recovery window was misleading for modern dominant
+  // storage). Two new high-leverage additions: cloud-as-magical-elsewhere,
+  // https-padlock-as-trust.
   {
     id: "computer-as-intelligent",
     name: "Anthropomorphizes the computer",
@@ -936,22 +1026,44 @@ const ENTRIES: Misconception[] = [
     id: "delete-as-erase",
     name: "Assumes 'delete' permanently erases data",
     description:
-      "Treats clicking 'Delete' or emptying the trash as physically removing the data. Most file systems mark the storage as available for reuse but leave the actual bytes in place until something else writes over them. The data is recoverable with forensic tools for hours, days, or longer. Secure deletion requires overwriting (with tools like shred) or hardware-level wipes. The implication: 'deleted' on a stolen device is not 'gone.'",
+      "Treats clicking 'Delete' or emptying the trash as physically removing the data. On HDDs the bytes typically remain on disk for hours, days, or months until something else writes over them — forensic recovery is routine. On SSDs with TRIM (default on Windows / macOS / Linux since ~2010), the controller's garbage collector usually wipes deleted blocks within seconds, but wear-leveling means multi-pass overwrite tools designed for HDDs give a false sense of security on SSDs. The canonical modern method per NIST SP 800-88 Rev. 2 is cryptographic erase: full-disk encryption from day one + factory reset destroys the key, rendering the data unrecoverable without overwriting bytes.",
     remediation: {
       kind: "reading",
-      href: "https://en.wikipedia.org/wiki/Data_erasure",
-      label: "Data erasure",
+      href: "https://csrc.nist.gov/pubs/sp/800/88/r2/final",
+      label: "NIST SP 800-88 Rev. 2 · Guidelines for Media Sanitization",
     },
   },
   {
     id: "binary-as-just-digits",
     name: "Treats 0s and 1s as abstract digits without context",
     description:
-      "Reads 'computers use binary' as a quirky design choice — 'they could use any number system.' Binary is the physical reality of how computers store and transmit information: a transistor is either conducting (1) or not (0), a magnetic spot is one polarity or the other, a voltage level is high or low. Bits are interpretable: depending on context, the same bit pattern can be a number, a character, a pixel, an instruction. Without the context (the file format, the type system, the protocol), bits have no meaning.",
+      "Reads 'computers use binary' as a quirky design choice — 'they could use any number system.' Binary is the physical reality of how computers store and transmit information: a transistor is either conducting (1) or not (0), a magnetic spot is one polarity or the other, a voltage level is high or low. The same bit pattern can be the letter A, the number 65, a green pixel, or a CPU ADD instruction — depending on the context (file format, type system, protocol). Without that context, bits have no meaning.",
     remediation: {
       kind: "lesson",
       path: "/paths/0/0-1/04",
       label: "Phase 0 · Bits, bytes, and what they mean",
+    },
+  },
+  {
+    id: "cloud-as-magical-elsewhere",
+    name: "Treats 'the cloud' as a magical somewhere-else",
+    description:
+      "Reads 'the cloud' as a fundamentally different kind of place where physics doesn't apply — perpetual, immune to outage, 'not really stored anywhere.' The cloud is data centers in specific geographic locations subject to disk failure, power outages, jurisdiction, contractual terms, and provider bankruptcy. Coding Horror's line is canonical: 'the cloud is just someone else's computer.' Modern caveat: it's many computers behind abstraction services, but the physical substrate and the operator's choices still constrain availability, durability, and access.",
+    remediation: {
+      kind: "reading",
+      href: "https://blog.codinghorror.com/the-cloud-is-just-someone-elses-computer/",
+      label: "Coding Horror · The cloud is just someone else's computer",
+    },
+  },
+  {
+    id: "https-padlock-as-trust",
+    name: "Reads the HTTPS padlock as a trust signal",
+    description:
+      "Treats the padlock icon as evidence the site is safe, legitimate, or trustworthy. HTTPS guarantees only that the connection is encrypted and the certificate matches the domain in the URL bar. It says nothing about whether the operator is honest, the site isn't phishing, the data is handled well at the other end, or the business model is benign. Phishing kits ship with valid Let's Encrypt certificates as a matter of course. The padlock is a channel-integrity signal, not a content-trust signal.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.fbi.gov/news/press-releases/cyber-actors-exploit-secure-websites-in-phishing-campaigns",
+      label: "FBI · Cyber actors exploit secure websites in phishing campaigns",
     },
   },
 ];
