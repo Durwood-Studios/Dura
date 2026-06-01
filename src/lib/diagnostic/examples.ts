@@ -1042,6 +1042,103 @@ export const INDIRECT_PROMPT_INJECTION: MCQQuestion = {
   tags: ["llm-security", "prompt-injection", "ai-engineering", "phase-6"],
 };
 
+// ─── Phase 7 · False sharing — CPU coherency stall ────────────────────────
+// Background-knowledge scaffold (not from the bounded-research session).
+// Anchored to Ulrich Drepper's "What Every Programmer Should Know About
+// Memory." False sharing is the canonical CPU-level performance bug that
+// performance counters at the cache-miss layer don't surface clearly.
+
+export const FALSE_SHARING: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-7-false-sharing-01",
+  difficulty: "stretch",
+  prompt:
+    "Two threads update separate variables that happen to be declared next to each other in a struct. Both threads are CPU-bound. Performance is far worse than running each thread alone on the same CPU. What's the cause?",
+  correct: {
+    text: "False sharing. The two variables sit in the same cache line, so even though the threads modify DIFFERENT variables, each modification invalidates the cache line for the other thread's CPU. The CPUs spend most of their time on cache-coherency traffic (MESI invalidation messages) rather than computation. Fix: pad variables to separate cache lines (alignas(64) in C++, #[repr(align(64))] in Rust, padding fields in C).",
+    explanation:
+      "False sharing is invisible to most performance counters because the cache line is 'present but invalid' — not a normal miss. It shows up as inflated coherency traffic on tools like perf c2c (cache-to-cache) on Linux.",
+  },
+  distractors: [
+    {
+      text: "Cache pressure — the threads' working sets exceed L3. Recompile with a smaller hot-set or run on a CPU with a larger cache",
+      misconception: "false-sharing-as-cache-miss",
+    },
+    {
+      text: "Memory bandwidth saturation — the threads are writing too fast for the DRAM controller. Throttle the write rate",
+      misconception: "false-sharing-as-cache-miss",
+    },
+    {
+      text: "Lock contention — the variables share an implicit ownership. Add a fine-grained mutex around each variable",
+      misconception: "false-sharing-as-cache-miss",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "Cache lines are the unit of CPU coherency. On modern x86 / ARM the line is 64 bytes. When a CPU modifies any byte in a line, it asserts ownership and other CPUs holding the line must invalidate.",
+      "Two struct fields declared adjacent: 'int a; int b;' — both 4 bytes — almost certainly fit in the same 64-byte cache line.",
+      "Thread T1 writes to a. The line is loaded into T1's L1 cache, marked Modified. T2's copy of the same line (which contained b) is invalidated.",
+      "Thread T2 writes to b. The line is loaded into T2's L1 cache from T1's cache (cache-to-cache transfer or via L3), marked Modified. T1's copy is invalidated.",
+      "Each thread alternates: write → invalidate the other → read back from the other's cache → write again. The line ping-pongs between L1s at memory-system speed, never serving a useful local read.",
+      "The threads modify different variables — they don't race semantically — but the CPU coherency protocol doesn't know that. From the protocol's perspective, both threads write to the same cache line, so the line must invalidate.",
+      "Performance impact: a cache-to-cache transfer is roughly 100x slower than an L1 hit. Two threads doing simple counter increments at 1 GHz can drop to a few MHz effective throughput.",
+      "Diagnosis: perf c2c on Linux shows cache-line-level contention. Intel VTune has a 'False Sharing' analysis. Look for cache lines with high HITM (hit modified) counts.",
+      "Fix: pad the variables so they sit in separate cache lines. C++: 'alignas(64) int a; alignas(64) int b;' or insert a 'char padding[64];' between them. Rust: '#[repr(align(64))]'. The cost is 60 bytes of waste per variable, which is essentially free.",
+      "Distractor diagnoses fail: larger cache (distractor 1) doesn't help — the line is in cache, just invalid. Bandwidth throttling (distractor 2) addresses a different bottleneck — the coherency traffic is what's slow, not DRAM. Mutexes (distractor 3) MAKE IT WORSE — the mutex itself sits in a cache line and adds more coherency traffic.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["cpu-cache", "false-sharing", "concurrency", "performance", "phase-7"],
+};
+
+// ─── Phase 7 · Raft vs Paxos architectural choice ─────────────────────────
+// Background-knowledge scaffold. Anchored to Ongaro & Ousterhout's Raft
+// paper. The "Raft is just simpler Paxos" misframe drives architecture
+// decisions in the wrong direction.
+
+export const RAFT_VS_PAXOS: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-7-raft-vs-paxos-01",
+  difficulty: "stretch",
+  prompt:
+    "Your team needs distributed consensus and is choosing between Raft and Paxos. A senior engineer argues 'Raft is just simpler Paxos with the same trade-offs.' What's a more accurate framing?",
+  correct: {
+    text: "Raft and Paxos solve the same problem with different architectural choices. Raft has a STRONG LEADER: a single leader is the source of truth for the log; reconfiguration follows a defined two-phase membership change. Paxos is leader-optional, supports multiple concurrent proposers, and is more flexible at the cost of harder-to-implement correctness. Raft trades flexibility for tractability — the right choice when the system tolerates a single bottleneck and benefits from a clear mental model.",
+    explanation:
+      "Both achieve consensus. Raft's design is intentional: Ongaro and Ousterhout's paper argues that algorithm understandability is itself a property worth optimizing for. The result is a different shape, not just a clearer presentation.",
+  },
+  distractors: [
+    {
+      text: "Yes — Raft is Paxos with the same correctness properties but better pedagogy and the same performance envelope",
+      misconception: "raft-as-paxos-simpler",
+    },
+    {
+      text: "Raft is strictly more efficient than Paxos because it eliminates the prepare phase that Paxos requires",
+      misconception: "raft-as-paxos-simpler",
+    },
+    {
+      text: "Use Raft only for replicated state machines; for any other distributed coordination problem, use Paxos for its flexibility",
+      misconception: "consensus-as-correctness",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "Consensus algorithms solve: 'a group of nodes agrees on a single value (or a sequence of values) despite some nodes failing or partitioning.'",
+      "Paxos (Lamport 1998) is the canonical solution. Multi-Paxos extends to sequences of values. Paxos has no required leader — any node can propose. Optimizations (designating a stable leader, batching proposals) are layered on top.",
+      "Raft (Ongaro & Ousterhout 2014) was designed with understandability as a first-class property. Its key choices: strong leader (only the leader appends to the log), simplified membership change (one node at a time, two-phase), log structure visible in the algorithm.",
+      "Same correctness properties: both are safe (agreed values can't change) and live (under non-pathological failures, progress is made). The properties differ in how they're achieved.",
+      "Performance: Raft and Paxos have similar latency under stable leadership. Raft's strong-leader requirement means leader failure triggers an election that pauses the system (typically 100-500ms). Paxos can run leaderless with higher per-decision overhead but no election downtime.",
+      "Flexibility: Paxos supports multiple concurrent proposers (useful for some architectures). Raft does not — the leader is the bottleneck.",
+      "Implementation effort: Raft's strong leader + simplified membership change make it materially easier to implement correctly than Multi-Paxos. The Raft paper itself argues this and presents an algorithm focused on minimizing implementation surface area.",
+      "When Raft fits: replicated state machines (etcd, Consul, CockroachDB use it), systems where a leader bottleneck is acceptable, teams without distributed-systems specialists.",
+      "When Paxos fits: geo-distributed systems where leaderless operation is valuable, systems with very high consensus rate where multiple proposers help, teams that can invest in the implementation complexity.",
+      "Distractor 1 is the headline misconception: 'same trade-offs' is wrong. Distractor 2 is wrong on the merits: Raft has the prepare-equivalent (elections) but at a different boundary. Distractor 3 conflates consensus with all distributed coordination (the consensus-as-correctness misconception) — many coordination problems are better solved with 2PC, sagas, or CRDTs.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["consensus", "raft", "paxos", "distributed-systems", "phase-7"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -1067,4 +1164,6 @@ export const ALL_EXAMPLES = [
   RETRY_BACKOFF_JITTER,
   TRAINING_SERVING_SKEW,
   INDIRECT_PROMPT_INJECTION,
+  FALSE_SHARING,
+  RAFT_VS_PAXOS,
 ] as const;

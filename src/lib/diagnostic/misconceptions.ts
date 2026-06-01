@@ -830,6 +830,80 @@ const ENTRIES: Misconception[] = [
       label: "scikit-learn · Cross-validation strategies",
     },
   },
+
+  // ─── Phase 7 · Advanced Systems (PRE-RESEARCH SCAFFOLD — not from the ──
+  // bounded-research session). Background knowledge of production-grade
+  // misconceptions in distributed consensus, CPU memory hierarchy, and
+  // database internals. Sources for future verification: Diego Ongaro's
+  // Raft paper, Leslie Lamport on Paxos, the Aphyr Jepsen consistency
+  // analyses, Ulrich Drepper's "What Every Programmer Should Know About
+  // Memory," and the C++ memory model documentation. Mark as SCAFFOLD.
+  {
+    id: "raft-as-paxos-simpler",
+    name: "Treats Raft as 'just simpler Paxos'",
+    description:
+      "Reads Raft as a teaching version of Paxos with the same trade-offs. They solve the same problem (consensus) but make different architectural choices: Raft has a STRONG LEADER (single source of truth, two-phase membership change), Paxos is leader-optional and supports multiple concurrent proposers. Raft trades flexibility for tractability — useful when the system tolerates a single bottleneck and benefits from a clear mental model. The choice isn't 'simpler is better,' it's matching the consensus model to the system's constraints.",
+    remediation: {
+      kind: "reading",
+      href: "https://raft.github.io/raft.pdf",
+      label: "Ongaro & Ousterhout · In Search of an Understandable Consensus Algorithm",
+    },
+  },
+  {
+    id: "false-sharing-as-cache-miss",
+    name: "Reads false sharing as a normal cache miss",
+    description:
+      "Diagnoses false sharing as 'cache pressure, get a bigger cache.' False sharing is a CPU coherency stall: two threads update separate variables that share a cache line, so each modification invalidates the line for the other CPU. Performance counters at the cache-miss level don't show this clearly because the line is technically present — it's just invalid. Fix: pad variables to separate cache lines (alignas(64) in C++, #[repr(align(64))] in Rust). Adding a mutex makes it worse.",
+    remediation: {
+      kind: "reading",
+      href: "https://en.wikipedia.org/wiki/False_sharing",
+      label: "False sharing",
+    },
+  },
+  {
+    id: "consensus-as-correctness",
+    name: "Treats consensus as the universal distributed-correctness primitive",
+    description:
+      "Reaches for Paxos / Raft / Zookeeper to coordinate every distributed decision. Consensus is the agreement-on-a-single-value primitive. Cross-shard transactions need two-phase commit (or its modern descendants — Calvin, Spanner's TrueTime). Cross-system invariants often need sagas with compensation. Eventually-consistent state needs CRDTs. Using consensus where the problem isn't 'agree on one value' produces architectures that scale poorly and fail in surprising ways under partition.",
+    remediation: {
+      kind: "reading",
+      href: "https://jepsen.io/consistency",
+      label: "Jepsen · Consistency models",
+    },
+  },
+  {
+    id: "mvcc-vs-locking-throughput",
+    name: "Assumes MVCC always outperforms locking",
+    description:
+      "Treats Multi-Version Concurrency Control as universally better for throughput than two-phase locking. MVCC excels for read-heavy workloads (readers don't block writers and vice versa). Under heavy WRITE contention on the same rows, MVCC produces version chains that grow long, vacuum costs become significant, and serializable isolation levels (Postgres SSI) abort more transactions. Lock-based concurrency can outperform MVCC for workloads dominated by short, conflicting writes. Pick the concurrency model based on the workload, not the database's marketing.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.postgresql.org/docs/current/mvcc.html",
+      label: "PostgreSQL · MVCC",
+    },
+  },
+  {
+    id: "tla-as-proof",
+    name: "Treats TLA+ output as a proof of correctness",
+    description:
+      "Reads a successful TLC model-check as proof the implementation is correct. TLA+ is a SPECIFICATION language — the model checker verifies that the SPEC satisfies its invariants under all reachable states (within model bounds). The implementation may diverge from the spec; bugs introduced after the spec was written don't appear in the spec's TLC output. TLA+ catches design-level bugs (concurrency races, missing invariants) and is high-leverage there; it does not catch implementation bugs.",
+    remediation: {
+      kind: "reading",
+      href: "https://lamport.azurewebsites.net/tla/tla.html",
+      label: "Lamport · The TLA+ Home Page",
+    },
+  },
+  {
+    id: "weak-memory-as-bug",
+    name: "Treats ARM/POWER weak memory ordering as a bug in 'correct' x86 code",
+    description:
+      "Assumes code that works on x86 will work on ARM. x86 has a strong memory model (Total Store Order); ARM and POWER are weakly ordered — writes can be reordered, made visible out of order across cores, and require explicit memory barriers (DMB on ARM, lwsync on POWER) where x86 didn't need any. The C++ memory model allows the compiler to reorder freely under sequential-consistency-for-data-race-free programs; non-atomic shared writes are undefined behavior. Multi-threaded code that hasn't been tested on weakly-ordered architectures is presumptively broken on them.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.hboehm.info/c++mm/why_undef.html",
+      label: "Boehm · Why the C++ memory model matters",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(
