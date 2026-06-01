@@ -849,6 +849,102 @@ export const READ_COMMITTED_DEFAULT: MCQQuestion = {
   tags: ["isolation-levels", "databases", "postgresql", "race-conditions", "phase-5"],
 };
 
+// ─── Phase 4 · HTTP idempotency vs idempotency keys ──────────────────────
+// Background-knowledge scaffold (not from the bounded-research session).
+// Anchored to RFC 9110 (HTTP Semantics) + Stripe's idempotency-key docs.
+// The "PUT is idempotent so I can retry" misread is the most common
+// API-design bug in payment + checkout flows.
+
+export const HTTP_IDEMPOTENCY: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-4-http-idempotency-01",
+  difficulty: "core",
+  prompt:
+    "Your API exposes a PUT /orders/{id} endpoint. A client retries on network failure. Per RFC 9110, PUT is idempotent — so retries are safe, right?",
+  correct: {
+    text: "Method-level idempotency (RFC 9110) means N PUTs on the same URL have the same EFFECT — at the protocol level. Application-level idempotency requires an explicit idempotency key the server uses to cache the first response and replay it on retry. Without that, a PUT that succeeds and then loses the response triggers a retry that runs against the new state, producing different outcomes.",
+    explanation:
+      "RFC 9110's idempotency is a property of the METHOD SEMANTICS. Real-world retry safety requires explicit application-level coordination — Stripe's idempotency keys are the canonical pattern.",
+  },
+  distractors: [
+    {
+      text: "Yes — RFC 9110 marks PUT as idempotent; retrying is safe by definition",
+      misconception: "idempotency-as-replay-safe",
+    },
+    {
+      text: "Yes — return the same status code (e.g., 201) on every retry and the client treats it as a successful single operation",
+      misconception: "http-status-as-semantics",
+    },
+    {
+      text: "Only if you wrap each PUT in a database transaction — the transactional boundary makes the operation idempotent",
+      misconception: "idempotency-as-replay-safe",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "RFC 9110 Section 9.2.2 defines idempotency: a method is idempotent if the intended EFFECT on the server of multiple identical requests with that method is the same as the effect of a single request.",
+      "The definition is about the EFFECT, not the response. Two PUTs to the same URL with the same body should leave the server in the same state.",
+      "Real-world retry safety has additional concerns the protocol doesn't cover: the client doesn't know if the FIRST request succeeded (the response may be lost in transit); the server's state may have changed between the first request and the retry (another client modified the resource); the retry may run against a different replica with different state.",
+      "Concrete failure: PUT /orders/123 with body { qty: 5 }. Server creates the order, deducts inventory, responds 201. Response lost in transit. Client retries. Server sees order 123 already exists with qty 5, returns 200 (idempotent at HTTP layer). But the inventory was deducted ONCE on the first call and NOT deducted on the retry — application invariant violated even though HTTP says everything is fine.",
+      "Production pattern: explicit idempotency keys. The client generates a unique key per logical operation (UUID), passes it in a header (Idempotency-Key on Stripe, the same idiom across most modern APIs).",
+      "The server stores the request body hash + the response under the key. On retry with the same key: server checks if it has seen the key. If yes, replay the cached response (without re-running the side effects). If no, run the operation and cache the result before responding.",
+      "Status codes alone (distractor 2) don't help: the client can't distinguish 'I succeeded twice' from 'I succeeded once and you retried.'",
+      "Database transactions alone (distractor 3) don't help: each retry is a separate transaction; the inventory deduction happens once per transaction, not once per logical operation.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["http", "idempotency", "api-design", "phase-4"],
+};
+
+// ─── Phase 4 · Retry policy hygiene ──────────────────────────────────────
+// Background-knowledge scaffold. Anchored to the AWS Builders' Library
+// guidance on timeouts/retries/backoff. The "I retry on failure" pattern
+// without exponential backoff + jitter is the canonical cause of
+// thundering-herd outages.
+
+export const RETRY_BACKOFF_JITTER: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-4-retry-backoff-jitter-01",
+  difficulty: "stretch",
+  prompt:
+    "Your service retries failed downstream requests with a 1-second delay between attempts, up to 5 retries. Under what condition does this policy produce a worse outage than no retries?",
+  correct: {
+    text: "When the downstream service is recovering from a brief failure: all N upstream clients hit the same 1-second mark, all retry simultaneously, the recovering service is hammered by a synchronized retry wave that pushes it back down. The policy converts a brief blip into a sustained outage. Fix: exponential backoff (delay doubles each attempt) PLUS jitter (random fractional delay) PLUS a maximum retry count PLUS a circuit breaker.",
+    explanation:
+      "Fixed-delay retries from many clients synchronize because they all share the same wall-clock starting condition (the moment the service went down). Jitter is what breaks the synchronization.",
+  },
+  distractors: [
+    {
+      text: "The policy is fine — 5 retries with 1-second delay is a reasonable retry budget; outages happen when retries run out",
+      misconception: "retry-without-backoff",
+    },
+    {
+      text: "When the downstream is slow, the 1-second delay isn't long enough; raise it to 5 seconds and the herd dissipates",
+      misconception: "retry-without-backoff",
+    },
+    {
+      text: "Only if the retry policy doesn't include a maximum retry count; capping at 5 is sufficient to bound the herd",
+      misconception: "retry-without-backoff",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "Brief downstream failure: a service crashes and restarts in ~3 seconds. While it's down, N upstream clients each fire a request that fails.",
+      "Each client schedules a retry for 'now + 1 second.' All N clients have approximately the same 'now' because the downstream failure was simultaneous from their perspective.",
+      "At the 1-second mark, the recovering downstream gets hit by all N retries at once. If the service's normal load was N RPS spread across a second, the retry wave is N requests in the same millisecond — a 1000× burst.",
+      "The recovering service is fragile (just starting up, caches cold, connection pools empty). The burst pushes it back down. The clients see another failure and schedule another retry — at 'now + 1 second' again. The synchronization is preserved.",
+      "Result: a 3-second brief failure becomes a 30+ second sustained outage because the retry policy creates a self-sustaining oscillation between 'service up, retry wave hits, service down' and 'service down, retries scheduled, service starts up.'",
+      "Fix 1 — exponential backoff: each retry delay doubles. 1s, 2s, 4s, 8s, 16s. Spreads the retry wave over time rather than concentrating it at fixed intervals.",
+      "Fix 2 — jitter: add a random fractional component to each delay. Clients no longer share a wall-clock starting condition. AWS Builders' Library recommends FULL jitter: delay = random(0, exponential_backoff_target). Equivalent jitter spreads requests across the backoff window.",
+      "Fix 3 — circuit breaker: after the retry count is exhausted, mark the downstream as down and stop sending requests for a longer cooldown window. Probe with a single request before opening the floodgates again.",
+      "Fix 4 — max retry count: caps the blast radius of any individual client. Without backoff + jitter though, max retries alone doesn't prevent the herd — it just bounds how long each client participates.",
+      "All four pieces address different failure modes. Skipping jitter is the most common omission and the one that produces the most production incidents.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["retries", "backoff", "thundering-herd", "distributed-systems", "phase-4"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -870,4 +966,6 @@ export const ALL_EXAMPLES = [
   ISA95_PYRAMID_MEANING,
   TCP_DELIVERY_SEMANTICS,
   READ_COMMITTED_DEFAULT,
+  HTTP_IDEMPOTENCY,
+  RETRY_BACKOFF_JITTER,
 ] as const;

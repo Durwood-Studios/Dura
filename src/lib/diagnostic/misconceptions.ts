@@ -678,6 +678,82 @@ const ENTRIES: Misconception[] = [
       label: "Brendan Gregg · Linux Load Averages",
     },
   },
+
+  // ─── Phase 4 · Backend + networking (PRE-RESEARCH SCAFFOLD — not from ──
+  // the bounded-research session). Background knowledge of the production
+  // misconceptions that drive backend incident postmortems: HTTP semantics
+  // beyond status codes, queueing theory basics, idempotency, distributed
+  // timing, retry storms. Sources for future verification: RFC 9110 (HTTP
+  // Semantics, June 2022), RFC 9112 (HTTP/1.1), RFC 9113 (HTTP/2), RFC 9114
+  // (HTTP/3), Little's Law for queueing, the AWS Builders' Library on
+  // timeouts/retries/backoff. Mark as SCAFFOLD pending freshly-sourced
+  // research before lessons publish.
+  {
+    id: "http-status-as-semantics",
+    name: "Treats HTTP status codes as the full semantic contract",
+    description:
+      "Returns a 200 for a failed business operation 'because the request was processed' or a 500 for a validation failure 'because the server saw it.' Per RFC 9110, status codes carry transport-layer semantics: 2xx = received and processed at the HTTP layer, 4xx = client-fixable problem, 5xx = server-side fault. The application-level outcome (did the order succeed?) is layered on top. Mixing them produces APIs where clients can't reason about retries — a 200 with body { error: 'out of stock' } makes retry policies useless because automated retry would keep firing.",
+    remediation: {
+      kind: "reading",
+      href: "https://datatracker.ietf.org/doc/html/rfc9110",
+      label: "RFC 9110 · HTTP Semantics",
+    },
+  },
+  {
+    id: "idempotency-as-replay-safe",
+    name: "Equates 'idempotent' with 'safe to retry blindly'",
+    description:
+      "Reads HTTP method idempotency (GET, PUT, DELETE) as 'I can retry without thinking.' RFC 9110's idempotency is about METHOD SEMANTICS — n calls have the same effect as 1 call AT THE PROTOCOL LEVEL. Application idempotency requires explicit idempotency keys: the server stores the first response under the key and replays it on retry. Without that, a PUT that creates a resource then crashes can be retried into a duplicate-but-different resource because the second PUT runs against the new state.",
+    remediation: {
+      kind: "reading",
+      href: "https://stripe.com/docs/api/idempotent_requests",
+      label: "Stripe · Idempotency keys",
+    },
+  },
+  {
+    id: "littles-law-ignored",
+    name: "Ignores Little's Law when sizing queues and timeouts",
+    description:
+      "Picks queue sizes and request timeouts by intuition. Little's Law (L = λW) gives the relationship: average queue length = arrival rate × average wait time. If your service handles 100 RPS with 50ms average latency, the in-flight request count is 5 — sizing the thread pool below 5 produces queueing; sizing too far above wastes resources. Ignoring this produces queues that overflow under steady-state load (capacity is the average, not the headroom).",
+    remediation: {
+      kind: "reading",
+      href: "https://en.wikipedia.org/wiki/Little%27s_law",
+      label: "Little's Law",
+    },
+  },
+  {
+    id: "retry-without-backoff",
+    name: "Retries failed requests without exponential backoff + jitter",
+    description:
+      "Retries with a fixed delay (or no delay) on transient errors. Synchronized retries from N clients hammering a recovering service produce a thundering herd that keeps the service down. Production-grade retry policy: exponential backoff (delay doubles each attempt) PLUS jitter (random component) PLUS a maximum retry count PLUS circuit breaker (stop retrying after threshold). Each component addresses a different failure mode; skipping jitter is the most common omission.",
+    remediation: {
+      kind: "reading",
+      href: "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/",
+      label: "AWS Builders' Library · Timeouts, retries, backoff with jitter",
+    },
+  },
+  {
+    id: "http2-multiplexing-as-parallelism",
+    name: "Treats HTTP/2 multiplexing as application-level parallelism",
+    description:
+      "Assumes HTTP/2 multiplexing means N parallel requests = N× throughput. HTTP/2 multiplexes streams over a single TCP connection, eliminating HTTP/1.1's head-of-line blocking AT THE HTTP LAYER — but TCP itself still has head-of-line blocking. A single dropped packet stalls all multiplexed streams until retransmit. HTTP/3 (QUIC) addresses this by replacing TCP with UDP + reliable streams. Picking HTTP/2 expecting HTTP/3 semantics for high-loss networks produces worse-than-HTTP/1.1 performance under packet loss.",
+    remediation: {
+      kind: "reading",
+      href: "https://datatracker.ietf.org/doc/html/rfc9113",
+      label: "RFC 9113 · HTTP/2",
+    },
+  },
+  {
+    id: "clock-monotonic-vs-realtime",
+    name: "Uses wall-clock time for duration measurement",
+    description:
+      "Reads CLOCK_REALTIME (or Date.now()) twice to measure how long something took. Real-time clocks can JUMP backward (NTP adjustments, leap-second handling, manual clock changes) — a 'duration' computed from two real-time reads can be negative or nonsense. Duration measurement requires a MONOTONIC clock (CLOCK_MONOTONIC on POSIX, performance.now() in browsers) which is guaranteed not to go backward. The wall-clock-for-duration bug shows up rarely but mysteriously — usually right after a clock adjustment, which is exactly when alerts fire.",
+    remediation: {
+      kind: "reading",
+      href: "https://man7.org/linux/man-pages/man2/clock_gettime.2.html",
+      label: "clock_gettime(2) · CLOCK_MONOTONIC",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(
