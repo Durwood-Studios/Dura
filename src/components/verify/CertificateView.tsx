@@ -6,6 +6,7 @@ import { ShareButton } from "@/components/seo/ShareButton";
 import { copyToClipboard } from "@/lib/share";
 import { SITE_URL } from "@/lib/og";
 import { getPhase } from "@/content/phases";
+import { buildSignedShareUrl } from "@/lib/verify/client";
 import type { Certificate } from "@/types/assessment";
 
 interface CertificateViewProps {
@@ -15,7 +16,7 @@ interface CertificateViewProps {
 export function CertificateView({ certificate }: CertificateViewProps): React.ReactElement {
   const [copied, setCopied] = useState(false);
   const phase = getPhase(certificate.phaseId);
-  const url = `${SITE_URL}/verify/${certificate.verificationHash}`;
+  const url = buildSignedShareUrl(SITE_URL, certificate);
   const shortHash = certificate.verificationHash.slice(0, 12);
 
   const copyHash = async () => {

@@ -15,6 +15,7 @@ import { awardXPWithToast } from "@/lib/xp-manager";
 import { XP_AWARDS } from "@/lib/xp";
 import { putCertificate, getCertificatesByPhase } from "@/lib/db/certificates";
 import { generateVerificationHash } from "@/lib/crypto";
+import { requestSignature } from "@/lib/verify/client";
 import { track } from "@/lib/analytics";
 import { generateId, formatTime, cn } from "@/lib/utils";
 import { Confetti } from "@/components/motion/Confetti";
@@ -171,10 +172,16 @@ export function PhaseTest({
         standards,
       };
       const verificationHash = await generateVerificationHash(certBase);
+      // Request an HMAC signature from the server-side signing endpoint.
+      // Returns null when (a) the deployment has no VERIFICATION_HMAC_SECRET,
+      // or (b) the request fails. Either way the cert is still valid — it
+      // just won't carry the math-anchored badge until backfilled.
+      const signature = (await requestSignature(verificationHash)) ?? undefined;
       const cert: Certificate = {
         ...certBase,
         id: generateId("cert"),
         verificationHash,
+        signature,
       };
       await putCertificate(cert);
       setCertificate(cert);
