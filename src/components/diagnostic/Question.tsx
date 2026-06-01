@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { evaluate, renderChoices } from "@/lib/diagnostic/feedback";
+import { recordDiagnosticAnswer } from "@/lib/diagnostic/fsrs-card";
 import { MISCONCEPTIONS } from "@/lib/diagnostic/misconceptions";
 import type { ConfidenceLevel, EvaluationResult, MCQQuestion } from "@/lib/diagnostic/types";
 import { Confidence } from "./Confidence";
@@ -10,9 +11,19 @@ import { Feedback } from "./Feedback";
 interface QuestionProps {
   question: MCQQuestion;
   onResolved?: (result: EvaluationResult) => void;
+  /**
+   * When true (default), the answer is persisted to the learner's local
+   * FSRS deck so the question becomes part of their spaced-repetition
+   * review queue. Set to false for previews / never-persist contexts.
+   */
+  persistToFsrs?: boolean;
 }
 
-export function Question({ question, onResolved }: QuestionProps): React.ReactElement {
+export function Question({
+  question,
+  onResolved,
+  persistToFsrs = true,
+}: QuestionProps): React.ReactElement {
   const choices = useMemo(() => renderChoices(question), [question]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [confidence, setConfidence] = useState<ConfidenceLevel | undefined>(undefined);
@@ -30,6 +41,12 @@ export function Question({ question, onResolved }: QuestionProps): React.ReactEl
       MISCONCEPTIONS
     );
     setResult(next);
+    if (persistToFsrs) {
+      // Fire-and-forget — the FSRS bridge tolerates store-read failures and
+      // the UI must not block on IndexedDB latency. The next dashboard load
+      // will see the persisted card.
+      void recordDiagnosticAnswer(question, next);
+    }
     onResolved?.(next);
   }
 
