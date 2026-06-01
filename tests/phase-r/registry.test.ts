@@ -37,7 +37,7 @@ describe("PHASE_R registry", () => {
 
 describe("getPhaseRLesson", () => {
   it("returns a lesson when the id matches", () => {
-    const lesson = getPhaseRLesson("r-0-iso-8373-vocabulary");
+    const lesson = getPhaseRLesson("r-1-iso-8373-vocabulary");
     expect(lesson).toBeDefined();
     expect(lesson?.title).toBe("ISO 8373 Vocabulary");
   });
@@ -67,7 +67,7 @@ describe("phaseRStandardsCostUSD", () => {
   });
 
   it("counts ROS-Industrial as zero (public spec)", () => {
-    const rosLesson = PHASE_R.lessons.find((l) => l.id === "r-5-ros-industrial");
+    const rosLesson = PHASE_R.lessons.find((l) => l.id === "r-6-ros-industrial");
     const rosStandard = rosLesson?.standards[0];
     expect(rosStandard?.paywalled).toBe(false);
     expect(rosStandard?.approxCostUSD).toBeNull();

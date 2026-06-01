@@ -593,6 +593,227 @@ export const PHASES: Phase[] = [
       ),
     ],
   },
+
+  // ─── Phase R — Robotics (post-Phase-5 specialization) ──────────────────
+  // Eight-lesson curriculum anchored to ISO 10218:2025, ISO 12100, the
+  // functional-safety triad, and ROS-Industrial. Capstone produces a
+  // hash-anchored R15.06-2025 risk-assessment package via /verify.
+  {
+    id: "r",
+    slug: "r-robotics",
+    title: "Phase R: Robotics",
+    tagline: "Build robots that pass real safety reviews.",
+    description:
+      "Eight lessons anchored to the 2025 unified ISO 10218 family + the functional-safety triad + ROS-Industrial. Capstone hash-anchors a complete R15.06-2025 risk-assessment package as a /verify artifact a hiring manager can audit.",
+    color: "#818cf8",
+    estimatedHours: 11,
+    moduleCount: 8,
+    lessonCount: 8,
+    order: 10,
+    modules: [
+      mod(
+        "r",
+        1,
+        "iso-8373-vocabulary",
+        "ISO 8373 Vocabulary",
+        "The canonical robotics glossary — manipulator, end-effector, pose, workspace, collaborative operation. Every downstream lesson drifts without it.",
+        1,
+        1
+      ),
+      mod(
+        "r",
+        2,
+        "iso-12100-risk",
+        "ISO 12100 Risk Assessment",
+        "The four-step risk-assessment process every machinery-safety standard inherits. Limits, hazards, estimation, evaluation.",
+        1,
+        1
+      ),
+      mod(
+        "r",
+        3,
+        "functional-safety",
+        "Functional Safety: PL ↔ SIL",
+        "IEC 61508 as parent. ISO 13849 (PL a-e) and IEC 62061 (SIL 1-3) derive from it with different architectural choices.",
+        1,
+        1
+      ),
+      mod(
+        "r",
+        4,
+        "collaborative-modes",
+        "The Four Collaborative Modes",
+        "ISO 10218-1:2025 absorbed ISO/TS 15066. The four modes — SMS, HG, SSM, PFL — have distinct sensor, control-system, and risk-assessment implications.",
+        1,
+        1
+      ),
+      mod(
+        "r",
+        5,
+        "pfl-testing",
+        "PFL Testing: RIA TR R15.806",
+        "Application-level safety validation for power-and-force-limiting cobots. PFL-certified robot ≠ PFL-validated application.",
+        1,
+        1
+      ),
+      mod(
+        "r",
+        6,
+        "ros-industrial",
+        "ROS 2 + ROS-Industrial",
+        "Hands-on against URsim following the ROS-Industrial public curriculum. No vendor-issued ROS 2 cert exists — Open Robotics + Apex.Grace are the paths.",
+        2,
+        1
+      ),
+      mod(
+        "r",
+        7,
+        "cybersecurity",
+        "Robot Cybersecurity: 10218 × 62443",
+        "ISO 10218-1:2025 added cybersecurity requirements referencing IEC 62443 plus robot-specific overlay (secure boot, signed firmware, teach-pendant auth).",
+        1,
+        1
+      ),
+      mod(
+        "r",
+        8,
+        "capstone",
+        "Capstone: R15.06-2025 Risk-Assessment Package",
+        "Complete R15.06-2025 package for a simulated cell: 10218-2 hazard identification, 13849 safety-function design, 15066 force/pressure budget. Hash-anchored via /verify.",
+        3,
+        1
+      ),
+    ],
+  },
+
+  // ─── Phase M — Manufacturing (post-Phase-5 specialization) ──────────────
+  // Twelve-lesson curriculum anchored to the manufacturing-standards stack
+  // ISO 9001 + AS9100/IATF 16949, Core Tools, GD&T/MBD, ISA-95/88,
+  // MTConnect + OPC UA + TSN, IEC 62443, Lean / Six Sigma, RAMI 4.0 / IIRA.
+  // Viable for non-CS-degreed learners (prereqs through Phase 5 only).
+  {
+    id: "m",
+    slug: "m-manufacturing",
+    title: "Phase M: Manufacturing",
+    tagline: "Build a manufacturing engineer hiring managers actually test.",
+    description:
+      "Twelve lessons anchored to ISO 9001, AS9100, IATF 16949 + Core Tools, ASME Y14.5/Y14.41 GD&T + MBD, ISA-95/88, MTConnect + OPC UA + TSN, IEC 62443, Lean / Six Sigma. Five hash-anchorable /verify artifacts: PPAP package, DMAIC project, GD&T stack-up, OEE computation, MTConnect→OPC UA bridge.",
+    color: "#2dd4bf",
+    estimatedHours: 16,
+    moduleCount: 12,
+    lessonCount: 12,
+    order: 11,
+    modules: [
+      mod(
+        "m",
+        1,
+        "iso-9001-baseline",
+        "ISO 9001 Baseline",
+        "Universal Quality Management System standard. 7 QM principles. ISO 9001 certifies the ISMS process — not individual products.",
+        1,
+        1
+      ),
+      mod(
+        "m",
+        2,
+        "as9100-iatf-supersets",
+        "Industry Supersets: AS9100 + IATF 16949",
+        "Aerospace (AS9100D) and automotive (IATF 16949) extend ISO 9001 with sector-specific requirements.",
+        1,
+        1
+      ),
+      mod(
+        "m",
+        3,
+        "iatf-core-tools",
+        "IATF Core Tools",
+        "Five Core Tools required for IATF 16949 audits: APQP, PPAP, FMEA, MSA, SPC.",
+        2,
+        1
+      ),
+      mod(
+        "m",
+        4,
+        "lean-tps",
+        "Lean / Toyota Production System",
+        "Two pillars: JIT + Jidoka. PDCA underneath. Practitioner tools: 5S, SMED, Kaizen, A3, Andon, Heijunka, Kanban.",
+        1,
+        1
+      ),
+      mod(
+        "m",
+        5,
+        "six-sigma-dmaic",
+        "Six Sigma DMAIC",
+        "Define-Measure-Analyze-Improve-Control. Sequential phases with gate reviews; skipping ahead solves the wrong problem.",
+        2,
+        1
+      ),
+      mod(
+        "m",
+        6,
+        "asme-y14-5-gdt",
+        "ASME Y14.5 GD&T + Tolerance Stack-Up",
+        "GD&T as a MODEL — datum reference frames, Rule #1, MMC/LMC modifiers, virtual conditions. Stack-up output is a /verify artifact.",
+        2,
+        1
+      ),
+      mod(
+        "m",
+        7,
+        "asme-y14-41-mbd",
+        "ASME Y14.41 Model-Based Definition",
+        "Annotated 3D CAD model as authoritative product-definition document. Leverages STEP (ISO 10303-242).",
+        1,
+        1
+      ),
+      mod(
+        "m",
+        8,
+        "ipc-a-610-classes",
+        "IPC-A-610J Acceptability + Class Framework",
+        "Visual workmanship criteria for PCBAs across three classes: 1 (consumer), 2 (commercial), 3 (high-reliability).",
+        1,
+        1
+      ),
+      mod(
+        "m",
+        9,
+        "ipc-7711-rework",
+        "IPC-7711/7721 Rework",
+        "Procedural standard for rework, modification, repair. Inherits the IPC-A-610 three-class framework.",
+        1,
+        1
+      ),
+      mod(
+        "m",
+        10,
+        "isa-95-isa-88",
+        "ISA-95 Pyramid + ISA-88 Batch",
+        "ISA-95 five-level pyramid (L0 process → L4 ERP) as a CONTROL HIERARCHY. ISA-88 adds batch structure.",
+        1,
+        1
+      ),
+      mod(
+        "m",
+        11,
+        "mtconnect-opcua-tsn",
+        "MTConnect + OPC UA + IEC/IEEE 60802 TSN",
+        "Open data plane for industrial automation. Official OPC UA Companion Specification for MTConnect. IEC/IEEE 60802 is the TSN profile for industrial automation.",
+        2,
+        1
+      ),
+      mod(
+        "m",
+        12,
+        "iec-62443-rami-iira",
+        "IEC 62443 + RAMI 4.0 + IIRA",
+        "OT cybersecurity via zones, conduits, SL1-SL4. Plus RAMI 4.0 + IIRA architectural literacy for EU and US supply chains.",
+        1,
+        1
+      ),
+    ],
+  },
 ];
 
 export function getPhase(id: string): Phase | undefined {

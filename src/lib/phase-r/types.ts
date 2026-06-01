@@ -10,14 +10,14 @@
  */
 
 export type PhaseRLessonId =
-  | "r-0-iso-8373-vocabulary"
-  | "r-1-iso-12100-risk"
-  | "r-2-functional-safety"
-  | "r-3-collaborative-modes"
-  | "r-4-pfl-testing"
-  | "r-5-ros-industrial"
-  | "r-6-cybersecurity"
-  | "r-7-capstone";
+  | "r-1-iso-8373-vocabulary"
+  | "r-2-iso-12100-risk"
+  | "r-3-functional-safety"
+  | "r-4-collaborative-modes"
+  | "r-5-pfl-testing"
+  | "r-6-ros-industrial"
+  | "r-7-cybersecurity"
+  | "r-8-capstone";
 
 export interface StandardAnchor {
   /** Standard identifier as cited in industry — e.g. "ISO 10218-1:2025". */

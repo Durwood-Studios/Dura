@@ -92,7 +92,7 @@ const IEC_62443: PhaseRLesson["standards"][number] = {
 
 const LESSONS: readonly PhaseRLesson[] = [
   {
-    id: "r-0-iso-8373-vocabulary",
+    id: "r-1-iso-8373-vocabulary",
     order: 1,
     title: "ISO 8373 Vocabulary",
     description:
@@ -103,7 +103,7 @@ const LESSONS: readonly PhaseRLesson[] = [
     hasVerifyArtifact: false,
   },
   {
-    id: "r-1-iso-12100-risk",
+    id: "r-2-iso-12100-risk",
     order: 2,
     title: "ISO 12100 Risk Assessment",
     description:
@@ -114,7 +114,7 @@ const LESSONS: readonly PhaseRLesson[] = [
     hasVerifyArtifact: false,
   },
   {
-    id: "r-2-functional-safety",
+    id: "r-3-functional-safety",
     order: 3,
     title: "Functional Safety: PL ↔ SIL",
     description:
@@ -125,7 +125,7 @@ const LESSONS: readonly PhaseRLesson[] = [
     hasVerifyArtifact: false,
   },
   {
-    id: "r-3-collaborative-modes",
+    id: "r-4-collaborative-modes",
     order: 4,
     title: "The Four Collaborative Modes",
     description:
@@ -136,7 +136,7 @@ const LESSONS: readonly PhaseRLesson[] = [
     hasVerifyArtifact: false,
   },
   {
-    id: "r-4-pfl-testing",
+    id: "r-5-pfl-testing",
     order: 5,
     title: "PFL Testing: RIA TR R15.806",
     description:
@@ -147,7 +147,7 @@ const LESSONS: readonly PhaseRLesson[] = [
     hasVerifyArtifact: true,
   },
   {
-    id: "r-5-ros-industrial",
+    id: "r-6-ros-industrial",
     order: 6,
     title: "ROS 2 + ROS-Industrial",
     description:
@@ -158,7 +158,7 @@ const LESSONS: readonly PhaseRLesson[] = [
     hasVerifyArtifact: true,
   },
   {
-    id: "r-6-cybersecurity",
+    id: "r-7-cybersecurity",
     order: 7,
     title: "Robot Cybersecurity: 10218 × 62443",
     description:
@@ -169,7 +169,7 @@ const LESSONS: readonly PhaseRLesson[] = [
     hasVerifyArtifact: false,
   },
   {
-    id: "r-7-capstone",
+    id: "r-8-capstone",
     order: 8,
     title: "Capstone: R15.06-2025 Risk-Assessment Package",
     description:

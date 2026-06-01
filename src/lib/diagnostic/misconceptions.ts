@@ -471,7 +471,7 @@ const ENTRIES: Misconception[] = [
       "Cites the machinery risk-assessment process as six steps (limits, hazards, estimation, evaluation, reduction, residual review). Per ISO 12100, the canonical process is FOUR steps: determination of the limits of the machinery, hazard identification, risk estimation, risk evaluation. Risk reduction is a separate clause (5) and residual review is iteration, not a step. The folk-count drift produces audit-finding paperwork that doesn't match the standard's structure.",
     remediation: {
       kind: "lesson",
-      path: "/paths/r/r-1/01",
+      path: "/paths/r/r-2/01",
       label: "Phase R · ISO 12100 risk assessment",
     },
   },
@@ -482,7 +482,7 @@ const ENTRIES: Misconception[] = [
       "Treats PL c = SIL 1, PL d = SIL 2, PL e = SIL 3 as exact equivalences. The mapping is probabilistic (based on PFH — average probability of dangerous failure per hour) and approximate. ISO 13849 uses categorical architectures (Cat B through Cat 4) that weight component reliability, diagnostic coverage, and common-cause failure differently than IEC 62061's structured analysis. Picking PL or SIL for a project requires choosing the framework, not converting between them with a lookup table.",
     remediation: {
       kind: "lesson",
-      path: "/paths/r/r-2/01",
+      path: "/paths/r/r-3/01",
       label: "Phase R · Functional safety — PL ↔ SIL",
     },
   },
@@ -493,7 +493,7 @@ const ENTRIES: Misconception[] = [
       "Treats the four ISO 10218 / ISO/TS 15066 collaborative operation modes as interchangeable labels. They have distinct sensor, control-system, and risk-assessment implications: Safety-rated Monitored Stop pauses the robot when a human enters the shared workspace; Hand Guiding requires direct operator control via an enabling device; Speed and Separation Monitoring continuously adjusts robot speed based on operator distance; Power and Force Limiting bounds contact forces against ISO/TS 15066 body-region limits. A risk assessment that conflates them produces a control architecture that fails the chosen mode's certification.",
     remediation: {
       kind: "lesson",
-      path: "/paths/r/r-3/01",
+      path: "/paths/r/r-4/01",
       label: "Phase R · The four collaborative modes",
     },
   },
@@ -504,7 +504,7 @@ const ENTRIES: Misconception[] = [
       "Assumes a power-and-force-limiting cobot certified per ISO 10218-1:2025 + ISO/TS 15066 is 'safe out of the box' for collaborative operation. The robot's PFL FUNCTIONS are certified, but whether contact forces in YOUR application stay within ISO/TS 15066 body-region limits depends on end-effector geometry, payload, speed, and operator body position — and must be measured against the application per RIA TR R15.806's test methodology. The cobot is PFL-capable; the application has to be PFL-validated.",
     remediation: {
       kind: "lesson",
-      path: "/paths/r/r-4/01",
+      path: "/paths/r/r-5/01",
       label: "Phase R · PFL testing — RIA TR R15.806",
     },
   },
@@ -515,7 +515,7 @@ const ENTRIES: Misconception[] = [
       "Searches for a 'ROS 2 Certified Engineer' badge analogous to AWS Certified Solutions Architect. No vendor-issued ROS 2 certification exists. The actual paths are: Open Robotics Skill Certification Courses (Basics Python/C++, Nav, TF — portfolio-style), The Construct online course catalog, and Apex.AI's Apex.Grace fork (ISO 26262 ASIL D) for safety-certified production paths. Hiring managers asking 'are you ROS 2 certified' are asking for community-recognized milestones, not a vendor badge.",
     remediation: {
       kind: "lesson",
-      path: "/paths/r/r-5/01",
+      path: "/paths/r/r-6/01",
       label: "Phase R · ROS 2 + ROS-Industrial",
     },
   },
@@ -526,7 +526,7 @@ const ENTRIES: Misconception[] = [
       "Reads the cybersecurity requirements added in ISO 10218-1:2025 as duplicating IEC 62443 and skips them. 10218-1:2025 references the 62443 family for the OT security baseline and adds ROBOT-SPECIFIC requirements on top — including secure boot of the controller, signed firmware updates, network segmentation for the safety controller, and authentication for teach-pendant access. The cross-track home for 62443 is Phase 8; the robot-specific overlay lives in Phase R R6.",
     remediation: {
       kind: "lesson",
-      path: "/paths/r/r-6/01",
+      path: "/paths/r/r-7/01",
       label: "Phase R · Robot cybersecurity — 10218 + 62443",
     },
   },
