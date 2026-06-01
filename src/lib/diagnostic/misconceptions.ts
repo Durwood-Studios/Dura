@@ -754,6 +754,82 @@ const ENTRIES: Misconception[] = [
       label: "clock_gettime(2) · CLOCK_MONOTONIC",
     },
   },
+
+  // ─── Phase 6 · AI/ML Engineering (PRE-RESEARCH SCAFFOLD — not from the ──
+  // bounded-research session). Background knowledge of the production
+  // misconceptions in ML engineering, LLM application security, and AI
+  // evaluation. Sources for future verification: Google's Rules of ML,
+  // Sculley et al. on hidden technical debt, OWASP LLM Top 10 (2025),
+  // Greshake et al. on indirect prompt injection, NIST AI 600-1 Generative
+  // AI Profile (already covered in Phase 9), and Stanford's Foundation
+  // Model Transparency Index. Mark as SCAFFOLD pending freshly-sourced
+  // research.
+  {
+    id: "training-vs-serving-skew",
+    name: "Assumes training and serving environments are equivalent",
+    description:
+      "Treats the production inference path as a thin wrapper around the trained model. In practice the most common ML bug is training-serving skew: the preprocessing applied during training (cleaned, normalized, feature-joined offline) doesn't match what happens at serving time (raw user input, real-time joins, different timing). Model accuracy that looks great offline collapses in production. Fix: enforce feature parity between training and serving pipelines, validate via shadow scoring against the live path.",
+    remediation: {
+      kind: "reading",
+      href: "https://developers.google.com/machine-learning/guides/rules-of-ml",
+      label: "Google · Rules of ML",
+    },
+  },
+  {
+    id: "overfit-vs-data-quality",
+    name: "Treats overfitting as the only generalization failure mode",
+    description:
+      "Diagnoses any poor-generalization symptom as overfitting and reaches for more regularization. Underfitting (model too simple for the function), data quality issues (label noise, missing features, biased sampling), distribution shift (training and production data differ), test-set leakage (train and test share rows or derived features) all produce similar symptoms with different fixes. Fixing overfitting when the actual problem is data quality wastes regularization budget and leaves the root cause untreated.",
+    remediation: {
+      kind: "reading",
+      href: "https://research.google/pubs/hidden-technical-debt-in-machine-learning-systems/",
+      label: "Sculley et al. · Hidden Technical Debt in ML",
+    },
+  },
+  {
+    id: "accuracy-as-metric",
+    name: "Uses accuracy on imbalanced datasets",
+    description:
+      "Reports accuracy as the headline metric when the class distribution is skewed. On a 99% / 1% imbalanced classification problem, predicting the majority class for everything yields 99% accuracy — and is useless. The right metric depends on the cost structure: precision vs recall (which mistake is worse?), F1 (balanced), PR-AUC (better than ROC-AUC under heavy imbalance), or business-specific (cost-weighted misclassification, revenue at risk). Pick the metric before training; accuracy is rarely the right one.",
+    remediation: {
+      kind: "reading",
+      href: "https://en.wikipedia.org/wiki/Precision_and_recall",
+      label: "Precision and recall",
+    },
+  },
+  {
+    id: "prompt-injection-as-jailbreak",
+    name: "Conflates prompt injection with jailbreaks",
+    description:
+      "Treats 'prompt injection' as the user typing 'IGNORE ALL INSTRUCTIONS' into a chat. That's direct prompt injection / jailbreaking — manageable with input filtering and stronger system prompts. The actual production threat is INDIRECT prompt injection: untrusted content (a document the user uploads, a webpage the agent reads, a tool output) contains instructions that the LLM cannot distinguish from the system prompt. Defenses: structured prompt boundaries, treating LLM output as untrusted, sandboxing the model from sensitive operations, manual approval for high-stakes actions.",
+    remediation: {
+      kind: "reading",
+      href: "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+      label: "OWASP · LLM Top 10",
+    },
+  },
+  {
+    id: "embeddings-as-similarity",
+    name: "Treats vector embeddings as proven semantic similarity",
+    description:
+      "Assumes cosine similarity between two embeddings reflects semantic similarity to the user. Embeddings reflect the model's TRAINING OBJECTIVE, which may diverge from user intent: a generic embedding model treats 'iPhone case' and 'iPhone insurance' as similar (both about iPhones); a search relevance system may need them dissimilar. Embedding-space distance is a model artifact, not a ground truth. Evaluate retrieval quality on application-specific queries before relying on similarity for routing decisions.",
+    remediation: {
+      kind: "reading",
+      href: "https://huggingface.co/blog/mteb",
+      label: "MTEB · Massive Text Embedding Benchmark",
+    },
+  },
+  {
+    id: "ml-test-set-leakage",
+    name: "Splits train and test without checking for leakage",
+    description:
+      "Uses a random train/test split without checking for: TIME leakage (rows from the test period influence training, e.g., features derived from future data), ID leakage (the same user appears in both sets, so the model memorizes per-user patterns), FEATURE leakage (a feature is derived from the label or from data unavailable at prediction time). All three produce inflated test metrics. For time-series, use forward-chaining splits. For user-level data, split by user. For feature engineering, audit each feature for prediction-time availability.",
+    remediation: {
+      kind: "reading",
+      href: "https://scikit-learn.org/stable/modules/cross_validation.html",
+      label: "scikit-learn · Cross-validation strategies",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(
