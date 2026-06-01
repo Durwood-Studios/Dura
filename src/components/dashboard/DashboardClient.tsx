@@ -11,6 +11,7 @@ import { isStreakAlive, type StreakState, INITIAL_STREAK } from "@/lib/streak";
 import { getCurrentStreak } from "@/lib/streak-manager";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { LevelBadge } from "@/components/gamification/LevelBadge";
+import { LiveDailyPrescription } from "@/components/prescription/LiveDailyPrescription";
 import { usePreferencesStore } from "@/stores/preferences";
 import { cn, formatMinutes } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -296,6 +297,9 @@ export function DashboardClient(): React.ReactElement {
           )}
         </div>
       </div>
+
+      {/* ── Today's prescription ────────────────────────────────────── */}
+      <LiveDailyPrescription />
 
       {/* ── Stat cards ──────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
