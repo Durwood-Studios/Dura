@@ -601,6 +601,83 @@ const ENTRIES: Misconception[] = [
       label: "Phase M · Six Sigma DMAIC",
     },
   },
+
+  // ─── Phase 5 · Systems engineering (background knowledge — NOT from the ─
+  // bounded-research session). The misconceptions below come from durable
+  // canonical knowledge of distributed systems, database internals, and
+  // OS-level behaviors that working systems engineers hit in production.
+  // Sources for any future lesson author: Bailis et al. on isolation
+  // anomalies, Gilbert/Lynch CAP proof + Abadi PACELC extension, the
+  // Aphyr Jepsen analyses, and the Linux Documentation Project's docs
+  // on load average semantics. Mark these as PRE-RESEARCH SCAFFOLD —
+  // before publishing, re-verify against a freshly-sourced research
+  // pass per the bounded-research discipline.
+  {
+    id: "cap-theorem-misread",
+    name: "Reads CAP as a universal 'pick 2 of 3' trade-off",
+    description:
+      "Treats Consistency / Availability / Partition tolerance as a permanent menu — 'we picked AP, we gave up C.' CAP is a constraint that applies DURING A PARTITION: when the network splits, a node must choose to refuse requests (preserving consistency) or serve them with potentially stale state (preserving availability). During normal operation no choice is forced. PACELC extends the model to cover normal-operation latency-vs-consistency trade-offs — which is where most systems actually spend their time.",
+    remediation: {
+      kind: "reading",
+      href: "https://en.wikipedia.org/wiki/PACELC_design_principle",
+      label: "PACELC design principle",
+    },
+  },
+  {
+    id: "eventual-consistency-as-weak",
+    name: "Treats eventual consistency as 'broken consistency'",
+    description:
+      "Reads eventual consistency as 'might be wrong, no guarantees' when it's actually a precise convergence model: in the absence of new updates, all replicas converge to the same value. CRDTs provide STRONG eventual consistency with rigorous mathematical guarantees on convergence regardless of message order. Confusing 'eventually consistent' with 'weakly consistent' produces design discussions that reject viable solutions on bad grounds.",
+    remediation: {
+      kind: "reading",
+      href: "https://en.wikipedia.org/wiki/Eventual_consistency",
+      label: "Eventual consistency",
+    },
+  },
+  {
+    id: "serializable-vs-strict-serializable",
+    name: "Conflates serializable with strict serializable",
+    description:
+      "Treats SQL standard's Serializable isolation as the strongest possible. Serializable allows transactions to be reordered with respect to wall-clock time — as long as SOME serial schedule produces the same result. Strict serializable adds real-time ordering: if T1 commits before T2 starts, T2 must observe T1's writes. Most 'Serializable' databases (Postgres SSI, CockroachDB Serializable) are only serializable; Spanner is strict serializable. The difference matters for cross-system invariants and external causality.",
+    remediation: {
+      kind: "reading",
+      href: "https://jepsen.io/consistency/models/strict-serializable",
+      label: "Jepsen · Strict serializable",
+    },
+  },
+  {
+    id: "tcp-as-reliable-delivery",
+    name: "Treats TCP as application-layer delivery guarantee",
+    description:
+      "Reads 'TCP delivered without error' as 'the application received the message.' TCP guarantees that bytes accepted into the sender's send buffer will eventually appear in order in the receiver's receive buffer, OR the connection will error. It does NOT guarantee the application process read them, processed them, or persisted them. A TCP connection that closed cleanly tells the sender NOTHING about whether the application acted on the bytes. Cross-process semantics require application-level acknowledgment.",
+    remediation: {
+      kind: "reading",
+      href: "https://datatracker.ietf.org/doc/html/rfc9293",
+      label: "RFC 9293 · TCP",
+    },
+  },
+  {
+    id: "read-committed-as-safe-default",
+    name: "Treats Read Committed as a sensible default isolation level",
+    description:
+      "Picks Read Committed because 'it's the default in Postgres and Oracle, so it's safe.' RC allows non-repeatable reads (the same SELECT in one transaction returns different rows depending on other concurrent commits) and phantoms. The 'check then insert' pattern (does this username exist? if not, insert) is a race condition under RC. Snapshot Isolation (Postgres REPEATABLE READ) or Serializable Snapshot Isolation are usually the right choice for application code; RC is a performance optimization with a sharp downside.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.postgresql.org/docs/current/transaction-iso.html",
+      label: "PostgreSQL · Transaction isolation",
+    },
+  },
+  {
+    id: "load-average-as-cpu",
+    name: "Reads Linux load average as CPU utilization",
+    description:
+      "Treats /proc/loadavg as 'how busy the CPU is.' Linux load average counts processes in TASK_RUNNING (on CPU or ready to run) AND TASK_UNINTERRUPTIBLE (D state — usually blocked on I/O, sometimes on locks). A load of 8 on a 4-core machine could be CPU saturation, I/O saturation, or any mix. Diagnose with vmstat, iostat, pidstat, mpstat — not from loadavg alone. The 1/5/15 minute exponential decay also means the number trails reality, which makes loadavg a lagging indicator regardless.",
+    remediation: {
+      kind: "reading",
+      href: "https://www.brendangregg.com/blog/2017-08-08/linux-load-averages.html",
+      label: "Brendan Gregg · Linux Load Averages",
+    },
+  },
 ];
 
 export const MISCONCEPTIONS: MisconceptionCatalog = Object.freeze(

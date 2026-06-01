@@ -759,6 +759,96 @@ export const ISA95_PYRAMID_MEANING: MCQQuestion = {
   tags: ["isa-95", "iec-62264", "manufacturing", "rami-4-0", "phase-m"],
 };
 
+// ─── Phase 5 · TCP delivery semantics ─────────────────────────────────────
+// Background-knowledge scaffold (not from the bounded-research session).
+// Anchored to RFC 9293 (TCP, Aug 2022). The "TCP delivered" misread is
+// the most common cross-service messaging bug in distributed systems.
+
+export const TCP_DELIVERY_SEMANTICS: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-5-tcp-delivery-semantics-01",
+  difficulty: "core",
+  prompt:
+    "Service A sends a 'finalize order' message to Service B over a TCP connection. send() returned the byte count, no error. What can A safely assume about what happened?",
+  correct: {
+    text: "The bytes were accepted into A's kernel send buffer. They may or may not have been received by B's kernel, and even if received, B's application process may not have read them, processed them, or persisted the order. Cross-service semantics require an application-level ACK.",
+    explanation:
+      "send() returning successfully means the bytes are queued for transmission on A's side. TCP's delivery semantics are between the two kernel stacks; the application-level state on B is invisible to A without an explicit response.",
+  },
+  distractors: [
+    {
+      text: "The message was delivered to B's application — TCP guarantees in-order, reliable delivery to the recipient",
+      misconception: "tcp-as-reliable-delivery",
+    },
+    {
+      text: "If A's TCP connection didn't error, B definitely processed the order — that's the TCP reliability contract",
+      misconception: "tcp-as-reliable-delivery",
+    },
+    {
+      text: "B's kernel received the bytes; the application is guaranteed to read them as long as the socket stays open",
+      misconception: "tcp-as-reliable-delivery",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "TCP is a byte-stream protocol. send() on the sender side accepts bytes into the kernel's send buffer. Success means 'queued for transmission,' not 'delivered.'",
+      "The kernel-to-kernel guarantee: bytes that enter A's send buffer will EITHER appear in order in B's receive buffer OR the connection will eventually error. The guarantee is at the transport layer, between kernels.",
+      "What the guarantee does NOT cover: whether B's application called read() on the socket; whether the application processed what it read; whether it persisted the state change implied by the message.",
+      "Failure modes that look like 'TCP delivered' but the application didn't act: B's process crashed after the kernel received the bytes but before the application read them. B read them but crashed before persisting. B persisted but the disk failed before fsync.",
+      "Cross-service messaging requires application-level acknowledgment: B sends a response that says 'I processed your request' (or 'I failed to process it for reason X'). A treats absence of response as failure (retry, escalate, surface to user).",
+      "The right mental model: TCP gives you 'reliable byte transport between kernels.' Application semantics are layered on top. A message-queue (Kafka, RabbitMQ) or a request-response RPC (gRPC) provides the application-level guarantees on top of TCP.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["tcp", "distributed-systems", "messaging", "phase-5"],
+};
+
+// ─── Phase 5 · Database isolation level defaults ─────────────────────────
+// Background-knowledge scaffold (not from the bounded-research session).
+// Anchored to the SQL standard isolation levels + Postgres / Oracle docs.
+// The "Read Committed is safe" assumption is the most common production-
+// race-condition source in application code.
+
+export const READ_COMMITTED_DEFAULT: MCQQuestion = {
+  kind: "mcq",
+  id: "phase-5-read-committed-default-01",
+  difficulty: "stretch",
+  prompt:
+    "Your team uses PostgreSQL with the default Read Committed isolation level. Application code includes a 'check then insert' pattern (does this username exist? if not, insert). Under concurrent registration traffic, what's the failure mode?",
+  correct: {
+    text: "Two concurrent transactions both run the SELECT, both see no existing username, both INSERT — producing duplicates. Read Committed allows non-repeatable reads and phantoms: the existence check at time T1 is not honored at the INSERT at time T2. Fix: a UNIQUE constraint (the DB rejects the duplicate), Snapshot Isolation (REPEATABLE READ), or an explicit lock.",
+    explanation:
+      "Read Committed only prevents dirty reads. It allows the same query to return different rows depending on other transactions' commits between calls — directly enabling the TOCTTOU race in 'check then act' patterns.",
+  },
+  distractors: [
+    {
+      text: "No failure mode — Read Committed is the safe default; the database serializes concurrent SELECTs implicitly",
+      misconception: "read-committed-as-safe-default",
+    },
+    {
+      text: "The failure mode is rare and only happens at extreme load; Read Committed is fine for production",
+      misconception: "read-committed-as-safe-default",
+    },
+    {
+      text: "The failure mode requires Strict Serializable to fix; even REPEATABLE READ won't prevent the duplicate INSERT",
+      misconception: "serializable-vs-strict-serializable",
+    },
+  ],
+  workedSolution: {
+    steps: [
+      "The SQL standard defines four isolation levels by which anomalies they prevent: Read Uncommitted (allows dirty reads), Read Committed (prevents dirty reads), Repeatable Read (prevents non-repeatable reads), Serializable (prevents phantoms).",
+      "Read Committed is the default in PostgreSQL, Oracle, SQL Server. It prevents dirty reads — a transaction never sees uncommitted writes from another transaction.",
+      "It does NOT prevent: non-repeatable reads (the same SELECT returns different rows depending on when other transactions committed) or phantoms (a range query returns different rows on the second call).",
+      "'Check then act' pattern walkthrough: T1 runs SELECT for username 'alice' — no match. T2 runs SELECT for 'alice' — no match. T1 INSERTs alice. T2 INSERTs alice. T2 sees no conflict because T1's INSERT was visible to neither T1's SELECT (before it) nor T2's SELECT (concurrent with T1).",
+      "Fix options: (a) A UNIQUE constraint on username — the database rejects the duplicate INSERT regardless of isolation level. Almost always the right answer. (b) Snapshot Isolation (Postgres REPEATABLE READ) — T2 sees a consistent snapshot from its start time; if T1 committed first, T2 still won't see the row but at commit time will fail with a serialization error, which the application retries. (c) Explicit pessimistic lock (SELECT … FOR UPDATE).",
+      "Repeatable Read (SI) IS strong enough to fix this when paired with proper retry logic. Strict Serializable is a stronger guarantee than needed — useful for cross-system invariants, not for single-row uniqueness.",
+      "The general rule: Read Committed is a performance optimization. Pick it consciously when you've analyzed the anomalies you're tolerating, not because it's the default.",
+    ],
+  },
+  confidenceCheck: true,
+  tags: ["isolation-levels", "databases", "postgresql", "race-conditions", "phase-5"],
+};
+
 export const ALL_EXAMPLES = [
   ARRAY_INDEXING,
   STRING_LENGTH_EMOJI,
@@ -778,4 +868,6 @@ export const ALL_EXAMPLES = [
   COBOT_PFL_VALIDATION,
   OEE_FORMULA_FAMILY,
   ISA95_PYRAMID_MEANING,
+  TCP_DELIVERY_SEMANTICS,
+  READ_COMMITTED_DEFAULT,
 ] as const;
