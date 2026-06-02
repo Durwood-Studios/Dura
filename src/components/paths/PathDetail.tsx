@@ -163,7 +163,7 @@ function PhaseRefRow({
             </span>
           )}
           <Link
-            href={`/curriculum/${phase.slug}`}
+            href={`/paths/${phase.id}`}
             className="text-sm font-semibold text-[var(--color-text-primary)] hover:text-[var(--color-accent)]"
           >
             {phase.title}
