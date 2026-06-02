@@ -1,0 +1,214 @@
+---
+title: "UVM Sequences and Virtual Sequences"
+description: "Sequence library, layered sequences, virtual sequences coordinating multiple agents. Reusable stimulus that composes."
+phase: h
+module: "h-5-uvm-sequences"
+order: 1
+estimatedMinutes: 90
+difficulty: 4
+prerequisites:
+  - "h-2-uvm-testbench-architecture"
+  - "h-3-constrained-random-stimulus"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - uvm-sequence
+  - uvm-sequence-item
+  - body-task
+  - layered-sequence
+  - virtual-sequence
+learningOutcomes:
+  - "Write a UVM sequence that generates constrained-random transactions"
+  - "Compose sequences via parent-child layered patterns"
+  - "Write a virtual sequence that coordinates multiple agents"
+  - "Use `start_item / finish_item` to interact with the sequencer correctly"
+professionalContext: "Sequence libraries are the reusable stimulus assets of a DV team. Well-designed sequences are reused across regression tests, error injection, performance benchmarks. Engineers who write effective sequences amortize their work across the team; engineers stuck writing ad-hoc procedural drivers produce single-use stimulus."
+thresholdConcept: false
+---
+
+## A minimal sequence
+
+```systemverilog
+class write_seq extends uvm_sequence #(write_txn);
+    `uvm_object_utils(write_seq)
+    rand int n;
+    constraint c_n { n inside { [10:100] }; }
+
+    function new(string name = "write_seq");
+        super.new(name);
+    endfunction
+
+    task body();
+        write_txn tx;
+        repeat (n) begin
+            tx = write_txn::type_id::create("tx");
+            start_item(tx);
+            assert(tx.randomize());
+            finish_item(tx);
+        end
+    endtask
+endclass
+```
+
+`start_item` / `finish_item` is the handshake with the sequencer:
+
+- `start_item` requests permission to send (sequencer may block if another sequence has priority).
+- Between, the transaction is randomized and modified as needed.
+- `finish_item` hands the transaction to the driver and waits for ack.
+
+## Running sequences
+
+In the test:
+
+```systemverilog
+class basic_test extends uvm_test;
+    `uvm_component_utils(basic_test)
+    my_env env;
+
+    function void build_phase(uvm_phase phase);
+        env = my_env::type_id::create("env", this);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        write_seq seq = write_seq::type_id::create("seq");
+        phase.raise_objection(this);
+        seq.start(env.agent.sequencer);
+        phase.drop_objection(this);
+    endtask
+endclass
+```
+
+Objections tell the UVM phase scheduler the run_phase is not done. When the last objection drops, the phase ends. Without objections, the test ends immediately at time 0.
+
+## Layered sequences
+
+A common pattern: one sequence calls another.
+
+```systemverilog
+class burst_then_idle_seq extends uvm_sequence #(write_txn);
+    `uvm_object_utils(burst_then_idle_seq)
+
+    task body();
+        write_seq    burst = write_seq::type_id::create("burst");
+        idle_seq     idle  = idle_seq::type_id::create("idle");
+        burst.start(m_sequencer, this);   // child sequence
+        idle.start(m_sequencer, this);
+    endtask
+endclass
+```
+
+Child sequences inherit the parent's sequencer, so the same sequencer drives everything.
+
+## Virtual sequences — coordinating multiple agents
+
+A virtual sequence runs at a higher level than any individual agent. It coordinates sequences across agents:
+
+```systemverilog
+class scenario_seq extends uvm_sequence;
+    `uvm_object_utils(scenario_seq)
+
+    // Handles to multiple sequencers, set by the test
+    axi_sequencer  axi_seq;
+    apb_sequencer  apb_seq;
+    irq_sequencer  irq_seq;
+
+    task body();
+        // Programmatic coordination of three agents
+        fork
+            begin
+                axi_write_seq w = axi_write_seq::type_id::create("w");
+                w.start(axi_seq);
+            end
+            begin
+                #1000ns;   // 1 us delay
+                apb_config_seq c = apb_config_seq::type_id::create("c");
+                c.start(apb_seq);
+            end
+            begin
+                wait_for_irq_seq i = wait_for_irq_seq::type_id::create("i");
+                i.start(irq_seq);
+            end
+        join_all
+    endtask
+endclass
+```
+
+The virtual sequencer has handles to all the sub-sequencers it orchestrates. The virtual sequence body() composes lower-level sequences across them, with full SV concurrency control.
+
+This is how you model complex system scenarios: "configure registers via APB, then drive AXI traffic, then wait for an interrupt — all coordinated in time."
+
+## Sequence library
+
+A regression test typically runs MANY sequences in MANY combinations. A sequence library object packages the menu:
+
+```systemverilog
+class my_seq_lib extends uvm_sequence_library #(write_txn);
+    `uvm_object_utils(my_seq_lib)
+    function new(string name = "my_seq_lib");
+        super.new(name);
+        init_sequence_library();
+    endfunction
+endclass
+
+// Register sequences in the library
+write_seq::type_id::set_type_override(write_seq::get_type());
+my_seq_lib::add_typewide_sequence(write_seq::get_type());
+my_seq_lib::add_typewide_sequence(error_inject_seq::get_type());
+```
+
+The library can run sequences in user-controlled random order with weights. Coverage feedback then refines which sequences run more or less.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "Why use start_item / finish_item instead of just directly driving signals from the sequence?",
+      options: [
+        "Performance",
+        "Sequences are abstract stimulus generators that hand transactions to the driver via the sequencer. start_item / finish_item is the handshake that lets the sequencer arbitrate between competing sequences, lets the testbench substitute drivers without changing sequences, and gives the UVM phase scheduler visibility into pending stimulus. Direct signal driving from a sequence breaks the agent boundary and prevents reuse across testbenches with different driver implementations.",
+        "It's the only way",
+        "Backward compatibility",
+      ],
+      correct: 1,
+      explanation:
+        "The sequence/sequencer/driver separation is a core UVM design choice. Sequences produce transactions; sequencers arbitrate; drivers translate to signals. Direct signal driving from a sequence collapses the boundary and prevents the substitution patterns UVM is built around. The handshake also gives the scheduler visibility — important for objections, phase synchronization, and coverage analysis.",
+    },
+    {
+      question:
+        "An engineer's test scenario requires: (1) configure registers via APB, (2) drive 100 AXI writes, (3) wait for an interrupt, (4) check error count via APB. What UVM construct is the right structural fit?",
+      options: [
+        "Three separate tests",
+        "A virtual sequence: one sequence that holds handles to the AXI sequencer, APB sequencer, and IRQ sequencer; orchestrates the four steps in temporal order using SV's fork/join_all and explicit waits; reuses the existing per-agent sequences (write_seq for AXI, config_seq for APB) without modification. The virtual sequence is the only place that knows about the multi-agent coordination; everything else stays per-agent.",
+        "Put everything in one big sequence",
+        "Use the scoreboard",
+      ],
+      correct: 1,
+      explanation:
+        "Virtual sequences are the canonical UVM answer to multi-agent coordination. A virtual sequence holds handles to multiple sequencers and orchestrates them temporally. Per-agent sequences stay simple and reusable. Three separate tests can't model temporal coordination. Putting everything in one mega-sequence breaks the per-agent boundary. Scoreboards check; they don't drive.",
+    },
+    {
+      question:
+        "A run_phase task starts a sequence but the simulation immediately ends at time 0 with the message 'all phases drained'. What's missing?",
+      options: [
+        "Use #100 instead",
+        "Objections: `phase.raise_objection(this);` before starting the sequence and `phase.drop_objection(this);` after it completes. UVM phases end when no component is holding an objection. Without raising one, the run_phase tells UVM 'I have no work to do' and the phase scheduler ends immediately. Always wrap blocking work in run_phase between raise/drop_objection — it's the contract that tells UVM to keep simulating until the work is done.",
+        "fork the sequence",
+        "Use $finish",
+      ],
+      correct: 1,
+      explanation:
+        "Objections are how UVM components signal 'I'm not done.' Without them, phases drain immediately. The pattern is invariant: raise_objection before any blocking work, drop_objection after. Multiple components can hold objections; the phase ends when the LAST one drops. Skipping this is the most common 'sim ends immediately' bug in UVM newcomers.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H6 introduces SystemVerilog Assertions (SVA) and formal verification — the property-checking technique that complements simulation. Where random stimulus answers 'have we tested enough scenarios,' assertions answer 'does the design always behave correctly.'

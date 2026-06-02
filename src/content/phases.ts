@@ -686,6 +686,98 @@ export const PHASES: Phase[] = [
     ],
   },
 
+  // ─── Phase H — Hardware Verification (post-Phase-5, code-teaching) ─────
+  // Eight-lesson SystemVerilog + UVM curriculum. IEEE 1800-2023 + IEEE
+  // 1800.2-2020 anchored. Capstone is a complete UVM testbench for a
+  // UART IP block, hash-anchored via /verify.
+  {
+    id: "h",
+    slug: "h-hardware-verification",
+    title: "Phase H: Hardware Verification",
+    tagline: "Stand up a UVM testbench for any IP block.",
+    description:
+      "Eight code-teaching lessons that move you from SystemVerilog literacy to a complete UVM testbench. IEEE 1800-2023 + IEEE 1800.2-2020 anchored throughout.",
+    color: "#a78bfa",
+    estimatedHours: 13,
+    moduleCount: 8,
+    lessonCount: 8,
+    order: 13,
+    modules: [
+      mod(
+        "h",
+        1,
+        "systemverilog-basics",
+        "SystemVerilog Basics for Verification",
+        "IEEE 1800-2023 in operational terms. Data types beyond Verilog, interfaces, classes.",
+        1.5,
+        1
+      ),
+      mod(
+        "h",
+        2,
+        "uvm-testbench-architecture",
+        "UVM Testbench Architecture",
+        "Driver, Monitor, Sequencer, Agent, Scoreboard, Env, Test. IEEE 1800.2-2020.",
+        2,
+        1
+      ),
+      mod(
+        "h",
+        3,
+        "constrained-random-stimulus",
+        "Constrained-Random Stimulus",
+        "Randomization, constraint blocks, the most productive DV methodology.",
+        1.5,
+        1
+      ),
+      mod(
+        "h",
+        4,
+        "functional-coverage",
+        "Functional Coverage — Coverpoints, Bins, Cross",
+        "Coverage closure: random stimulus + coverage = 'when am I done'.",
+        1.5,
+        1
+      ),
+      mod(
+        "h",
+        5,
+        "uvm-sequences",
+        "UVM Sequences and Virtual Sequences",
+        "Sequence library, layered sequences, virtual sequences coordinating agents.",
+        1.5,
+        1
+      ),
+      mod(
+        "h",
+        6,
+        "formal-verification-sva",
+        "Formal Verification — SVA Assertions",
+        "SystemVerilog Assertions, formal-vs-simulation tradeoffs.",
+        1.5,
+        1
+      ),
+      mod(
+        "h",
+        7,
+        "low-power-verification-upf",
+        "Low-Power Verification with UPF",
+        "IEEE 1801 Unified Power Format, power-aware simulation.",
+        1.25,
+        1
+      ),
+      mod(
+        "h",
+        8,
+        "capstone-uart-uvm-tb",
+        "Capstone — UVM Testbench for a UART IP Block",
+        "Complete UVM TB: driver, monitor, scoreboard, coverage, SVA. /verify-anchored.",
+        2.5,
+        1
+      ),
+    ],
+  },
+
   // ─── Phase R — Robotics (post-Phase-5 specialization) ──────────────────
   // Eight-lesson curriculum anchored to ISO 10218:2025, ISO 12100, the
   // functional-safety triad, and ROS-Industrial. Capstone produces a

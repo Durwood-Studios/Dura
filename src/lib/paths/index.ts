@@ -308,6 +308,36 @@ export const PATHS: readonly Path[] = [
     status: "scaffold",
   },
 
+  // ─── Hardware Verification ──────────────────────────────────────────────
+  {
+    id: "hardware-verification-engineer",
+    slug: "hardware-verification-engineer",
+    title: "Hardware Verification Engineer",
+    tagline: "Stand up UVM testbenches for any IP block.",
+    description:
+      "Pairs the CS + systems substrate with Phase H's eight-lesson SystemVerilog + UVM curriculum. IEEE 1800-2023 and IEEE 1800.2-2020 anchored throughout. The credential of choice for semiconductor DV roles.",
+    outcome:
+      "Compose a complete UVM testbench for a UART IP block — driver, monitor, sequencer, scoreboard, constrained-random sequences, functional coverage, SVA assertions — with 100% coverage closure documented and hash-anchored via /verify.",
+    archetype: "Systems",
+    color: "#a78bfa",
+    phases: [
+      { phaseId: "0", scope: "spine", rationale: "Digital-literacy foundations." },
+      { phaseId: "1", scope: "spine", rationale: "Programming fundamentals." },
+      { phaseId: "3", scope: "spine", rationale: "CS fundamentals." },
+      {
+        phaseId: "5",
+        scope: "spine",
+        rationale: "Systems engineering — OS internals, hardware abstraction.",
+      },
+      {
+        phaseId: "h",
+        scope: "spine",
+        rationale: "Phase H — SystemVerilog + UVM + SVA + UPF, eight lessons.",
+      },
+    ],
+    status: "complete",
+  },
+
   // ─── Leadership ─────────────────────────────────────────────────────────
   {
     id: "engineering-leader",

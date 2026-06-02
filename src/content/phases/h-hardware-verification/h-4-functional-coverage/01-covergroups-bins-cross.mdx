@@ -1,0 +1,183 @@
+---
+title: "Functional Coverage — Covergroups, Bins, Cross"
+description: "Coverpoints, bins, cross coverage. The measurement layer that closes the constrained-random verification loop."
+phase: h
+module: "h-4-functional-coverage"
+order: 1
+estimatedMinutes: 90
+difficulty: 4
+prerequisites:
+  - "h-3-constrained-random-stimulus"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - covergroup
+  - coverpoint
+  - bin
+  - cross-coverage
+  - coverage-closure
+learningOutcomes:
+  - "Write a covergroup with coverpoints + bins for transaction fields"
+  - "Add cross coverage between coverpoints"
+  - "Read a coverage report and identify holes"
+  - "Use coverage to drive constraint refinement"
+professionalContext: "Functional coverage tells you WHEN you've verified enough. Without it, constrained-random stimulus runs forever without a stopping condition. The discipline 'random until coverage closes' is the modern DV workflow; engineers who own the coverage model own the verification sign-off discussion with management."
+thresholdConcept: true
+---
+
+## The closure loop
+
+```
+Write coverage model → Run random stimulus → Measure coverage →
+  Holes? → Refine constraints → Repeat → Closure → Sign-off
+```
+
+Coverage closure = every defined coverpoint and cross has been hit at least once. When closure is achieved, verification is "done" by the team's documented criteria.
+
+## A minimal covergroup
+
+```systemverilog
+class write_txn;
+    rand bit [31:0] addr;
+    rand bit [3:0]  strb;
+    rand bit [1:0]  size;
+
+    covergroup cg_write;
+        cp_addr : coverpoint addr {
+            bins low      = { [0           : 32'h0FFF      ] };
+            bins mid      = { [32'h1000    : 32'h0FFF_FFFF ] };
+            bins high     = { [32'h1000_0000 : 32'hFFFF_FFFF] };
+        }
+
+        cp_strb : coverpoint strb {
+            bins full   = { 4'b1111 };
+            bins partial[] = { [4'b0001 : 4'b1110] };  // 14 individual bins
+            bins zero   = { 4'b0000 };
+        }
+
+        cp_size : coverpoint size;   // Auto-bins each value
+
+        cx_addr_strb : cross cp_addr, cp_strb;   // 3 × 16 = 48 cross bins
+    endgroup
+
+    function new();
+        cg_write = new();
+    endfunction
+endclass
+
+// Sample at the appropriate moment
+write_txn tx = new();
+repeat (1000) begin
+    tx.randomize();
+    tx.cg_write.sample();
+end
+
+// Coverage report shows what got hit
+```
+
+## Bin types
+
+- **Single value**: `bins zero = { 0 };`
+- **Range**: `bins small = { [1:255] };`
+- **Multi-bin (array)**: `bins each[] = { [1:14] };` creates 14 separate bins
+- **Wildcard**: `wildcard bins evens = { 4'b???0 };` matches anything with LSB=0
+- **Transition**: `bins seq = ( 0 => 1 => 2 );` triggers when sampled sequence matches
+- **Ignore**: `ignore_bins reserved = { 4'b1111 };` doesn't count toward coverage
+
+## Cross coverage
+
+```systemverilog
+cx_addr_strb : cross cp_addr, cp_strb;
+```
+
+This generates one bin for every combination. 3 addr bins × 16 strb bins = 48 cross bins. Cross coverage finds coverage holes that single coverpoints miss — e.g., "we tested high addresses but never with partial strobes."
+
+Cross bins can be filtered:
+
+```systemverilog
+cx_addr_strb : cross cp_addr, cp_strb {
+    ignore_bins ig = binsof(cp_strb.zero);   // Never check strb=0 cases
+}
+```
+
+## Coverage holes — debugging closure
+
+A coverage report shows percentage and lists missed bins. To close:
+
+1. **Identify the missed bin** (e.g., `cp_addr.high × cp_strb.partial` shows 0 hits).
+2. **Determine why** — is the constraint biasing away from this? Is it physically impossible? Is the stimulus generator skipping a scenario?
+3. **Fix**:
+   - Add a `dist` directive to bias toward the missed range.
+   - Write a directed-random sequence targeting the case.
+   - Mark as `ignore_bins` if genuinely unreachable.
+
+The discipline: every coverage hole is either CLOSED or DOCUMENTED AS UNREACHABLE. Just running more random stimulus doesn't fix structural holes.
+
+## Coverage at the right abstraction
+
+Common mistake: covering implementation details instead of intent. A FIFO depth covergroup should cover:
+
+- Empty, near-empty, half-full, near-full, full
+- Transitions between states
+- Overflow attempts
+
+NOT:
+
+- Every individual depth value 0-255 (unimportant; bin them)
+- Internal pointer values (implementation detail)
+
+The covergroup is a SPEC of what scenarios matter. Engineers who treat it as a "code coverage on internals" miss the point.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer's coverage report shows 100% on every coverpoint but 60% on the cross. What's the most likely cause and fix?",
+      options: [
+        "Run more transactions",
+        "Cross coverage hits require COMBINATIONS of values; coverpoints can each be 100% while combinations are uneven. The constraints generate stimulus that exercises each field broadly but doesn't necessarily combine them; e.g., maybe addresses are always written with strb=1111 in the testbench's most common scenarios. Fix: add constraints that force specific combinations (e.g., `addr inside high_range && strb inside partial_range`), or write targeted sequences. Pure scale doesn't fix structural holes in the cross.",
+        "The cross is incorrectly defined",
+        "Cross coverage is optional",
+      ],
+      correct: 1,
+      explanation:
+        "Cross holes with full coverpoint coverage are the most common 'where do I go from here' moment in functional coverage. The fix is targeted constraint refinement — generate stimulus that exercises the missing combinations. This is where the coverage-driven verification loop gets specific: each coverage report directs the next constraint change. The cross is the structural goal; coverpoints feeding it are just the inputs.",
+    },
+    {
+      question: "Why ignore_bins instead of just not defining the bin?",
+      options: [
+        "Same thing",
+        "Defining a bin and then marking it ignore_bins makes the EXCLUSION explicit and auditable. A reviewer sees 'we considered this case and deliberately excluded it because [reason in comment]' rather than 'this case is silently missing.' ignore_bins is the documented form; missing bins are accidental gaps. Use ignore_bins for genuinely unreachable cases (reserved register encodings, hardware-impossible combinations) with a documenting comment.",
+        "ignore_bins is faster",
+        "Required by the simulator",
+      ],
+      correct: 1,
+      explanation:
+        "Coverage models are sign-off artifacts. ignore_bins makes deliberate exclusions visible to reviewers; silent omissions are accidental gaps. The discipline: every bin not in the report is either covered or explicitly ignored with rationale. Reviewers can audit the rationale; silent gaps can't be audited. This is the same principle as MISRA deviation documentation from E7.",
+    },
+    {
+      question:
+        "An engineer creates 256 individual bins for a 32-bit address field. The coverage report shows 0.4% closure after 10,000 transactions. What's wrong?",
+      options: [
+        "Run more transactions",
+        "The covergroup is at the wrong granularity. 256 bins on a 32-bit space (4.3 billion values) means each bin covers ~16M addresses, but the random distribution only hits a tiny fraction of the space. A better model: 5-10 semantically meaningful bins (low, mid, high, boundary, reserved) that align with WHAT MATTERS for the DUT. Fine-grained binning produces unreachable bins; coarse semantic binning produces useful coverage closure.",
+        "Use randc",
+        "Larger sample size",
+      ],
+      correct: 1,
+      explanation:
+        "Coverage models should reflect what matters, not what's possible. 256 fine-grained bins on a 4.3B-value space produce mostly-unreachable bins. Coarser binning (5-10 semantic categories) reflects the verification intent. The covergroup is a spec; tighten it to what the DV team actually cares about, not what's mechanically possible to enumerate.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H5 returns to UVM and unpacks sequences — the reusable stimulus library that drives the sequencer from H2. Sequences compose, layer, and coordinate across multiple agents (virtual sequences), giving structured control over what gets randomized when.
