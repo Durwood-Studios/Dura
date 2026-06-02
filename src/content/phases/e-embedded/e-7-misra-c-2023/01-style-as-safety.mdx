@@ -1,0 +1,243 @@
+---
+title: "MISRA-C:2023 — When Style Is a Safety Requirement"
+description: "Not a rule-list reader. Specific MISRA rules in action, what bugs they prevent (most of which Rust prevents structurally), and how the deviation-policy mechanism handles the few cases the rules can't fit. Practical, not bureaucratic."
+phase: e
+module: "e-7-misra-c-2023"
+order: 1
+estimatedMinutes: 75
+difficulty: 4
+prerequisites:
+  - "e-5-drivers"
+standards:
+  primaryAnchor: "MISRA-C:2023"
+  cs2023: ["SE-CodeQuality"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - misra-c
+  - misra-2023
+  - mandatory-rule
+  - required-rule
+  - advisory-rule
+  - deviation-policy
+  - implementation-defined
+  - undefined-behavior
+  - integer-promotion
+  - essential-type
+learningOutcomes:
+  - "Distinguish MISRA-C:2023's Mandatory, Required, and Advisory rules"
+  - "Identify the categories of bugs MISRA exists to prevent (UB, IB, type confusion, resource leaks)"
+  - "Read a specific MISRA rule and recognize a code pattern that violates it"
+  - "Author a deviation document for a rule that genuinely can't be followed"
+  - "Recognize how Rust's type system structurally prevents many MISRA violations"
+professionalContext: "MISRA-C is the de facto safety-critical C subset for automotive (referenced by ISO 26262), aerospace (DO-178C), medical devices (IEC 62304 Class B/C), and rail (EN 50128). Engineers working on safety-critical projects spend substantial time keeping code MISRA-compliant. The compliance has two failure modes that this lesson closes: (1) treating MISRA as bureaucratic overhead and gaming the static analyzer, vs (2) understanding why each rule exists and engineering with the underlying safety goal in mind. The latter produces compliant code that's also genuinely safer; the former produces compliant code that still has the bugs MISRA was trying to prevent."
+thresholdConcept: true
+---
+
+## Where MISRA fits
+
+MISRA-C is a guidelines document published by the Motor Industry Software Reliability Association. MISRA-C:2023 is the current edition, released 2023, and is the modernized post-2012 version. It defines a C-language subset designed to reduce the risk of bugs in safety-critical software.
+
+MISRA-C is NOT a separate language. It's a set of rules that restrict what C constructs you can use. The compiler doesn't enforce MISRA — that's a static-analyzer's job (Cppcheck, PC-lint, Polyspace, Helix QAC, Coverity, etc.).
+
+When does MISRA apply?
+
+- **Automotive** — ISO 26262 (functional safety) doesn't mandate MISRA but it's the dominant industry choice.
+- **Aviation** — DO-178C doesn't mandate it but DO-330 (tool qualification) and the underlying safety goals push teams toward subset-based languages.
+- **Medical** — IEC 62304 Class B and C software typically use MISRA.
+- **Rail** — EN 50128 references coding standards including MISRA.
+- **Any project that wants fewer bugs** — even non-safety-critical projects use MISRA voluntarily.
+
+If your project isn't in one of these domains, MISRA is overhead. If it is, MISRA conformance is part of the deliverable.
+
+## The three categories of rules
+
+MISRA-C:2023 categorizes rules by compliance strength:
+
+> **Mandatory** — must be followed. No exceptions. Deviation is not permitted.
+> **Required** — must be followed unless a documented deviation justifies otherwise.
+> **Advisory** — recommended; deviations need lighter documentation but should be tracked.
+
+There are about 175 rules total in the 2023 edition. Roughly:
+
+- 11 Mandatory rules
+- ~120 Required rules
+- ~45 Advisory rules
+
+The Mandatory rules cover violations the C standard itself flags as undefined behavior — things like dereferencing a null pointer or modifying a string literal. These are not deviation candidates because the language itself can't guarantee anything if you violate them.
+
+## Five rules that catch real bugs
+
+Rather than enumerate all 175, let's look at five that catch bugs you've probably written or read in production code.
+
+### Rule 10.1 — Operands shall not be of inappropriate essential type (Required)
+
+C's implicit integer promotion is the source of an enormous number of bugs. Example:
+
+```c
+uint16_t a = 0xFFFF;
+uint16_t b = 0x0001;
+uint32_t c = a + b;
+// What's in c?
+// On most platforms: 0x00010000 (correct)
+// Because: a and b promote to int (32-bit), add, then convert to uint32_t.
+```
+
+That's the easy case. Now:
+
+```c
+int16_t a = -1;
+uint16_t b = 1;
+if (a < b) {
+    // Reached? It depends.
+    // On most platforms: a promotes to int, b promotes to int, -1 < 1 is true.
+    // But: the C standard's "usual arithmetic conversions" can convert int16_t
+    // to unsigned if the platform's int is 16-bit (rare but legal),
+    // making -1 become a large positive value and the comparison false.
+}
+```
+
+Rule 10.1 forbids mixing signed and unsigned types in ways that can produce these surprises. Forces explicit casts that make the conversion visible to the reader.
+
+### Rule 17.3 — Functions shall not be called without a prior declaration (Mandatory)
+
+```c
+// Forgot to #include the header
+int main(void) {
+    foo(42);   // Compiler assumes int foo() returning int
+}
+
+// In foo.c:
+double foo(int x) { return x * 1.5; }
+```
+
+The caller and callee disagree on the return type. Stack misalignment, garbage return values, crashes. Mandatory because no deviation argument is valid.
+
+### Rule 18.4 — The +, -, += and -= operators shall not be applied to an expression of pointer type (Advisory)
+
+```c
+int buf[10];
+int *p = buf;
+p += 3;        // Pointer arithmetic — error-prone
+*p = 42;       // Wrote to buf[3]
+```
+
+Advisory rather than Required because pointer arithmetic is sometimes necessary. The rule pushes you toward array indexing (`buf[i]`) which is harder to get subtly wrong.
+
+### Rule 13.1 — Initializer lists shall not contain persistent side effects (Required)
+
+```c
+int counter = 0;
+int data[] = { counter++, counter++, counter++ };
+// What's in data? The C standard says: unspecified order.
+// Could be {0, 1, 2} or {2, 1, 0} or anything in between.
+```
+
+Rule 13.1 forbids this. Force readers to see side effects in deterministic order.
+
+### Rule 21.3 — The memory allocation and deallocation functions of <stdlib.h> shall not be used (Required)
+
+Dynamic allocation in safety-critical embedded code is widely avoided. Reasons:
+
+- Heap fragmentation in long-running systems eventually causes allocation failures.
+- Allocation latency is unbounded.
+- Use-after-free and double-free are classes of bugs static analysis cannot fully catch.
+
+Most MISRA-conformant projects use static allocation exclusively — every buffer is sized at compile time, no `malloc` anywhere.
+
+## The deviation policy
+
+For Required and Advisory rules, the project may DEVIATE if justified. A deviation document looks like:
+
+```
+RULE: MISRA-C:2023 Rule 18.4 (Advisory)
+SCOPE: src/dma_driver.c, line 142
+JUSTIFICATION: DMA setup requires pointer arithmetic to compute the
+  destination address of each chunk. Array indexing produces equivalent
+  code but obscures the relationship between the source-data layout and
+  the DMA configuration. The use is contained, documented, and reviewed.
+RISK ASSESSMENT: Low. The pointer arithmetic operates on a statically-
+  allocated buffer with bounds known at compile time.
+APPROVED BY: J. Smith, Safety Engineer, 2026-04-15
+```
+
+Deviation documents are auditable. Static analyzers can take deviation comments inline (`/* MISRA-2023-Rule-18.4: deviation, see ADR-014 */`) so the analyzer doesn't flag the violation on each build.
+
+The discipline: deviations are FOR specific code locations, are JUSTIFIED with a clear technical reason, are REVIEWED by someone other than the author, and are REVISITED periodically. A project with dozens of "deviation" suppressions and no justification is not conforming — it's papering over violations.
+
+## What Rust eliminates structurally
+
+Many MISRA rules exist because C lets you do dangerous things. Rust's type system prevents many of these BY CONSTRUCTION:
+
+| MISRA-C Rule                        | What it prevents             | Rust analog                                          |
+| ----------------------------------- | ---------------------------- | ---------------------------------------------------- |
+| 17.3 (function prior decl)          | Calling undeclared functions | Rust requires declarations and checks types          |
+| 13.1 (init-list side effects)       | Unspecified evaluation order | Rust evaluates left-to-right deterministically       |
+| 18.4 (pointer arithmetic)           | Out-of-bounds pointer ops    | Rust slices carry length; index is bounds-checked    |
+| 21.3 (no malloc)                    | Unbounded allocation latency | `#![no_std]` programs have no allocator unless added |
+| 10.1 (inappropriate essential type) | Implicit promotion surprises | Rust requires explicit casts; no implicit narrowing  |
+| 9.1 (uninitialized read)            | Reading uninit memory        | Rust requires initialization before use              |
+
+This doesn't mean Rust replaces MISRA-C — it means many of the disciplines MISRA enforces in C come "for free" in Rust. The discipline still exists; the language just enforces it for you.
+
+## What MISRA does NOT prevent
+
+MISRA-C is a coding-style discipline. It doesn't catch:
+
+- Wrong algorithms (the code is conformant but solves the wrong problem).
+- Race conditions (E3 / E4).
+- Architecture-level bugs (the wrong task takes the wrong lock).
+- Missing requirements (the safety case identified a hazard the code doesn't address).
+
+Engineers who treat MISRA conformance as a complete safety practice are confused about what MISRA does. It's a SUBSET of safety engineering — necessary in regulated domains, not sufficient.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A code reviewer finds a function that takes a pointer-to-int and increments the pointer to walk an array. The team's static analyzer flags MISRA-C:2023 Rule 18.4. The author argues pointer arithmetic is idiomatic C and not actually dangerous in this case. What's the appropriate response?",
+      options: [
+        "Override the analyzer's warning",
+        "Rule 18.4 is Advisory, so a deviation IS permitted if justified — but the deviation requires a documented, reviewed, technically-grounded justification. The author should: (1) explain why pointer arithmetic is structurally preferred over array indexing here, (2) document the bounds-checking that makes the use safe, (3) get the deviation reviewed by someone other than themselves, (4) tag the location with a deviation comment the analyzer can accept. Override-without-deviation breaks the conformance audit; refusing the pattern entirely may add real complexity if pointer arithmetic genuinely is the right tool.",
+        "Rewrite the code to use array indexing regardless",
+        "MISRA-C is bureaucratic — ignore the rule",
+      ],
+      correct: 1,
+      explanation:
+        "Advisory rules permit deviation but require documented justification. The right process is to formally deviate (with technical rationale, scope, risk assessment, and external review) rather than override. The deviation becomes auditable; the analyzer accepts inline tags and stops flagging that location. Rewriting to comply when pointer arithmetic is genuinely the right tool adds artificial complexity. Override-without-deviation breaks the conformance trail — the next audit catches it. Ignoring MISRA entirely fails the project's regulatory commitments.",
+    },
+    {
+      question:
+        "A junior engineer asks: 'If we're MISRA-conformant, is our code safe?' What's the structurally correct answer?",
+      options: [
+        "Yes — MISRA conformance is sufficient for safety",
+        "MISRA-C is a coding-style discipline that prevents specific categories of C-language bugs (undefined behavior, implementation-defined behavior, type confusion, certain resource issues). It does NOT validate algorithm correctness, prevent race conditions, address architecture-level mistakes, or ensure all hazards are mitigated. MISRA is a NECESSARY component of safety engineering in regulated domains but not SUFFICIENT. The complete picture includes hazard analysis, safety architecture, requirements traceability, testing, formal verification of critical components, and reviews — MISRA is one technique among many.",
+        "MISRA conformance is more about lawsuits than safety",
+        "Safety is impossible to verify",
+      ],
+      correct: 1,
+      explanation:
+        "The honest answer separates necessary from sufficient. MISRA prevents specific C-language pitfalls and is required for compliance in regulated industries. But safety engineering also requires hazard analysis (what could go wrong), architecture (how the system handles each failure), requirements (what the system must do and not do), testing (does it work), and reviews (did multiple people check). MISRA conformance is necessary in these domains but is one of many disciplines a safety case must demonstrate. Option 1 (sufficient) misleads engineers into thinking compliance equals safety. Option 3 cynically misreads MISRA's purpose. Option 4 abandons engineering responsibility.",
+    },
+    {
+      question: "Why does Rust eliminate the need for some — but not all — MISRA-C rules?",
+      options: [
+        "Rust eliminates all MISRA rules",
+        "Many MISRA rules exist to prevent C-language pitfalls (implicit type promotion, undeclared functions, pointer arithmetic out of bounds, uninitialized reads, dynamic allocation hazards). Rust's type system structurally prevents most of these — bounds checking, mandatory initialization, no implicit narrowing, explicit casts, no allocator without explicit setup. But MISRA also covers concerns Rust doesn't address structurally: avoiding certain algorithm classes, banning specific standard-library functions, requiring explicit deviation documentation for risk-bearing choices. These remain a discipline question even in Rust.",
+        "Rust eliminates no MISRA rules — they're parallel concerns",
+        "Rust replaces MISRA entirely",
+      ],
+      correct: 1,
+      explanation:
+        "Rust's type system removes the LANGUAGE-LEVEL pitfalls MISRA exists to prevent in C. Bounds checking, mandatory initialization, no implicit narrowing — these come for free in Rust. But MISRA also encodes safety-engineering decisions (no dynamic allocation in long-running systems, no functions that could exhibit unbounded behavior, deviation documentation for risk-bearing choices) that are organizational and process matters, not language matters. Rust changes the calculus of which rules are needed but doesn't eliminate the need for discipline. Ferrocene (Rust toolchain certified for ISO 26262) brings Rust into the safety-certified world, where similar 'subset' discussions apply.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson E8 — the capstone — assembles everything across E1-E7 into a single working real-time sensor pipeline on STM32F4: ADC + DMA + RTOS task + UART telemetry. End-to-end firmware that compiles, flashes, runs, and is hash-anchored via /verify as a portfolio artifact. The MISRA discipline from this lesson and the Rust option from E6 are both available for the capstone — you choose.

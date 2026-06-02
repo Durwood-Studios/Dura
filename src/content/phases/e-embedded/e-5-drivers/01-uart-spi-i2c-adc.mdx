@@ -1,0 +1,309 @@
+---
+title: "Drivers — UART, SPI, I2C, ADC"
+description: "The four buses every embedded engineer writes against. Polled, interrupt-driven, and DMA-driven implementations side-by-side, with the choice criteria documented."
+phase: e
+module: "e-5-drivers"
+order: 1
+estimatedMinutes: 120
+difficulty: 4
+prerequisites:
+  - "e-4-rtos-fundamentals"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - uart
+  - spi
+  - i2c
+  - adc
+  - baud-rate
+  - duplex
+  - master
+  - slave
+  - clock-stretching
+  - sample-rate
+  - quantization
+learningOutcomes:
+  - "Initialize and use UART, SPI, I2C, and ADC peripherals on Cortex-M from the reference manual"
+  - "Choose between polled, interrupt-driven, and DMA-driven driver patterns based on traffic shape"
+  - "Read a peripheral datasheet (e.g., an I2C sensor) and translate it to driver code"
+  - "Recognize the bus-specific failure modes: framing errors (UART), clock skew (SPI), arbitration loss (I2C), aliasing (ADC)"
+professionalContext: "These four buses cover ~90% of embedded peripheral integration work. Every IMU, environmental sensor, display controller, EEPROM, ADC, and DAC speaks one of them. Engineers who can write a driver from a sensor datasheet are productive in any embedded environment; engineers who can only call vendor HAL functions hit a wall when the vendor doesn't ship a driver for their part. The polled vs interrupt vs DMA choice criteria in this lesson directly determine system CPU load."
+thresholdConcept: false
+---
+
+## The four buses, in operational terms
+
+| Bus  | Wires                   | Speed               | Duplex | Topology                         | Typical use                     |
+| ---- | ----------------------- | ------------------- | ------ | -------------------------------- | ------------------------------- |
+| UART | 2 (TX, RX)              | 9600 – 921600 bps   | Full   | Point-to-point                   | Debug console, GPS, BLE module  |
+| SPI  | 4 (SCK, MOSI, MISO, CS) | up to ~50 MHz       | Full   | 1 master, N slaves (CS-selected) | Flash, displays, fast ADCs      |
+| I2C  | 2 (SDA, SCL)            | 100k / 400k / 1M Hz | Half   | Multi-master, address-routed     | Sensors, EEPROMs, I/O expanders |
+| ADC  | n/a (analog input)      | 1 ksps – 5 Msps     | n/a    | Internal peripheral              | Sensor reading, audio capture   |
+
+Each has its own datasheet vocabulary, its own failure modes, and its own driver decomposition.
+
+## UART — the simplest bus
+
+Two signals: TX (transmit) and RX (receive). Both ends pre-agree on baud rate, parity, and stop bits. Each side has a shift register that converts between serial line bits and parallel bytes.
+
+Polled UART transmit:
+
+```c
+void uart_putc(char c) {
+    while (!(USART2_SR & SR_TXE)) { }   // Wait for TX empty
+    USART2_DR = c;
+}
+```
+
+Polled is fine for low-traffic debug output. For higher traffic, the same TXE flag drives an interrupt:
+
+```c
+// Tx ring buffer drained by the IRQ
+static volatile uint8_t tx_buf[256];
+static volatile uint16_t tx_head, tx_tail;
+
+void uart_putc_async(char c) {
+    uint16_t next = (tx_head + 1) & 0xFF;
+    while (next == tx_tail) { }          // Buffer full — block
+    tx_buf[tx_head] = c;
+    tx_head = next;
+    USART2_CR1 |= CR1_TXEIE;             // Enable TX-empty interrupt
+}
+
+void USART2_IRQHandler(void) {
+    if ((USART2_SR & SR_TXE) && (USART2_CR1 & CR1_TXEIE)) {
+        if (tx_tail != tx_head) {
+            USART2_DR = tx_buf[tx_tail];
+            tx_tail = (tx_tail + 1) & 0xFF;
+        } else {
+            USART2_CR1 &= ~CR1_TXEIE;    // Buffer empty — disable IRQ
+        }
+    }
+    // RX handling from E3 stays here too
+}
+```
+
+For bulk transmit (e.g., a logging burst), use DMA:
+
+```c
+void uart_dma_send(const uint8_t *data, uint16_t len) {
+    DMA1_S6CR &= ~1;                     // Disable
+    while (DMA1_S6CR & 1) { }
+    DMA1_S6PAR  = (uint32_t)&USART2_DR;
+    DMA1_S6M0AR = (uint32_t)data;
+    DMA1_S6NDTR = len;
+    DMA1_S6CR = (1U << 10) | (1U << 6);  // MINC | DIR=mem-to-periph
+    USART2_CR3 |= (1U << 7);             // DMAT: DMA tx enable
+    DMA1_S6CR |= 1;                      // Start
+}
+```
+
+UART failure modes to handle in production:
+
+- **Framing error** — receiver expected a stop bit but saw something else. Usually wrong baud rate or noise. Check status register, drop the byte, log.
+- **Overrun** — a new byte arrived before the old one was read. The RX ISR must keep up.
+- **Parity error** (if enabled) — corruption on the line. Log + drop.
+
+## SPI — fast, deterministic, full-duplex
+
+Four wires: SCK (clock from master), MOSI (master out), MISO (master in), CS (chip select per slave). The master drives the clock; on each clock edge, one bit goes each direction. SPI is synchronous, fast (10s of MHz), and has well-defined transfer durations.
+
+Polled SPI transfer (master):
+
+```c
+uint8_t spi_xfer(uint8_t tx_byte) {
+    SPI1_DR = tx_byte;                   // Write triggers a transfer
+    while (!(SPI1_SR & SR_RXNE)) { }     // Wait for received byte
+    return SPI1_DR;
+}
+
+void spi_read_register(uint8_t reg, uint8_t *out, size_t len) {
+    gpio_clear(CS_PIN);                  // Assert CS
+    spi_xfer(reg | 0x80);                 // Address + read bit (device-specific)
+    for (size_t i = 0; i < len; i++) {
+        out[i] = spi_xfer(0xFF);          // Dummy write to clock in
+    }
+    gpio_set(CS_PIN);                    // Deassert CS
+}
+```
+
+For bulk transfers — display frame buffers, large flash reads — DMA is the right pattern. Set up DMA for MOSI (memory → peripheral) and MISO (peripheral → memory), kick off the transfer, sleep until the completion interrupt.
+
+SPI failure modes:
+
+- **Clock polarity / phase mismatch** — master and slave disagree on which edge samples. Always check the slave's datasheet for CPOL/CPHA requirements; STM32 calls them CPOL and CPHA in the CR1 register.
+- **Timing violations** — running the clock faster than the slave can sample. Datasheet specifies a maximum SPI clock per slave.
+- **CS race** — releasing CS before the last bit clocks out. Wait for BSY (busy) to clear before releasing CS.
+
+## I2C — multi-device, address-routed, complicated
+
+Two wires shared by many devices: SDA (data, open-drain) and SCL (clock, open-drain). The master initiates every transaction. Each slave has a 7-bit address. The protocol:
+
+1. Master pulls SDA low while SCL is high — START condition.
+2. Master writes 7 address bits + 1 R/W bit.
+3. Addressed slave pulls SDA low — ACK.
+4. Data bytes flow, each acknowledged.
+5. Master pulls SDA high while SCL is high — STOP.
+
+A simple polled I2C read of register `0x10` from a sensor at address `0x68`:
+
+```c
+int i2c_read_register(uint8_t addr, uint8_t reg, uint8_t *out) {
+    // Wait for bus idle
+    while (I2C1_SR2 & SR2_BUSY) { }
+
+    // START
+    I2C1_CR1 |= CR1_START;
+    while (!(I2C1_SR1 & SR1_SB)) { }
+
+    // Address + write
+    I2C1_DR = (addr << 1) | 0;
+    while (!(I2C1_SR1 & SR1_ADDR)) {
+        if (I2C1_SR1 & SR1_AF) return -1;  // No ACK — device missing
+    }
+    (void)I2C1_SR2;                          // Clear ADDR by reading SR2
+
+    // Register address
+    while (!(I2C1_SR1 & SR1_TXE)) { }
+    I2C1_DR = reg;
+    while (!(I2C1_SR1 & SR1_BTF)) { }
+
+    // Repeated START
+    I2C1_CR1 |= CR1_START;
+    while (!(I2C1_SR1 & SR1_SB)) { }
+
+    // Address + read
+    I2C1_DR = (addr << 1) | 1;
+    I2C1_CR1 &= ~CR1_ACK;                   // NAK on the single byte we'll read
+    while (!(I2C1_SR1 & SR1_ADDR)) { }
+    (void)I2C1_SR2;
+
+    // STOP, then receive
+    I2C1_CR1 |= CR1_STOP;
+    while (!(I2C1_SR1 & SR1_RXNE)) { }
+    *out = I2C1_DR;
+
+    return 0;
+}
+```
+
+I2C is fiddly because the state machine has many transition points, each gated on a different status flag. STM32 also famously has tricky errata around the I2C peripheral; the reference manual's "I2C debug tree" exists for a reason.
+
+I2C failure modes:
+
+- **No ACK** — addressed device didn't respond. Usually wrong address or device missing. Code MUST detect this and abort gracefully (the polled example does).
+- **Bus stuck low** — a slave is clock-stretching forever, or a previous transaction was interrupted mid-byte and left SDA low. Recovery: toggle SCL nine times manually with the I2C peripheral disabled, then send a START / STOP pair to reset state.
+- **Arbitration loss** (multi-master) — two masters started simultaneously and one detected it. Detect in CR1 and retry.
+
+## ADC — sampling analog signals
+
+The ADC converts an analog voltage to an N-bit digital value. STM32F4 has 12-bit ADCs running at up to 2.4 Msps. Three structural choices when sampling:
+
+- **Single-shot polling** — start a conversion, wait for done, read result. Fine for occasional readings (e.g., battery monitor every second).
+- **Interrupt per sample** — ADC fires an IRQ when each conversion completes. Fine for low-rate streaming (~1 kHz).
+- **DMA continuous** — ADC samples continuously, DMA copies each result to a buffer, completion interrupt fires per buffer. Mandatory for high-rate streaming (audio, motor control, fast-sensor logging).
+
+DMA-driven continuous ADC (the canonical pattern, simplified):
+
+```c
+static volatile uint16_t adc_buffer[256];
+
+void adc_dma_continuous_start(void) {
+    // ADC1 channel 0, continuous mode
+    ADC1_CR2 = (1U << 1) | (1U << 8);    // CONT | DMA
+    ADC1_SQR1 = 0;                         // 1 conversion in sequence
+    ADC1_SQR3 = 0;                         // Channel 0
+    ADC1_SMPR2 = 0b101;                   // Sample time
+
+    // DMA2 stream 0 channel 0 = ADC1
+    DMA2_S0CR  = 0;
+    DMA2_S0PAR  = (uint32_t)&ADC1_DR;
+    DMA2_S0M0AR = (uint32_t)adc_buffer;
+    DMA2_S0NDTR = 256;
+    DMA2_S0CR =
+        (0U << 25) |    // Channel 0
+        (1U << 8)  |    // CIRC: circular mode
+        (1U << 10) |    // MINC
+        (1U << 11) |    // PSIZE = 16-bit
+        (1U << 13) |    // MSIZE = 16-bit
+        (1U << 4)  |    // TCIE
+        (1U << 3);      // HTIE: half-transfer interrupt for double-buffering
+
+    DMA2_S0CR |= 1;                        // Enable DMA
+    ADC1_CR2 |= 1;                          // Enable ADC
+    ADC1_CR2 |= (1U << 30);                 // Start conversion
+}
+```
+
+Circular DMA + half-transfer interrupt is the double-buffer pattern: while the application processes the first half of the buffer, DMA fills the second half. When the second half is done, the application processes that half while DMA fills the first again. Zero data loss at high sample rates.
+
+ADC failure modes:
+
+- **Aliasing** — sampling slower than 2× the signal bandwidth folds high-frequency content into the band of interest. Add an anti-aliasing filter or sample faster.
+- **Quantization error** — 12 bits gives ~0.025% resolution over the input range; if your signal needs more precision, use a higher-resolution ADC.
+- **Reference voltage drift** — if the ADC's reference voltage isn't stable, neither are the readings. Use the chip's internal reference or an external precision reference.
+
+## The choice matrix
+
+| Bus  | Polled                      | Interrupt                    | DMA                           |
+| ---- | --------------------------- | ---------------------------- | ----------------------------- |
+| UART | Debug console               | Command interface (~10 kB/s) | Log burst, file transfer      |
+| SPI  | Register access             | Touch panel, IMU             | Frame buffer, large flash R/W |
+| I2C  | Sensor init, one-shot reads | Continuous IMU at low rate   | Rare (I2C is slow)            |
+| ADC  | Battery voltage check       | Slow sweep                   | Audio, fast sensor streaming  |
+
+The pattern: polled for occasional or low-traffic; interrupt for event-driven low-rate streams; DMA for bulk or high-rate continuous flow. Mixed-mode is normal — debug UART polled, application UART interrupt-driven, audio DMA — in the same firmware.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An I2C sensor at address 0x68 reads correctly in development but occasionally returns garbage in the field. Investigation shows SDA briefly stuck low after some readings. What's the most likely cause and fix?",
+      options: [
+        "Wrong baud rate — increase the I2C clock",
+        "The bus is hanging because a transaction was interrupted mid-byte (e.g., MCU reset between SCL falling and SDA being released by the slave), leaving the slave in a state where it holds SDA low waiting for more clocks. Recovery: toggle SCL nine times manually with the I2C peripheral disabled, then send a START/STOP to reset; some drivers do this at boot and after error detection.",
+        "The sensor is broken — replace it",
+        "I2C is unreliable; switch to SPI",
+      ],
+      correct: 1,
+      explanation:
+        "Bus-stuck-low is a classic I2C failure mode caused by mid-transaction interruption (power glitch, MCU reset, wire noise) that leaves a slave waiting for clocks. The recovery procedure — toggle SCL with GPIO, send START/STOP — clears the slave's state. Robust I2C drivers run this recovery at boot and after detected errors. Wrong baud rate produces consistent garbage, not stuck buses. Replacing the sensor doesn't fix a protocol-level state issue. Switching to SPI is overkill — the I2C bug is well-understood and recoverable.",
+    },
+    {
+      question:
+        "An engineer samples an audio signal at 5 kHz to capture human speech. The reconstructed signal has artifacts at 1-2 kHz that weren't in the original. What's the most likely cause?",
+      options: [
+        "Quantization error",
+        "Aliasing — sampling at 5 kHz captures content up to 2.5 kHz (Nyquist), but human speech has content well above 2.5 kHz (sibilants, plosives). The above-2.5 kHz content folds back into the 0-2.5 kHz range as spectral mirror images, producing the 1-2 kHz artifacts. Fix: add an analog low-pass anti-aliasing filter before the ADC, or sample at a higher rate (8 kHz is the telephony minimum, 16+ kHz for clean speech).",
+        "The microphone is bad",
+        "The ADC reference voltage is drifting",
+      ],
+      correct: 1,
+      explanation:
+        "Aliasing is the canonical undersampling failure. Nyquist requires sampling at > 2× the highest frequency of interest, and content above Nyquist folds back into the sampled band. Human speech has meaningful content to ~8 kHz; sampling at 5 kHz misses this and produces fold-back artifacts. The fix is structural — anti-aliasing filter or higher sample rate. Quantization is amplitude-resolution, not frequency-fold. Microphone or reference issues produce different artifacts.",
+    },
+    {
+      question: "When is DMA NOT the right choice for a peripheral?",
+      options: [
+        "Always use DMA — it's strictly better than polling or interrupts",
+        "DMA is overkill (or actively wrong) when: (a) traffic is sparse / event-driven and an ISR per event is acceptable; (b) the transfer is short enough that DMA setup overhead exceeds the transfer time; (c) the bus is half-duplex and slow (I2C) so DMA gains nothing meaningful; (d) the DMA buffer can't be statically allocated (DMA from stack is a recipe for corruption). Choose the simplest pattern that meets the latency budget.",
+        "DMA is for advanced engineers; junior engineers should use polling",
+        "DMA only works on STM32",
+      ],
+      correct: 1,
+      explanation:
+        "DMA has overhead — setup time, IRQ on completion, buffer management — that pays back at scale but not for one-shot transfers. For event-driven low-rate traffic (a button press, a single sensor read), an ISR is simpler. For very short transfers, polling can be faster than DMA. For half-duplex buses, DMA isn't structurally beneficial. And DMA buffers MUST live longer than the transfer — stack-local DMA buffers cause corruption that's hard to debug. Choose the pattern that fits the traffic shape; default to the simplest one that meets latency requirements.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson E6 takes one of the C drivers from this lesson and rewrites it in Rust using embedded-hal traits and RTIC. You'll see the same hardware register access, the same interrupt semantics, but type-safe and memory-safe — and structurally similar enough that the patterns transfer. The memory-safety argument becomes operationally concrete.
