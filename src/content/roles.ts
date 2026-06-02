@@ -2765,6 +2765,648 @@ export const ROLES: Role[] = [
     prerequisites: ["frontend"],
     leadsTo: ["mobile", "full-stack"],
   },
+
+  // ─── 15. Embedded / Firmware Engineer ─────────────────────────────────
+  {
+    id: "embedded",
+    slug: "embedded-engineer",
+    title: "Embedded / Firmware Engineer",
+    tagline: "Write the code that lives between hardware and the rest of the world.",
+    description:
+      "Embedded engineers write firmware that runs on microcontrollers — ARM Cortex-M, RISC-V, AVR — without a general-purpose OS. You speak to peripherals at the register level, manage real-time constraints, and ship code that has to work for years without crashing. The role lives wherever software meets physical hardware: medical devices, automotive ECUs, industrial controllers, consumer electronics.",
+    icon: "Activity",
+    color: "#FB923C",
+    levels: {
+      junior: {
+        required: [
+          "c-fundamentals",
+          "git-basics",
+          "debugging",
+          "linux-fundamentals",
+          "data-structures-basics",
+          "bit-manipulation",
+          "memory-management",
+          "shell-scripting",
+        ],
+        valuable: ["python-basics", "rust-basics", "cmake-basics"],
+      },
+      mid: {
+        required: [
+          "c-fundamentals",
+          "git-basics",
+          "debugging",
+          "linux-fundamentals",
+          "data-structures-basics",
+          "bit-manipulation",
+          "memory-management",
+          "shell-scripting",
+          "rtos-fundamentals",
+          "interrupt-handling",
+          "peripheral-drivers",
+          "arm-cortex-m",
+          "uart-spi-i2c",
+          "dma-fundamentals",
+          "misra-c",
+          "static-analysis",
+        ],
+        valuable: [
+          "rust-basics",
+          "freertos",
+          "embedded-rust",
+          "openocd-debugging",
+          "logic-analyzer",
+        ],
+      },
+      senior: {
+        required: [
+          "c-fundamentals",
+          "git-basics",
+          "debugging",
+          "linux-fundamentals",
+          "data-structures-basics",
+          "bit-manipulation",
+          "memory-management",
+          "shell-scripting",
+          "rtos-fundamentals",
+          "interrupt-handling",
+          "peripheral-drivers",
+          "arm-cortex-m",
+          "uart-spi-i2c",
+          "dma-fundamentals",
+          "misra-c",
+          "static-analysis",
+          "iec-62304",
+          "iso-26262",
+          "do-178c",
+          "safety-critical-design",
+          "architecture-patterns",
+          "code-review",
+          "mentoring",
+          "low-power-design",
+        ],
+        valuable: [
+          "ferrocene-rust",
+          "apex-grace",
+          "secure-boot",
+          "signed-firmware-updates",
+          "autosar",
+          "zephyr-rtos",
+          "tasking-vfb",
+        ],
+      },
+    },
+    portfolio: [
+      {
+        title: "Real-Time Sensor Pipeline (STM32F4)",
+        tutorialSlug: "phase-e-capstone",
+        skill: "ADC + DMA + RTOS + UART",
+      },
+      {
+        title: "Bare-Metal LED Driver (No HAL)",
+        tutorialSlug: "phase-e-bare-metal",
+        skill: "Register-Level GPIO",
+      },
+      { title: "FreeRTOS Task Architecture", tutorialSlug: "freertos-tasks", skill: "RTOS Design" },
+      {
+        title: "Rust on Cortex-M (embedded-hal + RTIC)",
+        tutorialSlug: "phase-e-rust",
+        skill: "Memory-Safe Embedded",
+      },
+      {
+        title: "MISRA-C:2023 Conformant Driver",
+        tutorialSlug: "misra-driver",
+        skill: "Safety-Critical C",
+      },
+    ],
+    standards: [
+      {
+        name: "ISO/IEC 9899:2018 (C17)",
+        body: "ISO/IEC",
+        url: "https://www.iso.org/standard/74528.html",
+        description: "The C language specification embedded engineers write to daily.",
+      },
+      {
+        name: "ARMv7-M Architecture Reference Manual",
+        body: "Arm Holdings",
+        url: "https://developer.arm.com/documentation/ddi0403/latest",
+        description:
+          "The canonical architecture reference for Cortex-M3/M4 — exception model, NVIC, system control space.",
+      },
+      {
+        name: "MISRA-C:2023",
+        body: "MISRA Consortium",
+        url: "https://misra.org.uk/",
+        description:
+          "The de facto safety-critical C subset. Referenced by ISO 26262, IEC 62304, EN 50128.",
+      },
+      {
+        name: "IEC 62304",
+        body: "IEC",
+        url: "https://www.iec.ch/",
+        description:
+          "Medical device software lifecycle (Class A/B/C). The standard for embedded software in medical devices.",
+      },
+      {
+        name: "ISO 26262",
+        body: "ISO",
+        url: "https://www.iso.org/standard/68383.html",
+        description:
+          "Automotive functional safety (ASIL A-D). Anchors the safety case for embedded automotive software.",
+      },
+    ],
+    certifications: [
+      {
+        name: "ARM Accredited Engineer (AAE)",
+        issuer: "Arm",
+        level: "professional",
+        url: "https://www.arm.com/resources/education/accredited-program",
+      },
+      {
+        name: "Certified Automotive Embedded Engineer",
+        issuer: "TÜV SÜD",
+        level: "expert",
+        url: "https://www.tuvsud.com/",
+      },
+    ],
+    skills: [
+      {
+        category: "Core",
+        items: [
+          { skill: "C (ISO/IEC 9899)", skillId: "c-fundamentals" },
+          { skill: "ARM Cortex-M Architecture", skillId: "arm-cortex-m" },
+          { skill: "Bare-Metal Programming", skillId: "peripheral-drivers" },
+          { skill: "Interrupts + DMA", skillId: "interrupt-handling" },
+          { skill: "RTOS (FreeRTOS / Zephyr)", skillId: "rtos-fundamentals" },
+        ],
+      },
+      {
+        category: "Bus Protocols",
+        items: [
+          { skill: "UART / SPI / I2C", skillId: "uart-spi-i2c" },
+          { skill: "ADC + Analog Frontend", skillId: "peripheral-drivers" },
+          { skill: "DMA + Double Buffering", skillId: "dma-fundamentals" },
+        ],
+      },
+      {
+        category: "Safety + Standards",
+        items: [
+          { skill: "MISRA-C:2023", skillId: "misra-c" },
+          { skill: "IEC 62304 (Medical)", skillId: "iec-62304" },
+          { skill: "ISO 26262 (Automotive)", skillId: "iso-26262" },
+          { skill: "DO-178C (Aviation)", skillId: "do-178c" },
+        ],
+      },
+      {
+        category: "Modern Toolchain",
+        items: [
+          { skill: "GCC arm-none-eabi", skillId: "embedded-toolchain" },
+          { skill: "Rust (embedded-hal + RTIC)", skillId: "embedded-rust" },
+          { skill: "probe-rs / OpenOCD", skillId: "openocd-debugging" },
+        ],
+      },
+    ],
+    dayInTheLife:
+      "You start by reviewing the ISR latency numbers from yesterday's production firmware — a customer reported missed sensor samples and you suspect a bus driver is taking too long. You instrument with a GPIO toggle, capture on a logic analyzer, find a 200µs spike from an interrupt that was supposed to be sub-50µs, and refactor it into a queue-and-task pattern. After lunch, you review a teammate's MISRA-C deviation document for a DMA buffer pointer, then port an old C driver to Rust on Cortex-M to evaluate whether the team should switch the next-gen product line.",
+    salaryRange: { low: 110000, high: 240000, currency: "USD", source: "levels.fyi", year: 2026 },
+    demandLevel: "very-high",
+    goals: ["specialize-ai", "deep-understanding", "reliable-systems", "mid-to-senior"],
+    prerequisites: ["backend"],
+    leadsTo: ["robotics-software", "solutions-architect"],
+  },
+
+  // ─── 16. Robotics Software Engineer ───────────────────────────────────
+  {
+    id: "robotics-software",
+    slug: "robotics-software-engineer",
+    title: "Robotics Software Engineer",
+    tagline: "Write ROS 2 code that ships through a safety review.",
+    description:
+      "Robotics software engineers write the perception, planning, and control code for robots — manipulators, mobile robots, cobots. You speak ROS 2 fluently, write code against safety-rated control systems, and produce risk-assessment packages a customer can audit. The role bridges machine-learning (perception), control engineering (motion), and safety engineering (ISO 10218 risk assessments).",
+    icon: "Compass",
+    color: "#818CF8",
+    levels: {
+      junior: {
+        required: [
+          "python-basics",
+          "c-fundamentals",
+          "git-basics",
+          "linux-fundamentals",
+          "data-structures-basics",
+          "linear-algebra",
+          "ros2-basics",
+          "debugging",
+          "shell-scripting",
+        ],
+        valuable: ["computer-vision-basics", "control-theory-basics", "moveit-basics"],
+      },
+      mid: {
+        required: [
+          "python-basics",
+          "c-fundamentals",
+          "git-basics",
+          "linux-fundamentals",
+          "data-structures-basics",
+          "linear-algebra",
+          "ros2-basics",
+          "debugging",
+          "shell-scripting",
+          "ros2-nodes",
+          "tf2-coordinate-frames",
+          "ros2-nav2",
+          "moveit-basics",
+          "iso-8373",
+          "iso-12100",
+          "collaborative-modes",
+          "urdf-modeling",
+        ],
+        valuable: [
+          "iso-10218",
+          "pfl-testing",
+          "ros-industrial",
+          "gazebo-simulation",
+          "ursim",
+          "control-theory",
+        ],
+      },
+      senior: {
+        required: [
+          "python-basics",
+          "c-fundamentals",
+          "git-basics",
+          "linux-fundamentals",
+          "data-structures-basics",
+          "linear-algebra",
+          "ros2-basics",
+          "debugging",
+          "shell-scripting",
+          "ros2-nodes",
+          "tf2-coordinate-frames",
+          "ros2-nav2",
+          "moveit-basics",
+          "iso-8373",
+          "iso-12100",
+          "collaborative-modes",
+          "urdf-modeling",
+          "iso-10218",
+          "pfl-testing",
+          "functional-safety-pl-sil",
+          "iec-61508",
+          "iso-13849",
+          "iec-62443",
+          "ria-tr-r15-806",
+          "architecture-patterns",
+          "code-review",
+          "mentoring",
+          "risk-assessment-packages",
+        ],
+        valuable: ["apex-grace", "iso-26262", "sros-2", "embedded-real-time", "rust-basics"],
+      },
+    },
+    portfolio: [
+      {
+        title: "R15.06-2025 Risk-Assessment Package",
+        tutorialSlug: "phase-r-capstone",
+        skill: "Safety Engineering",
+      },
+      {
+        title: "ROS 2 Pick-and-Place Against URsim",
+        tutorialSlug: "ros2-pick-and-place",
+        skill: "Manipulation",
+      },
+      {
+        title: "MoveIt Motion Planning Pipeline",
+        tutorialSlug: "moveit-pipeline",
+        skill: "Motion Planning",
+      },
+      {
+        title: "Annex A Force/Pressure Budget",
+        tutorialSlug: "annex-a-budget",
+        skill: "PFL Validation",
+      },
+    ],
+    standards: [
+      {
+        name: "ISO 10218-1:2025",
+        body: "ISO",
+        url: "https://www.iso.org/standard/73933.html",
+        description:
+          "Safety requirements for robot systems in industrial environments (Part 1). Absorbed ISO/TS 15066 in 2025.",
+      },
+      {
+        name: "ANSI/A3 R15.06-2025",
+        body: "ANSI / A3 (US)",
+        url: "https://www.automate.org/a3-content/robot-safety-standards",
+        description: "US national adoption of ISO 10218. The risk-assessment package's anchor.",
+      },
+      {
+        name: "RIA TR R15.806",
+        body: "ANSI / A3",
+        url: "https://www.automate.org/",
+        description: "Testing methodology for power-and-force-limited (PFL) collaborative robots.",
+      },
+      {
+        name: "ROS-Industrial Public Curriculum",
+        body: "Southwest Research Institute / ARM Institute",
+        url: "https://rosindustrial.org/",
+        description: "The canonical public training for ROS in industrial settings. Free.",
+      },
+      {
+        name: "IEC 61508 series",
+        body: "IEC",
+        url: "https://www.iec.ch/functionalsafety/",
+        description:
+          "Functional safety of E/E/PE systems. Parent standard of ISO 13849 + IEC 62061.",
+      },
+    ],
+    certifications: [
+      {
+        name: "Open Robotics Skill Certification (Navigation, MoveIt, TF)",
+        issuer: "Open Robotics / The Construct",
+        level: "professional",
+        url: "https://www.theconstruct.ai/",
+      },
+      {
+        name: "ROS-Industrial Training (SwRI)",
+        issuer: "Southwest Research Institute",
+        level: "professional",
+        url: "https://rosindustrial.org/events",
+      },
+    ],
+    skills: [
+      {
+        category: "ROS 2",
+        items: [
+          { skill: "ROS 2 Nodes + Topics + Services", skillId: "ros2-nodes" },
+          { skill: "TF2 (Coordinate Frames)", skillId: "tf2-coordinate-frames" },
+          { skill: "Nav2 Stack", skillId: "ros2-nav2" },
+          { skill: "MoveIt Motion Planning", skillId: "moveit-basics" },
+        ],
+      },
+      {
+        category: "Safety Standards",
+        items: [
+          { skill: "ISO 10218-1:2025 (Robot Safety)", skillId: "iso-10218" },
+          { skill: "ISO 12100 Risk Assessment", skillId: "iso-12100" },
+          { skill: "Four Collaborative Modes (SMS/HG/SSM/PFL)", skillId: "collaborative-modes" },
+          { skill: "RIA TR R15.806 (PFL Testing)", skillId: "pfl-testing" },
+        ],
+      },
+      {
+        category: "Functional Safety",
+        items: [
+          { skill: "IEC 61508 (Parent)", skillId: "iec-61508" },
+          { skill: "ISO 13849 (PL a-e)", skillId: "iso-13849" },
+          { skill: "IEC 62061 (SIL 1-3)", skillId: "iec-62061" },
+          { skill: "PL ↔ SIL Mapping (Approximate)", skillId: "functional-safety-pl-sil" },
+        ],
+      },
+      {
+        category: "Simulation + Tooling",
+        items: [
+          { skill: "Gazebo / Ignition", skillId: "gazebo-simulation" },
+          { skill: "URsim (Universal Robots)", skillId: "ursim" },
+          { skill: "URDF Robot Modeling", skillId: "urdf-modeling" },
+        ],
+      },
+    ],
+    dayInTheLife:
+      "You start by reviewing yesterday's PFL force measurements from the contact-points matrix on a customer cell — one quasi-static reading is 5% above the Annex A threshold for sternum contact. You investigate, find the end-effector geometry has a sharper edge than the design intent, and write the deviation report. Mid-day, you debug a TF2 chain that's making MoveIt fail intermittently. After lunch, you review a junior engineer's R15.06 risk-assessment package and walk them through what's missing in the cybersecurity section.",
+    salaryRange: { low: 120000, high: 250000, currency: "USD", source: "levels.fyi", year: 2026 },
+    demandLevel: "very-high",
+    goals: ["specialize-ai", "deep-understanding", "reliable-systems", "mid-to-senior"],
+    prerequisites: ["embedded"],
+    leadsTo: ["solutions-architect"],
+  },
+
+  // ─── 17. Manufacturing Systems Engineer ───────────────────────────────
+  {
+    id: "manufacturing-systems",
+    slug: "manufacturing-systems-engineer",
+    title: "Manufacturing Systems Engineer",
+    tagline: "Bridge the shop floor and the IT stack.",
+    description:
+      "Manufacturing systems engineers integrate MES, SCADA, OPC UA, MTConnect, and the QMS systems that govern shop-floor work. You speak the supplier-qualification standards (ISO 9001, AS9100, IATF 16949), the operational frameworks (Lean, Six Sigma), and the data-plane protocols (OPC UA, MTConnect, IEC 62443). The role lives wherever production data must flow from machines to enterprise systems.",
+    icon: "Layers",
+    color: "#2DD4BF",
+    levels: {
+      junior: {
+        required: [
+          "python-basics",
+          "sql-queries",
+          "git-basics",
+          "linux-fundamentals",
+          "iso-9001",
+          "networking-basics",
+          "rest-api-basics",
+          "data-structures-basics",
+        ],
+        valuable: ["docker-basics", "control-systems-basics", "factory-automation-basics"],
+      },
+      mid: {
+        required: [
+          "python-basics",
+          "sql-queries",
+          "git-basics",
+          "linux-fundamentals",
+          "iso-9001",
+          "networking-basics",
+          "rest-api-basics",
+          "data-structures-basics",
+          "as9100",
+          "iatf-16949",
+          "iatf-core-tools",
+          "lean-tps",
+          "six-sigma-dmaic",
+          "isa-95",
+          "opc-ua",
+          "mtconnect",
+          "gd-t-basics",
+        ],
+        valuable: [
+          "ipc-a-610",
+          "asme-y14-5",
+          "mbd-asme-y14-41",
+          "isa-88",
+          "tsn-iec-ieee-60802",
+          "iec-62443",
+        ],
+      },
+      senior: {
+        required: [
+          "python-basics",
+          "sql-queries",
+          "git-basics",
+          "linux-fundamentals",
+          "iso-9001",
+          "networking-basics",
+          "rest-api-basics",
+          "data-structures-basics",
+          "as9100",
+          "iatf-16949",
+          "iatf-core-tools",
+          "lean-tps",
+          "six-sigma-dmaic",
+          "isa-95",
+          "opc-ua",
+          "mtconnect",
+          "gd-t-basics",
+          "asme-y14-5",
+          "mbd-asme-y14-41",
+          "isa-88",
+          "tsn-iec-ieee-60802",
+          "iec-62443",
+          "rami-4-0",
+          "iira",
+          "architecture-patterns",
+          "code-review",
+          "mentoring",
+        ],
+        valuable: ["ipc-7711-rework", "iso-22400-oee", "step-ap242", "b2mml", "apex-grace"],
+      },
+    },
+    portfolio: [
+      {
+        title: "PPAP Package (Production Part Approval)",
+        tutorialSlug: "phase-m-ppap",
+        skill: "Automotive QMS",
+      },
+      {
+        title: "DMAIC Project End-to-End",
+        tutorialSlug: "phase-m-dmaic",
+        skill: "Six Sigma",
+      },
+      {
+        title: "MTConnect → OPC UA Bridge Sandbox",
+        tutorialSlug: "phase-m-bridge",
+        skill: "Open Data Plane",
+      },
+      {
+        title: "GD&T Tolerance Stack-Up (ASME Y14.5)",
+        tutorialSlug: "phase-m-gdt",
+        skill: "Engineering Specs",
+      },
+      {
+        title: "ISA-95 Zone-and-Conduit Diagram",
+        tutorialSlug: "phase-m-isa95",
+        skill: "Factory IT Architecture",
+      },
+    ],
+    standards: [
+      {
+        name: "ISO 9001:2015",
+        body: "ISO",
+        url: "https://www.iso.org/standard/62085.html",
+        description: "Universal QMS. The substrate every supplier audit assumes.",
+      },
+      {
+        name: "AS9100D / IATF 16949:2016",
+        body: "SAE / IATF",
+        url: "https://www.sae.org/standards/content/as9100d/",
+        description:
+          "Aerospace + automotive QMS supersets — extend ISO 9001 with sector-specific requirements.",
+      },
+      {
+        name: "ISA-95 / IEC 62264",
+        body: "ISA / IEC",
+        url: "https://www.isa.org/standards-and-publications/isa-standards/isa-standards-committees/isa95",
+        description:
+          "Five-level control hierarchy (L0 process → L4 ERP) with information-flow obligations.",
+      },
+      {
+        name: "OPC UA / IEC 62541",
+        body: "OPC Foundation / IEC",
+        url: "https://opcfoundation.org/",
+        description:
+          "Industrial interoperability framework. Companion specs for MTConnect, Robotics, ISA-95.",
+      },
+      {
+        name: "MTConnect",
+        body: "Association for Manufacturing Technology",
+        url: "https://www.mtconnect.org/",
+        description:
+          "Open machine-tool data standard. REST/XML and OPC UA Companion Specification.",
+      },
+      {
+        name: "IEC 62443 series",
+        body: "IEC",
+        url: "https://www.iec.ch/cybersecurity",
+        description:
+          "OT cybersecurity. Zones, conduits, SL1-SL4 framework. Referenced by ISO 10218-1:2025.",
+      },
+    ],
+    certifications: [
+      {
+        name: "Six Sigma Green Belt",
+        issuer: "ASQ",
+        level: "professional",
+        url: "https://asq.org/cert/six-sigma-green-belt",
+      },
+      {
+        name: "Six Sigma Black Belt",
+        issuer: "ASQ",
+        level: "expert",
+        url: "https://asq.org/cert/six-sigma-black-belt",
+      },
+      {
+        name: "ISO 9001 Lead Auditor",
+        issuer: "Exemplar Global / IRCA",
+        level: "professional",
+        url: "https://exemplarglobal.org/",
+      },
+    ],
+    skills: [
+      {
+        category: "Quality Management",
+        items: [
+          { skill: "ISO 9001 Baseline", skillId: "iso-9001" },
+          { skill: "AS9100D (Aerospace)", skillId: "as9100" },
+          { skill: "IATF 16949 (Automotive)", skillId: "iatf-16949" },
+          { skill: "Core Tools (APQP / PPAP / FMEA / MSA / SPC)", skillId: "iatf-core-tools" },
+        ],
+      },
+      {
+        category: "Operational Excellence",
+        items: [
+          { skill: "Lean / TPS", skillId: "lean-tps" },
+          { skill: "Six Sigma DMAIC", skillId: "six-sigma-dmaic" },
+          { skill: "ISO 22400 OEE", skillId: "iso-22400-oee" },
+        ],
+      },
+      {
+        category: "Engineering Specification",
+        items: [
+          { skill: "ASME Y14.5 GD&T", skillId: "asme-y14-5" },
+          { skill: "ASME Y14.41 Model-Based Definition", skillId: "mbd-asme-y14-41" },
+          { skill: "STEP AP242", skillId: "step-ap242" },
+        ],
+      },
+      {
+        category: "Factory IT Stack",
+        items: [
+          { skill: "ISA-95 Five-Level Pyramid", skillId: "isa-95" },
+          { skill: "ISA-88 Batch Models", skillId: "isa-88" },
+          { skill: "OPC UA + Companion Specs", skillId: "opc-ua" },
+          { skill: "MTConnect (REST/XML + OPC UA)", skillId: "mtconnect" },
+          { skill: "TSN (IEC/IEEE 60802)", skillId: "tsn-iec-ieee-60802" },
+        ],
+      },
+      {
+        category: "OT Cybersecurity + Architecture",
+        items: [
+          { skill: "IEC 62443 (Zones / Conduits / SL)", skillId: "iec-62443" },
+          { skill: "RAMI 4.0 (German Industry 4.0)", skillId: "rami-4-0" },
+          { skill: "IIRA (US Industrial IoT Consortium)", skillId: "iira" },
+        ],
+      },
+    ],
+    dayInTheLife:
+      "You start by reviewing yesterday's OEE numbers — Line 3 is at 78% but you know the planned-downtime assumption is generous, so you walk over and time-study the actual changeovers. Mid-morning, you debug an MTConnect agent that stopped publishing spindle telemetry after a controller firmware update — turns out the OPC UA Companion Spec mapping changed and the MES integration needs to point at the new node ID. After lunch, you walk a junior engineer through the four 10218-1:2025 cybersecurity overlay requirements for a new cobot cell's risk assessment.",
+    salaryRange: { low: 100000, high: 220000, currency: "USD", source: "levels.fyi", year: 2026 },
+    demandLevel: "high",
+    goals: ["deep-understanding", "reliable-systems", "mid-to-senior"],
+    prerequisites: ["backend"],
+    leadsTo: ["solutions-architect", "engineering-manager"],
+  },
 ];
 
 /** Look up a role by its unique ID. */
