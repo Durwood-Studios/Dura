@@ -22,6 +22,7 @@ import type { LucideIcon } from "lucide-react";
 import { buildMetadata } from "@/lib/og";
 import { ROLES, getRoleBySlug, getRole } from "@/content/roles";
 import { getSkill } from "@/content/skills";
+import { getPathBySlug } from "@/lib/paths";
 import type { Role } from "@/types/career-track";
 
 const ICON_MAP: Record<string, LucideIcon> = {
@@ -94,6 +95,9 @@ export default async function RoleDetailPage({ params }: PageProps): Promise<Rea
   const leadsToRoles = role.leadsTo
     .map((id) => getRole(id))
     .filter((r): r is Role => r !== undefined);
+  // If a curriculum Path matches this Role's slug, link to it.
+  // Paths sequence DURA's phases; Tracks describe the destination.
+  const matchedPath = getPathBySlug(role.slug);
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
@@ -147,6 +151,28 @@ export default async function RoleDetailPage({ params }: PageProps): Promise<Rea
           &ldquo;{role.dayInTheLife}&rdquo;
         </p>
       </section>
+
+      {/* Cross-link to the matching curriculum Path */}
+      {matchedPath && (
+        <Link
+          href={`/paths/p/${matchedPath.slug}`}
+          className="dura-card group mb-12 flex items-start justify-between gap-4 p-5 transition-colors"
+        >
+          <div>
+            <p className="text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
+              Recommended curriculum path
+            </p>
+            <h3 className="mt-1 text-lg font-semibold text-[var(--color-text-primary)] transition-colors group-hover:text-emerald-400">
+              {matchedPath.title}
+            </h3>
+            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">{matchedPath.tagline}</p>
+          </div>
+          <ArrowRight
+            className="mt-2 h-4 w-4 shrink-0 text-[var(--color-text-muted)] transition-colors group-hover:text-emerald-400"
+            aria-hidden="true"
+          />
+        </Link>
+      )}
 
       {/* Skills at each level */}
       <section className="mb-12">

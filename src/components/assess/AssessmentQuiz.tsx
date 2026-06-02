@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, Check, Sparkles, X } from "lucide-react";
 import { PREFIX_QUESTIONS, SKILL_QUESTIONS } from "@/content/skill-assessment";
 import { scoreAssessment, scorePrefix, recommendPath, dreyfusLabel } from "@/lib/skill-assessment";
-import { LEARNING_PATHS } from "@/lib/paths";
+import { LEARNING_PATHS } from "@/lib/learning-paths";
 import { useAssessmentStore } from "@/stores/assessment";
 import { PathCard } from "@/components/assess/PathCard";
 import { generateId, cn } from "@/lib/utils";
