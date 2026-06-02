@@ -272,16 +272,16 @@ export const PATHS: readonly Path[] = [
     status: "scaffold",
   },
 
-  // ─── Preview — Phase E doesn't exist yet ──────────────────────────────
+  // ─── Embedded — Phase E exists, lessons being authored ────────────────
   {
     id: "embedded-engineer",
     slug: "embedded-engineer",
     title: "Embedded / Firmware Engineer",
     tagline: "Ship production firmware against ARM Cortex-M.",
     description:
-      "Preview path — anchored to the forthcoming Phase E (Embedded / Firmware). C and Rust on bare metal, RTOS fundamentals, MISRA-C:2023 compliant style, driver development, debugger workflow, and the safety-critical software standards (DO-178C, IEC 62304) the embedded world ships against.",
+      "C and Rust on bare metal, RTOS fundamentals, MISRA-C:2023 compliant style, driver development for the four canonical buses, and a real-time capstone application. Code-first throughout — Phase E is DURA's flagship code-teaching discipline phase.",
     outcome:
-      "Build production firmware against an ARM Cortex-M target with HAL abstraction, RTOS scheduling, and a debugger-driven development loop.",
+      "Build production firmware against an ARM Cortex-M target with documented register access, RTOS scheduling, DMA-driven peripherals, and a real-time sensor pipeline that compiles, flashes, and runs.",
     archetype: "Embedded",
     color: "#fb923c",
     phases: [
@@ -302,10 +302,10 @@ export const PATHS: readonly Path[] = [
       {
         phaseId: "e",
         scope: "spine",
-        rationale: "Phase E — Embedded / Firmware (under development).",
+        rationale: "Phase E — Embedded / Firmware. Eight code-first lessons on ARM Cortex-M.",
       },
     ],
-    status: "preview",
+    status: "scaffold",
   },
 
   // ─── Leadership ─────────────────────────────────────────────────────────

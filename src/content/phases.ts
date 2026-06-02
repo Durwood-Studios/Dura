@@ -594,6 +594,98 @@ export const PHASES: Phase[] = [
     ],
   },
 
+  // ─── Phase E — Embedded / Firmware (post-Phase-5, code-teaching) ───────
+  // Eight-lesson code-first curriculum for ARM Cortex-M. C and Rust on
+  // bare metal, RTOS, drivers, MISRA-C:2023 in practice, and a capstone
+  // real-time sensor pipeline on STM32F4. Hash-anchored capstone via /verify.
+  {
+    id: "e",
+    slug: "e-embedded",
+    title: "Phase E: Embedded / Firmware",
+    tagline: "Ship production firmware against ARM Cortex-M.",
+    description:
+      "Eight code-teaching lessons from C-literacy to a working real-time sensor pipeline on STM32. C and Rust on bare metal, RTOS fundamentals, drivers for the four canonical buses, MISRA-C:2023 in practice. Code-first — standards appear only where they're load-bearing.",
+    color: "#fb923c",
+    estimatedHours: 15,
+    moduleCount: 8,
+    lessonCount: 8,
+    order: 12,
+    modules: [
+      mod(
+        "e",
+        1,
+        "c-toolchain-arm-cortex-m",
+        "C Toolchain for ARM Cortex-M",
+        "GCC arm-none-eabi, linker scripts, startup code, and the build flow that produces a flashable binary.",
+        1.5,
+        1
+      ),
+      mod(
+        "e",
+        2,
+        "bare-metal-c",
+        "Bare-Metal C — Registers, Peripherals, the Boot Sequence",
+        "Memory-mapped I/O, volatile, the vector table, and the journey from reset vector to main().",
+        1.5,
+        1
+      ),
+      mod(
+        "e",
+        3,
+        "interrupts-and-dma",
+        "Interrupts and DMA",
+        "ISRs without the pitfalls plus DMA-driven peripheral transfers. The hardware-software contract at the interrupt boundary.",
+        1.5,
+        1
+      ),
+      mod(
+        "e",
+        4,
+        "rtos-fundamentals",
+        "RTOS Fundamentals — Tasks, Queues, Priority Inversion",
+        "FreeRTOS / Zephyr as references. Schedulers, queues, mutexes, and the priority-inversion failure mode that bit Mars Pathfinder.",
+        2,
+        1
+      ),
+      mod(
+        "e",
+        5,
+        "drivers",
+        "Drivers — UART, SPI, I2C, ADC",
+        "The four buses every embedded engineer writes against. Polled, interrupt-driven, and DMA-driven implementations with the choice criteria documented.",
+        2,
+        1
+      ),
+      mod(
+        "e",
+        6,
+        "rust-cortex-m",
+        "Rust on Cortex-M — embedded-hal + RTIC",
+        "Rust's embedded-hal trait ecosystem and RTIC's task model. The memory-safety argument made concrete.",
+        2,
+        1
+      ),
+      mod(
+        "e",
+        7,
+        "misra-c-2023",
+        "MISRA-C:2023 — When Style Is a Safety Requirement",
+        "Why specific MISRA rules exist, what bugs they prevent, and how the deviation-policy mechanism works. Practical, not bureaucratic.",
+        1.25,
+        1
+      ),
+      mod(
+        "e",
+        8,
+        "capstone",
+        "Capstone — A Real-Time Sensor Pipeline",
+        "ADC + DMA + RTOS task + UART telemetry on STM32F4. End-to-end firmware that compiles, flashes, and runs. Hash-anchored via /verify.",
+        3,
+        1
+      ),
+    ],
+  },
+
   // ─── Phase R — Robotics (post-Phase-5 specialization) ──────────────────
   // Eight-lesson curriculum anchored to ISO 10218:2025, ISO 12100, the
   // functional-safety triad, and ROS-Industrial. Capstone produces a
