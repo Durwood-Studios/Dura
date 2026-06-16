@@ -338,6 +338,49 @@ export const PATHS: readonly Path[] = [
     status: "complete",
   },
 
+  // ─── Quantitative / HFT ─────────────────────────────────────────────────
+  {
+    id: "quant-hft-engineer",
+    slug: "quant-hft-engineer",
+    title: "Quantitative / HFT Engineer",
+    tagline: "Build microsecond-latency C++ for quant trading.",
+    description:
+      "Pairs the CS + systems substrate with Phase Q's eight-lesson low-latency C++ curriculum — move semantics, IEEE 754 numerics, cache-aware programming, lock-free data structures, kernel-bypass networking, and the Nasdaq ITCH/OUCH + FIX market-data protocols. ISO C++23 anchored throughout.",
+    outcome:
+      "Build a microsecond-latency, in-memory limit order book that consumes ITCH market data, maintains price levels feeding a lock-free SPSC queue, computes mid/spread, and is latency-profiled — hash-anchored via /verify.",
+    archetype: "Systems",
+    color: "#f59e0b",
+    phases: [
+      { phaseId: "0", scope: "spine", rationale: "Digital-literacy foundations." },
+      { phaseId: "1", scope: "spine", rationale: "Programming fundamentals." },
+      {
+        phaseId: "3",
+        scope: "spine",
+        rationale:
+          "CS fundamentals — algorithms + complexity, load-bearing for HFT data structures.",
+      },
+      {
+        phaseId: "5",
+        scope: "spine",
+        rationale:
+          "Systems engineering — OS internals + networking, the substrate for kernel-bypass and latency work.",
+      },
+      {
+        phaseId: "7",
+        scope: "spine",
+        moduleIds: ["7-4"],
+        rationale: "Performance engineering — profiling, hot paths, cache lines, microbenchmarks.",
+      },
+      {
+        phaseId: "q",
+        scope: "spine",
+        rationale:
+          "Phase Q — Quantitative / HFT Systems. Eight code-first lessons from modern C++ to a microsecond order book.",
+      },
+    ],
+    status: "complete",
+  },
+
   // ─── Leadership ─────────────────────────────────────────────────────────
   {
     id: "engineering-leader",

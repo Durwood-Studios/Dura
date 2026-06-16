@@ -778,6 +778,97 @@ export const PHASES: Phase[] = [
     ],
   },
 
+  // ─── Phase Q — Quant / HFT Systems (post-Phase-5, code-teaching) ───────
+  // Eight lessons on microsecond-latency C++ for quant trading. ISO
+  // C++23 + IEEE 754-2019 + FIX + Nasdaq ITCH/OUCH anchored.
+  {
+    id: "q",
+    slug: "q-quant-hft",
+    title: "Phase Q: Quantitative / HFT Systems",
+    tagline: "Build microsecond-latency C++ for quant trading.",
+    description:
+      "Eight code-teaching lessons from modern C++ to a working order book. ISO C++23, IEEE 754-2019, FIX, and Nasdaq ITCH/OUCH anchored throughout.",
+    color: "#f59e0b",
+    estimatedHours: 14,
+    moduleCount: 8,
+    lessonCount: 8,
+    order: 14,
+    modules: [
+      mod(
+        "q",
+        1,
+        "modern-cpp-for-hft",
+        "Modern C++ for HFT",
+        "Move semantics, templates, constexpr, concepts, std::span — the deliberate subset HFT teams write in.",
+        2,
+        1
+      ),
+      mod(
+        "q",
+        2,
+        "ieee-754-numerics",
+        "IEEE 754 Numerics",
+        "Binary64 operationally. Fast-math, denormals, FMA, deterministic-FP for risk.",
+        1.5,
+        1
+      ),
+      mod(
+        "q",
+        3,
+        "cache-aware-programming",
+        "Cache-Aware Programming + False Sharing",
+        "x86-64 cache hierarchy, line size, prefetch, false sharing between threads.",
+        1.5,
+        1
+      ),
+      mod(
+        "q",
+        4,
+        "lock-free-data-structures",
+        "Lock-Free Data Structures",
+        "std::atomic, memory orderings, SPSC ring, ABA, the C++ memory model.",
+        2,
+        1
+      ),
+      mod(
+        "q",
+        5,
+        "kernel-bypass-networking",
+        "Kernel-Bypass Networking — DPDK + io_uring",
+        "Why the kernel network stack is too slow, DPDK polling, io_uring, AF_XDP.",
+        1.5,
+        1
+      ),
+      mod(
+        "q",
+        6,
+        "market-data-itch-ouch",
+        "Market Data — ITCH + OUCH",
+        "Nasdaq ITCH/OUCH binary protocols, SoupBinTCP framing.",
+        1.5,
+        1
+      ),
+      mod(
+        "q",
+        7,
+        "fix-protocol-order-entry",
+        "FIX Protocol",
+        "FIX 5.0 SP2 order entry, FIXP transport, FAST encoding.",
+        1.25,
+        1
+      ),
+      mod(
+        "q",
+        8,
+        "capstone-order-book",
+        "Capstone — Microsecond Order Book",
+        "In-memory order book from ITCH; latency-profiled; /verify anchored.",
+        3,
+        1
+      ),
+    ],
+  },
+
   // ─── Phase R — Robotics (post-Phase-5 specialization) ──────────────────
   // Eight-lesson curriculum anchored to ISO 10218:2025, ISO 12100, the
   // functional-safety triad, and ROS-Industrial. Capstone produces a

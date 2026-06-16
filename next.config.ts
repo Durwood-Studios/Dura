@@ -8,6 +8,17 @@ const withSerwist = withSerwistInit({
 });
 
 const nextConfig: NextConfig = {
+  // Tree-shake barrel-heavy libs at import time. Framer Motion ("motion") is
+  // the dominant client-JS cost on lesson pages (it lands in the 4 largest
+  // chunks); lucide-react re-exports hundreds of icons. optimizePackageImports
+  // rewrites these to per-symbol imports so only used code is bundled.
+  experimental: {
+    optimizePackageImports: ["motion", "lucide-react"],
+  },
+  // Serve modern image formats (smaller than PNG/JPEG) via next/image.
+  images: {
+    formats: ["image/avif", "image/webp"],
+  },
   outputFileTracingIncludes: {
     "/paths/[phaseId]/[moduleId]/[lessonId]": ["./src/content/phases/**/*.mdx"],
     "/howto/[slug]": ["./src/content/howto/**/*.mdx"],

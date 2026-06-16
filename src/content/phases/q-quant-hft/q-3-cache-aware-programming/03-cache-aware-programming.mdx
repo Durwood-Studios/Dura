@@ -1,0 +1,398 @@
+---
+title: "Cache-Aware Programming and False Sharing"
+description: "x86-64 cache hierarchy, line size (64B), prefetch hints, false sharing between threads. Memory-layout decisions that change latency by 10x."
+phase: q
+module: "q-3-cache-aware-programming"
+order: 3
+estimatedMinutes: 90
+difficulty: 4
+prerequisites:
+  - "q-1-modern-cpp-for-hft"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - cache-line
+  - cache-hierarchy
+  - spatial-locality
+  - temporal-locality
+  - cache-hit
+  - cache-miss
+  - aos
+  - soa
+  - false-sharing
+  - cache-line-padding
+  - prefetch
+  - hardware-destructive-interference-size
+learningOutcomes:
+  - "Explain the x86-64 L1/L2/L3 cache hierarchy and why a cache miss to DRAM costs roughly 100x an L1 hit"
+  - "Predict whether a given memory access pattern exhibits spatial or temporal locality, and rewrite a struct from array-of-structs to structure-of-arrays when the access pattern demands it"
+  - "Diagnose false sharing from a code listing — identify which fields share a 64-byte cache line and which threads contend for it"
+  - "Eliminate false sharing with alignas and std::hardware_destructive_interference_size, and justify why padding to a full line is correct rather than wasteful"
+  - "Insert a __builtin_prefetch hint correctly and state the precondition under which it helps rather than hurts"
+professionalContext: "In HFT the difference between a profitable strategy and a losing one is frequently measured in nanoseconds, and the dominant nanosecond sink in a hot path is not computation — it is waiting for memory. A single L3 miss that goes to DRAM stalls the core for the equivalent of hundreds of instructions; in a tick-to-trade path that fires millions of times a day, layout decisions compound into the bulk of measured latency. False sharing in particular is the bug that does not show up in a code review and does not throw an exception: two threads writing two logically independent counters silently serialize because the counters landed on the same cache line, and the only symptom is a throughput number that is mysteriously 5-10x worse than the algorithm predicts. Quant engineers who can read a struct and see the cache lines — who reach for alignas before reaching for a profiler — are the ones who ship the fast path. This lesson trains that vision."
+thresholdConcept: false
+---
+
+## Why this lesson exists
+
+You wrote a lock-free counter for each worker thread. The algorithm has zero contention — every thread touches only its own counter, no locks, no shared writes to the same variable. You benchmark it and throughput is 6x worse than running one thread alone. Nothing in the code explains it. No mutex, no atomic fence on a shared address, no obvious dependency.
+
+The answer is not in your algorithm. It is in the 64 bytes of memory your counters happened to land in. Two counters that are logically independent became physically dependent because the CPU does not move memory one byte at a time — it moves it one <VocabTooltip slug="cache-line">cache line</VocabTooltip> at a time, and your two counters shared a line. This lesson is about the gap between the memory model you reason in (individual variables) and the memory the hardware actually moves (64-byte lines). In a hot path, that gap is most of your latency.
+
+## First principles: the CPU does not read variables, it reads lines
+
+Picture a chef working at a counter. The pantry is across the building. Walking to the pantry for a single egg is absurdly slow, so the chef does not fetch one ingredient at a time — they grab a whole tray of nearby ingredients in one trip and set it on the counter. The next time they need something, if it is already on the counter, the work is instant. If it is not, another long walk to the pantry.
+
+The CPU works the same way. The pantry is main memory (DRAM). The counter is the cache. The tray is the cache line. When your code reads one `int`, the CPU does not fetch 4 bytes — it fetches the entire 64-byte line that `int` lives in and parks the whole line in cache. Everything else that was on that line came along for free.
+
+Two consequences fall out of this immediately, and they are the whole lesson:
+
+1. If the data you need next is on a line you already pulled in, access is nearly free. Lay your data out so that what you use together lives together.
+2. If two CPU cores want to write to the same line — even to different bytes of it — the hardware must keep their caches coherent, and that coordination is expensive. Keep independently-written data on different lines.
+
+## The mental model
+
+> **Stop picturing memory as a flat array of bytes you read one at a time. Picture it as a grid of 64-byte tiles. Every read or write touches a whole tile. Performance is determined by how many distinct tiles your hot path touches and whether two cores fight over the same tile.**
+
+Hold that grid-of-tiles image. Everything below is a corollary of it.
+
+## The cache hierarchy on x86-64
+
+A modern x86-64 core does not have one cache — it has a <VocabTooltip slug="cache-hierarchy">hierarchy</VocabTooltip> of them, each larger and slower than the one above it. Representative figures for a recent Intel/AMD server core (exact numbers vary by part; treat these as order-of-magnitude):
+
+```
+Level   Typical size      Typical latency      Shared?
+─────   ────────────      ───────────────      ───────
+L1d     32–48 KB          ~4–5 cycles          per-core
+L2      512 KB – 2 MB     ~12–15 cycles        per-core
+L3      tens of MB        ~40–75 cycles        shared across cores
+DRAM    gigabytes         ~200–350 cycles      shared
+```
+
+The exact cycle counts depend on the microarchitecture; what does not change is the **shape** of the curve. Each level down is roughly 3-10x slower than the one above. A <VocabTooltip slug="cache-hit">cache hit</VocabTooltip> in L1 is essentially free relative to a <VocabTooltip slug="cache-miss">cache miss</VocabTooltip> that goes all the way to DRAM, which costs on the order of 100x more. The exact multiplier is machine-specific; the existence of a roughly two-orders-of-magnitude cliff is universal.
+
+The cache line is 64 bytes on every mainstream x86-64 part. You do not have to memorize that — the standard library exposes related constants:
+
+```cpp
+#include <new>      // std::hardware_destructive_interference_size (C++17)
+#include <cstddef>
+#include <print>    // std::println (C++23)
+
+int main() {
+    // These are implementation-defined constants the standard library
+    // exposes so you do not hardcode a magic number. The VALUES are not
+    // guaranteed and differ across implementations and microarchitectures.
+    std::println("destructive  (avoid sharing): {}",
+                 std::hardware_destructive_interference_size);
+    std::println("constructive (pack together): {}",
+                 std::hardware_constructive_interference_size);
+}
+```
+
+`std::hardware_destructive_interference_size` (from `<new>`, since C++17) is the minimum offset between two objects that guarantees they will _not_ land on the same cache line — the size you pad to when you want to avoid <VocabTooltip slug="false-sharing">false sharing</VocabTooltip>. `std::hardware_constructive_interference_size` is the maximum size you can pack together while still likely sharing one line.
+
+Do not conflate these constants with the cache line size. The **constructive** size equals the line size — 64 on x86-64. The **destructive** size is the single most implementation-defined constant in the standard library: it must be `>=` the line size, but it is frequently _larger_. On many Intel parts it is 128, because the L2 adjacent-line / spatial prefetcher pulls cache-line **pairs**, so two objects 64 bytes apart can still interfere — which is exactly why GCC emits `-Winterference-size` warnings and why libraries like folly hardcode 128 for x86. Concretely: on libc++ / x86-64 the destructive size is commonly 64, but compiling this very snippet on an Apple-clang / libc++ / arm64 host prints `destructive=256, constructive=64`. The number is not portable; the technique is. We will use the destructive one below — it pads to whatever the implementation reports, which is exactly the point.
+
+> A note on a real footgun: some compilers warn that the _value_ of these constants is not guaranteed identical between translation units compiled with different flags, which can break ABI if the constant leaks into a struct layout in a public header. For an internal hot-path struct compiled in one build, this does not bite you. Mentioned because the warning surprises people; it does not change the technique.
+
+## Spatial and temporal locality
+
+Two access patterns make the cache work _for_ you.
+
+**<VocabTooltip slug="spatial-locality">Spatial locality</VocabTooltip>**: you access memory addresses that are near each other. Because the whole line came in together, accessing the next adjacent element is a hit. Iterating a contiguous array forward is the canonical example — every 64 bytes is one miss, and the next 15 `int`s on that line are hits.
+
+**<VocabTooltip slug="temporal-locality">Temporal locality</VocabTooltip>**: you access the same address again soon. The line is still resident, so the re-access is a hit. A loop counter, a frequently-read config value, the top-of-book price you read on every tick — all live happily in L1 because you touch them constantly.
+
+The hardware prefetcher rewards spatial locality automatically: when it detects a forward sequential stride, it starts pulling the _next_ lines before you ask for them. This is why a linear scan of an array is dramatically faster than chasing pointers through a linked list of the same elements — the linked list defeats the prefetcher because the next address is unpredictable.
+
+## AoS vs SoA: the layout decision that changes everything
+
+Here is where the grid-of-tiles model pays off. Suppose you track a book of orders. The natural object-oriented layout is an array of structs — <VocabTooltip slug="aos">AoS</VocabTooltip>:
+
+```cpp
+#include <cstdint>
+#include <vector>
+
+// Array-of-Structs: each Order is one contiguous record.
+struct Order {
+    std::uint64_t id;        // 8 bytes
+    std::uint64_t timestamp; // 8 bytes
+    std::int64_t  price;     // 8 bytes  (fixed-point ticks, not double)
+    std::uint32_t quantity;  // 4 bytes
+    std::uint32_t flags;     // 4 bytes
+};                           // 32 bytes per Order -> 2 Orders per 64B line
+
+std::vector<Order> book;
+
+// Hot loop: we only need price to find the best bid. But each Order is 32B,
+// so each cache line holds only 2 prices — and we drag id, timestamp,
+// quantity, and flags into cache on every iteration, using them for nothing.
+std::int64_t best_bid(const std::vector<Order>& book) {
+    std::int64_t best = INT64_MIN;
+    for (const Order& o : book) {
+        if (o.price > best) best = o.price;   // touch 8 of every 32 bytes
+    }
+    return best;
+}
+```
+
+The hot loop reads only `price`, but the layout forces the CPU to load the entire 32-byte `Order` to get at it. Three quarters of every cache line is wasted on fields this loop never reads. You pay for memory bandwidth you do not use.
+
+The fix is to flip the layout to a structure of arrays — <VocabTooltip slug="soa">SoA</VocabTooltip>:
+
+```cpp
+#include <cstdint>
+#include <vector>
+
+// Structure-of-Arrays: each field is its own contiguous array.
+struct OrderBook {
+    std::vector<std::uint64_t> id;
+    std::vector<std::uint64_t> timestamp;
+    std::vector<std::int64_t>  price;     // <- the hot field, packed tight
+    std::vector<std::uint32_t> quantity;
+    std::vector<std::uint32_t> flags;
+};
+
+// Now the prices are contiguous: one 64B line holds EIGHT int64 prices,
+// and the prefetcher streams them perfectly. We touch only the bytes we use.
+std::int64_t best_bid(const OrderBook& book) {
+    std::int64_t best = INT64_MIN;
+    for (std::int64_t p : book.price) {   // pure sequential scan over prices
+        if (p > best) best = p;
+    }
+    return best;
+}
+```
+
+The SoA version touches 8 prices per line instead of 2, brings in zero bytes it does not use, and feeds the hardware prefetcher a clean sequential stride. For a scan-heavy hot path this is a 4x reduction in lines touched before you count the prefetch win.
+
+The decision is not "SoA is better." The decision is: **does this code path read many records but few fields (favor SoA), or read few records but most fields of each (favor AoS)?** A function that loads one whole `Order` to print it wants AoS — all the fields are on one or two lines. A loop that scans a million orders for the best price wants SoA. Real systems often keep both layouts and choose per access pattern.
+
+## False sharing: when independent writes collide
+
+Now the bug from the opening. Per-thread counters, no shared state in your code:
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <thread>
+#include <vector>
+
+// One counter per worker. Logically independent — thread i only touches [i].
+struct Counters {
+    std::atomic<std::uint64_t> count[4];
+};
+
+void worker(Counters& c, int i, std::uint64_t iters) {
+    for (std::uint64_t n = 0; n < iters; ++n) {
+        // relaxed: we only need the final tally, not ordering vs other work.
+        c.count[i].fetch_add(1, std::memory_order_relaxed);
+    }
+}
+```
+
+`std::atomic<std::uint64_t>` is 8 bytes. Four of them is 32 bytes — they all fit inside a single 64-byte cache line. So when thread 0 writes `count[0]` and thread 1 writes `count[1]`, they are writing different _variables_ but the same _line_.
+
+The cache-coherence protocol (a MESI-family protocol — real Intel parts use MESIF, AMD uses MOESI, but the invalidate-on-write behavior is identical) works at line granularity. For a core to write a line it must hold that line in the Modified state, which means invalidating every other core's copy. When thread 1 writes `count[1]`, it invalidates the line in thread 0's L1 — even though thread 0 does not care about `count[1]`. Thread 0's next write to `count[0]` now misses, must re-acquire the line, and in turn invalidates thread 1. The line ping-pongs between cores on the interconnect. This is <VocabTooltip slug="false-sharing">false sharing</VocabTooltip>: no logical sharing, but physical sharing of a line forces the coherence traffic of true sharing.
+
+The symptom is exactly the opening puzzle — throughput collapses to a fraction of single-threaded, with no lock in sight.
+
+The fix is <VocabTooltip slug="cache-line-padding">cache-line padding</VocabTooltip>: force each counter onto its own line so a write to one never invalidates another.
+
+```cpp
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <new>      // std::hardware_destructive_interference_size
+
+// alignas + padding to a full destructive-interference span guarantees
+// each counter owns its cache line. The padding is "wasted" bytes that
+// buy back the entire false-sharing penalty — on a hot counter that is
+// the difference between 6x slowdown and linear scaling.
+struct alignas(std::hardware_destructive_interference_size) PaddedCounter {
+    std::atomic<std::uint64_t> value{0};
+    // Fill the rest of the line so the next PaddedCounter starts on a new one.
+    char pad[std::hardware_destructive_interference_size - sizeof(value)];
+};
+
+struct Counters {
+    PaddedCounter count[4];   // each element now starts on its own 64B line
+};
+```
+
+`alignas(std::hardware_destructive_interference_size)` forces each `PaddedCounter` to begin at a 64-byte boundary, and the `pad` array makes its size a full 64 bytes so the array stride is one line per element. Now thread 1 writing `count[1]` cannot touch the line holding `count[0]`. The coherence ping-pong disappears and the counters scale linearly with cores.
+
+Yes, you "wasted" 56 bytes per counter. That trade is correct: a few hundred bytes of padding to eliminate a 6x throughput loss on a hot path is one of the best deals in systems programming. Padding is not waste when the alternative is serialization.
+
+## Prefetch hints: helping the hardware see the future
+
+The hardware prefetcher is excellent at predictable strides and helpless at unpredictable ones. When _you_ know the next address but the hardware cannot guess it — chasing a pointer, hopping by a computed index — you can issue an explicit <VocabTooltip slug="prefetch">prefetch</VocabTooltip> hint to start the load early, while the core does other work.
+
+```cpp
+#include <cstdint>
+#include <vector>
+
+// Process records whose NEXT index is computed, not sequential, so the
+// hardware prefetcher cannot predict it. We prefetch the next record's
+// cache line while we finish processing the current one.
+std::uint64_t sum_with_prefetch(const std::vector<std::uint64_t>& data,
+                                const std::vector<std::size_t>& next_index) {
+    std::uint64_t total = 0;
+    for (std::size_t i = 0; i + 1 < data.size(); ++i) {
+        // Kick off the load for the address we will need next iteration.
+        //   arg 2 (rw):       0 = prepare to READ
+        //   arg 3 (locality): 3 = high temporal locality (keep in L1/L2)
+        // This is a HINT. It never changes results; it can only change timing.
+        __builtin_prefetch(&data[next_index[i + 1]], 0, 3);
+
+        total += data[next_index[i]];   // use the value fetched last iteration
+    }
+    return total;
+}
+```
+
+`__builtin_prefetch(addr, rw, locality)` is a GCC and Clang builtin (the portable x86 spelling is `_mm_prefetch` from `<xmmintrin.h>`). It emits a prefetch instruction and returns nothing — it cannot change the program's result, only its timing. The precondition for it to _help_ is strict and easy to get wrong:
+
+- The address must be one the prefetcher would not already have predicted (sequential scans need no manual prefetch — the hardware already does it).
+- The prefetch must be issued **far enough ahead** that the line arrives before you use it, but not so far ahead that it gets evicted before use.
+- There must be useful work to overlap with the load latency.
+
+A prefetch issued too late, on data the prefetcher already handles, or with nothing to overlap, is at best a wasted instruction and at worst pollutes the cache and makes things slower. This is why prefetch is the _last_ tool you reach for, validated by measurement — not the first. Fix your layout (SoA, padding) before you reach for prefetch hints.
+
+## Practice: read the layout, find the bug
+
+Fill in the blanks to lock the mechanism before the competency check.
+
+<FillBlank
+  prompt="On every mainstream x86-64 CPU, the cache line size in bytes is ___. To avoid false sharing you pad to std::hardware_destructive_interference_size — an implementation-defined value (>= the line size) declared in the <___> header."
+  answers={["64", "new"]}
+  hints={[
+    "A power of two; eight int64 values fit in one.",
+    "Same header that declares placement-new's std::nothrow.",
+  ]}
+/>
+
+<FillBlank
+  prompt="Two threads each increment their own atomic counter, but the counters share a cache line. This performance bug is called ___ ___. The fix is to ___ each counter to its own line using alignas."
+  answers={["false", "sharing", "pad"]}
+  hints={[
+    "Adjective meaning 'not real'.",
+    "What sharing of state would look like to the coherence protocol.",
+    "Add filler bytes.",
+  ]}
+/>
+
+## Apply it: diagnose the layout
+
+Reason about cache behavior, not C++ syntax. Below is a classifier you complete by hand: given a description of a struct or access pattern, return the cache verdict. Each scenario maps to exactly one of the listed diagnoses — you decide which by analyzing where the data lands and who writes it.
+
+<SandboxExercise
+  language="typescript"
+  instructions="You are reviewing four memory layouts on the hot path. Implement `diagnoseLayout(scenario)` to return one of the EXACT strings below for each scenario, reasoning about cache lines (64B) and who writes what. Returns: 'false-sharing' when multiple threads write distinct fields that share one cache line (fix: pad each to its own line); 'cache-friendly' when one thread scans a tightly packed hot field sequentially (good spatial locality, prefetcher-friendly); 'wasted-bandwidth' when a scan reads one field but an array-of-structs layout drags whole records into cache, wasting most of every line (fix: convert to structure-of-arrays); 'prefetch-candidate' when access is hardware-unpredictable (computed-index / pointer chasing) with work to overlap, so a manual prefetch issued ahead can help. Map: 'four-atomic-counters-one-line-two-threads' -> 'false-sharing'; 'soa-price-scan' -> 'cache-friendly'; 'aos-scan-one-field' -> 'wasted-bandwidth'; 'pointer-chase-with-work' -> 'prefetch-candidate'."
+  initialCode={`function diagnoseLayout(scenario: string): string {
+  // Classify each scenario by reasoning about cache lines and writers.
+  // TODO: implement
+  return "";
+}
+
+console.log(diagnoseLayout("four-atomic-counters-one-line-two-threads"));
+console.log(diagnoseLayout("soa-price-scan"));
+console.log(diagnoseLayout("aos-scan-one-field"));
+console.log(diagnoseLayout("pointer-chase-with-work"));`}
+  solution={`function diagnoseLayout(scenario: string): string {
+switch (scenario) {
+case "four-atomic-counters-one-line-two-threads":
+// Four 8-byte atomics fit in one 64B line; two cores writing
+// different elements ping-pong the line via the coherence protocol.
+return "false-sharing";
+case "soa-price-scan":
+// SoA packs ~8 int64 prices per line, scanned sequentially —
+// dense useful bytes, clean stride for the hardware prefetcher.
+return "cache-friendly";
+case "aos-scan-one-field":
+// 32B records, one field read: each 64B line carries 2 useful
+// values plus 24 bytes the loop never touches. Convert to SoA.
+return "wasted-bandwidth";
+case "pointer-chase-with-work":
+// Next address is unpredictable to the hardware prefetcher, and
+// there is work to overlap — a manual prefetch issued ahead helps.
+return "prefetch-candidate";
+default:
+return "unknown-scenario";
+}
+}
+
+console.log(diagnoseLayout("four-atomic-counters-one-line-two-threads")); // false-sharing
+console.log(diagnoseLayout("soa-price-scan")); // cache-friendly
+console.log(diagnoseLayout("aos-scan-one-field")); // wasted-bandwidth
+console.log(diagnoseLayout("pointer-chase-with-work")); // prefetch-candidate`}
+testCases={[
+"four-atomic-counters-one-line-two-threads is classified false-sharing",
+"soa-price-scan is classified cache-friendly",
+"aos-scan-one-field is classified wasted-bandwidth",
+"pointer-chase-with-work is classified prefetch-candidate"
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A hot loop scans an array of 1,000,000 Order structs (32 bytes each: id, timestamp, price, quantity, flags) reading ONLY the price field. A colleague proposes converting the storage to structure-of-arrays so price is its own contiguous std::vector<int64_t>. Analyze the cache effect of this change.",
+      options: [
+        "No effect — the same total number of bytes is read either way, so cache behavior is identical",
+        "It is strictly worse, because SoA scatters each Order's fields across five arrays and destroys spatial locality",
+        "AoS loads a full 32-byte Order per element, so one 64-byte line holds 2 prices and 3/4 of every line is fields the loop never reads; SoA packs 8 int64 prices per line and brings in zero unused bytes, cutting lines touched ~4x and feeding the hardware prefetcher a clean sequential stride — a large win for this read-many-records, one-field access pattern",
+        "SoA helps only because int64 is smaller than the struct; if price were a double the layouts would perform the same",
+      ],
+      correct: 2,
+      explanation:
+        "The access pattern is the deciding factor: this loop reads many records but a single field. Under AoS the 32-byte stride means each 64B line carries 2 prices plus 24 bytes of id/timestamp/quantity/flags that the loop never touches — wasted bandwidth on every line. SoA stores prices contiguously, so one line holds 8 int64 prices and the prefetcher streams them perfectly, roughly a 4x reduction in lines touched. Option A ignores that you pay per LINE, not per byte used. Option B describes the cost SoA pays for whole-record access (printing one Order), which is not this loop. Option D is wrong because the int64-vs-double size is irrelevant to why SoA wins here — eliminating the unused fields is the win.",
+    },
+    {
+      question:
+        "Given: `struct S { std::atomic<uint64_t> a; std::atomic<uint64_t> b; };` shared by two threads, where thread 1 only ever writes `s.a` and thread 2 only ever writes `s.b`, and throughput is ~6x worse than expected with no lock anywhere. What is the root cause and the correct fix?",
+      options: [
+        "The atomics need std::memory_order_seq_cst instead of relaxed; tightening the ordering will restore throughput",
+        "False sharing: a and b are 8 bytes each and land on the same 64-byte line, so each core's write invalidates the other's cached copy via the coherence protocol, ping-ponging the line across the interconnect. Fix by padding so a and b occupy separate lines — e.g. alignas(std::hardware_destructive_interference_size) on each field's wrapper plus padding to a full line",
+        "A data race — two threads writing the same struct is undefined behavior regardless of which fields they touch; add a mutex around both writes",
+        "The struct is too small to align; making it a class with a virtual function adds a vtable pointer that pushes b onto its own line and fixes it",
+      ],
+      correct: 1,
+      explanation:
+        "Two 8-byte atomics sit within one 64-byte line. Even though the threads write different fields, MESI coherence operates at line granularity: thread 2's write to b puts the line in Modified state on its core and invalidates thread 1's copy, so thread 1's next write to a misses and re-acquires the line, ad infinitum — the line ping-pongs. That is false sharing, and the fix is to pad each field onto its own cache line. Option A is wrong: stronger ordering adds fences and makes it WORSE, and ordering is not the issue. Option C is wrong: writing distinct atomic objects is well-defined and race-free — adding a mutex reintroduces the very serialization padding avoids. Option D is a non-sequitur; a vtable pointer is not a layout-control tool and would not reliably separate the lines.",
+    },
+    {
+      question:
+        "An engineer adds `__builtin_prefetch(&arr[i+1], 0, 3);` inside a loop that already iterates `arr` sequentially from front to back, hoping to speed it up. After measuring, the loop is unchanged or slightly slower. Why?",
+      options: [
+        "The third argument should be 0, not 3 — locality 3 disables the prefetch entirely",
+        "Prefetch only works on heap memory; arr must be allocated with new for the hint to take effect",
+        "The hardware prefetcher already detects the forward sequential stride and prefetches those lines automatically, so the manual hint is redundant — at best a wasted instruction, and it can mildly hurt by competing for issue slots or polluting the cache; manual prefetch helps only for access patterns the hardware CANNOT predict, such as pointer chasing or computed-index hops, issued far enough ahead to hide the load latency",
+        "Prefetch changed the computed sum slightly due to reordering, which is the expected behavior of the hint",
+      ],
+      correct: 2,
+      explanation:
+        "Sequential forward scans are exactly what the hardware stride prefetcher is built to handle, so a manual prefetch of the next sequential element is redundant — the line is already on its way. The redundant instruction occupies an issue slot and can pollute cache, which is why it can be marginally slower. Manual prefetch earns its keep only when the next address is unpredictable to the hardware (pointer chasing, gather by computed index) AND the hint is issued enough iterations ahead to overlap the ~hundreds-of-cycles load with useful work. Option A inverts the locality argument (3 means high locality / keep it close, not 'disabled'). Option B is false — prefetch works on any addressable memory. Option D is false — prefetch is a pure hint and never changes results, only timing.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- The CPU moves memory in 64-byte cache lines, not individual variables; performance is governed by how many distinct lines your hot path touches and whether cores contend for the same line. To avoid false sharing, pad to `std::hardware_destructive_interference_size` from `<new>` — an implementation-defined constant that is `>=` the line size (commonly 64 on libc++/x86-64, but 128 on many Intel parts and other values elsewhere), not a portable name for the line size itself.
+- The L1/L2/L3/DRAM hierarchy gets ~3-10x slower per level, with a roughly 100x cliff from an L1 hit to a DRAM miss. Spatial locality (adjacent accesses) and temporal locality (re-accesses) are what keep you on the cheap side of that cliff.
+- Array-of-structs vs structure-of-arrays is an access-pattern decision: SoA wins when scanning many records for few fields (packs the hot field tight, feeds the prefetcher); AoS wins when touching most fields of few records.
+- False sharing is logically-independent writes colliding on one physical cache line, serializing threads through the coherence protocol with no lock present. Eliminate it by padding each hot field to its own line with `alignas(std::hardware_destructive_interference_size)`.
+- `__builtin_prefetch` is a timing-only hint that helps exclusively for hardware-unpredictable access patterns issued far enough ahead — and is the last optimization to reach for, after layout is correct.
+
+## What's next
+
+You can now lay data out so a single thread stays cache-resident and so multiple threads do not fight over lines. The next lesson takes the multi-threaded half of that further: Q4 builds lock-free data structures — `std::atomic`, the C++ memory orderings you only glimpsed in the `fetch_add` above, a single-producer/single-consumer ring buffer, and the ABA problem. Cache-line padding from this lesson is a prerequisite there: a lock-free queue with its head and tail indices on the same line false-shares between producer and consumer and loses most of its advantage.

@@ -1,0 +1,357 @@
+---
+title: "Lock-Free Data Structures"
+description: "std::atomic, memory ordering (acquire/release/relaxed/seq_cst), SPSC ring buffers, the ABA problem, the C++ memory model."
+phase: q
+module: "q-4-lock-free-data-structures"
+order: 4
+estimatedMinutes: 120
+difficulty: 5
+prerequisites:
+  - "q-3-cache-aware-programming"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - data-race
+  - atomic
+  - memory-order-relaxed
+  - memory-order-acquire
+  - memory-order-release
+  - memory-order-acq-rel
+  - memory-order-seq-cst
+  - happens-before
+  - release-acquire-synchronization
+  - spsc-ring-buffer
+  - compare-exchange
+  - aba-problem
+  - lock-free
+  - wait-free
+  - obstruction-free
+learningOutcomes:
+  - "Explain why a non-atomic read concurrent with a write is undefined behavior in C++, not merely a stale read"
+  - "Choose the correct std::memory_order for a given producer/consumer hand-off and justify why a weaker ordering would break it"
+  - "Trace the release-acquire happens-before edge that makes a single-producer/single-consumer ring buffer correct without a lock"
+  - "Identify an ABA bug in a compare_exchange loop and name two mechanisms that defeat it"
+  - "Distinguish lock-free from wait-free from obstruction-free and state which guarantee an HFT hot path actually needs"
+professionalContext: "On an HFT hot path, a mutex is a non-starter: a thread that loses a lock contention can be descheduled by the kernel for microseconds — an eternity when your competitor's order reaches the matching engine first. The standard structure for moving market-data events from a network-receive thread to a strategy thread is a lock-free single-producer/single-consumer ring buffer, and getting its memory ordering wrong produces bugs that pass every test on x86 and then corrupt data on ARM, or pass in debug and corrupt under -O3. Every quant developer is expected to reason about std::atomic and the C++ memory model from first principles, because the compiler, the CPU, and the cache coherence protocol are all allowed to reorder your memory operations in ways that only the memory model constrains. This lesson is the difference between an engineer who copies a ring buffer off a blog and one who can prove theirs is correct."
+thresholdConcept: true
+---
+
+## Why this lesson exists
+
+You have two threads. One receives market-data packets off the wire and writes them into a buffer. The other reads from that buffer and runs your strategy. The obvious tool — a `std::mutex` — is forbidden here, because a thread that blocks on a contended lock can be put to sleep by the kernel for microseconds, and microseconds are the entire game. So you reach for a lock-free queue.
+
+Then it works in testing, ships to production, and one day a price field reads as garbage — but only on the ARM-based colo box, never on your x86 laptop. The packet was written. The reader saw the "ready" flag. The price was still stale. Nothing in your code is "wrong" in the line-by-line sense. The bug lives in a layer most programmers never look at: the rules that say _when one thread's writes become visible to another thread, and in what order_. That layer is the C++ memory model, and this lesson is how you stop being afraid of it.
+
+## First principles: a write is not an event with a time
+
+Picture two people editing a shared document, each on their own laptop, syncing over a flaky connection. Person A types a paragraph, then ticks a checkbox that says "paragraph done." Person B is watching the checkbox. The instant it ticks, B starts reading the paragraph.
+
+The trap: there is no global clock. B's laptop might receive the checkbox-tick _before_ it receives the paragraph text. From B's view the checkbox is on but the paragraph is empty. Nothing is broken — the two changes propagated in a different order than A made them.
+
+A multicore CPU is exactly this. Each core has its own store buffer and cache. When core A writes the price and then writes the "ready" flag, core B is allowed to observe those two writes **in the opposite order**, unless something forces an ordering. The compiler is allowed to reorder them before the CPU even sees them. The hardware is allowed to reorder them after. "It happened first in the source code" buys you nothing across threads.
+
+A <VocabTooltip slug="data-race">data race</VocabTooltip> is when two threads access the same memory location, at least one access is a write, and nothing orders them. In C++ a data race is not "you might read a stale value." It is **undefined behavior** — the standard places no constraint on what your program does. The compiler may have assumed the race could not happen and optimized accordingly. So the first job is never to read or write shared mutable data with a plain `int`.
+
+## The mental model
+
+> **An `std::atomic` write is more than indivisible — it is a synchronization point that can carry an ordering promise with it.** Picture every shared write as a package and every shared read as a delivery. `memory_order` is the shipping class you pay for: `relaxed` ships the package alone with no guarantee about anything else in the truck; `release`/`acquire` is a sealed pallet — when the reader takes delivery of the `release` write, _everything that was on the truck before it_ is guaranteed to have arrived too.
+
+Hold that image. The entire correctness of a lock-free queue is one `release` write on the producer paired with one `acquire` read on the consumer, forming a guarantee the standard calls _happens-before_.
+
+## The mechanism: std::atomic and memory_order
+
+`std::atomic<T>` (from `<atomic>`) gives you operations that are indivisible — no torn reads, no torn writes — and that take a `std::memory_order` argument controlling how the operation orders the _other, non-atomic_ memory around it.
+
+There are five orderings you need. Here they are with their actual, standard-defined meaning — no approximations:
+
+```cpp
+#include <atomic>
+
+std::atomic<int> flag{0};
+int payload = 0;  // plain, non-atomic — shared, but protected by the atomic
+
+// memory_order_relaxed:
+//   Atomicity only. No ordering w.r.t. any other memory operation.
+//   Use when the value is independent of everything else (e.g. a counter
+//   you only read after all threads join).
+flag.store(1, std::memory_order_relaxed);
+int c = flag.load(std::memory_order_relaxed);
+
+// memory_order_release (store-side):
+//   No prior read/write in THIS thread may be reordered after this store.
+//   It "publishes" everything written before it.
+payload = 42;                                // (1) write the data
+flag.store(1, std::memory_order_release);    // (2) publish — (1) cannot move after (2)
+
+// memory_order_acquire (load-side):
+//   No subsequent read/write in THIS thread may be reordered before this load.
+//   If it reads a value written by a release store, it "receives" everything
+//   that release published.
+if (flag.load(std::memory_order_acquire) == 1) {  // (3) receive
+    int v = payload;                              // (4) guaranteed to see 42 — (4) cannot move before (3)
+}
+
+// memory_order_acq_rel:
+//   For read-modify-write ops (fetch_add, exchange, compare_exchange).
+//   Acts as acquire on the load half AND release on the store half.
+
+// memory_order_seq_cst (the default):
+//   Everything acq_rel gives, PLUS a single total order over all seq_cst
+//   operations that every thread agrees on. The strongest and the slowest.
+```
+
+The pairing that does the real work is **release-acquire**. When thread B's `acquire` load reads the value that thread A's `release` store wrote, the standard guarantees a <VocabTooltip slug="happens-before">happens-before</VocabTooltip> relationship: every write thread A performed _before_ the release store is visible to every read thread B performs _after_ the acquire load. This is <VocabTooltip slug="release-acquire-synchronization">release-acquire synchronization</VocabTooltip>, and it is the cheapest ordering that lets one thread hand data to another safely.
+
+A crucial subtlety: release-acquire only synchronizes the two threads that touch _that specific atomic with those orderings_. It does **not** impose a single global order that all threads agree on — that is the extra, more expensive thing <VocabTooltip slug="memory-order-seq-cst">`seq_cst`</VocabTooltip> buys. For a producer handing to one consumer, you never need the global order, so paying for `seq_cst` is wasted cycles (it inserts a full barrier — `mfence` on x86, `dmb ish` on ARM).
+
+Why the ARM-only bug from the opening: x86 has a strongly-ordered memory model where ordinary stores already behave almost like release stores, so a buggy queue using `relaxed` where it needed `release` _appears_ to work. ARM (and POWER) are weakly ordered — they actually reorder — so the same code corrupts data. The memory model is the contract; the hardware decides how much slack it takes.
+
+## Building a correct SPSC ring buffer
+
+A <VocabTooltip slug="spsc-ring-buffer">single-producer/single-consumer (SPSC) ring buffer</VocabTooltip> is the canonical lock-free structure for one thread feeding another. Exactly one thread calls `push`, exactly one calls `pop`. That constraint is what lets us avoid the read-modify-write atomics entirely — each index is written by only one thread.
+
+The invariant: the buffer is empty when `head == tail`, full when advancing `tail` would collide with `head`. The producer owns `tail`, the consumer owns `head`. The only cross-thread communication is the two atomic indices.
+
+```cpp
+#include <atomic>
+#include <cstddef>
+#include <optional>
+#include <array>
+
+template <typename T, std::size_t Capacity>
+class SpscRing {
+    // One slot is always left empty so head == tail unambiguously means "empty"
+    // (not "full"). So usable capacity is Capacity - 1.
+    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of two");
+
+    std::array<T, Capacity> buffer_{};
+
+    // Producer writes tail_, consumer reads it. Consumer writes head_,
+    // producer reads it. Each index has exactly one writer thread.
+    alignas(64) std::atomic<std::size_t> head_{0};  // next slot to read
+    alignas(64) std::atomic<std::size_t> tail_{0};  // next slot to write
+    // alignas(64): keep head_ and tail_ on separate cache lines so the two
+    // threads don't false-share. (Phase Q lesson q-3 — false sharing.)
+
+    static constexpr std::size_t mask = Capacity - 1;
+
+public:
+    // Called by the PRODUCER thread only.
+    bool push(const T& item) {
+        // We own tail_. relaxed load is fine — no other thread writes it.
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        const std::size_t next = (tail + 1) & mask;
+
+        // Read the consumer's head with ACQUIRE: we must see the consumer's
+        // most recent progress so we don't overwrite a slot it hasn't read.
+        if (next == head_.load(std::memory_order_acquire)) {
+            return false;  // full
+        }
+
+        buffer_[tail] = item;  // (A) write the payload into the slot
+
+        // RELEASE publishes (A): when the consumer's acquire-load of tail_
+        // observes this new value, it is guaranteed to see buffer_[tail].
+        tail_.store(next, std::memory_order_release);
+        return true;
+    }
+
+    // Called by the CONSUMER thread only.
+    std::optional<T> pop() {
+        // We own head_. relaxed load — no other thread writes it.
+        const std::size_t head = head_.load(std::memory_order_relaxed);
+
+        // ACQUIRE on tail_: if it pairs with the producer's release store,
+        // we are guaranteed to see the payload write (A) it published.
+        if (head == tail_.load(std::memory_order_acquire)) {
+            return std::nullopt;  // empty
+        }
+
+        T item = buffer_[head];  // (B) safe to read — happens-after the release
+
+        // RELEASE publishes that this slot is free, so the producer's
+        // acquire-load of head_ sees the slot is reusable.
+        head_.store((head + 1) & mask, std::memory_order_release);
+        return item;
+    }
+};
+```
+
+Walk the happens-before edge, because it is the whole lesson:
+
+1. Producer writes `buffer_[tail] = item` — step **(A)**, a plain write.
+2. Producer does `tail_.store(next, release)` — this _publishes_ (A).
+3. Consumer does `tail_.load(acquire)` and reads `next` (the value the producer stored in step 2).
+4. Because the acquire read observed the release store's value, **(A) happens-before (B)**. The consumer's `buffer_[head]` read at step **(B)** is guaranteed to see `item`, not stale memory.
+
+Remove the ordering — make both `relaxed` — and step 4 evaporates. On x86 it might still pass. On ARM, step (B) can read the slot _before_ (A)'s write has propagated, and you get the garbage-price bug. The `release`/`acquire` pair is not decoration; it is the proof.
+
+Why `relaxed` is correct for the producer's load of its _own_ `tail_`: only the producer writes `tail_`, so there is no inter-thread ordering to establish — the program order within one thread already guarantees the producer sees its own latest write.
+
+## When you do need read-modify-write: compare_exchange and the ABA problem
+
+SPSC dodges the hard part because each index has one writer. The moment you have multiple producers or multiple consumers, two threads race to update the same index, and you need an atomic <VocabTooltip slug="compare-exchange">read-modify-write</VocabTooltip>: `compare_exchange_weak(expected, desired)`. It atomically checks "does this atomic still equal `expected`? If so, set it to `desired` and return true; otherwise load the current value into `expected` and return false." The classic loop:
+
+```cpp
+std::atomic<Node*> head_;
+
+void push(Node* new_node) {
+    Node* old_head = head_.load(std::memory_order_relaxed);
+    do {
+        new_node->next = old_head;
+        // Try to swing head_ from old_head to new_node. If another thread
+        // changed head_ since our load, CAS fails, refreshes old_head, retry.
+    } while (!head_.compare_exchange_weak(
+        old_head, new_node,
+        std::memory_order_release,   // on success: publish new_node->next
+        std::memory_order_relaxed)); // on failure: only a retry, no publish
+}
+```
+
+Now the danger. The <VocabTooltip slug="aba-problem">ABA problem</VocabTooltip>: `compare_exchange` only checks that the _value_ is unchanged, not that _nothing happened_. Suppose the head pointer is `A`. Thread 1 reads `A`, then stalls. Thread 2 pops `A` (head now `B`), pops `B` (head now `C`), frees `A`, then allocates a new node that the allocator happens to place at the _same address_ `A`, and pushes it (head now `A` again). Thread 1 wakes up, runs its `compare_exchange`: head still equals `A`, so it succeeds — and splices in a `next` pointer computed from a structure that no longer exists. The value matched; the world underneath it did not.
+
+Two real mechanisms defeat ABA:
+
+- **Tagged pointers / version counters.** Pack a monotonically increasing counter alongside the pointer in one atomically-swappable word (e.g. `std::atomic<TaggedPtr>` where `TaggedPtr` is `{pointer, uint64 tag}`). Every successful CAS bumps the tag, so even if the pointer recycles to `A`, the tag differs and the stale CAS fails. This needs a double-width CAS (x86-64: `cmpxchg16b`).
+- **Deferred reclamation** so a node's memory is never reused while another thread might still hold a pointer to it: hazard pointers (each thread publishes the pointers it is currently using; memory is freed only once no hazard pointer references it) or epoch-based reclamation / RCU.
+
+SPSC ring buffers sidestep ABA entirely — there is no shared pointer being CAS'd, only two single-writer indices — which is exactly why HFT hot paths prefer them when the topology allows.
+
+## Lock-free is not wait-free
+
+These terms are precise progress guarantees, not vibes:
+
+- <VocabTooltip slug="lock-free">**Lock-free**</VocabTooltip>: at least *one* thread makes progress
+  in a bounded number of steps, system-wide. No thread can be blocked by another holding a lock
+  (there are no locks). But an individual thread can be starved indefinitely — its
+  `compare_exchange` can fail forever because others keep winning.
+- <VocabTooltip slug="wait-free">**Wait-free**</VocabTooltip>: *every* thread completes its
+  operation in a bounded number of its own steps, regardless of what other threads do. No
+  starvation, ever. Strictly stronger and strictly harder to build.
+- <VocabTooltip slug="obstruction-free">**Obstruction-free**</VocabTooltip>: the weakest — a thread
+  completes in bounded steps *if it runs in isolation* (other threads paused). The CAS-loop `push`
+  above is lock-free by definition: whenever a thread's `compare_exchange` fails, it failed
+  precisely because some other thread's CAS succeeded, so the system as a whole always makes
+  progress in a bounded number of steps. Lock-freedom is strictly stronger than obstruction-freedom,
+  so the push trivially satisfies obstruction-freedom too — but it is **not** wait-free, because an
+  individual thread can lose the race an unbounded number of times.
+
+The CAS-loop stack is lock-free but **not** wait-free: a thread can lose the CAS race repeatedly. The SPSC ring buffer's `push`/`pop`, by contrast, contain no retry loop — they execute a fixed sequence of operations and return — so they are **wait-free**. For an HFT hot path you want wait-free: bounded, predictable latency matters more than throughput, and a structure that _might_ retry an unbounded number of times has an unbounded tail latency, which is the one thing a latency-sensitive system cannot tolerate. This is the practical punchline — "lock-free" on a blog often means "CAS loop," and a CAS loop has no upper bound on how long one thread waits.
+
+## Practice
+
+<FillBlank
+  prompt="In the SPSC push(), the producer's own index is loaded with memory_order_relaxed because only the ___ thread writes it. The store that publishes the payload uses memory_order____, which pairs with the consumer's memory_order_acquire load to create a ___ relationship that guarantees the payload write is visible."
+  answers={["producer", "release", "happens-before"]}
+  hints={[
+    "Which single thread is allowed to call push()?",
+    "The store-side ordering that 'publishes' everything written before it.",
+    "The two-word term (hyphenated) for the standard's visibility guarantee.",
+  ]}
+/>
+
+<SandboxExercise
+  language="typescript"
+  instructions="Reason about ordering, not C++ syntax. A teammate's multi-producer stack uses a compare_exchange loop on a raw pointer with NO version tag and NO deferred reclamation, and frees popped nodes immediately back to the allocator. Implement `describeABARisk(scenario)` that takes a scenario string and returns one of the exact strings: 'aba-possible' if the scenario allows a node address to be freed and then reused while another thread holds a stale copy of that pointer across its compare_exchange; 'aba-safe' if the structure is single-producer/single-consumer with per-index single writers (no shared pointer CAS); or 'needs-tag-or-hazard' if the scenario is multi-producer with raw-pointer CAS and asks how to fix it. Map: scenario 'mpmc-raw-cas-immediate-free' -> 'aba-possible'; 'spsc-ring' -> 'aba-safe'; 'mpmc-raw-cas-how-to-fix' -> 'needs-tag-or-hazard'."
+  initialCode={`function describeABARisk(scenario: string): string {
+  // Return the correct classification for each scenario.
+  // TODO: implement
+  return "";
+}
+
+console.log(describeABARisk("mpmc-raw-cas-immediate-free"));
+console.log(describeABARisk("spsc-ring"));
+console.log(describeABARisk("mpmc-raw-cas-how-to-fix"));`}
+  solution={`function describeABARisk(scenario: string): string {
+switch (scenario) {
+case "mpmc-raw-cas-immediate-free":
+// Address can be freed then recycled to the same value while a
+// stalled thread holds a stale pointer — its CAS wrongly succeeds.
+return "aba-possible";
+case "spsc-ring":
+// Only two single-writer indices; no shared pointer is CAS'd, so no ABA.
+return "aba-safe";
+case "mpmc-raw-cas-how-to-fix":
+// Defeat ABA with a version-tagged pointer (double-width CAS) or
+// deferred reclamation (hazard pointers / epochs).
+return "needs-tag-or-hazard";
+default:
+return "unknown-scenario";
+}
+}
+
+console.log(describeABARisk("mpmc-raw-cas-immediate-free")); // aba-possible
+console.log(describeABARisk("spsc-ring")); // aba-safe
+console.log(describeABARisk("mpmc-raw-cas-how-to-fix")); // needs-tag-or-hazard`}
+testCases={[
+"mpmc-raw-cas-immediate-free is classified aba-possible",
+"spsc-ring is classified aba-safe",
+"mpmc-raw-cas-how-to-fix is classified needs-tag-or-hazard"
+]}
+/>
+
+> **What changes for you after this**
+> Before this lesson you read `tail_.store(next)` as "set tail to next." After it you read `tail_.store(next, std::memory_order_release)` as "set tail to next _and seal every write I made before this line into the same delivery_." The memory_order argument stops being noise you copy from a blog and becomes the load-bearing part of the line — the difference between a queue that is provably correct and one that passes on x86 and corrupts on ARM.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "In the SPSC ring buffer, the producer writes `buffer_[tail] = item;` and then `tail_.store(next, std::memory_order_release);`. A reviewer proposes changing the store to `std::memory_order_relaxed` 'because the writes are already in program order in the source.' What actually breaks, and why might testing miss it?",
+      options: [
+        "Nothing breaks; program order in the source guarantees the consumer sees the payload, so relaxed is a safe optimization",
+        "The release store is what publishes the prior payload write; with relaxed there is no happens-before edge to the consumer's acquire load, so on a weakly-ordered CPU (ARM/POWER) the consumer can observe the new tail value before the payload write has propagated and read stale memory — and testing on strongly-ordered x86, where ordinary stores already behave near-release, can pass anyway, hiding the bug until it runs on ARM",
+        "The store would tear because relaxed permits torn writes on a size_t; release is required for atomicity of the index itself",
+        "Relaxed would cause the producer to deadlock waiting on the consumer's head_ index",
+      ],
+      correct: 1,
+      explanation:
+        "The release store's job is to establish a happens-before relationship: everything the producer wrote before the release (the payload) is guaranteed visible to a consumer whose acquire load reads the released value. memory_order_relaxed gives atomicity but no such ordering, so the payload write and the index update can be observed out of order by another thread. On x86, ordinary stores are already strongly ordered (close to release semantics), so the broken code frequently passes there; on weakly-ordered ARM/POWER the reordering is real and the consumer reads stale data. Atomicity is not the issue — relaxed is still atomic and untearable for a size_t; the issue is purely inter-thread ordering. There is no deadlock; the indices never block.",
+    },
+    {
+      question:
+        "A multi-producer stack uses `head_.compare_exchange_weak(old_head, new_node)` in a loop. Under stress it occasionally corrupts the list even though every compare_exchange that 'succeeds' confirms head_ still equals the old_head the thread read. What is the most likely root cause and which fixes address it?",
+      options: [
+        "compare_exchange_weak is buggy and should be compare_exchange_strong; strong never spuriously fails",
+        "The ABA problem: between a thread's load of head_ and its CAS, other threads popped that node, freed it, and the allocator reused the same address for a new node pushed back onto head_; the CAS sees the matching pointer value and succeeds against a structure that no longer exists — fix with a version-tagged pointer (double-width CAS) or deferred reclamation such as hazard pointers or epoch-based reclamation",
+        "False sharing between head_ and the node payload; fix by aligning head_ to a 64-byte cache line",
+        "The CAS needs memory_order_seq_cst; release/relaxed orderings allow the corruption",
+      ],
+      correct: 1,
+      explanation:
+        "This is textbook ABA: compare_exchange compares values, not histories. If the head pointer goes A -> B -> C and then a recycled allocation lands back at address A and is pushed, a stalled thread that read A earlier will find head_ == A and succeed, splicing in a next pointer derived from freed memory. compare_exchange_weak vs strong only concerns spurious failure on the retry loop and does not address ABA. False sharing is a performance issue, not a correctness/value-matching issue. seq_cst strengthens ordering but does nothing about value recycling — ABA is orthogonal to memory ordering. The real fixes are a version/tag counter (so the swappable word changes even when the pointer recycles) or deferred reclamation that prevents the address from being reused while a pointer to it is still live.",
+    },
+    {
+      question:
+        "Two candidate queues for an HFT receive-to-strategy hand-off: (A) the wait-free SPSC ring buffer from this lesson, and (B) a lock-free multi-producer queue built on a compare_exchange retry loop. Throughput benchmarks show (B) slightly higher. Why might (A) still be the correct choice for the hot path?",
+      options: [
+        "(A) is wait-free: each push/pop runs a fixed bounded sequence with no retry loop, so its tail latency is bounded; (B) is lock-free but not wait-free — a producer can lose the CAS race repeatedly, giving an unbounded worst-case (tail) latency, and HFT cares about bounded latency far more than average throughput",
+        "(A) uses less memory because a ring buffer needs no per-node allocation, and memory is the binding constraint on the hot path",
+        "(B) requires a mutex internally which the kernel can deschedule, whereas (A) is lock-free",
+        "(A) is faster on average in every benchmark, so the throughput numbers for (B) must be measurement error",
+      ],
+      correct: 0,
+      explanation:
+        "Wait-free means every operation completes in a bounded number of its own steps regardless of other threads — the SPSC push/pop have no retry loop, so their latency is bounded and predictable. Lock-free (the CAS-loop queue) only guarantees that *some* thread makes progress; an individual thread can lose the compare_exchange race an unbounded number of times, producing an unbounded tail latency. HFT hot paths are dominated by tail latency, not average throughput, so a wait-free structure with bounded worst case is usually preferred even when a lock-free one wins on average throughput. (B) is lock-free, so it contains no mutex — that option misstates the definitions. Memory footprint is a real but secondary consideration here; the load-bearing reason is the latency-bound guarantee. And the throughput numbers for (B) are not necessarily wrong — higher average throughput coexisting with worse tail latency is exactly the trade-off being made.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A plain read concurrent with a write is a **data race**, which in C++ is undefined behavior — not a stale read. Shared mutable data must be `std::atomic` (or otherwise ordered).
+- The five `memory_order` levels have precise meanings: `relaxed` (atomicity only), `acquire`/`release` (the publish/receive pair that builds happens-before), `acq_rel` (both, for read-modify-write), and `seq_cst` (a global total order, the strongest and slowest, and usually unnecessary for a single hand-off).
+- An **SPSC ring buffer** is correct because of exactly one release-acquire pair: the producer's `release` store of `tail_` publishes the payload write, and the consumer's `acquire` load receives it — establishing a happens-before edge. Single-writer-per-index lets each thread use `relaxed` on its own index.
+- The **ABA problem** is that `compare_exchange` matches values, not histories; a recycled address can make a stale CAS wrongly succeed. Defeat it with version-tagged pointers (double-width CAS) or deferred reclamation (hazard pointers / epochs). SPSC avoids ABA by having no shared pointer CAS.
+- **Lock-free** (someone progresses) is weaker than **wait-free** (everyone progresses in bounded steps). A CAS-loop queue is lock-free but not wait-free; the SPSC ring is wait-free. HFT hot paths want wait-free for bounded tail latency.
+
+## What's next
+
+Lesson q-5 takes the data you can now move safely between threads and asks the next bottleneck: how does it get _into_ your process in the first place? You will see why the kernel network stack is too slow for a hot path and how DPDK polling, AF_XDP, and io_uring bypass it — feeding packets directly into a lock-free ring exactly like the one you built in this lesson.

@@ -4,6 +4,7 @@ import { SYSTEMS_AI_TERMS } from "./batch-systems-ai";
 import { ADVANCED_PROFESSIONAL_TERMS } from "./batch-advanced-professional";
 import { CTO_GAPS_TERMS } from "./batch-cto-gaps";
 import { EXPANSION_TERMS } from "./batch-expansion";
+import { CACHE_AWARE_TERMS } from "./batch-cache-aware";
 
 /**
  * Verified dictionary. Core terms inline, expansion batches imported.
@@ -3228,6 +3229,7 @@ export const DICTIONARY: DictionaryTerm[] = [
   ...ADVANCED_PROFESSIONAL_TERMS,
   ...CTO_GAPS_TERMS,
   ...EXPANSION_TERMS,
+  ...CACHE_AWARE_TERMS,
 ];
 
 export const DICTIONARY_BY_SLUG: Map<string, DictionaryTerm> = new Map(

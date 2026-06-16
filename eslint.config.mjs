@@ -64,6 +64,9 @@ const eslintConfig = [
       "next-env.d.ts",
       "public/sw.js",
       "public/sw.js.map",
+      // Local-only tooling (gitignored, absent on CI) — never lint these.
+      "tools/**",
+      "xDocs/**",
     ],
   },
   {
