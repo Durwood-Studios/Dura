@@ -3,12 +3,12 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { Menu, X } from "lucide-react";
+import { InstallButton } from "@/components/pwa/InstallButton";
 
 const LINKS = [
   { href: "/about", label: "About" },
   { href: "/discover", label: "Discovery" },
   { href: "/open-source", label: "Open Source" },
-  { href: "/install", label: "Install" },
   { href: "/tracks", label: "Career Tracks" },
 ] as const;
 
@@ -56,6 +56,7 @@ export function Nav(): React.ReactElement {
               {link.label}
             </Link>
           ))}
+          <InstallButton className="inline-flex items-center gap-1.5 transition-colors hover:text-[#171717] dark:hover:text-white" />
           <Link
             href="/dashboard"
             className="inline-flex h-9 items-center justify-center rounded-lg bg-[#10B981] px-5 text-sm font-medium text-white transition hover:bg-[#059669]"
@@ -90,6 +91,10 @@ export function Nav(): React.ReactElement {
                 {link.label}
               </Link>
             ))}
+            <InstallButton
+              className="flex h-12 items-center gap-2 text-base text-[#525252] transition-colors hover:text-[#171717] dark:text-[#a0a0a8] dark:hover:text-white"
+              onResult={() => setIsOpen(false)}
+            />
             <div className="mt-3 border-t border-[#E5E5E5]/60 pt-4 dark:border-white/5">
               <Link
                 href="/dashboard"
