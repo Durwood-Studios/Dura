@@ -1,0 +1,475 @@
+---
+title: "Application Security — The OWASP Top 10 in Code"
+description: "The 2021 Top 10 as vulnerable code → exploit → fix, each mapped to OWASP ASVS verification requirements."
+phase: s
+module: "s-2-appsec-owasp-top-10"
+order: 2
+estimatedMinutes: 120
+difficulty: 4
+prerequisites:
+  - "s-1-threat-modeling"
+  - "4-2-rest-apis-express"
+standards:
+  primaryAnchor: "OWASP Top 10:2021"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - owasp-top-10
+  - broken-access-control
+  - insecure-direct-object-reference
+  - deny-by-default
+  - parameterized-query
+  - sql-injection
+  - cryptographic-failure
+  - injection
+  - insecure-design
+  - security-misconfiguration
+  - vulnerable-components
+  - authentication-failure
+  - software-integrity-failure
+  - logging-failure
+  - ssrf
+  - allow-list
+  - asvs
+learningOutcomes:
+  - "Name the ten OWASP Top 10:2021 categories in order and state the root cause each one names"
+  - "Read a vulnerable code sample and identify which Top 10 category it falls under and why"
+  - "Rewrite a SQL-injection-vulnerable query as a parameterized query and explain why the fix closes the hole"
+  - "Apply deny-by-default access control and server-side allow-listing to close A01 and A10 defects"
+  - "Map a given vulnerability to the OWASP ASVS verification requirement that would have caught it in review"
+professionalContext: "The OWASP Top 10 is the lingua franca of application security. When a penetration test report lands on an engineer's desk, its findings are categorized by Top 10 ID. When a security architect writes a secure-coding standard, it is structured around these ten. When a code reviewer blocks a pull request, 'this is an A03 injection defect, see ASVS V5.3.4' is the sentence that carries weight. A security engineer who can look at code and name the category, the exploit, the fix, and the ASVS requirement that verifies the fix is doing the core job. This lesson is the defensive, blue-team reading of the Top 10 — we study the vulnerable shapes so we can recognize and remove them, never to weaponize them."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A penetration-test report just landed in your inbox. It contains one line: "A03:2021 — Injection. Login endpoint. Critical." No exploit walkthrough, no remediation steps — the report assumes you already know what A03 means, what the attacker can do with it, and how to close it. Your job is to read the code, find the defect, fix it, and prove the fix holds. The clock is the next release.
+
+This is the daily reality of application security work. The <VocabTooltip slug="owasp-top-10">OWASP Top 10</VocabTooltip> is the shared vocabulary that lets a tester, an engineer, and an auditor talk about the same defect without re-explaining it each time. Learn to read code through these ten lenses and you can do the central task of a security engineer: look at a function and say "that is broken, here is the category, here is the fix, here is the requirement that verifies it."
+
+## First principles: ten names for ten ways software breaks
+
+Before the list, the idea behind the list. Every web application is a machine that takes untrusted input from the outside world and turns it into trusted actions on the inside — reading a database row, writing a file, calling another service. A vulnerability is any place where that boundary leaks: where outside input reaches an inside action without the check that should have stopped it.
+
+The Top 10 is a ranked taxonomy of where that boundary most commonly leaks, compiled by the Open Web Application Security Project from real-world breach data. The 2021 edition is the current one. It is not a checklist of bugs — it is ten _categories of root cause_, each naming a class of missing check.
+
+Here is the full 2021 list, in its published order. The order is by prevalence and impact, not alphabetical, so the order itself is information:
+
+```text
+A01:2021 — Broken Access Control
+A02:2021 — Cryptographic Failures
+A03:2021 — Injection
+A04:2021 — Insecure Design
+A05:2021 — Security Misconfiguration
+A06:2021 — Vulnerable and Outdated Components
+A07:2021 — Identification and Authentication Failures
+A08:2021 — Software and Data Integrity Failures
+A09:2021 — Security Logging and Monitoring Failures
+A10:2021 — Server-Side Request Forgery (SSRF)
+```
+
+Two structural facts worth holding onto. First, **Broken Access Control moved to #1 in 2021** — it was #5 in the 2017 edition — because access-control defects turned out to be the most widespread when OWASP measured real applications. Second, **Insecure Design (A04) and SSRF (A10) are new categories in 2021**; SSRF was promoted from a single entry to its own category after a run of high-impact incidents.
+
+## The mental model
+
+> **A Top 10 category is a question you ask of every untrusted input.** A01 asks "is this user allowed to touch this object?" A03 asks "is this input being treated as data or as code?" A10 asks "is the server about to fetch a URL an attacker chose?" Security review is running those ten questions over the code paths where outside input meets inside action.
+
+We will work the highest-frequency categories as vulnerable code → exploit → fix, then map each to a verification requirement in <VocabTooltip slug="asvs">ASVS</VocabTooltip> — the OWASP Application Security Verification Standard, a companion document that turns each Top 10 theme into concrete, checkable requirements (numbered like "V5.3.4"). The Top 10 tells you _what_ breaks; ASVS tells you _what to verify_ so it does not.
+
+## A01 — Broken Access Control
+
+<VocabTooltip slug="broken-access-control">Broken access control</VocabTooltip> is the failure to
+enforce *what an authenticated user is permitted to do*. Authentication asks "who are you"; access
+control asks "are you allowed to touch this." A01 is the gap where the second check is missing or
+wrong.
+
+The most common shape is an <VocabTooltip slug="insecure-direct-object-reference">insecure direct object reference</VocabTooltip> (IDOR): an endpoint takes an object id from the request and returns the object without checking that the caller owns it.
+
+Vulnerable code — an Express route that returns an invoice by id:
+
+```js
+// VULNERABLE — A01: no ownership check on the requested invoice.
+// req.user is populated by auth middleware (the caller IS logged in)...
+// but being logged in is not the same as being allowed to see THIS invoice.
+app.get("/api/invoices/:invoiceId", requireAuth, async (req, res) => {
+  const invoice = await db.invoice.findById(req.params.invoiceId);
+  if (!invoice) return res.status(404).json({ error: "Not found" });
+  return res.json(invoice); // returns ANY invoice to ANY logged-in user
+});
+```
+
+The exploit needs no special tooling. A logged-in user requests `/api/invoices/1001`, sees their own invoice, then requests `/api/invoices/1002` — and receives another customer's invoice, because the code never checks that invoice 1002 belongs to the caller. Iterating ids walks the whole table.
+
+The fix is **deny-by-default ownership enforcement**: scope every object lookup to the authenticated principal, and treat "no row matched" as the default outcome rather than "row found, now decide."
+
+```js
+// FIXED — A01: the query itself is scoped to the owner.
+// The database never returns a row the caller doesn't own, so there is
+// no window between "found it" and "check permission" for a bug to hide in.
+app.get("/api/invoices/:invoiceId", requireAuth, async (req, res) => {
+  const invoice = await db.invoice.findOne({
+    id: req.params.invoiceId,
+    ownerId: req.user.id, // deny-by-default: ownership is part of the lookup
+  });
+  if (!invoice) return res.status(404).json({ error: "Not found" }); // same 404 whether it doesn't exist OR isn't yours — don't leak existence
+  return res.json(invoice);
+});
+```
+
+Two design choices matter here. <VocabTooltip slug="deny-by-default">Deny-by-default</VocabTooltip> means the lookup _fails closed_: access is denied unless a rule explicitly grants it, rather than granted unless a rule denies it. And returning the same `404` for "does not exist" and "exists but isn't yours" stops the endpoint from leaking which invoice ids are real.
+
+> **ASVS mapping (A01).** ASVS V4 — Access Control. V4.2.1 requires that sensitive data and APIs are protected against IDOR by verifying authorization for the specific object requested. A reviewer citing V4.2.1 is asking: "show me the ownership check tied to the requested id."
+
+## A02 — Cryptographic Failures
+
+<VocabTooltip slug="cryptographic-failure">Cryptographic failures</VocabTooltip> — called "Sensitive
+Data Exposure" in 2017 — cover everything from sending data in cleartext to using broken algorithms
+to storing passwords recoverably. The category name was changed in 2021 to point at the *root cause*
+(the cryptography was wrong or absent) rather than the *symptom* (data got exposed).
+
+The canonical example is password storage. A fast, unsalted hash is a cryptographic failure even though it is technically "hashing."
+
+```js
+// VULNERABLE — A02: SHA-256 is a FAST hash built for speed.
+// An attacker who steals this table can compute billions of guesses per
+// second on a GPU. Unsalted means identical passwords share a hash, so one
+// cracked entry cracks every account that reused that password.
+const crypto = require("node:crypto");
+function storePassword(plaintext) {
+  return crypto.createHash("sha256").update(plaintext).digest("hex");
+}
+```
+
+The fix is a **slow, salted, purpose-built password hash**. Use an algorithm designed to resist brute force — Argon2id is the current OWASP first recommendation; bcrypt and scrypt are also acceptable. These are deliberately expensive to compute and salt each password so identical passwords produce different hashes.
+
+```js
+// FIXED — A02: Argon2id is memory-hard and deliberately slow, with a
+// per-password salt generated and stored inside the returned hash string.
+// The cost parameters make large-scale offline cracking economically
+// infeasible even if the database is stolen.
+const argon2 = require("argon2");
+
+async function storePassword(plaintext) {
+  // argon2 generates a random salt per call and encodes it in the output.
+  return argon2.hash(plaintext, { type: argon2.argon2id });
+}
+
+async function verifyPassword(plaintext, storedHash) {
+  // Constant-time comparison is handled inside verify — never compare hashes
+  // with === , which can leak timing information about how many bytes matched.
+  return argon2.verify(storedHash, plaintext);
+}
+```
+
+> **ASVS mapping (A02).** ASVS V2.4 — Credential Storage. V2.4.1 requires passwords to be stored using an approved one-way key-derivation function such as Argon2id, bcrypt, or scrypt. V6 covers cryptography at rest more broadly. A reviewer citing V2.4.1 is asking: "is this a password hash or a general-purpose hash?"
+
+## A03 — Injection
+
+<VocabTooltip slug="injection">Injection</VocabTooltip> is the failure to keep *data* and *code*
+separate. It happens whenever untrusted input is concatenated into a string that an interpreter then
+parses as a command — SQL, an OS shell, an LDAP query, an HTML page (cross-site scripting is a form
+of injection). <VocabTooltip slug="sql-injection">SQL injection</VocabTooltip> is the classic.
+
+Vulnerable code — a login query built by string concatenation:
+
+```js
+// VULNERABLE — A03: the user's input is glued directly into SQL text.
+// The database parses the whole string as code, so input that contains
+// SQL syntax becomes part of the query the database runs.
+async function findUser(email, password) {
+  const sql =
+    "SELECT * FROM users WHERE email = '" + email + "' AND password_hash = '" + password + "'";
+  return db.query(sql);
+}
+```
+
+The exploit: an attacker submits the email `' OR '1'='1' --`. The query the database sees becomes `SELECT * FROM users WHERE email = '' OR '1'='1' -- ' AND password_hash = '...'`. The `OR '1'='1'` is always true and the `--` comments out the password check, so the query returns the first user row and the login succeeds without a valid password. The input was meant to be _data_ (an email) and was executed as _code_ (SQL logic).
+
+The fix is the <VocabTooltip slug="parameterized-query">parameterized query</VocabTooltip> (also called a prepared statement). You send the SQL _structure_ and the _values_ to the database separately. The database compiles the structure first, then binds the values into placeholder slots — values are never parsed as SQL, so there is no syntax an attacker can smuggle in.
+
+```js
+// FIXED — A03: the SQL text contains only placeholders ($1, $2).
+// The driver sends the query structure and the values on separate channels.
+// The database treats the values as data, never as SQL, so OR '1'='1' is
+// just a string that happens to equal no real email.
+async function findUser(email, password) {
+  const sql = "SELECT * FROM users WHERE email = $1 AND password_hash = $2";
+  return db.query(sql, [email, password]); // values bound, not concatenated
+}
+```
+
+The defense is structural, not a filter: you are not trying to _detect_ malicious input, you are removing the channel through which input could ever be interpreted as code. String-escaping blocklists fail because attackers find encodings you did not anticipate; parameterization succeeds because the data path is provably separate from the code path.
+
+> **ASVS mapping (A03).** ASVS V5.3 — Output Encoding and Injection Prevention. V5.3.4 requires that database queries use parameterized queries or are otherwise protected from SQL injection. A reviewer citing V5.3.4 is asking: "show me a placeholder and a bound value, not a concatenated string."
+
+## A04 — Insecure Design
+
+<VocabTooltip slug="insecure-design">Insecure design</VocabTooltip> is new in 2021 and different in
+kind from the others: it is a flaw in the *plan*, not the *code*. A perfectly implemented design can
+still be insecure if the design never accounted for an abuse case. No amount of clean code fixes a
+missing security requirement.
+
+Example: a "reset password by answering a security question" flow. The code can be flawless — parameterized queries, hashed answers, rate-limited — and the _design_ is still insecure, because security questions ("mother's maiden name") are often publicly discoverable, so the whole mechanism is a weaker authenticator masquerading as a stronger one. The fix lives in threat modeling (the subject of lesson s-1, your prerequisite): you surface the abuse case at design time and choose a different mechanism — for example, a time-limited token sent to a pre-verified channel.
+
+A04's lesson for the engineer: some defects cannot be found by reading a function. They are found by asking, at design time, "how would an attacker abuse this feature as specified?" That is why threat modeling precedes coding.
+
+> **ASVS mapping (A04).** ASVS V1 — Architecture, Design and Threat Modeling. V1.1 requires a secure software development lifecycle that addresses security in every stage, including documented threat models for critical flows. A reviewer citing V1 is asking: "where is the threat model for this feature?"
+
+## A05–A09, in brief
+
+The remaining categories follow the same shape — a missing check at the boundary — and we name the question each one asks:
+
+- **A05 — <VocabTooltip slug="security-misconfiguration">Security Misconfiguration</VocabTooltip>:** the software is fine but its _settings_ are not — a default admin password left unchanged, a verbose stack trace returned to users, an S3 bucket left public, debug mode on in production. The question: "is every default hardened, and is nothing exposed that a production system should hide?" _(ASVS V14 — Configuration.)_
+
+- **A06 — <VocabTooltip slug="vulnerable-components">Vulnerable and Outdated Components</VocabTooltip>:** you are running a dependency with a known, published vulnerability (a CVE) and have not patched it. The question: "do you know every component and version you ship, and is any of them known-vulnerable?" The defensive practice is a software bill of materials plus continuous dependency scanning (`npm audit`, Dependabot, OSV). _(ASVS V14.2 — Dependency.)_
+
+- **A07 — <VocabTooltip slug="authentication-failure">Identification and Authentication Failures</VocabTooltip>:** weaknesses in proving who the user is — permitting weak or breached passwords, missing rate limiting on login (enabling credential stuffing), broken session management. The question: "can an attacker become a user they are not?" _(ASVS V2 — Authentication, V3 — Session Management.)_
+
+- **A08 — <VocabTooltip slug="software-integrity-failure">Software and Data Integrity Failures</VocabTooltip>:** trusting code or data whose integrity you never verified — installing an unsigned update, deserializing untrusted data, a CI/CD pipeline that pulls an unpinned dependency. The question: "do you verify that the code and data you load are the code and data you intended?" _(ASVS V10 — Malicious Code, V1.10 — integrity.)_
+
+- **A09 — <VocabTooltip slug="logging-failure">Security Logging and Monitoring Failures</VocabTooltip>:** the breach happened and no one could tell, because logins, access-control failures, and high-value actions were not logged, or the logs were never watched. The question: "if an attack happened right now, would you see it, and could you reconstruct it afterward?" Log security-relevant events with enough context to investigate — and never log secrets or full credentials. _(ASVS V7 — Error Handling and Logging.)_
+
+## A10 — Server-Side Request Forgery (SSRF)
+
+<VocabTooltip slug="ssrf">SSRF</VocabTooltip> happens when an application fetches a URL supplied by
+the user and that URL points somewhere the user should not be able to reach. The application's
+server makes the request, so it runs with the *server's* network position — which usually means
+access to internal services, cloud metadata endpoints, and admin interfaces that are firewalled off
+from the outside.
+
+Vulnerable code — a "fetch image from URL" feature:
+
+```js
+// VULNERABLE — A10: the server fetches any URL the user provides.
+// The user controls where the SERVER points its request, so they can aim
+// it at internal addresses the user could never reach directly.
+app.post("/api/import-image", requireAuth, async (req, res) => {
+  const response = await fetch(req.body.imageUrl); // attacker-controlled target
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return res.json({ bytes: buffer.length });
+});
+```
+
+The exploit: instead of an image URL, the attacker submits `http://169.254.169.254/latest/meta-data/`, the cloud metadata service address. The server fetches it from inside the trusted network and may hand back instance credentials. Internal-only addresses like `http://localhost:9200` (an unauthenticated internal Elasticsearch) are reachable the same way.
+
+The fix combines an <VocabTooltip slug="allow-list">allow-list</VocabTooltip> with destination validation. You decide in advance the small set of hosts the feature is permitted to reach and reject everything else — deny-by-default, applied to network destinations.
+
+```js
+// FIXED — A10: validate the parsed URL against an explicit allow-list of
+// hosts BEFORE making any request. Anything not on the list is rejected.
+const ALLOWED_IMAGE_HOSTS = new Set(["images.partner-cdn.example"]);
+
+app.post("/api/import-image", requireAuth, async (req, res) => {
+  let target;
+  try {
+    target = new URL(req.body.imageUrl); // throws on malformed input
+  } catch {
+    return res.status(400).json({ error: "Invalid URL" });
+  }
+
+  // Allow-list the scheme and host; deny-by-default everything else.
+  // Blocking known-bad addresses (a blocklist) is unwinnable — there are too
+  // many ways to encode 169.254.169.254. Allow only what you intend instead.
+  if (target.protocol !== "https:" || !ALLOWED_IMAGE_HOSTS.has(target.hostname)) {
+    return res.status(400).json({ error: "URL not permitted" });
+  }
+
+  const response = await fetch(target.href);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return res.json({ bytes: buffer.length });
+});
+```
+
+The same principle keeps recurring: **allow-list, never blocklist.** A blocklist enumerates the bad and fails the moment an attacker finds an encoding you missed (`0x A9.FE.A9.FE`, decimal IP, DNS rebinding). An allow-list enumerates the good — a far smaller, fully known set — and fails closed.
+
+> **ASVS mapping (A10).** ASVS V12.6 / V5.2.6 — server-side requests must validate and restrict destinations against an allow-list and must not follow requests to internal or private address ranges. A reviewer citing this is asking: "where is the allow-list, and is it checked before the fetch?"
+
+## Practice
+
+Read this handler and reason about it before you change anything. It contains two distinct Top 10 defects from different categories. Your task is to name both categories, then rewrite the handler to close both — without removing the feature.
+
+<SandboxExercise
+  language="javascript"
+  instructions="This Express handler lets a logged-in user download a document by id from a user-supplied storage URL. It has TWO Top 10:2021 defects from two different categories. (1) In a comment, name each category by its ID (e.g. A01, A03, A10) and say in one line why. (2) Rewrite the handler so both are closed: scope the document lookup to the caller (deny-by-default ownership), and allow-list the storage host before fetching. Keep the download feature working for legitimate same-owner requests to the approved host. The function names and the run() harness are provided — make downloadDocument secure."
+  initialCode={`// Pretend DB + fetch. Do not change these stubs.
+const db = {
+  documents: [
+    { id: "1", ownerId: "alice", storageUrl: "https://files.example/1" },
+    { id: "2", ownerId: "bob",   storageUrl: "https://files.example/2" },
+  ],
+  findDocById(id) {
+    return this.documents.find((d) => d.id === id) ?? null;
+  },
+};
+async function fetchBytes(url) {
+  // stand-in: returns a fake byte count for any URL
+  return url.length;
+}
+
+// VULNERABLE — two Top 10 defects live here. Identify and fix them.
+async function downloadDocument(req) {
+// req = { user: { id }, params: { docId }, body: { storageUrl } }
+const doc = db.findDocById(req.params.docId);
+if (!doc) return { status: 404 };
+const bytes = await fetchBytes(req.body.storageUrl);
+return { status: 200, bytes };
+}
+
+// --- test harness (do not edit) ---
+async function run() {
+// alice tries to read bob's document -> should be denied (404)
+const a = await downloadDocument({
+user: { id: "alice" },
+params: { docId: "2" },
+body: { storageUrl: "https://files.example/2" },
+});
+// alice reads her own doc from the approved host -> should succeed (200)
+const b = await downloadDocument({
+user: { id: "alice" },
+params: { docId: "1" },
+body: { storageUrl: "https://files.example/1" },
+});
+// alice points the server at the cloud metadata endpoint -> should be denied
+const c = await downloadDocument({
+user: { id: "alice" },
+params: { docId: "1" },
+body: { storageUrl: "http://169.254.169.254/latest/meta-data/" },
+});
+console.log("cross-owner:", a.status, "(want 404/403)");
+console.log("legit:", b.status, "(want 200)");
+console.log("ssrf attempt:", c.status, "(want 400/403)");
+}
+run();
+`}
+  solution={`const db = {
+documents: [
+{ id: "1", ownerId: "alice", storageUrl: "https://files.example/1" },
+{ id: "2", ownerId: "bob", storageUrl: "https://files.example/2" },
+],
+// deny-by-default: ownership is part of the lookup
+findDocByIdForOwner(id, ownerId) {
+return this.documents.find((d) => d.id === id && d.ownerId === ownerId) ?? null;
+},
+};
+async function fetchBytes(url) {
+return url.length;
+}
+
+// A01 (Broken Access Control / IDOR): the original returned ANY document to
+// ANY logged-in user — no ownership check on the requested id.
+// A10 (SSRF): the original fetched ANY user-supplied storageUrl, letting the
+// server be pointed at internal addresses like the metadata endpoint.
+const ALLOWED_STORAGE_HOSTS = new Set(["files.example"]);
+
+async function downloadDocument(req) {
+// Fix A01: scope the lookup to the authenticated owner; same 404 either way.
+const doc = db.findDocByIdForOwner(req.params.docId, req.user.id);
+if (!doc) return { status: 404 };
+
+// Fix A10: validate + allow-list the destination before any fetch.
+let target;
+try {
+target = new URL(req.body.storageUrl);
+} catch {
+return { status: 400 };
+}
+if (target.protocol !== "https:" || !ALLOWED_STORAGE_HOSTS.has(target.hostname)) {
+return { status: 400 };
+}
+
+const bytes = await fetchBytes(target.href);
+return { status: 200, bytes };
+}
+
+async function run() {
+const a = await downloadDocument({ user: { id: "alice" }, params: { docId: "2" }, body: { storageUrl: "https://files.example/2" } });
+const b = await downloadDocument({ user: { id: "alice" }, params: { docId: "1" }, body: { storageUrl: "https://files.example/1" } });
+const c = await downloadDocument({ user: { id: "alice" }, params: { docId: "1" }, body: { storageUrl: "http://169.254.169.254/latest/meta-data/" } });
+console.log("cross-owner:", a.status, "(want 404/403)");
+console.log("legit:", b.status, "(want 200)");
+console.log("ssrf attempt:", c.status, "(want 400/403)");
+}
+run();
+`}
+testCases={[
+"alice requesting bob's document id is denied (cross-owner returns 404 or 403)",
+"alice requesting her own document from the approved host succeeds (returns 200)",
+"a request whose storageUrl points at 169.254.169.254 is rejected before any fetch",
+"the document lookup includes the caller's id, not just the document id",
+"the storage host is checked against an allow-list rather than a blocklist",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An endpoint GET /api/orders/:id runs `findById(req.params.id)` and returns the order to any authenticated caller. A logged-in user changes the id in the URL and reads other customers' orders. Which Top 10:2021 category is this, and what is the structural fix?",
+      options: [
+        "A03 Injection — the fix is to escape the id before using it in the query",
+        "A07 Authentication Failures — the fix is to require a stronger password on login",
+        "A01 Broken Access Control (an IDOR) — the fix is deny-by-default: scope the lookup to the authenticated owner (findOne({ id, ownerId: req.user.id })) so the database never returns a row the caller doesn't own, and return the same 404 whether the row is missing or not theirs",
+        "A05 Security Misconfiguration — the fix is to turn off debug mode in production",
+      ],
+      correct: 2,
+      explanation:
+        "The caller is authenticated (A07 is about proving identity, which succeeded here), so the failure is authorization, not authentication: A01 Broken Access Control, specifically an insecure direct object reference. Escaping (A03's tool) is irrelevant because the id is used as a value, not concatenated as code. The fix is structural — make ownership part of the lookup itself (deny-by-default) so there is no window between 'found the row' and 'check permission' for a bug to hide in, and return an identical 404 so the endpoint doesn't leak which ids exist. This maps to ASVS V4.2.1.",
+    },
+    {
+      question:
+        'A reviewer rejects `db.query("SELECT * FROM t WHERE name = \'" + userName + "\'")` and cites ASVS V5.3.4. Why is switching to `db.query("SELECT * FROM t WHERE name = $1", [userName])` a real fix rather than a cosmetic one?',
+      options: [
+        "It isn't a real fix; both run the same SQL, so the change is purely stylistic",
+        "Parameterization sends the query structure and the values on separate channels, so the database compiles the SQL text first and then binds userName as pure data into a placeholder — the input can never be parsed as SQL, which removes the code/data confusion that defines injection rather than trying to detect or escape bad input",
+        "The parameterized version is faster, and speed is what V5.3.4 measures",
+        "It works because $1 placeholders silently strip quote characters from the input",
+      ],
+      correct: 1,
+      explanation:
+        "Injection (A03) is a code/data confusion: concatenation lets attacker input become part of the SQL the database parses. Parameterization is structural — the SQL text (with placeholders) and the values travel separately, the database compiles the structure before any value is bound, and bound values are treated as data only. It does not strip or escape characters (option 4 is wrong); it removes the channel through which input could be interpreted as code. That is why it beats blocklist/escaping approaches, which fail whenever an attacker finds an encoding the filter missed. ASVS V5.3.4 verifies exactly this.",
+    },
+    {
+      question:
+        'Two image-import handlers reject SSRF differently. Handler A blocks any URL whose host resolves to 169.254.169.254, 127.0.0.1, or 10.0.0.0/8. Handler B parses the URL and proceeds only if the host is in the set {"images.partner-cdn.example"} over https. Which is the sound A10 defense and why?',
+      options: [
+        "Handler A, because explicitly naming the dangerous internal addresses is the most direct way to stop SSRF",
+        "Both are equally sound; allow-list and blocklist are interchangeable for SSRF",
+        "Handler B, because an allow-list (deny-by-default) enumerates the small, fully-known set of permitted destinations and fails closed, whereas Handler A's blocklist must anticipate every encoding of every internal address — decimal IPs, 0x-hex, DNS rebinding, IPv6-mapped forms — and fails open the moment one is missed",
+        "Neither; SSRF can only be fixed by disabling outbound network access entirely",
+      ],
+      correct: 2,
+      explanation:
+        "A10 SSRF is defended by validating the destination against an allow-list before the request, the network-destination form of deny-by-default. Handler B fails closed: anything not in the known-good set is rejected. Handler A's blocklist fails open — the address space of 'internal' is huge and can be encoded many ways (decimal, hex, octal, IPv6-mapped, DNS rebinding), so any omission is a bypass. Disabling all outbound access (option 4) would break the feature; the goal is to permit exactly the intended destinations. This maps to ASVS V12.6 / V5.2.6.",
+    },
+    {
+      question:
+        "A team stores passwords with `crypto.createHash('sha256')`. A pentest flags it as A02 Cryptographic Failures. What makes SHA-256 the wrong tool here, and what is the fix?",
+      options: [
+        "SHA-256 is cryptographically broken and produces collisions, so any hash function would be unsafe for passwords",
+        "Nothing is wrong — SHA-256 is a modern hash, so the pentest finding is a false positive",
+        "SHA-256 is a fast, general-purpose hash with no built-in salt, so a stolen table can be brute-forced at billions of guesses per second and identical passwords share a hash; the fix is a slow, salted, purpose-built password KDF such as Argon2id (or bcrypt/scrypt), which is deliberately expensive and salts each password",
+        "The fix is to apply SHA-256 twice (double hashing), which makes brute force infeasible",
+      ],
+      correct: 2,
+      explanation:
+        "SHA-256 is not broken (option 1 is false) — it is the wrong category of function for passwords. It is designed to be fast and has no salt, which is exactly what you do NOT want for credential storage: speed helps the attacker brute-force a stolen table, and no salt means identical passwords collide so one crack reveals many accounts. Double-hashing (option 4) is still fast and still unsalted. The fix is a purpose-built, memory-hard, salted key-derivation function — Argon2id is OWASP's first recommendation, with bcrypt and scrypt acceptable. This maps to ASVS V2.4.1.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- The **OWASP Top 10:2021**, in order: A01 Broken Access Control, A02 Cryptographic Failures, A03 Injection, A04 Insecure Design, A05 Security Misconfiguration, A06 Vulnerable and Outdated Components, A07 Identification and Authentication Failures, A08 Software and Data Integrity Failures, A09 Security Logging and Monitoring Failures, A10 SSRF — each naming a class of missing check at the untrusted-input boundary.
+- **A01** is closed by deny-by-default ownership checks (scope the lookup to the caller); **A03** by parameterized queries that separate code from data; **A10** by server-side allow-listing of destinations. The recurring principle: allow-list the known-good, never blocklist the known-bad.
+- **A02** requires purpose-built, salted, slow password hashing (Argon2id) rather than fast general-purpose hashes; **A04** is a design-time flaw that threat modeling, not code review, catches.
+- Every fix maps to a concrete, checkable **ASVS** requirement — V4.2.1 (IDOR), V2.4.1 (credential storage), V5.3.4 (injection), V12.6/V5.2.6 (SSRF) — so a reviewer can verify the fix, not just trust it.
+- Security review is **running ten questions over the code**: for each untrusted input that reaches an inside action, ask which of the ten checks is missing.
+
+## What's next
+
+You can now read a function and name the category, exploit, fix, and ASVS requirement for the most common web defects. The next lesson takes the single most prevalent category — A01 Broken Access Control — and goes deep: role-based vs attribute-based authorization models, enforcing access control in a layered architecture, and writing the automated tests that prove an endpoint denies by default. The Top 10 told you what to look for; access-control engineering is where the largest share of that work lives.

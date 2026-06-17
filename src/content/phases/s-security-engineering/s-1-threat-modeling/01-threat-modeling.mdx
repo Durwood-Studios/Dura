@@ -1,0 +1,359 @@
+---
+title: "Threat Modeling — STRIDE, Attack Trees, Data-Flow Diagrams"
+description: "Data-flow diagrams, trust boundaries, STRIDE per-element, attack trees, and risk ranking — structured reasoning about what can go wrong."
+phase: s
+module: "s-1-threat-modeling"
+order: 1
+estimatedMinutes: 90
+difficulty: 3
+prerequisites:
+  - "5-2-computer-networking"
+  - "4-2-rest-apis-express"
+standards:
+  primaryAnchor: "Microsoft STRIDE"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - threat-modeling
+  - data-flow-diagram
+  - trust-boundary
+  - external-entity
+  - data-store
+  - stride
+  - spoofing
+  - tampering
+  - repudiation
+  - information-disclosure
+  - denial-of-service
+  - elevation-of-privilege
+  - attack-tree
+  - risk-ranking
+  - mitigation
+learningOutcomes:
+  - "Draw a data-flow diagram for a small system, labeling processes, data stores, external entities, data flows, and the trust boundaries between them"
+  - "Apply STRIDE per-element to enumerate threats against each component, mapping each of the six categories to the security property it violates"
+  - "Build an attack tree for one goal an adversary might pursue, decomposing it into AND/OR sub-goals down to concrete leaf attacks"
+  - "Rank enumerated threats by likelihood × impact and explain why DREAD's numeric scoring is no longer recommended"
+  - "Produce a threat model for a small web app: DFD, a per-element STRIDE table, and a prioritized mitigation list anchored to real security controls"
+professionalContext: "Threat modeling is the cheapest security activity a team can run, because it happens on a whiteboard before a single line of vulnerable code is written. Every mature security program — and the secure-development frameworks teams are audited against, including the Microsoft Security Development Lifecycle and OWASP's SAMM — places threat modeling at the design phase, where a fix costs a diagram edit instead of an incident response. Engineers who can run a threat model are the ones invited into design reviews; they turn 'is this secure?' from a vague worry into an enumerated, ranked, assignable list of work. This lesson teaches the structured reasoning, not a tool: the goal is that you can look at any system and systematically ask what can go wrong, who would make it go wrong, and what stops them."
+thresholdConcept: true
+---
+
+## Why this lesson exists
+
+Most security work is reactive. A scanner flags a vulnerability, an incident gets reported, a penetration tester hands over a findings document — and the team scrambles to patch. Reactive security is expensive because the vulnerable code already shipped, already ran, possibly already leaked data.
+
+Threat modeling moves the work earlier. It is a structured way to reason about what can go wrong with a design _before_ it is built, while the only artifact that exists is a diagram. <VocabTooltip slug="threat-modeling">Threat modeling</VocabTooltip> is the discipline of systematically enumerating, ranking, and planning mitigations for the ways an adversary could attack a system. The day a security review stops being a vague feeling of unease and becomes a ranked list of specific threats with assigned owners is the day a team starts doing security on purpose.
+
+## The first-principles picture
+
+Picture a building you are responsible for keeping safe. To reason about its security you do not start by listing burglary techniques. You start by drawing a floor plan: where are the doors, the windows, the safe, the loading dock, the staff-only areas? Then you draw the property line and the locked interior doors — the places where "who is allowed here" changes. Only once you can see _where the valuables are_ and _where control changes hands_ can you ask, door by door, "what could someone do here?"
+
+A software system is the same. Before you can reason about attacks, you need a map of where data lives, where it moves, and where control of it changes hands. That map is a <VocabTooltip slug="data-flow-diagram">data-flow diagram</VocabTooltip> (DFD). The "locked interior doors" — the places where the level of trust changes — are <VocabTooltip slug="trust-boundary">trust boundaries</VocabTooltip>, and they are where almost every interesting threat lives.
+
+## The mental model
+
+> **Threat modeling is four questions, asked in order.** _What are we building?_ (draw the data-flow diagram). _What can go wrong?_ (apply STRIDE to each element). _What are we going to do about it?_ (rank by likelihood × impact, then mitigate). _Did we do a good job?_ (review the model against the built system). Everything else in this lesson is mechanism for answering those four questions repeatably.
+
+These four questions are the framing the threat-modeling community converged on (it is the structure of the _Threat Modeling Manifesto_, co-authored by practitioners including Adam Shostack, whose book _Threat Modeling: Designing for Security_ is the canonical reference). The value is that the questions are answerable by an ordinary engineering team on a whiteboard — no special tooling required.
+
+## Question 1 — What are we building? The data-flow diagram
+
+A DFD has exactly five kinds of element. Keeping the vocabulary small is deliberate: a model anyone can draw is a model the team will actually maintain.
+
+- **Process** — code that acts on data. An API server, a worker, a Lambda. Drawn as a circle.
+- **<VocabTooltip slug="data-store">Data store</VocabTooltip>** — where data rests. A database, a file, a cache, a message queue. Drawn as two parallel lines.
+- **<VocabTooltip slug="external-entity">External entity</VocabTooltip>** — an actor outside your control that interacts with the system: a user's browser, a third-party API, a payment processor. Drawn as a rectangle. You cannot change its behavior, so you must never trust its input.
+- **Data flow** — data moving between the elements above. Drawn as an arrow, labeled with _what_ moves (e.g. "login credentials", "JWT", "order record").
+- **<VocabTooltip slug="trust-boundary">Trust boundary</VocabTooltip>** — a line the diagram crosses where the trust level changes: the browser-to-server boundary (the internet), the server-to-database boundary, a boundary between two microservices owned by different teams. Drawn as a dashed line cutting across the data flows.
+
+Here is a DFD for a small web app — a note-taking service with login. Read it as a map, not as code:
+
+```
+   ┌─────────────────────────── Internet trust boundary ──────────────────────────┐
+   │                                                                               │
+ ┌──────────┐   1. credentials / JWT    ╭───────────────╮   3. SQL query    ╔═══════════╗
+ │ Browser  │ ────────────────────────► │  Notes API    │ ────────────────► ║  Postgres ║
+ │ (user)   │ ◄──────────────────────── │  (process)    │ ◄──────────────── ║  (notes)  ║
+ └──────────┘   2. note JSON            ╰───────┬───────╯   4. rows          ╚═══════════╝
+ [external]                                     │
+                                                │ 5. verify token
+                                                ▼
+                                       ╭─────────────────╮
+                                       │  Auth service   │
+                                       │  (process)      │
+                                       ╰─────────────────╯
+                              └──── Service trust boundary ────┘
+```
+
+Three trust boundaries are present, and each is a place where a threat can enter:
+
+1. The **internet boundary** between the browser and the Notes API. Everything from the browser is attacker-controllable — the user could be hostile, or the request could be forged.
+2. The **datastore boundary** between the API and Postgres. The API trusts the database to store and return data faithfully; the database trusts the API to send well-formed, authorized queries.
+3. The **service boundary** between the Notes API and the Auth service. These are two processes, possibly on two hosts, possibly owned by two teams.
+
+Drawing this took five minutes. The next three questions all operate on this picture.
+
+## Question 2 — What can go wrong? STRIDE per element
+
+<VocabTooltip slug="stride">STRIDE</VocabTooltip> is a mnemonic from Microsoft (introduced by Loren
+Kohnfelder and Praerit Garg in 1999, and the backbone of the Microsoft Security Development
+Lifecycle) for the six categories of threat. The reason STRIDE endures is that each category is the
+violation of one specific security property — so the mnemonic doubles as a checklist of the
+properties you are trying to preserve.
+
+| STRIDE category            | What the attacker does                                            | Property violated | Property's plain meaning                     |
+| -------------------------- | ----------------------------------------------------------------- | ----------------- | -------------------------------------------- |
+| **S**poofing               | Pretends to be someone or something they are not                  | Authentication    | "You are who you say you are"                |
+| **T**ampering              | Modifies data or code without authorization                       | Integrity         | "Data has not been altered"                  |
+| **R**epudiation            | Denies having performed an action, and you cannot prove otherwise | Non-repudiation   | "Actions are provably attributable"          |
+| **I**nformation disclosure | Reads data they are not authorized to read                        | Confidentiality   | "Data is seen only by those allowed"         |
+| **D**enial of service      | Makes the system unavailable to legitimate users                  | Availability      | "The system is up when needed"               |
+| **E**levation of privilege | Gains capabilities they were not granted                          | Authorization     | "You may only do what you are allowed to do" |
+
+The technique called **STRIDE-per-element** walks the DFD and asks, for each element, which STRIDE categories realistically apply. Not every category applies to every element — that is the point of the method. The classic guidance maps element types to the categories they are most susceptible to: external entities are subject to Spoofing and Repudiation; processes can suffer all six; data stores are most subject to Tampering, Information disclosure, Denial of service, and (where they hold logs) Repudiation; data flows are subject to Tampering, Information disclosure, and Denial of service.
+
+Apply it to the Notes API process from our DFD:
+
+| Element: **Notes API** | Threat (this element, this category)                                                       | Candidate mitigation                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| Spoofing               | A request arrives claiming to be an authenticated user but the token is forged or replayed | Verify a signed token (JWT with a checked signature + expiry) on every request; bind the session to the user |
+| Tampering              | A client sends a `note_id` belonging to another user to edit their note                    | Authorize per-object: check the note's `owner_id` equals the caller's id before any write                    |
+| Repudiation            | A user edits a note, then claims they never did                                            | Append-only audit log: who, what, when, with a server-assigned timestamp                                     |
+| Information disclosure | An error response leaks a stack trace or a SQL string to the client                        | Return generic error bodies to clients; log details server-side only                                         |
+| Denial of service      | An unauthenticated flood of login attempts exhausts the API's worker pool                  | Rate-limit per IP and per account; fail fast on unauthenticated paths                                        |
+| Elevation of privilege | A normal user reaches an admin-only endpoint                                               | Enforce role checks server-side on every privileged route — never rely on the UI hiding a button             |
+
+Each row is a _specific, actionable_ threat tied to a _specific element_ and a _specific mitigation_. That is the deliverable STRIDE produces.
+
+### From threat to fix: a worked tampering example
+
+The Tampering row above — a client editing another user's note — is the single most common real web vulnerability. OWASP names it **Broken Access Control**, the number-one risk in the OWASP Top 10 (2021), and the specific flaw is catalogued as **CWE-639: Authorization Bypass Through User-Controlled Key** (commonly called IDOR, Insecure Direct Object Reference). Here is the vulnerable handler:
+
+```javascript
+// VULNERABLE: trusts the client-supplied note id without an ownership check.
+// The threat model's "Tampering on Notes API" row is exactly this bug.
+app.put("/notes/:id", requireAuth, async (req, res) => {
+  try {
+    // req.params.id is attacker-controlled. Any logged-in user can pass
+    // ANY note id here — including notes that belong to someone else.
+    const updated = await db.query("UPDATE notes SET body = $1 WHERE id = $2 RETURNING *", [
+      req.body.body,
+      req.params.id,
+    ]);
+    if (updated.rowCount === 0) return res.status(404).json({ error: "Not found" });
+    return res.json({ note: updated.rows[0] });
+  } catch (err) {
+    console.error("note update failed", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+```
+
+The fix is to scope the write to the authenticated user. The ownership check becomes part of the query's `WHERE` clause, so the database itself refuses to touch a row the caller does not own:
+
+```javascript
+// FIXED: the WHERE clause includes owner_id = the authenticated user.
+// A note the caller does not own does not match the WHERE clause, so rowCount is 0
+// and the handler returns 404 — the attacker cannot even confirm the note
+// exists, which also closes the information-disclosure side channel.
+app.put("/notes/:id", requireAuth, async (req, res) => {
+  try {
+    // req.user.id comes from the verified token (see the Spoofing mitigation),
+    // NOT from the request body — so the attacker cannot choose it.
+    const updated = await db.query(
+      "UPDATE notes SET body = $1 WHERE id = $2 AND owner_id = $3 RETURNING *",
+      [req.body.body, req.params.id, req.user.id]
+    );
+    // rowCount === 0 means: the note does not exist OR it is not the caller's.
+    // We deliberately do not distinguish the two cases to the client.
+    if (updated.rowCount === 0) return res.status(404).json({ error: "Not found" });
+    return res.json({ note: updated.rows[0] });
+  } catch (err) {
+    console.error("note update failed", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+```
+
+Two threat-model rows are closed by one structural change: Tampering (you cannot edit another user's note) and the read side of Information disclosure (you cannot use the response to learn another user's note exists). The query is parameterized in both versions, which is what keeps an _additional_ threat — SQL injection (**CWE-89**) — off the table; never concatenate `req.params` into a query string.
+
+## Question 2, continued — Attack trees for the threats that need depth
+
+STRIDE gives you breadth: one pass enumerates threats across the whole system. An <VocabTooltip slug="attack-tree">attack tree</VocabTooltip> gives you depth on a single threat. It takes one adversary _goal_ as the root and decomposes it into the sub-goals and concrete steps that achieve it. Attack trees were popularized by Bruce Schneier in 1999 and remain the standard way to reason about _how_ a specific attack would actually be carried out.
+
+The decomposition uses two node types:
+
+- **OR node** — the parent goal is achieved if _any_ child is achieved. (Multiple independent routes.)
+- **AND node** — the parent goal requires _all_ children. (Every step is necessary.)
+
+Take the Spoofing threat from the STRIDE table — "authenticate as another user" — and build its tree:
+
+```
+GOAL: Authenticate as another user                          [OR]
+├── 1. Steal a valid session token                          [OR]
+│   ├── 1a. XSS to read a token from a non-HttpOnly cookie   (leaf)
+│   ├── 1b. Read the token from a logged URL or error report (leaf)
+│   └── 1c. Intercept it on the wire                         [AND]
+│       ├── 1c-i.  Get a network position (e.g. hostile Wi-Fi)
+│       └── 1c-ii. TLS is absent or downgradeable
+├── 2. Forge a token                                         [AND]
+│   ├── 2a. The signing algorithm is weak or "none" accepted
+│   └── 2b. The signing key is guessable or leaked
+└── 3. Defeat the password login                            [OR]
+    ├── 3a. Credential stuffing with breached passwords      (leaf)
+    └── 3b. Reset-flow takeover (predictable reset token)    (leaf)
+```
+
+The tree turns a vague worry ("could someone log in as another user?") into specific, mitigable leaves. Each leaf suggests a control: branch **1a** says cookies must be `HttpOnly`; **1c** says enforce TLS and HSTS so the AND node can never be satisfied; **2a** says pin the JWT algorithm and reject `alg: none` (a real historical JWT-library flaw); **3a** says rate-limit and check credentials against a breached-password list. Breaking any single node in an AND branch defeats that whole branch — which is why **1c-ii** ("enforce TLS") is such a high-value mitigation: it kills the entire interception route by itself.
+
+## Question 3 — What do we do about it? Risk ranking
+
+A threat model can easily produce fifty threats. You cannot fix fifty things at once, so you rank. <VocabTooltip slug="risk-ranking">Risk ranking</VocabTooltip> orders threats so the team spends its limited time on what matters most.
+
+The durable, defensible model is **risk = likelihood × impact**:
+
+- **Likelihood** — how probable is this threat being exploited, given the attacker capability you are defending against and the controls already present? (Often expressed Low/Medium/High.)
+- **Impact** — how bad is it if exploited? (Data-breach scope, financial loss, safety, regulatory exposure.)
+
+Plot each threat on a likelihood × impact grid; the high-likelihood, high-impact quadrant is your work queue.
+
+> **A note on DREAD.** You will see older material rank threats with **DREAD** (Damage, Reproducibility, Exploitability, Affected users, Discoverability), scoring each 1–10 and summing. Microsoft itself moved away from DREAD because the numeric scores were subjective and inconsistent between reviewers — two engineers would score the same threat very differently, giving the method false precision. Prefer a likelihood × impact judgment with a written justification, or a calibrated framework like CVSS when you need a published, comparable score for a specific vulnerability. Know what DREAD is so you recognize it in legacy docs; do not reach for it on new work.
+
+Ranking the Notes API threats:
+
+| Threat                                     | Likelihood | Impact | Rank   | First mitigation                            |
+| ------------------------------------------ | ---------- | ------ | ------ | ------------------------------------------- |
+| Broken access control (edit others' notes) | High       | High   | **P0** | Per-object `owner_id` check (shown above)   |
+| Forged/replayed token (spoofing)           | Medium     | High   | **P0** | Verify signature + expiry; pin algorithm    |
+| Credential-stuffing the login              | High       | Medium | **P1** | Rate-limit + breached-password check        |
+| Stack trace leak (info disclosure)         | Medium     | Medium | **P1** | Generic client errors; detailed server logs |
+| Login flood (DoS)                          | Medium     | Medium | **P2** | Per-IP and per-account rate limits          |
+| No audit trail (repudiation)               | Low        | Medium | **P2** | Append-only audit log                       |
+
+The output of the whole exercise is the rightmost-but-one column: a _prioritized_ list. A design review that ends with "P0: fix the access-control check before launch" has done its job — the threat is named, ranked, and assignable.
+
+A <VocabTooltip slug="mitigation">mitigation</VocabTooltip> is whatever reduces a threat's risk: it can _eliminate_ the threat (remove the feature), _reduce_ its likelihood or impact (add a control), _transfer_ it (a third party assumes it), or — explicitly and on the record — _accept_ it when the cost of fixing exceeds the risk. Naming the accepted risks is part of the model, not a failure of it.
+
+## Question 4 — Did we do a good job?
+
+The model is a living document. You revisit it when the design changes (a new data flow crosses a new boundary), and you check the built system against it — did every P0 mitigation actually ship? A threat model filed and never re-opened is a diagram, not a practice. This is also the defensive ethic of the whole discipline: you enumerate attacks in order to _close_ them, on systems you are authorized to work on. Threat modeling is blue-team work — the output is a list of defenses, never a toolkit for attacking systems you do not own.
+
+## Practice — apply STRIDE to a new element
+
+You have seen STRIDE applied to the Notes API process. Now apply it to a _different_ element of the same diagram: the **Postgres data store**.
+
+<SandboxExercise
+  language="javascript"
+  instructions={`The threat model so far covered the Notes API process. Now reason about the Postgres data store from the DFD.
+
+A data store is most susceptible to four of the six STRIDE categories: Tampering, Information disclosure, Denial of service, and Repudiation (when it holds logs). Spoofing and Elevation of privilege are usually reasoned about at the process that _accesses_ the store, not the store itself.
+
+Write a small JS object literal named 'storeThreats' that maps each of the FOUR applicable STRIDE categories (as keys: "tampering", "informationDisclosure", "denialOfService", "repudiation") to a string describing (a) one concrete threat against the Postgres store and (b) one real mitigation control.
+
+Example of the shape for one entry:
+tampering: "Threat: an attacker with a leaked DB credential alters note rows directly. Mitigation: least-privilege DB roles so the app user cannot bypass app-layer authorization; encrypt backups; restrict network access to the DB to the API subnet only."
+
+Then log it: console.log(JSON.stringify(storeThreats, null, 2)).
+
+Defensive framing only — every entry must end in a mitigation, not an attack recipe.`}
+  initialCode={`// Reason about the Postgres data store, not the API process.
+// Fill in all four applicable STRIDE categories with threat + mitigation.
+
+const storeThreats = {
+tampering: "Threat: ... Mitigation: ...",
+informationDisclosure: "Threat: ... Mitigation: ...",
+denialOfService: "Threat: ... Mitigation: ...",
+repudiation: "Threat: ... Mitigation: ...",
+};
+
+console.log(JSON.stringify(storeThreats, null, 2));`}
+  solution={`// A data store's four applicable STRIDE categories, each closed with a control.
+
+const storeThreats = {
+tampering:
+"Threat: an attacker with a leaked DB credential alters note rows directly, bypassing the API's owner_id check. " +
+"Mitigation: least-privilege DB roles (the app user can only INSERT/UPDATE/SELECT, not DROP/ALTER); " +
+"restrict DB network access to the API subnet; enable row-level security so even direct access enforces ownership.",
+informationDisclosure:
+"Threat: a stolen backup or an unencrypted disk exposes every user's notes at rest. " +
+"Mitigation: encryption at rest for the volume and backups; encrypt sensitive columns; tightly scope who can read backups.",
+denialOfService:
+"Threat: an expensive unindexed query (or a flood of them) exhausts DB connections and CPU, taking the store down for everyone. " +
+"Mitigation: connection pooling with caps; statement timeouts; indexes on hot query paths; per-tenant rate limits at the API.",
+repudiation:
+"Threat: a privileged operator edits data directly and there is no record, so the action cannot be attributed. " +
+"Mitigation: enable DB audit logging of privileged actions to an append-only, separately-owned log store.",
+};
+
+console.log(JSON.stringify(storeThreats, null, 2));`}
+testCases={[
+"storeThreats has exactly the four keys: tampering, informationDisclosure, denialOfService, repudiation",
+"each value names a concrete threat against the data store (not the API process)",
+"each value ends in a defensive mitigation, not an exploitation step",
+]}
+/>
+
+> **What changes for you after this**
+> Before this lesson, "is this secure?" was a feeling — you either had a bad hunch about a design or you did not. After this lesson, "is this secure?" is a procedure: draw the DFD, find the trust boundaries, run STRIDE per element, deepen the scary ones with attack trees, rank by likelihood × impact, and assign the P0s. You will never again look at an architecture diagram without your eye going straight to the dashed lines where trust changes hands.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "In STRIDE, an attacker submits a request that edits a note belonging to a different user by passing that note's id. Which STRIDE category is this, and which security property does it violate?",
+      options: [
+        "Spoofing — it violates authentication, because the attacker is pretending to be the note's owner",
+        "Tampering — it violates integrity, because the attacker modifies data they are not authorized to modify; the fix is a per-object authorization check (owner_id) in the write path, closing the CWE-639 / Broken Access Control flaw",
+        "Information disclosure — it violates confidentiality, because the attacker can see the note",
+        "Denial of service — it violates availability, because editing the note disrupts the owner",
+      ],
+      correct: 1,
+      explanation:
+        "Modifying data without authorization is Tampering, which violates Integrity. The attacker is authenticated as themselves (so it is not Spoofing) but acts on an object they do not own. The structural fix is per-object authorization: include `owner_id = req.user.id` in the UPDATE's WHERE clause so the database refuses rows the caller does not own. This is OWASP's #1 risk, Broken Access Control, catalogued as CWE-639 (IDOR). The same fix also closes the read side-channel (the attacker cannot confirm the note exists), but the primary violation here is integrity, not confidentiality.",
+    },
+    {
+      question:
+        "You are building an attack tree for the goal 'intercept a session token on the wire.' The tree shows this as an AND node with two children: '1c-i: attacker has a network position' AND '1c-ii: TLS is absent or downgradeable.' Why does enforcing TLS (with HSTS) defeat this entire branch?",
+      options: [
+        "Because TLS makes the attacker's network position impossible to obtain",
+        "Because an AND node requires ALL children to be satisfied; enforcing TLS makes child 1c-ii unsatisfiable, so the parent goal on this branch can never be achieved regardless of the attacker's network position",
+        "Because HSTS removes the need for a session token entirely",
+        "Because TLS converts the AND node into an OR node, which is easier to defend",
+      ],
+      correct: 1,
+      explanation:
+        "An AND node is achieved only when every child is achieved. The interception branch needs both a network position and exploitable transport. Enforcing TLS plus HSTS (which prevents protocol downgrade) makes the '1c-ii: TLS absent or downgradeable' leaf unsatisfiable. Once one child of an AND node is permanently false, the whole branch is dead — the attacker's network position (1c-i) no longer matters. This is why attack trees are useful for prioritizing: a single high-value control can kill an entire branch. TLS does not affect whether the attacker can sit on hostile Wi-Fi (1c-i); it makes that position useless, which is sufficient.",
+    },
+    {
+      question:
+        "A teammate proposes ranking all enumerated threats using DREAD, scoring Damage, Reproducibility, Exploitability, Affected users, and Discoverability each 1–10 and summing. What is the best-grounded response?",
+      options: [
+        "Agree — DREAD is the current Microsoft-recommended standard for ranking threats",
+        "DREAD's numeric scores are subjective and inconsistent between reviewers, giving false precision; Microsoft itself moved away from it. Prefer a likelihood × impact judgment with written justification (or CVSS for a published, comparable per-vulnerability score), and use DREAD only to recognize it in legacy documents",
+        "Reject ranking entirely — every threat should be fixed before launch regardless of priority",
+        "Use DREAD but drop the Discoverability term, which makes the scores objective",
+      ],
+      correct: 1,
+      explanation:
+        "DREAD's weakness is that its per-axis 1–10 scores are subjective: two reviewers score the same threat differently, so the sum looks precise but is not reproducible. Microsoft deprecated it for exactly this reason. The defensible default is likelihood × impact with a written rationale; for a specific published vulnerability, CVSS gives a comparable score. You should still recognize DREAD in older material. Fixing every threat before launch (option 3) is not realistic — ranking exists precisely because teams have finite time, and some risks are explicitly accepted on the record. Dropping one DREAD axis does not cure the subjectivity of the rest.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A **data-flow diagram** has five element types (process, data store, external entity, data flow, trust boundary), and the dashed **trust boundaries** are where trust changes hands and where most threats enter.
+- **STRIDE** enumerates six threat categories, each the violation of one security property: Spoofing→authentication, Tampering→integrity, Repudiation→non-repudiation, Information disclosure→confidentiality, Denial of service→availability, Elevation of privilege→authorization. STRIDE-per-element walks the DFD asking which categories apply to each element.
+- **Attack trees** decompose one adversary goal into AND/OR sub-goals down to concrete leaves; breaking any child of an AND node defeats that whole branch, which is how you find high-value mitigations.
+- **Risk ranking** orders threats by likelihood × impact so finite effort goes to the P0s; **DREAD's** numeric summing is deprecated for false precision — prefer a justified likelihood × impact judgment or CVSS.
+- A complete threat model for a small web app is a **DFD + a per-element STRIDE table + a prioritized mitigation list** anchored to real controls (per-object authz for CWE-639, signed-token verification, rate limits, encryption at rest, audit logging).
+
+## Connect forward
+
+You now have a structured way to find _what_ can go wrong. The next lessons in Phase S turn the top-ranked threats from this model into concrete defenses: secure authentication and session handling (closing the Spoofing tree), input validation and output encoding (closing Tampering and injection), and access-control design (closing the Broken Access Control finding you ranked P0 here). Every defensive lesson that follows is answering a row in a threat model exactly like the one you just built.

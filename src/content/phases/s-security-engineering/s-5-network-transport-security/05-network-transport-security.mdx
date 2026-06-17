@@ -1,0 +1,431 @@
+---
+title: "Network & Transport Security — TLS 1.3, mTLS, Segmentation"
+description: "The TLS 1.3 handshake, certificate validation and pinning, mutual TLS for service auth, and zero-trust segmentation."
+phase: s
+module: "s-5-network-transport-security"
+order: 5
+estimatedMinutes: 90
+difficulty: 3
+prerequisites:
+  - "s-4-applied-cryptography"
+  - "5-2-computer-networking"
+standards:
+  primaryAnchor: "RFC 8446 (TLS 1.3)"
+  cs2023: []
+  swebok: []
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - tls-1-3
+  - handshake
+  - one-rtt
+  - ecdhe
+  - aead
+  - cipher-suite
+  - forward-secrecy
+  - zero-rtt
+  - replay-attack
+  - certificate-chain
+  - root-of-trust
+  - hostname-verification
+  - certificate-revocation
+  - ocsp-stapling
+  - certificate-pinning
+  - mutual-tls
+  - service-identity
+  - network-segmentation
+  - zero-trust
+  - east-west-traffic
+learningOutcomes:
+  - "Trace the TLS 1.3 1-RTT handshake message by message (ClientHello, ServerHello, EncryptedExtensions, Certificate, Finished) and name the keys derived at each step"
+  - "Explain why TLS 1.3 removed RSA key transport, CBC-mode cipher suites, and renegotiation, and what attack each removal closes"
+  - "Validate a certificate correctly — chain to a trusted root, hostname match, expiry, revocation — and identify which check a given misconfiguration skips"
+  - "Decide when certificate pinning helps and when it causes an outage, and pin by SPKI hash rather than by leaf certificate"
+  - "Configure mutual TLS so a service proves its identity to a peer, and explain how that replaces network-location trust"
+  - "Contrast perimeter segmentation with the zero-trust model and place a control on the correct side of the trust boundary"
+professionalContext: "Transport security is the control most often assumed-correct and most often wrong. A security engineer is the person who reads the actual handshake, not the green padlock. In real work you will be asked: why did the mobile app break after we rotated the leaf certificate (someone pinned the leaf, not the SPKI); why is an internal service reachable with no authentication (it trusted network location instead of identity); why is our TLS config flagged by a scanner (a 1.1-era cipher suite is still enabled). Getting TLS 1.3, certificate validation, mTLS, and segmentation right is the difference between a network that resists a foothold and one where a single compromised host owns everything east-west. This lesson is blue-team: you configure and verify defenses, you do not attack them."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A penetration tester does not usually break TLS. They wait for someone to misconfigure it. The padlock in the address bar means a TLS session was established — it says nothing about _whether the server is the one you intended to reach_, _whether the certificate was validated_, or _whether the cipher suite still has known weaknesses_. Every one of those is a separate decision your code or your config made, and every one of them is a place real incidents come from.
+
+The most expensive transport-security failures are not exotic cryptographic breaks. They are an internal service that trusts anyone who can reach it over the network, a mobile app that pinned the wrong thing and bricked itself on a routine certificate rotation, or a load balancer still offering a 2011-era cipher suite a scanner flags on day one of an audit. This lesson is about reading the layer underneath the padlock so those failures are visible to you before they are visible to an attacker.
+
+## First principles: what a transport channel must guarantee
+
+Strip away the acronyms. When two parties talk over a network they do not control, they need four things, and they need them in this order:
+
+1. **Confidentiality** — a passive observer on the wire learns nothing about the contents.
+2. **Integrity** — an active attacker cannot alter a message without detection.
+3. **Authenticity** — each party knows _who_ they are talking to, not merely that _someone_ answered.
+4. **Forward secrecy** — recording today's encrypted traffic and stealing the server's long-term key tomorrow must not retroactively decrypt today's session.
+
+<VocabTooltip slug="tls-1-3">TLS 1.3</VocabTooltip>, defined in RFC 8446 (published August 2018), is
+the protocol that delivers all four. The number 1.3 matters: TLS 1.0, 1.1, and the SSL versions
+before them each shipped configurations that fail one of the four. TLS 1.3 is a deliberate narrowing
+— it removed every option that could not guarantee the list above. Understanding TLS 1.3 is largely
+understanding _what it refuses to do_.
+
+## The mental model
+
+> A TLS 1.3 session is built in one round trip: both sides throw a fresh ephemeral key share onto the wire, mix them into one shared secret neither side could have computed alone, and the server signs the transcript with its certificate to prove it is who the name says it is. From the second message on, everything is encrypted. There is no menu of weak options — the protocol only offers ciphers that authenticate every byte.
+
+Hold that picture. The rest of this lesson is the mechanism behind it, then the three places it gets deployed in real infrastructure: certificate validation, mutual TLS, and segmentation.
+
+## The TLS 1.3 handshake, message by message
+
+A <VocabTooltip slug="handshake">handshake</VocabTooltip> is the negotiation that establishes session keys before any application data flows. TLS 1.3's headline change is that it completes in <VocabTooltip slug="one-rtt">1-RTT</VocabTooltip> — one round trip — where TLS 1.2 needed two. It does this by having the client _guess_ the key-exchange parameters up front instead of waiting to be told.
+
+Here is the full handshake. The arrows are network messages; the `{}` braces mark messages that are already encrypted.
+
+```text
+Client                                              Server
+
+ClientHello
+  + supported_versions (1.3)
+  + key_share (client's ECDHE public key)        -------->
+                                                          ServerHello
+                                                          + key_share (server's ECDHE public key)
+                                            <--------    {EncryptedExtensions}
+                                            <--------    {Certificate}        (server's cert chain)
+                                            <--------    {CertificateVerify}  (signature over transcript)
+                                            <--------    {Finished}
+{Finished}                                  -------->
+[Application Data]                          <------->    [Application Data]
+```
+
+Walk it slowly:
+
+- **ClientHello** carries a <VocabTooltip slug="ecdhe">ECDHE</VocabTooltip> `key_share` — the client's ephemeral Elliptic-Curve Diffie-Hellman public key — _in the very first message_. ECDHE (Ephemeral Elliptic-Curve Diffie-Hellman) lets two parties derive a shared secret by exchanging public keys; "ephemeral" means the private key is generated fresh for this one handshake and discarded after, which is the source of <VocabTooltip slug="forward-secrecy">forward secrecy</VocabTooltip>. The client also advertises `supported_versions: TLS 1.3` so a 1.3 server does not fall back.
+- **ServerHello** carries the server's own ECDHE `key_share`. The moment both shares are on the wire, each side computes the same shared secret (`ECDHE(my_private, your_public)`) and derives the **handshake traffic keys** from it via HKDF (the key-derivation function you met in s-4). Everything after ServerHello is encrypted under those keys — note the braces.
+- **EncryptedExtensions** carries negotiated parameters that no longer need to be in the clear (one of 1.3's privacy wins: the server name and ALPN are protected, not plaintext as in 1.2).
+- **Certificate** is the server's <VocabTooltip slug="certificate-chain">certificate chain</VocabTooltip> — sent _encrypted_, another 1.3 privacy improvement.
+- **CertificateVerify** is a digital signature, made with the certificate's private key, over a hash of the entire handshake transcript so far. This is the authenticity step: it proves the server holds the private key for the certificate it presented, and binds that proof to _this exact handshake_, so a recorded signature cannot be replayed into a different session.
+- **Finished** (both directions) is a MAC over the transcript that confirms neither side's view of the negotiation was tampered with mid-flight.
+
+Then application data flows under the derived **application traffic keys**. One round trip, mutual integrity, server authenticity, forward secrecy. That is the whole protocol's promise delivered.
+
+### AEAD: why there is no separate MAC step
+
+Every TLS 1.3 <VocabTooltip slug="cipher-suite">cipher suite</VocabTooltip> uses an <VocabTooltip slug="aead">AEAD</VocabTooltip> construction — Authenticated Encryption with Associated Data. An AEAD cipher encrypts and authenticates in one operation: the same call that hides the plaintext also produces an authentication tag, and decryption _fails closed_ if the tag does not verify. The full list of mandatory-to-implement TLS 1.3 cipher suites is short by design:
+
+```text
+TLS_AES_128_GCM_SHA256        (mandatory to implement)
+TLS_AES_256_GCM_SHA384
+TLS_CHACHA20_POLY1305_SHA256
+TLS_AES_128_CCM_SHA256
+```
+
+Compare that to TLS 1.2, which offered hundreds of suites, many combining a cipher with a bolt-on MAC in "MAC-then-encrypt" order — the ordering behind the Lucky 13 and POODLE-family padding-oracle attacks. AEAD removes the choice: there is no way to assemble an unauthenticated or wrong-order construction because authentication is not a separate, skippable step.
+
+### What TLS 1.3 deliberately removed — and the attack each removal closes
+
+This is the part to internalize, because audits and scanners are checking for exactly these:
+
+| Removed in 1.3                                                                       | Why it existed                     | Attack it enabled                                                                                                                              |
+| ------------------------------------------------------------------------------------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **RSA key transport** (client encrypts the premaster secret to the server's RSA key) | Simpler than DH, no ephemeral keys | No forward secrecy — steal the server's long-term RSA key later and every recorded past session decrypts. Also the ROBOT padding-oracle class. |
+| **CBC-mode cipher suites** (MAC-then-encrypt)                                        | Ubiquitous block-cipher mode       | Padding-oracle attacks: Lucky 13, POODLE-style. AEAD replaces them.                                                                            |
+| **RC4**                                                                              | Fast stream cipher                 | Statistical biases in the keystream recover plaintext.                                                                                         |
+| **Renegotiation**                                                                    | Mid-session re-handshake           | The 2009 TLS renegotiation prefix-injection flaw (CVE-2009-3555). 1.3 replaces it with `KeyUpdate`, which only rekeys and cannot inject.       |
+| **Compression** (TLS-level)                                                          | Bandwidth                          | CRIME: compression leaks plaintext length, recovering secrets like session cookies.                                                            |
+| **Static (non-ephemeral) Diffie-Hellman**                                            | Marginal performance               | No forward secrecy. 1.3 mandates ephemeral.                                                                                                    |
+
+The pattern: TLS 1.3 did not add cleverness, it removed every option that could be configured into a weakness. When a scanner flags your endpoint, it has almost always found one of these still enabled on a fallback path.
+
+### The 0-RTT caveat — the one place 1.3 trades safety for speed
+
+TLS 1.3 added an optional <VocabTooltip slug="zero-rtt">0-RTT</VocabTooltip> ("zero round trip time") mode. On a _resumed_ connection to a server the client has talked to before, the client can send application data in its very first flight, using a pre-shared key from the prior session — before the handshake completes. That is one fewer round trip of latency, which is why CDNs want it.
+
+The cost is real and the RFC names it explicitly: **0-RTT data is replayable.** Because the data rides along before the server has contributed any fresh randomness to that specific early-data flight, a network attacker who captures the 0-RTT bytes can resend them, and the server may process them again. RFC 8446 §8 and §2.3 spell out the consequence:
+
+> **Operational rule (RFC 8446 §8):** Only send 0-RTT early data for requests that are safe to replay. A `GET /balance` is safe to process twice. A `POST /transfer?amount=500` is not — replay it and money moves twice. Non-idempotent requests must never travel as 0-RTT early data; the application, not only the TLS library, has to enforce this.
+
+The defensive posture: leave 0-RTT off unless you have a measured latency need, and when it is on, scope it to idempotent, non-state-changing requests only. This is a place where "it's faster" and "it's safe" point in opposite directions, and the security engineer is the one who holds the line.
+
+## Certificate validation — the check most code gets wrong
+
+The handshake proves the peer holds a private key matching the certificate it presented. It does _not_, by itself, prove that certificate is one you should trust. That is validation, and it is four independent checks. Skip any one and the authenticity guarantee collapses.
+
+1. **Chain to a trusted root.** The server sends a leaf certificate plus intermediates. Each is signed by the next one up, terminating at a <VocabTooltip slug="root-of-trust">root of trust</VocabTooltip> — a certificate in the client's trust store, shipped by the OS or browser. If the chain does not terminate at a root you trust, validation fails. (s-4 covered the signature math that makes "signed by" verifiable.)
+2. **Hostname matches.** <VocabTooltip slug="hostname-verification">Hostname verification</VocabTooltip> checks that the name you _intended to reach_ appears in the certificate's Subject Alternative Name (SAN) list. A perfectly valid, well-signed certificate for `evil.example` must be rejected when you dialed `bank.example`. This is the check that careless code skips most often, because the TLS library will happily complete a handshake against a valid-but-wrong-name certificate unless you ask it to verify the name.
+3. **Not expired (and not yet valid).** The `notBefore`/`notAfter` window must contain the current time.
+4. **Not revoked.** A certificate can be valid-by-signature but <VocabTooltip slug="certificate-revocation">revoked</VocabTooltip> because its key was compromised. Revocation is checked via OCSP or CRLs (below).
+
+Here is the vulnerable-then-fixed pair every security engineer should recognize on sight. In Python, the standard library does validation _by default_ — but the dangerous thing is how easy it is to turn off:
+
+```python
+import ssl
+import socket
+
+# VULNERABLE — do not ship this.
+# Disabling verification was someone's "quick fix" for a cert error in staging
+# that escaped to production. The handshake still succeeds and the padlock is
+# green, but ANY certificate is now accepted: a machine-in-the-middle presenting
+# a self-signed cert is indistinguishable from the real server.
+insecure = ssl._create_unverified_context()          # check_hostname=False, CERT_NONE
+insecure.check_hostname = False                        # redundant here, shown for clarity
+insecure.verify_mode = ssl.CERT_NONE                   # the line that removes all trust
+
+# SECURE — the default context performs all four checks.
+# create_default_context() sets check_hostname=True and verify_mode=CERT_REQUIRED,
+# loads the OS trust store, and rejects TLS < 1.2.
+secure = ssl.create_default_context()
+secure.minimum_version = ssl.TLSVersion.TLSv1_3        # refuse anything below 1.3 for new services
+
+with socket.create_connection(("bank.example", 443)) as sock:
+    # server_hostname drives BOTH SNI and hostname verification — pass the name
+    # you INTENDED to reach, never a value derived from the certificate itself.
+    with secure.wrap_socket(sock, server_hostname="bank.example") as tls:
+        # If we get here, the chain validated, the hostname matched, the cert is
+        # in its validity window, and (if stapled) revocation passed.
+        cert = tls.getpeercert()
+        print("verified peer:", cert["subject"])
+```
+
+The single most common transport-security vulnerability in shipped code is some variant of `verify_mode = CERT_NONE` or `check_hostname = False`, added to silence a certificate error and never removed. The fix is never to disable verification — it is to fix the certificate or add the correct root to the trust store.
+
+### Revocation and OCSP stapling
+
+When a private key is compromised, the certificate must be revoked before its natural expiry. Two mechanisms: Certificate Revocation Lists (CRLs — large, slow to distribute) and OCSP (Online Certificate Status Protocol — the client asks the CA "is serial N still good?"). Classic OCSP has two problems: it adds a round trip to a third party on every connection, and it leaks to the CA which sites the client visits.
+
+<VocabTooltip slug="ocsp-stapling">OCSP stapling</VocabTooltip> fixes both. The _server_ periodically fetches a fresh, CA-signed "this certificate is still valid as of <timestamp>" response and _staples_ it into the TLS handshake (the `status_request` extension). The client gets the revocation proof for free, in-band, with no extra round trip and no privacy leak to the CA. NIST SP 800-52r2 (Guidelines for TLS Implementations) recommends servers support stapling for exactly these reasons. Enabling it is a one-line server config in nginx (`ssl_stapling on;`) — and a control a security engineer should confirm is present.
+
+## Certificate pinning — a sharper tool that cuts both ways
+
+<VocabTooltip slug="certificate-pinning">Certificate pinning</VocabTooltip> narrows trust from "any
+certificate that chains to any trusted root" down to "specifically the key(s) I expect." It defends
+against a real threat: a mis-issued certificate from a compromised or coerced CA. Without pinning, a
+CA that issues a fraudulent `bank.example` certificate produces something every client trusts. With
+pinning, the client rejects it because the key does not match the pin.
+
+Pinning is also the single most common cause of self-inflicted outages in mobile apps, because most teams pin the wrong thing.
+
+> **Pin the SPKI hash, not the leaf certificate.** Pin the SHA-256 of the **Subject Public Key Info** — the public key — not the whole leaf certificate. Leaf certificates rotate on a 90-day cadence (Let's Encrypt) or shorter; if you pinned the leaf, every routine rotation bricks every installed app until users update. If you pin the SPKI and reissue the certificate _with the same key_ (or pre-stage a backup key's pin), rotation is invisible to clients.
+
+The rules that keep pinning from becoming an outage:
+
+- **Pin SPKI, not leaf.** Survives certificate reissuance with the same key.
+- **Always ship a backup pin.** Pin a second, offline-held key. If the primary key is compromised you rotate to the backup without a forced app update.
+- **Set a finite max-age and have an un-pin plan.** A pin you cannot remove is a kill switch you handed to your future self.
+- **Pin first-party APIs you control, not third-party endpoints.** You cannot predict when a vendor rotates their CA.
+
+```text
+# A pin set for a mobile client (conceptual — exact syntax is platform-specific).
+# Two SHA-256 SPKI pins: the live key and an OFFLINE backup key.
+# If the live key is ever compromised, you rotate to the backup with no app update.
+pin-sha256: "primary-key-spki-base64=="    # in production today
+pin-sha256: "backup-key-spki-base64=="     # held offline, never deployed yet
+max-age:    5184000                         # 60 days — finite, so a mistake self-heals
+```
+
+Pin when you control both ends and the threat model includes CA mis-issuance (banking, messaging apps). Do not pin when you cannot guarantee key continuity, because the failure mode is a fleet-wide outage you cannot hotfix.
+
+## Mutual TLS — both sides prove identity
+
+In ordinary "server-authenticated" TLS, only the server presents a certificate; the client stays anonymous at the transport layer and authenticates later with a password or token. <VocabTooltip slug="mutual-tls">Mutual TLS</VocabTooltip> (mTLS) adds a second certificate: the client also presents one, and the server validates it the same four ways. Now _both_ sides have a cryptographic, transport-layer identity before a single byte of application data flows.
+
+This is the backbone of modern service-to-service authentication. Inside a cluster, service A calls service B. How does B know the caller is really A and not a compromised pod that happens to be on the same network? mTLS answers it: A presents a certificate whose <VocabTooltip slug="service-identity">service identity</VocabTooltip> (often encoded as a SPIFFE ID in the SAN, e.g. `spiffe://cluster/ns/payments/sa/checkout`) B validates against its trust bundle. Network location proves nothing; the certificate proves everything.
+
+The handshake is the same TLS 1.3 flow, with the server requesting a client certificate (`CertificateRequest`), and the client answering with its own `Certificate` + `CertificateVerify`. Server-side, enabling it is a configuration of "require and verify a client certificate against this CA":
+
+```python
+import ssl
+
+# SERVER side: require AND verify a client certificate (this is what makes it mutual).
+server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+server_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+
+# CERT_REQUIRED on the server is the line that turns server-auth TLS into mTLS:
+# the handshake now FAILS unless the client presents a cert that chains to our CA.
+server_ctx.verify_mode = ssl.CERT_REQUIRED
+server_ctx.load_verify_locations(cafile="internal-service-ca.pem")  # the CA that signs service certs
+server_ctx.load_cert_chain(certfile="service-b.pem", keyfile="service-b-key.pem")
+
+# CLIENT side (service A): present our own certificate when service B asks for one.
+client_ctx = ssl.create_default_context()
+client_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+client_ctx.load_verify_locations(cafile="internal-service-ca.pem")
+client_ctx.load_cert_chain(certfile="service-a.pem", keyfile="service-a-key.pem")
+# On connect, client_ctx must still set server_hostname so service A also verifies B.
+```
+
+The shift mTLS represents: authentication moves _into the transport layer_ and stops depending on where a request came from. That idea — identity over location — is the bridge to the last topic.
+
+## Segmentation and zero trust — identity over location
+
+<VocabTooltip slug="network-segmentation">Network segmentation</VocabTooltip> divides a network into
+zones so that compromising one host does not grant reach to all of them. The traditional model is
+_perimeter_ segmentation: a hard outer firewall, and inside it a trusted flat network. The fatal
+assumption is that <VocabTooltip slug="east-west-traffic">east-west traffic</VocabTooltip> — traffic
+between internal hosts — is trustworthy because it is "inside." Once an attacker gets a single
+foothold, that flat interior is theirs to traverse. Almost every large breach has this
+lateral-movement phase.
+
+<VocabTooltip slug="zero-trust">Zero trust</VocabTooltip> inverts the assumption. Articulated in
+Google's BeyondCorp papers (2014 onward) and codified for the U.S. government in NIST SP 800-207
+(Zero Trust Architecture, 2020), the model is:
+
+> **Never trust, always verify.** There is no privileged "inside." Every request — north-south _and_ east-west — is authenticated and authorized on its own merits (identity, device posture, policy), independent of the network it originated on. Being on the corporate LAN earns a request exactly zero trust.
+
+Concretely, zero trust replaces "is this packet from inside the firewall?" with "does this _identity_ have a policy that permits this _action_ on this _resource_, right now?" mTLS is one of its primary enforcement mechanisms for service-to-service calls: the certificate is the identity, and policy is evaluated against the identity, not the source IP.
+
+Where each control belongs relative to the trust boundary:
+
+- A perimeter firewall reduces attack surface — keep it, but do not let it be your _only_ control. It is a wall, not an identity check.
+- mTLS between services enforces identity east-west — this is the control that contains a foothold. Without it, one compromised pod can call every internal API.
+- Microsegmentation (per-workload policy) limits blast radius — a compromised service can reach only the specific peers its policy allows.
+- Authentication and authorization belong at every service, not only at the edge — because in zero trust there is no trusted interior to be "past."
+
+Defense in depth still holds: zero trust does not delete the perimeter, it stops the perimeter from being load-bearing.
+
+## Practice
+
+Work through this scenario before the competency check. The fix is at the bottom — try to name it first.
+
+<SandboxExercise
+  language="javascript"
+  instructions="A Node.js service makes outbound HTTPS calls to an internal payments API. After a CA error blocked deploys, an engineer set NODE_TLS_REJECT_UNAUTHORIZED='0' to make the error go away, and it shipped. Your task: (1) state precisely which of the four certificate-validation checks this disables, (2) explain the exact attack it now permits on the payments call, and (3) write the secure replacement — keep verification ON and instead load the internal CA so the internal cert validates. The function makeSecureRequest(host) should build an https.request options object that verifies the peer against the internal CA and verifies the hostname. Do not disable any check."
+  initialCode={`const https = require('https');
+const fs = require('fs');
+
+// SHIPPED AS-IS: an engineer set this to silence a CA chain error.
+// It makes Node accept ANY certificate — every validation check is off.
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+// Build the request options for an outbound HTTPS call to the internal
+// payments API. Right now this inherits the insecure global above and
+// performs no real peer verification.
+//
+// Rewrite makeSecureRequest so it:
+// 1. keeps verification ON (rejectUnauthorized: true),
+// 2. loads the internal CA via the \`ca\` option so the internal
+// certificate validates without disabling any check,
+// 3. sets servername so hostname verification runs against the
+// name you actually dialed.
+function makeSecureRequest(host) {
+const options = {
+host,
+port: 443,
+path: '/charge',
+method: 'POST',
+// TODO: peer + hostname verification belongs here.
+};
+
+return https.request(options);
+}
+
+module.exports = { makeSecureRequest };
+`}
+  solution={`const https = require('https');
+const fs = require('fs');
+
+// The fix is never to disable verification. We teach the client to
+// trust the RIGHT root: load the internal CA and keep every check on.
+// NODE_TLS_REJECT_UNAUTHORIZED is left unset (secure default = '1').
+
+const internalCa = fs.readFileSync('internal-ca.pem');
+
+function makeSecureRequest(host) {
+const options = {
+host,
+port: 443,
+path: '/charge',
+method: 'POST',
+// Chain-to-a-trusted-root: validate the peer against the internal CA.
+ca: internalCa,
+// Keep peer verification ON — reject anything the CA doesn't sign.
+rejectUnauthorized: true,
+// Hostname verification: check the cert's name against the host we dialed.
+servername: host,
+};
+
+return https.request(options);
+}
+
+module.exports = { makeSecureRequest };
+`}
+testCases={[
+"rejectUnauthorized is true (or left at its secure default) on the request options",
+"the internal CA certificate is loaded via the ca option so the internal endpoint validates without disabling verification",
+"servername / host is set to the intended hostname so hostname verification runs against the name you dialed",
+"the explanation names machine-in-the-middle / cert substitution as the attack the insecure flag permits",
+]}
+/>
+
+The disabled check is **chain-to-a-trusted-root** (and, depending on the library, hostname verification along with it): `NODE_TLS_REJECT_UNAUTHORIZED='0'` makes Node accept _any_ certificate. The attack it permits is machine-in-the-middle — anyone who can intercept the connection presents a self-signed certificate and Node accepts it, so the payments traffic is silently decrypted and re-encrypted by an attacker. The fix is to keep `rejectUnauthorized: true` and pass the internal CA via the `ca` option (`https.request({ host, servername: host, ca: fs.readFileSync('internal-ca.pem'), rejectUnauthorized: true })`) so the internal certificate validates legitimately. You never trade verification for convenience; you teach the client to trust the right root.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "In the TLS 1.3 handshake, the client puts its ECDHE key_share in the very first message (ClientHello) rather than waiting for the server to tell it which parameters to use. What does this design buy, and what property does using EPHEMERAL keys provide?",
+      options: [
+        "It lets the client skip certificate validation, trading authenticity for speed",
+        "It completes the handshake in one round trip (1-RTT) instead of two, because the server can compute the shared secret and send its certificate in a single flight; and because each ECDHE key is generated fresh per handshake and then discarded, the session has forward secrecy — recording the traffic and later stealing the server's long-term certificate key does not decrypt it",
+        "It enables RSA key transport, which is faster than Diffie-Hellman",
+        "It allows TLS-level compression, reducing handshake size",
+      ],
+      correct: 1,
+      explanation:
+        "Sending the ECDHE key_share in ClientHello lets the server derive the shared secret immediately and bundle its key_share, certificate, CertificateVerify, and Finished into one flight — that is the 1-RTT improvement over TLS 1.2's two round trips. Forward secrecy comes specifically from the keys being EPHEMERAL: the ECDHE private key exists only for this handshake and is discarded, so the long-term certificate key never decrypts session traffic and cannot do so retroactively if stolen later. Option 1 is backwards — 1.3 strengthens authenticity, it does not skip it. RSA key transport and TLS compression were both REMOVED in 1.3 precisely because they break forward secrecy (RSA transport) and leak plaintext (compression, the CRIME attack).",
+    },
+    {
+      question:
+        "TLS 1.3 removed CBC-mode cipher suites and mandates AEAD (e.g. AES-GCM, ChaCha20-Poly1305) for every suite. Which problem does this remove?",
+      options: [
+        "It removes the need for any certificate, since AEAD authenticates the server",
+        "It makes the handshake faster by skipping integrity checks",
+        "It eliminates the class of padding-oracle attacks (Lucky 13, POODLE-style) that exploited the MAC-then-encrypt CBC construction, because AEAD encrypts and authenticates in one operation with no separately skippable, wrongly-ordered MAC step — decryption fails closed if the authentication tag does not verify",
+        "It allows unauthenticated encryption when performance matters",
+      ],
+      correct: 2,
+      explanation:
+        "CBC suites in TLS 1.2 used MAC-then-encrypt, and the resulting padding handling leaked timing/error information that padding-oracle attacks (Lucky 13, the POODLE family) exploited to recover plaintext. AEAD binds encryption and authentication into a single operation that fails closed on a bad tag, so there is no separate, mis-orderable, or omittable MAC step to attack. AEAD authenticates the DATA, not the server's identity — certificates are still required (option 1 is wrong). It does not skip integrity (option 2) and never permits unauthenticated encryption (option 4); 'Authenticated' is in the name.",
+    },
+    {
+      question:
+        "A mobile banking app pinned the SHA-256 of its server's LEAF certificate. The certificate was on a 90-day rotation; on the next routine renewal the app could no longer connect for any user who had not updated. Separately, an internal microservice accepts any caller that can reach it over the cluster network. Which two corrections are right?",
+      options: [
+        "Pinning: disable pinning entirely since it caused an outage. Microservice: add an IP allowlist for the cluster subnet.",
+        "Pinning: keep pinning but pin the SHA-256 of the Subject Public Key Info (SPKI) and ship an offline BACKUP pin, so reissuing the certificate with the same key is invisible to clients and a key compromise can be rotated without a forced app update. Microservice: require mTLS so callers prove a service identity that chains to the internal CA, because network location is not authentication — a zero-trust control.",
+        "Pinning: pin the root CA certificate instead of the leaf. Microservice: move it behind the perimeter firewall and trust all east-west traffic.",
+        "Pinning: shorten the certificate rotation to 30 days so outages are more frequent but smaller. Microservice: rely on the green padlock to confirm the caller.",
+      ],
+      correct: 1,
+      explanation:
+        "Pinning the leaf breaks on every rotation; pinning the SPKI (the public key) survives reissuance with the same key, and an offline backup pin lets you rotate after a key compromise without a forced update — that is the standard safe pinning recipe. The microservice failure is trusting network LOCATION instead of IDENTITY; mTLS makes each caller present a certificate-bound service identity that chains to the internal CA, which is exactly the zero-trust principle 'never trust, always verify' applied east-west. Option 1's IP allowlist still trusts location, not identity. Option 3's 'pin the root' over-broadens trust to every cert that CA issues, and 'trust all east-west traffic' is the flat-network assumption zero trust exists to kill. Option 4 misunderstands both problems.",
+    },
+    {
+      question:
+        "TLS 1.3's optional 0-RTT (early data) mode lets a client send application data in its first flight on a resumed connection. RFC 8446 warns this data has one specific weakness. What is it, and what is the correct operational rule?",
+      options: [
+        "0-RTT data is sent in plaintext; the rule is to only use it on internal networks",
+        "0-RTT data is replayable — a network attacker can capture and resend the early-data bytes, and the server may process them again; the rule is to send only idempotent, non-state-changing requests (safe to process twice, like a GET) as 0-RTT, never something like a funds transfer",
+        "0-RTT disables certificate validation; the rule is to re-validate the certificate after the handshake",
+        "0-RTT only works with RSA key transport; the rule is to enable RSA suites alongside it",
+      ],
+      correct: 1,
+      explanation:
+        "0-RTT early data rides ahead of the server's fresh per-flight randomness, so a captured copy can be replayed and reprocessed — RFC 8446 §8 / §2.3 call this out directly. The defensive rule is that only idempotent, non-state-changing requests may travel as 0-RTT; a replayed GET is harmless, a replayed POST that moves money is not, and the application layer (not only the TLS stack) must enforce that boundary. The data is still encrypted (option 1 is wrong), certificate validation is unaffected by 0-RTT (option 3), and 0-RTT uses a pre-shared key from the prior session, not RSA key transport, which 1.3 removed entirely (option 4).",
+    },
+  ]}
+/>
+
+## What you learned
+
+- The **TLS 1.3 handshake** completes in 1-RTT: the client sends an ECDHE key_share in ClientHello, both sides derive a shared secret, and the server signs the transcript (CertificateVerify) to prove identity — everything after ServerHello is encrypted, and ephemeral keys give forward secrecy.
+- TLS 1.3 is defined by **what it removed**: RSA key transport, CBC suites, RC4, renegotiation, compression, and static DH — each removal closes a named attack class (lost forward secrecy, padding oracles, CRIME, renegotiation injection). Every suite is now AEAD, so authentication cannot be skipped or mis-ordered.
+- **0-RTT trades safety for latency**: early data is replayable, so it must be scoped to idempotent requests only.
+- **Certificate validation is four independent checks** — chain to a trusted root, hostname match, validity window, revocation (use OCSP stapling). The most common shipped vulnerability is disabling verification to silence an error; the fix is to trust the right root, never to stop verifying.
+- **Pin the SPKI hash, not the leaf**, always ship a backup pin, and pin only endpoints whose key continuity you control — otherwise pinning becomes a fleet-wide outage.
+- **mTLS** gives both peers a transport-layer identity, which is the enforcement mechanism for **zero trust**: authenticate and authorize every request by identity, not by network location, north-south and east-west alike.
+
+## What's next
+
+Lesson s-6 moves up the stack from the transport channel to the application running on top of it: how an authenticated, encrypted connection still carries injection, broken-access-control, and authentication-logic flaws — the OWASP Top 10 territory — and how secure-by-default frameworks and input validation close them. TLS got the bytes there safely; s-6 is about what the application does with them.

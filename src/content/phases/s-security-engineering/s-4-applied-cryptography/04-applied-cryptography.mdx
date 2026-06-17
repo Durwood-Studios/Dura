@@ -1,0 +1,440 @@
+---
+title: "Applied Cryptography — Hashing, AEAD, Key Management"
+description: "Hashes vs MACs vs KDFs, authenticated encryption, nonce discipline, key rotation, the FIPS boundary — crypto used correctly, not invented."
+phase: s
+module: "s-4-applied-cryptography"
+order: 4
+estimatedMinutes: 30
+difficulty: 4
+prerequisites:
+  - "s-3-authn-authz-sessions"
+standards:
+  primaryAnchor: "NIST FIPS 140-3"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - cryptographic-hash
+  - preimage-resistance
+  - collision-resistance
+  - message-authentication-code
+  - hmac
+  - key-derivation-function
+  - password-hashing-function
+  - argon2
+  - pbkdf2
+  - hkdf
+  - authenticated-encryption
+  - aead
+  - aes-gcm
+  - chacha20-poly1305
+  - nonce
+  - ecb-mode
+  - padding-oracle
+  - key-rotation
+  - envelope-encryption
+  - key-management-service
+  - fips-140-3
+  - csprng
+learningOutcomes:
+  - "Choose correctly between a hash, an HMAC, a password-hashing function, and a KDF for a given task, and explain why substituting one for another is a vulnerability"
+  - "Encrypt and decrypt data with an AEAD construction (AES-256-GCM or ChaCha20-Poly1305) using a real crypto library, supplying a unique nonce and verifying the authentication tag"
+  - "Explain why ECB and unauthenticated CBC are unsafe, and why reusing a GCM nonce under one key is catastrophic rather than merely weak"
+  - "Generate keys from a CSPRNG, separate keys by purpose, and rotate them using envelope encryption so no long-lived data key is ever hardcoded"
+  - "Identify whether a deployment needs a FIPS 140-3 validated cryptographic module and locate the validated boundary"
+professionalContext: "Most real-world cryptographic failures are not broken algorithms — AES and SHA-256 are sound. They are correct algorithms used wrongly: a nonce reused, a hash used where a MAC was needed, a password stored under a fast hash, a key checked into git, ciphertext accepted without verifying its tag. A security engineer's job is almost never to invent a cipher; it is to assemble validated primitives correctly and to recognize the specific misuse patterns that turn a sound primitive into an exploitable system. This lesson trains the judgment that separates engineers who reach for a library and use it as designed from those who write the CVE."
+thresholdConcept: true
+---
+
+## Why this lesson exists
+
+A junior engineer is told "encrypt the user's session data." They search, find `crypto.createCipheriv`, pick `aes-256-ecb` because it has no confusing nonce argument, and ship it. The data is now encrypted with a NIST-approved cipher and a 256-bit key — and it leaks its own structure to anyone who looks, because ECB encrypts identical blocks to identical ciphertext. The algorithm is sound. The usage is a vulnerability.
+
+This is the shape of almost every cryptographic incident in production software. The cipher is fine. SHA-256 is fine. The bug is that a primitive was used for a job it was never designed to do, or used correctly except for one parameter whose reuse silently destroys every guarantee. This lesson is about that gap — choosing the right primitive and feeding it the right inputs — because that, not algorithm design, is what security engineers are actually paid to get right.
+
+## First principles — four jobs that look the same and are not
+
+Take four tasks that all "scramble bytes" and are routinely confused:
+
+1. **Fingerprint a file** so you can detect if it changed — comparing a download against a published value.
+2. **Prove a message came from someone who holds a shared secret** — your server confirming a webhook really came from your payment provider.
+3. **Store a password** so that a stolen database does not hand attackers the plaintext passwords.
+4. **Turn one secret into several purpose-specific keys** — deriving an encryption key and a separate signing key from one master secret.
+
+To a beginner these all sound like "hash it." They are four different primitives with four different security properties, and using the tool for job 1 to do job 2 or job 3 is a textbook vulnerability with a real CWE number attached. Before naming them, hold this distinction: **a plain hash answers "are these bytes identical?" — it does not answer "did someone who knows the secret produce this?" and it is deliberately too fast to safely store passwords.**
+
+## The mental model
+
+> A plain hash is a public fingerprint — anyone can compute it, so it proves integrity but never authenticity. A MAC is a fingerprint only a secret-holder can compute, so it proves both. A password-hashing function is a hash deliberately made slow and memory-hard to survive being stolen. A KDF stretches and separates key material. Encryption (AEAD) hides the bytes AND attaches a MAC so tampering is detected. Pick by the question you need answered, not by which API you found first.
+
+## Hash vs MAC vs password-KDF vs KDF — when each
+
+### Plain cryptographic hash (SHA-256)
+
+A <VocabTooltip slug="cryptographic-hash">cryptographic hash</VocabTooltip> maps any input to a fixed-size digest (SHA-256 → 256 bits) with two properties that matter here: <VocabTooltip slug="preimage-resistance">preimage resistance</VocabTooltip> (given a digest, you cannot find an input that produces it) and <VocabTooltip slug="collision-resistance">collision resistance</VocabTooltip> (you cannot find two inputs with the same digest). SHA-256 (a member of the SHA-2 family, NIST FIPS 180-4) holds both today. SHA-1 and MD5 do not — collisions are demonstrated and cheap — so they are unusable for any security purpose.
+
+Use a plain hash to detect _unintentional or after-the-fact_ change when no secret is involved: verifying a downloaded artifact against a published digest, content-addressing, deduplication.
+
+```javascript
+import { createHash } from "node:crypto";
+
+// Integrity fingerprint of a downloaded artifact. Anyone can recompute this —
+// that is the point: a published digest lets every downloader self-verify.
+function sha256Hex(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+```
+
+The trap: a plain hash proves _integrity_, never _authenticity_. Because anyone can compute SHA-256, an attacker who alters a message can also recompute its hash. If you store `hash(message)` next to a message an attacker controls, you have proven nothing. That is the job of a MAC.
+
+### Message Authentication Code (HMAC)
+
+A <VocabTooltip slug="message-authentication-code">message authentication code</VocabTooltip> takes a message **and a secret key** and produces a tag that only a key-holder can produce or verify. <VocabTooltip slug="hmac">HMAC</VocabTooltip> (Hash-based MAC, RFC 2104, standardized as FIPS 198-1) is the canonical construction — `HMAC-SHA-256` is the default you should reach for.
+
+Use a MAC to prove a message came from someone holding the shared secret and was not altered: verifying inbound webhook signatures, signing your own session tokens, authenticating API requests.
+
+```javascript
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+// Verify an inbound webhook really came from a partner who shares `secret`.
+function verifyWebhook(rawBody, providedTagHex, secret) {
+  const expected = createHmac("sha256", secret).update(rawBody).digest();
+  const provided = Buffer.from(providedTagHex, "hex");
+
+  // Length guard first: timingSafeEqual throws if buffers differ in length.
+  if (expected.length !== provided.length) return false;
+
+  // Constant-time compare. A normal === leaks, via response time, how many
+  // leading bytes matched — enough to forge a valid tag byte by byte.
+  return timingSafeEqual(expected, provided);
+}
+```
+
+Two non-obvious points the comments flag: never compare tags with `===` (it short-circuits on the first differing byte, and that timing leak is exploitable); and never invent a "MAC" by writing `hash(secret + message)` yourself — that naive construction is vulnerable to length-extension attacks on Merkle–Damgård hashes like SHA-256, which is precisely the flaw HMAC's nested structure was designed to close.
+
+### Password-hashing function (Argon2, scrypt, PBKDF2)
+
+Passwords are special. They are low-entropy (humans pick weak ones) and, if your database is stolen, an attacker can guess offline at billions of tries per second on a GPU. A plain hash like SHA-256 is _too fast_ — its speed, a virtue for integrity, is a liability here. You want a function deliberately slow and memory-hungry so each guess costs the attacker real time and hardware.
+
+A <VocabTooltip slug="password-hashing-function">password-hashing function</VocabTooltip> is built for exactly this. The current first choice is <VocabTooltip slug="argon2">Argon2id</VocabTooltip> (winner of the Password Hashing Competition); <VocabTooltip slug="pbkdf2">PBKDF2</VocabTooltip> (NIST SP 800-132) remains acceptable and is the FIPS-approved option when you need a validated module. Each incorporates a per-user random **salt** (so identical passwords get different stored values and precomputed rainbow tables are useless) and a tunable cost parameter you raise as hardware improves.
+
+```javascript
+// Argon2id via the `argon2` package. The library stores algorithm, salt, and
+// cost parameters INSIDE the returned string, so verify() needs no extra state.
+import argon2 from "argon2";
+
+async function hashPassword(plaintext) {
+  // memoryCost / timeCost are tuned so one verification takes ~tens of ms on
+  // YOUR hardware — slow enough to punish offline guessing, fast enough for login.
+  return argon2.hash(plaintext, {
+    type: argon2.argon2id,
+    memoryCost: 19_456, // 19 MiB — memory-hardness defeats cheap GPU parallelism
+    timeCost: 2,
+    parallelism: 1,
+  });
+}
+
+async function checkPassword(plaintext, storedHash) {
+  try {
+    // verify() re-derives using the parameters embedded in storedHash and
+    // compares in constant time internally.
+    return await argon2.verify(storedHash, plaintext);
+  } catch (error) {
+    // A malformed stored hash must fail closed, never throw to the caller as success.
+    console.error("[auth] password verify failed", error);
+    return false;
+  }
+}
+```
+
+Never store passwords with SHA-256, MD5, or a bare HMAC. The whole point is to be slow; a fast hash hands an attacker the cleartext passwords of every user who reused one.
+
+### Key Derivation Function (HKDF)
+
+The last job is different again: you hold _one_ high-entropy secret (a master key, or a shared secret from a key exchange) and you need _several_ keys — say one for encryption and a separate one for a MAC — and you must never use the same key for two purposes. A <VocabTooltip slug="key-derivation-function">key derivation function</VocabTooltip> for this is <VocabTooltip slug="hkdf">HKDF</VocabTooltip> (HMAC-based KDF, RFC 5869). Its `info` parameter binds each derived key to a named purpose so the encryption key and the signing key are cryptographically distinct even though they came from one secret.
+
+```javascript
+import { hkdfSync } from "node:crypto";
+
+// Derive two purpose-separated keys from ONE master secret. The `info` label is
+// what makes them distinct — deriving with a different label yields an unrelated key.
+function deriveKeys(masterSecret, salt) {
+  const encKey = Buffer.from(hkdfSync("sha256", masterSecret, salt, "session-encryption-v1", 32));
+  const macKey = Buffer.from(hkdfSync("sha256", masterSecret, salt, "session-mac-v1", 32));
+  return { encKey, macKey };
+}
+```
+
+HKDF is for high-entropy inputs. Do **not** feed a user password into HKDF and call it password hashing — HKDF is fast by design and offers none of the offline-guessing resistance Argon2 provides. Passwords go through a password-hashing function; key material goes through HKDF. Same word "derive," opposite requirements.
+
+## Authenticated encryption — the only kind you should use
+
+Now encryption. The beginner's instinct — "AES makes it secret" — is half the story and the dangerous half. Plain confidentiality without integrity is exploitable, so modern practice uses <VocabTooltip slug="authenticated-encryption">authenticated encryption</VocabTooltip>: a construction that both hides the data and produces an authentication tag, so any tampering with the ciphertext is detected at decryption time. The standard form is <VocabTooltip slug="aead">AEAD</VocabTooltip> (Authenticated Encryption with Associated Data), which also lets you bind unencrypted context — a header, a record ID — to the ciphertext so it cannot be relocated or replayed.
+
+> The mental model for encryption: never "encrypt then hope." Always **AEAD** — encrypt and authenticate in one operation, and refuse to use any plaintext if the tag does not verify. Confidentiality without authenticity is a vulnerability waiting for an attacker who flips bits.
+
+### Why ECB and raw CBC are dangerous
+
+<VocabTooltip slug="ecb-mode">ECB mode</VocabTooltip> (Electronic Codebook) encrypts each block
+independently with no chaining. Identical plaintext blocks produce identical ciphertext blocks, so
+the ciphertext leaks the plaintext's structure — the canonical demonstration is an image encrypted
+in ECB where the picture is still visible through the ciphertext. ECB provides neither real
+confidentiality nor any integrity. Do not use it, ever, for anything.
+
+Plain CBC mode chains blocks so structure is hidden, but **unauthenticated** CBC has no integrity tag. An attacker can flip bits in the ciphertext to flip bits in the decrypted plaintext, and — if your code reveals whether decryption padding was valid — mount a <VocabTooltip slug="padding-oracle">padding oracle attack</VocabTooltip> that decrypts the entire message without the key, one byte at a time, using only your error responses. Padding-oracle bugs are not theoretical; they have broken real protocols (the POODLE attack against SSL 3.0 is one public example). The defense is to never deploy unauthenticated CBC: use AEAD, which detects tampering before any padding is even examined.
+
+### AES-256-GCM and ChaCha20-Poly1305
+
+Two AEAD constructions cover essentially all needs:
+
+- <VocabTooltip slug="aes-gcm">AES-256-GCM</VocabTooltip> (Galois/Counter Mode, NIST SP 800-38D) —
+  the default when the platform has AES hardware acceleration (AES-NI on x86, the crypto extensions
+  on ARM), which is most servers and modern phones.
+- <VocabTooltip slug="chacha20-poly1305">ChaCha20-Poly1305</VocabTooltip> (RFC 8439) — a
+  software-friendly AEAD that is fast and constant-time without special hardware; preferred on
+  platforms lacking AES acceleration, and the reason TLS 1.3 ships it.
+
+Both take a key, a <VocabTooltip slug="nonce">nonce</VocabTooltip> (number-used-once), the plaintext, and optional associated data, and return ciphertext plus an authentication tag. Here is GCM used correctly in Node:
+
+```javascript
+import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
+
+// AES-256-GCM. Returns nonce + tag + ciphertext so decrypt has everything it needs.
+function encrypt(plaintext, key, associatedData) {
+  // 96-bit (12-byte) nonce is the GCM standard size. It MUST be unique per
+  // encryption under this key — see the nonce-reuse section below.
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+
+  // Bind unencrypted context (e.g. a record id) so the tag also covers it.
+  if (associatedData) cipher.setAAD(associatedData);
+
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag(); // 16-byte authentication tag
+  return { nonce, tag, ciphertext };
+}
+
+function decrypt({ nonce, tag, ciphertext }, key, associatedData) {
+  const decipher = createDecipheriv("aes-256-gcm", key, nonce);
+  decipher.setAuthTag(tag); // tells GCM what tag to verify against
+  if (associatedData) decipher.setAAD(associatedData);
+
+  // final() THROWS if the tag does not verify. That throw is the security
+  // boundary: a failed tag means tampered or wrong-key data — never return
+  // partial plaintext on failure.
+  try {
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  } catch (error) {
+    console.error("[crypto] AEAD authentication failed — rejecting ciphertext", error);
+    throw new Error("decryption failed: authentication tag mismatch");
+  }
+}
+```
+
+The load-bearing line is `decipher.final()` throwing on a bad tag. AEAD's promise is _you never act on unauthenticated plaintext_ — so the failure path must reject the whole message, not salvage what decrypted before the error.
+
+### The catastrophic failure: GCM nonce reuse
+
+GCM's single most important rule: **under one key, never reuse a nonce.** This is not "slightly weaker if you do." Reusing a nonce for two different messages under the same key lets an attacker XOR the two ciphertexts to cancel the keystream and recover the XOR of the two plaintexts — and, worse, it leaks GCM's internal authentication subkey, letting the attacker **forge valid tags** for arbitrary messages. One repeated nonce can collapse both confidentiality and authenticity of everything encrypted under that key. This exact failure has appeared in shipped products.
+
+So how do you guarantee uniqueness? Two correct strategies:
+
+- **Random nonces** from a <VocabTooltip slug="csprng">CSPRNG</VocabTooltip> (`crypto.randomBytes`, never `Math.random`). With a 96-bit random nonce, collisions are negligible until you approach ~2³² messages under one key — fine for most uses, and the reason the code above uses `randomBytes(12)`. Rotate the key well before that volume.
+- **Counter nonces** — a strictly increasing counter, persisted so it never resets (a reset replays a nonce). Deterministic and collision-free if the counter is monotonic, but a crash that rewinds the counter, or two processes sharing a key and counter, reintroduces reuse. Random nonces are easier to get right in distributed systems; counters suit single-writer, high-volume streams.
+
+The one thing you must never do is hardcode a fixed nonce or derive it from the plaintext. A constant nonce means _every_ message reuses it — the worst case.
+
+```javascript
+// WRONG — a fixed nonce reuses it on every call. Catastrophic for GCM.
+const nonce = Buffer.alloc(12, 0); // never do this
+
+// RIGHT — fresh CSPRNG nonce per encryption.
+const nonce = randomBytes(12);
+```
+
+## Key management — where most real systems actually fail
+
+The algorithms above are only as safe as the keys feeding them, and key handling is where production systems leak. Four rules:
+
+1. **Generate keys from a CSPRNG.** A 256-bit key is `crypto.randomBytes(32)` — never a password, a timestamp, or `Math.random()`. Weak key generation has its own CWE (CWE-331, insufficient entropy) and defeats an otherwise perfect cipher.
+2. **Separate keys by purpose.** One key, one job. Encryption keys, MAC keys, and signing keys are distinct — derive them with HKDF and different `info` labels. Reusing a key across purposes can let one protocol's behavior attack another's.
+3. **Never hardcode keys.** A key in source code is a key in git history, in every clone, in every CI log. This is CWE-798 (use of hard-coded credentials), one of the most common and most damaging findings in security review. Keys come from a secrets manager or KMS at runtime — never a literal, never `.env` committed to the repo.
+4. **<VocabTooltip slug="key-rotation">Rotate keys</VocabTooltip>** so a compromise has a bounded blast radius and old key material ages out. Rotation is only practical with the right architecture, which is envelope encryption.
+
+### Envelope encryption and KMS
+
+You do not want to re-encrypt terabytes of data every time you rotate a key, and you do not want your application process to ever hold the long-lived master key in memory. <VocabTooltip slug="envelope-encryption">Envelope encryption</VocabTooltip> solves both. A <VocabTooltip slug="key-management-service">key management service</VocabTooltip> (KMS — AWS KMS, GCP Cloud KMS, Azure Key Vault, or HashiCorp Vault) holds a master key (the KEK, key-encryption key) that _never leaves the service_. Your app asks the KMS to generate a fresh per-object data key (DEK); the KMS returns it twice — plaintext for immediate use, and encrypted-under-the-KEK to store beside the ciphertext.
+
+```javascript
+// Envelope encryption, pseudocode against a KMS client.
+// The KEK never leaves the KMS; the app only ever holds a short-lived DEK.
+async function encryptObject(plaintext, kms, kekId) {
+  // KMS returns a fresh data key: plaintext (use now) + ciphertextBlob (store).
+  const { Plaintext: dek, CiphertextBlob: wrappedDek } = await kms.generateDataKey({
+    KeyId: kekId,
+    KeySpec: "AES_256",
+  });
+
+  const { nonce, tag, ciphertext } = encrypt(plaintext, dek, null);
+
+  // Zero the plaintext DEK from memory as soon as we are done with it.
+  dek.fill(0);
+
+  // Store the WRAPPED data key with the ciphertext. The plaintext DEK is gone.
+  return { wrappedDek, nonce, tag, ciphertext };
+}
+
+async function decryptObject(record, kms) {
+  // KMS unwraps the DEK using the KEK it holds — the app never sees the KEK.
+  const { Plaintext: dek } = await kms.decrypt({ CiphertextBlob: record.wrappedDek });
+  const plaintext = decrypt(record, dek, null);
+  dek.fill(0);
+  return plaintext;
+}
+```
+
+Rotating the KEK now re-wraps only the small data keys, not the bulk data. The plaintext DEK lives in app memory for milliseconds and is zeroed after use. This is the standard pattern behind "encryption at rest" in every major cloud.
+
+### Don't roll your own crypto
+
+A recurring theme: every code sample above _uses_ a primitive; none _implements_ one. That is the rule. "Don't roll your own crypto" does not mean "don't learn how it works" — it means do not ship a cipher, a MAC, or a constant-time comparison you wrote yourself. Correct implementations must resist timing side channels, padding oracles, and a literature of attacks that took experts decades to find. Use a vetted library (libsodium / `node:crypto` / Web Crypto / your platform's audited module) and feed it correct inputs. Your value as a security engineer is _assembling_ primitives correctly, not reinventing them.
+
+## The FIPS 140-3 boundary
+
+Some deployments — US federal systems, healthcare, payment, and anything contractually bound to them — require cryptography performed inside a **validated** module. <VocabTooltip slug="fips-140-3">FIPS 140-3</VocabTooltip> is the NIST standard (which incorporates ISO/IEC 19790) that specifies security requirements for cryptographic modules; NIST's CMVP (Cryptographic Module Validation Program) tests and lists modules that conform. The key idea is the **validated boundary**: it is not enough to use an approved _algorithm_ (AES, SHA-256, HMAC are all FIPS-approved); the algorithm must run inside a module that has been validated as an implementation, and you must operate it in its FIPS-approved mode.
+
+Practical consequences for an engineer:
+
+- "FIPS-compliant" is meaningful only as "uses a FIPS 140-3 _validated_ module in approved mode." A library claiming to implement AES is not validated unless it appears on the CMVP list with a certificate number.
+- Algorithm restrictions follow: approved hashes and AEADs only; some constructions and key sizes are disallowed in approved mode. Argon2, for example, is excellent but is _not_ a FIPS-approved password KDF — PBKDF2 is the FIPS-approved choice when the validated boundary is a requirement.
+- If you do not have a regulatory requirement, you do not need FIPS — and chasing it can force you onto older, weaker-but-approved options. Know whether you are inside the boundary before you design.
+
+## Practice — pick the right primitive
+
+Before the competency check, build the decision muscle. For each scenario, decide which primitive fits and supply the correct call. The grader checks behavior, not exact text.
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement four functions, each using the CORRECT primitive for its job — substituting the wrong one is the vulnerability this exercise tests. (1) fingerprintArtifact(buf): return the SHA-256 hex digest, for integrity checking a public download. (2) verifyWebhook(body, tagHex, secret): return true only if tagHex is a valid HMAC-SHA-256 of body under secret, compared in CONSTANT time. (3) storePassword(pw): return a value safe to store in a stolen-database scenario — use a deliberately-slow password-hashing function with a per-user salt, NOT a plain hash. (4) encryptSecret(plaintext, key): return { nonce, tag, ciphertext } using an AEAD construction with a FRESH random nonce each call. Do not implement any primitive yourself; use node:crypto / a password-hashing library."
+  initialCode={`import { createHash, createHmac, timingSafeEqual, randomBytes, createCipheriv } from "node:crypto";
+
+// 1) Public integrity fingerprint — which primitive answers "did these bytes change?"
+export function fingerprintArtifact(buf) {
+// TODO
+}
+
+// 2) Prove the message came from a secret-holder, compared in constant time.
+export function verifyWebhook(body, tagHex, secret) {
+// TODO
+}
+
+// 3) Safe to store even if the whole DB is stolen. NOT a fast hash.
+export async function storePassword(pw) {
+// TODO: use a password-hashing function (e.g. argon2) with a per-user salt
+}
+
+// 4) Hide the bytes AND detect tampering, with a unique nonce per call.
+export function encryptSecret(plaintext, key) {
+// TODO: AES-256-GCM with a fresh randomBytes(12) nonce; return { nonce, tag, ciphertext }
+}`}
+  solution={`import { createHash, createHmac, timingSafeEqual, randomBytes, createCipheriv } from "node:crypto";
+import argon2 from "argon2";
+
+export function fingerprintArtifact(buf) {
+  // Plain hash: integrity of a PUBLIC artifact, no secret involved.
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+export function verifyWebhook(body, tagHex, secret) {
+  // MAC: only a secret-holder can produce this tag — proves authenticity.
+  const expected = createHmac("sha256", secret).update(body).digest();
+  const provided = Buffer.from(tagHex, "hex");
+  if (expected.length !== provided.length) return false;
+  return timingSafeEqual(expected, provided); // constant-time, not ===
+}
+
+export async function storePassword(pw) {
+  // Password-hashing function: deliberately slow + memory-hard + per-user salt
+  // (argon2 generates and embeds the salt automatically).
+  return argon2.hash(pw, { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 });
+}
+
+export function encryptSecret(plaintext, key) {
+  // AEAD: confidentiality + integrity, FRESH nonce per call.
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return { nonce, tag, ciphertext };
+}`}
+  testCases={[
+    "fingerprintArtifact returns the SHA-256 hex digest of its input",
+    "verifyWebhook returns true for a correct HMAC-SHA-256 tag and false for a wrong one",
+    "verifyWebhook uses a constant-time comparison rather than === or ==",
+    "storePassword returns a slow password-hash string, not a plain SHA-256 digest, and embeds a per-user salt",
+    "encryptSecret returns a fresh nonce each call and produces a verifiable GCM tag",
+  ]}
+/>
+
+## Check your understanding
+
+> **What changes for you after this**
+> Before this lesson, "encrypt it" and "hash it" were single actions you reached for by API name. After this lesson, every cryptographic task starts with a question — _integrity or authenticity? secret involved or not? password or key material? does the tag verify before I touch the plaintext? is this nonce guaranteed unique?_ — and the answer selects the primitive. The threshold you have crossed: cryptographic failures live in the _usage_, not the _algorithm_, and your job is correct assembly of validated primitives, never invention.
+
+<Quiz
+  questions={[
+    {
+      question:
+        "Your API receives a webhook with a signature. A teammate verifies it by computing `sha256(secret + body)` and comparing to the provided value with `===`. Name the two distinct flaws.",
+      options: [
+        "There are no flaws — SHA-256 is collision-resistant, so this is a valid signature scheme",
+        "First, `sha256(secret + body)` is a homemade MAC vulnerable to length-extension on SHA-256 (Merkle–Damgård) — the correct primitive is HMAC, whose nested construction closes exactly this hole; second, `===` short-circuits on the first differing byte, leaking via timing how many leading bytes matched, which lets an attacker forge a valid tag byte by byte — the comparison must be constant-time (timingSafeEqual)",
+        "The only flaw is using SHA-256 instead of SHA-1, which is faster",
+        "The only flaw is that the secret should be appended after the body, not prepended",
+      ],
+      correct: 1,
+      explanation:
+        "Two independent vulnerabilities. (1) The secret-prefix construction `hash(secret || message)` is not a sound MAC: SHA-256 is a Merkle–Damgård hash and is susceptible to length-extension, letting an attacker who sees one valid tag forge tags for extended messages without knowing the secret. HMAC's nested keyed structure (RFC 2104 / FIPS 198-1) was designed specifically to prevent this. (2) `===` on the tags is a non-constant-time comparison; its early exit leaks, through response timing, the length of the matching prefix — enough to reconstruct a valid tag one byte at a time. The fix is HMAC-SHA-256 compared with a constant-time function. Choosing the wrong primitive AND comparing it unsafely are separate bugs, both real CWEs.",
+    },
+    {
+      question:
+        "A service encrypts every record with AES-256-GCM using a 256-bit key and, for simplicity, a fixed 12-byte nonce of all zeros. The key is strong and the algorithm is NIST-approved. What is the actual security?",
+      options: [
+        "Strong — a 256-bit key and an approved algorithm guarantee confidentiality regardless of the nonce",
+        "Slightly weakened but acceptable, since the nonce is not secret anyway",
+        "Catastrophically broken — a fixed nonce means every record reuses the same nonce under the same key, which in GCM lets an attacker XOR ciphertexts to recover plaintext relationships AND leaks GCM's authentication subkey, enabling forgery of valid tags; the cure is a fresh CSPRNG nonce (or a never-resetting counter) per encryption",
+        "Broken for confidentiality only; the authentication tag is unaffected by nonce reuse",
+      ],
+      correct: 2,
+      explanation:
+        "Nonce reuse under one key is GCM's single catastrophic failure mode, and a constant nonce is the worst case because EVERY message reuses it. Reuse cancels the keystream (XOR of two same-nonce ciphertexts reveals XOR of plaintexts) and, critically, leaks the GHASH authentication subkey, which lets an attacker forge valid authentication tags — so both confidentiality and authenticity collapse. The strength of the key and the approval status of AES are irrelevant; the misuse is in the parameter. The fix is a unique nonce per encryption: a fresh CSPRNG value (randomBytes(12), collision-negligible until ~2^32 messages, then rotate the key) or a strictly monotonic persisted counter.",
+    },
+    {
+      question:
+        "You are storing user passwords. Rank these by suitability: (a) SHA-256(password), (b) HMAC-SHA-256(password) under a server key, (c) Argon2id(password) with a per-user salt and tuned cost.",
+      options: [
+        "(a) best — it is the simplest and SHA-256 is collision-resistant",
+        "(c) is the correct choice — a password-hashing function is deliberately slow and memory-hard, so each offline guess after a database theft costs real time and hardware; (a) is unsafe because a plain hash is far too fast (billions of GPU guesses/sec); (b) is better than (a) only while the server key stays secret, but it is still a fast primitive and not built for password storage — Argon2id (or scrypt, or PBKDF2 where FIPS validation is required) is the right tool",
+        "(b) best — the server key makes it impossible to crack even if the database is stolen",
+        "All three are equivalent because they all produce a fixed-size digest",
+      ],
+      correct: 1,
+      explanation:
+        "Password storage needs a SLOW, memory-hard function so offline guessing against a stolen database is expensive per attempt. (c) Argon2id with a per-user salt and tuned cost is purpose-built and the current first choice. (a) SHA-256 is disqualified by its speed — the very property that makes it good for integrity makes it terrible for passwords. (b) HMAC adds a secret-key 'pepper' that helps only as long as that key is not also stolen, and it is still a fast primitive never designed for password storage. When a FIPS 140-3 validated boundary is required, PBKDF2 is the approved password KDF; otherwise Argon2id or scrypt. The shared theme: choose the primitive by the job, not by familiarity.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A plain hash (SHA-256) proves integrity but never authenticity; a MAC (HMAC-SHA-256) proves both because only a secret-holder can produce the tag; a password-hashing function (Argon2id / PBKDF2) is a _deliberately slow_ hash for storing passwords; a KDF (HKDF) stretches and purpose-separates high-entropy key material. Substituting one for another is a named vulnerability, not a style choice.
+- Encrypt with AEAD only (AES-256-GCM or ChaCha20-Poly1305): it hides the data _and_ authenticates it, and you must reject the plaintext whenever the tag fails to verify. ECB leaks structure and unauthenticated CBC invites padding-oracle attacks.
+- Reusing a GCM nonce under one key is catastrophic — it breaks confidentiality and enables tag forgery — so every encryption gets a unique nonce, from a CSPRNG or a monotonic counter, never a constant.
+- Keys come from a CSPRNG, are separated by purpose, are never hardcoded (CWE-798), and rotate via envelope encryption so a KMS-held master key never enters your process while bulk data is never re-encrypted on rotation.
+- FIPS 140-3 requires cryptography inside a _validated_ module operated in approved mode — an approved algorithm alone is not enough — and the boundary changes which primitives (e.g. PBKDF2 over Argon2) you are allowed to use.
+
+## What's next
+
+The next lesson moves from protecting data at rest and in transit to protecting it on the wire end to end: TLS 1.3, certificate validation, and the trust chain — how the AEAD and key-exchange primitives from this lesson compose into the protocol that secures nearly every connection your systems make, and the specific verification steps an engineer must never skip.

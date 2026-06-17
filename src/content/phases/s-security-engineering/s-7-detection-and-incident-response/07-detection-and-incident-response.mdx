@@ -1,0 +1,420 @@
+---
+title: "Detection, Logging & Incident Response — ATT&CK and the Blue Team"
+description: "Useful security logging, detection engineering mapped to MITRE ATT&CK, and the NIST incident-response lifecycle."
+phase: s
+module: "s-7-detection-and-incident-response"
+order: 7
+estimatedMinutes: 90
+difficulty: 3
+prerequisites:
+  - "s-1-threat-modeling"
+standards:
+  primaryAnchor: "MITRE ATT&CK"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - security-logging
+  - structured-logging
+  - log-integrity
+  - detection-engineering
+  - mitre-attack
+  - tactic
+  - technique
+  - detection-rule
+  - true-positive
+  - false-positive
+  - siem
+  - alert-fatigue
+  - incident-response-lifecycle
+  - containment
+  - eradication
+  - indicator-of-compromise
+learningOutcomes:
+  - "Decide what a security event log should and should not contain — including why secrets and raw PII must be excluded"
+  - "Write a structured security log event that a detection rule can match without brittle string parsing"
+  - "Map a detection rule to a specific MITRE ATT&CK tactic and technique ID, and explain what the rule does and does not catch"
+  - "Explain why high-volume low-value alerts cause alert fatigue and how to tune a rule to raise the true-positive rate"
+  - "Walk an incident through the four NIST SP 800-61r2 phases in order and name the goal of each phase"
+professionalContext: "On a real security-engineering team the gap between 'we got breached' and 'we caught it in minutes' is almost never a smarter firewall — it is whether the right events were logged, whether a detection rule fired, and whether a human had a rehearsed lifecycle to follow. Engineers who can only build features are common; engineers who can also make a system observable to defenders, write a detection that survives contact with reality, and run the first hour of an incident without panic are the ones who get pulled into the incident bridge. This lesson is the blue-team half of secure engineering: not how attacks work as offense, but how you see them and respond when they happen."
+thresholdConcept: false
+---
+
+## Why this lesson exists
+
+A company runs a clean penetration test, patches every finding, and ships. Three months later an attacker logs in with a stolen employee password, moves through the network for eleven days, and leaves with the customer database. The post-incident review finds the smoking gun: the logins were in the logs the whole time. Nobody was looking, and nothing was built to look.
+
+Prevention fails. It fails for everyone, eventually, because the attacker only has to be right once and the defender has to be right always. The discipline that decides how badly a failure hurts is **detection and response** — whether your systems emit the signals an attacker generates, whether something is watching those signals, and whether a human knows what to do when one fires. This lesson is about building that, defensively, before you need it.
+
+## Logs are not a debugging afterthought — they are evidence
+
+Most engineers meet logging as a debugging tool: print a line, read it when something breaks. Security logging is a different job with a different consumer. The reader is not you at 2 a.m. chasing a null pointer; the reader is a detection rule, and later a responder reconstructing what an attacker did.
+
+Picture a bank's security camera footage. Nobody watches it live. Its value is that when a robbery happens, there is a recording good enough to answer: who came in, when, what did they touch, where did they go. <VocabTooltip slug="security-logging">Security logging</VocabTooltip> is that footage for your software. The questions it must answer are the same: which identity, from where, did what, to which resource, and did it succeed.
+
+> **The mental model**
+> A security log is a witness statement written before the crime, by a witness who cannot lie or forget. You decide in advance what the witness is standing where to see. If the witness was not positioned to see the login, no amount of cleverness later recovers it.
+
+That reframing drives every decision below. You log the events a defender will need as evidence — not whatever was convenient to print.
+
+### What to log
+
+For each security-relevant event, capture the facts a responder reconstructs an attack from:
+
+- **Authentication events** — every login success and failure, logout, password change, and MFA challenge. Failed logins are how brute-force attacks become visible.
+- **Authorization decisions** — access denied, privilege escalation, role changes. A sudden grant of admin is a story.
+- **Identity and origin** — the acting user/service identity, source IP, and a request or session correlation ID so events can be stitched into a timeline.
+- **The action and its target** — what was attempted, on which resource, and whether it succeeded or failed. "Succeeded" vs "failed" is often the whole signal.
+- **Time** — an accurate, timezone-explicit timestamp (UTC, ISO 8601). Clock skew across hosts destroys timelines, so synchronize clocks (NTP) as a logging prerequisite.
+
+### What to NEVER log
+
+This is where well-meaning logging becomes its own breach. The log is a high-value target precisely because it concentrates everything an attacker wants to read.
+
+- **Secrets** — passwords (even failed-attempt passwords), session tokens, API keys, MFA codes, private keys. A log full of plaintext passwords is a credential database you built for the attacker.
+- **Raw sensitive PII** — full payment card numbers (PCI-DSS forbids it), government IDs, health records, full security answers. Log a reference (a user ID, a tokenized card reference), not the secret itself.
+- **Full request bodies on sensitive endpoints** — the login and payment endpoints carry exactly the data you must not retain.
+
+The rule: log enough to know _who did what to what, and whether it worked_ — never enough to _impersonate them or harm them_ if the log leaks. When unsure, log a stable identifier and look up the rest in a system with proper access controls.
+
+## Structured logs: writing for a machine reader
+
+A human can read `User bob failed to log in from 10.0.0.5`. A detection rule reading thousands of those per second cannot — not reliably. Wording drifts between services, fields move, and a rule built on substring matching breaks the first time someone edits the message. <VocabTooltip slug="structured-logging">Structured logging</VocabTooltip> emits each event as a machine-parseable object (typically JSON) with named fields, so a rule matches `event == "auth.login" && outcome == "failure"` instead of grepping prose.
+
+Here is the same event, unstructured then structured. The structured form is what a detection rule can stand on.
+
+```text
+# Unstructured — a detection rule has to guess at this with fragile regex
+2026-06-16 14:03:11 WARN login failed for bob from 10.0.0.5 (bad password)
+```
+
+```json
+// Structured — every field is named, typed, and queryable
+{
+  "timestamp": "2026-06-16T14:03:11.482Z",
+  "event": "auth.login",
+  "outcome": "failure",
+  "reason": "invalid_credentials",
+  "actor": { "user_id": "u_8821", "username": "bob" },
+  "source": { "ip": "10.0.0.5" },
+  "correlation_id": "req_b1f3a9",
+  "service": "account-api"
+}
+```
+
+Note what is present and what is absent: there is an `outcome`, a stable `actor.user_id`, a `source.ip`, and a `correlation_id` to stitch a session together — and there is **no password field**, not even the bad one that was submitted. A small, deliberate emitter enforces both halves:
+
+```typescript
+// security-log.ts — one place that decides the shape of every security event.
+// Centralizing it means "never log secrets" is enforced by construction,
+// not by every caller remembering the rule.
+
+interface SecurityEvent {
+  event: string; // dotted name, e.g. "auth.login"
+  outcome: "success" | "failure";
+  reason?: string;
+  actor: { userId: string; username?: string };
+  source: { ip: string };
+  correlationId: string;
+  service: string;
+}
+
+// The input type has no field for a password, token, or card number.
+// You cannot pass a secret in even by accident — the type rejects it.
+export function logSecurityEvent(e: SecurityEvent): void {
+  const record = {
+    timestamp: new Date().toISOString(), // always UTC, ISO 8601
+    ...e,
+  };
+  // Real systems ship this to a log pipeline; stdout is the simplest sink.
+  process.stdout.write(JSON.stringify(record) + "\n");
+}
+```
+
+The type system is doing security work here: because `SecurityEvent` has no field that could hold a credential, a caller cannot leak one through this path even by mistake.
+
+## Log integrity: a witness who cannot be edited
+
+An attacker who reaches your systems will try to erase the footage. <VocabTooltip slug="log-integrity">Log integrity</VocabTooltip> is the property that logs cannot be silently altered or deleted after the fact. Without it, your evidence is only as trustworthy as the attacker's restraint.
+
+The practical controls, in rough order of strength:
+
+- **Ship logs off-host immediately.** Forward to a separate logging system (a <VocabTooltip slug="siem">SIEM</VocabTooltip> or log store) the attacker does not control. A log that only lives on the compromised host is a log the attacker owns.
+- **Append-only / write-once storage.** Configure the destination so records can be added but not modified or deleted within a retention window (often called WORM — write once, read many).
+- **Restrict who can read and delete.** The accounts that generate logs should not be able to purge them.
+
+The threat model is explicit: assume the host that produced the log is the host the attacker controls. Integrity comes from getting the evidence somewhere the attacker's foothold does not reach.
+
+## Detection engineering: from logs to "something is wrong"
+
+Logs are raw material. <VocabTooltip slug="detection-engineering">Detection engineering</VocabTooltip> is the practice of writing the rules — called <VocabTooltip slug="detection-rule">detection rules</VocabTooltip> — that turn that raw material into alerts a human should act on. A detection rule is a hypothesis: _"if I see this pattern in the logs, an attack technique is probably in progress."_
+
+The hard part is not writing rules. It is writing rules that fire when something is genuinely wrong and stay quiet otherwise. A rule that fires on attacks is producing <VocabTooltip slug="true-positive">true positives</VocabTooltip>; a rule that fires on benign activity is producing <VocabTooltip slug="false-positive">false positives</VocabTooltip>. Every false positive spends a human's attention, and attention is the scarcest resource on a security team.
+
+To write rules that mean something, you need a shared vocabulary for _what attackers actually do_. That is what ATT&CK provides.
+
+## MITRE ATT&CK: the shared map of adversary behavior
+
+<VocabTooltip slug="mitre-attack">MITRE ATT&CK</VocabTooltip> is a free, openly published knowledge
+base of real-world adversary behavior, maintained by MITRE. It is organized into two levels you will
+use constantly:
+
+- A <VocabTooltip slug="tactic">tactic</VocabTooltip> is the attacker's _goal_ — the "why" of a step. Examples: Initial Access, Credential Access, Lateral Movement, Impact.
+- A <VocabTooltip slug="technique">technique</VocabTooltip> is _how_ they pursue that goal, and each has a stable ID. Examples below.
+
+The value of ATT&CK is that it lets a whole industry name attacker behavior the same way. When your detection rule says "this matches T1110," any analyst anywhere knows exactly what behavior you mean, and you can ask the falsifiable question: _which techniques can my logging actually see?_ That last question — known as detection coverage — is the core of the job.
+
+A handful of real techniques you can map detections to today:
+
+| ATT&CK ID | Technique                         | What it looks like in your logs                                                                                |
+| --------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **T1110** | Brute Force                       | Many `auth.login` failures for one account or from one source IP                                               |
+| **T1078** | Valid Accounts                    | A successful login that is anomalous — new country, new device, odd hour — using legitimate stolen credentials |
+| **T1190** | Exploit Public-Facing Application | Malformed requests, unusual paths, or errors hitting an internet-facing service before a compromise            |
+| **T1059** | Command and Scripting Interpreter | A web/app process spawning a shell (`sh`, `bash`, `powershell`) — rarely legitimate for most services          |
+| **T1486** | Data Encrypted for Impact         | Mass file modification/encryption — the signature of ransomware                                                |
+
+These five IDs are stable, canonical ATT&CK Enterprise technique identifiers. When you cite a technique, cite the ID — it is the unambiguous reference, the way you would cite a CWE for a weakness.
+
+> **The mental model**
+> ATT&CK turns "be on the lookout for hackers" into a checklist of named, individually-detectable behaviors. You do not defend against "attacks" in the abstract; you build and measure coverage against specific techniques, one ID at a time.
+
+### A worked detection: brute force (T1110)
+
+Take T1110, Brute Force. The hypothesis: _a single account accumulating many login failures in a short window is being attacked._ The structured `auth.login` events from earlier are exactly the raw material this needs.
+
+```typescript
+// detect-bruteforce.ts — a single detection rule mapped to ATT&CK T1110.
+// Hypothesis: >= THRESHOLD failed logins for one account inside WINDOW_MS
+// indicates a brute-force attempt against that account.
+
+interface LoginEvent {
+  event: "auth.login";
+  outcome: "success" | "failure";
+  actor: { userId: string };
+  timestampMs: number;
+}
+
+interface Alert {
+  attackId: string; // the ATT&CK technique this maps to
+  attackName: string;
+  userId: string;
+  failureCount: number;
+}
+
+const WINDOW_MS = 5 * 60 * 1000; // 5-minute sliding window
+const THRESHOLD = 10; // tuned below — this number decides the false-positive rate
+
+export function detectBruteForce(events: LoginEvent[], nowMs: number): Alert[] {
+  const recentFailuresByUser = new Map<string, number>();
+
+  for (const e of events) {
+    const isRecent = nowMs - e.timestampMs <= WINDOW_MS;
+    if (e.outcome === "failure" && isRecent) {
+      const count = recentFailuresByUser.get(e.actor.userId) ?? 0;
+      recentFailuresByUser.set(e.actor.userId, count + 1);
+    }
+  }
+
+  const alerts: Alert[] = [];
+  for (const [userId, failureCount] of recentFailuresByUser) {
+    // The threshold is the whole game: too low and a user fat-fingering
+    // their password pages a human; too high and a real attack slips under.
+    if (failureCount >= THRESHOLD) {
+      alerts.push({
+        attackId: "T1110",
+        attackName: "Brute Force",
+        userId,
+        failureCount,
+      });
+    }
+  }
+  return alerts;
+}
+```
+
+The rule is honest about its limits. It catches a noisy attacker hammering one account. It does **not** catch _password spraying_ — one password tried against many accounts — because each account stays under the per-account threshold. That is not a bug to hide; it is coverage to document. A second rule keyed on failures-per-source-IP would extend coverage to spraying. Naming the gap is the engineering.
+
+## SIEM and the alert-fatigue trap
+
+A <VocabTooltip slug="siem">SIEM</VocabTooltip> (Security Information and Event Management) is the system that ingests logs from across your fleet, runs detection rules against them continuously, and raises alerts. It is the control room where the camera feeds converge.
+
+The failure mode of every SIEM is human, not technical. It is <VocabTooltip slug="alert-fatigue">alert fatigue</VocabTooltip>: when a rule fires hundreds of low-value alerts, analysts start dismissing them reflexively, and the one real alert dies in the noise alongside the junk. A famous breach was missed not because no alert fired — one did — but because the team had been trained by thousands of false positives to ignore that category.
+
+The defense is ruthless tuning toward a high true-positive rate:
+
+- **Raise thresholds and add context.** Ten failures in five minutes from a residential IP at 3 a.m. is a better signal than three failures. Combine signals (failure count _and_ a never-seen source) rather than alerting on any one alone.
+- **Suppress known-benign sources.** A health-check bot that fails auth by design should be on an allowlist, not an alert.
+- **Make every alert actionable.** If an analyst cannot do anything about an alert, it should not page them. Route it to a dashboard or delete the rule.
+- **Measure the true-positive rate per rule and delete rules that earn their keep in noise.** A rule that is wrong 99% of the time is training your team to ignore it.
+
+> **The mental model**
+> Alerts are a budget you spend out of a human's finite attention. A detection that is technically correct but mostly noise has a negative balance: it makes the team _worse_ at noticing the real thing. Tuning is not polish — it is the core engineering of detection.
+
+## When detection fires: the incident-response lifecycle
+
+A detection fires. Now what? Improvising the first hour of a breach is how a contained incident becomes a catastrophe. The standard answer is the <VocabTooltip slug="incident-response-lifecycle">incident-response lifecycle</VocabTooltip> defined by **NIST Special Publication 800-61 Revision 2**, the U.S. reference for computer-security incident handling. It has four phases, in this order:
+
+**1. Preparation.** Everything you do _before_ an incident so the other three phases are possible: the logging and detection from this whole lesson, a written runbook, a contact list, defined roles, access to tools, and rehearsal. You cannot improvise preparation during an incident — that is the point of the name. The work above is this phase.
+
+**2. Detection & Analysis.** Recognize that an incident is occurring and understand its scope. This is where your detection rule's alert lands. Analysis answers: is this a true positive? What is affected? How far has it spread? You confirm the incident and gather <VocabTooltip slug="indicator-of-compromise">indicators of compromise</VocabTooltip> (IOCs) — observable artifacts like a malicious IP, a file hash, or a compromised account — that let you find every place the attacker has been.
+
+**3. Containment, Eradication & Recovery.** Three steps that NIST groups as one phase:
+
+- <VocabTooltip slug="containment">Containment</VocabTooltip> — stop the bleeding *without*
+  destroying evidence. Isolate the affected host, disable the compromised account, block the
+  malicious IP. Short-term containment buys time; you contain before you fully understand, because
+  spread is the enemy.
+- <VocabTooltip slug="eradication">Eradication</VocabTooltip> — remove the attacker's foothold:
+  delete malware, close the exploited vulnerability, reset every credential that may have leaked.
+  Containment stops spread; eradication removes the cause.
+- **Recovery** — return systems to normal operation carefully, restoring from known-good backups and _monitoring closely_ for the attacker's return, because they often come back through the same door.
+
+**4. Post-Incident Activity.** The "lessons learned" review. What happened, how did we respond, what was slow or missing, and — critically — what change feeds back into **Preparation** so the next incident is detected faster and hurts less. The lifecycle is a loop: post-incident findings become next quarter's detection rules and runbook edits.
+
+These four phases — Preparation; Detection & Analysis; Containment, Eradication & Recovery; Post-Incident Activity — are the exact structure NIST SP 800-61r2 defines. Memorize the order; in a real incident the order is what keeps a panicked team from skipping containment or forgetting to learn.
+
+> **A defensive note.** Everything in this lesson is blue-team: you are building visibility into systems you are responsible for and rehearsing how to defend them. Detection rules describe attacker behavior so you can _catch_ it, not reproduce it. Run detections only against logs from systems you own or are authorized to monitor.
+
+## Practice: write and tune a detection rule
+
+You will extend the brute-force idea into a second rule and feel the tuning trade-off directly. The goal is to detect T1078 (Valid Accounts) style anomalies — a _successful_ login that is suspicious because of where it came from.
+
+<SandboxExercise
+  language="typescript"
+  instructions="Write detectAnomalousLogin(events, knownIps). It scans an array of login events and returns an Alert for every SUCCESSFUL login whose source IP is NOT in the knownIps set (a per-user allowlist of previously-seen IPs). Each Alert must include attackId 'T1078', attackName 'Valid Accounts', the userId, and the ip. Successful logins from a known IP and all failed logins produce no alert. This maps to ATT&CK T1078: a real credential used from an unexpected location."
+  initialCode={`interface LoginEvent {
+  outcome: "success" | "failure";
+  userId: string;
+  ip: string;
+}
+
+interface Alert {
+attackId: string;
+attackName: string;
+userId: string;
+ip: string;
+}
+
+function detectAnomalousLogin(
+events: LoginEvent[],
+knownIps: Set<string>
+): Alert[] {
+// TODO: alert on each SUCCESSFUL login from an IP not in knownIps.
+return [];
+}`}
+  solution={`interface LoginEvent {
+outcome: "success" | "failure";
+userId: string;
+ip: string;
+}
+
+interface Alert {
+attackId: string;
+attackName: string;
+userId: string;
+ip: string;
+}
+
+function detectAnomalousLogin(
+events: LoginEvent[],
+knownIps: Set<string>
+): Alert[] {
+const alerts: Alert[] = [];
+for (const e of events) {
+// Only successful logins matter here — a failure from a new IP is a
+// different signal (brute force), handled by a different rule.
+const isAnomalous = e.outcome === "success" && !knownIps.has(e.ip);
+if (isAnomalous) {
+alerts.push({
+attackId: "T1078",
+attackName: "Valid Accounts",
+userId: e.userId,
+ip: e.ip,
+});
+}
+}
+return alerts;
+}`}
+testCases={[
+"A successful login from an IP not in knownIps produces one T1078 alert",
+"A successful login from a known IP produces no alert",
+"A failed login from an unknown IP produces no alert",
+"The alert carries attackId 'T1078' and the offending ip",
+]}
+/>
+
+After it works, sit with the tuning question: this rule alerts on _every_ new IP. A traveling employee on hotel Wi-Fi trips it daily. That is a false positive, and a stream of them is alert fatigue in the making. How would you raise the true-positive rate — add a "new IP _and_ new country" condition, suppress corporate IP ranges, or only alert when the new IP coincides with a sensitive action? There is no single right answer; the discipline is naming the trade-off out loud.
+
+## Reinforce the vocabulary
+
+<FillBlank
+  prompt="Fill in the blanks. In MITRE ATT&CK, an attacker's goal is a {{0}} and the specific method (with a stable ID like T1110) is a {{1}}. A detection rule that fires on benign activity is producing a {{2}}, which over time causes {{3}}."
+  answers={["tactic", "technique", "false positive", "alert fatigue"]}
+  hints={[
+    "The 'why' of an attacker's step — Initial Access, Impact, etc.",
+    "The 'how', each with an ID like T1110 or T1078",
+    "An alert that fired but should not have",
+    "What happens to analysts drowning in low-value alerts",
+  ]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer adds logging to the login endpoint and, to 'help debugging,' includes the submitted password on every failed-login event so the team can see typos. What is wrong with this, in security terms?",
+      options: [
+        "Nothing — failed passwords are not real passwords, so they are safe to log",
+        "It is inefficient because failed-login events are high-volume and bloat the log store",
+        "The log now contains plaintext credentials; logs are a high-value target and are often shipped to many systems, so this builds an attacker a credential database and likely violates data-handling rules — a security log must capture who-did-what-and-whether-it-worked, never enough to impersonate or harm the user if the log leaks",
+        "It is fine as long as the log file has restrictive Unix permissions on the host",
+      ],
+      correct: 2,
+      explanation:
+        "Submitted passwords — even on failures — are secrets and must never be logged. A 'failed' password is frequently a real password with one wrong keystroke, or the right password for a different account. Logs get forwarded, indexed, and backed up across many systems, so a single plaintext-credential field becomes a credential database distributed to all of them. The correct rule is: log enough to reconstruct who did what to what and whether it succeeded, never enough to impersonate or harm the actor if the log leaks. Host file permissions do not help once the log is shipped to a SIEM, and volume is not the real issue.",
+    },
+    {
+      question:
+        "Your brute-force rule (ATT&CK T1110) alerts when one account exceeds 10 failed logins in 5 minutes. An attacker tries the single password 'Spring2026!' against 4,000 different accounts, two attempts each, over ten minutes. What happens, and what does it teach about detection?",
+      options: [
+        "The rule fires immediately because 8,000 failures is far over the threshold",
+        "The rule stays silent because no single account crosses 10 failures — this is password spraying, a known coverage gap of a per-account rule; the lesson is that a detection's value is defined by which techniques it can and cannot see, so you document the gap and add a complementary rule (e.g. keyed on failures-per-source-IP or per-password)",
+        "The rule fires because the total failure count across all accounts exceeds the threshold",
+        "The attack is not detectable by any log-based rule and requires a network appliance",
+      ],
+      correct: 1,
+      explanation:
+        "The rule counts failures per account, and each account sees only two — well under 10 — so it never fires. This is password spraying, the deliberate inverse of brute force, and it is a known blind spot of any per-account threshold rule. The professional takeaway is that a detection rule is defined as much by what it cannot see as by what it can: you document the coverage gap (in ATT&CK terms) and add a complementary rule keyed on a different dimension, such as failures per source IP or many accounts failing against the same password. Totals across all accounts are not how the rule is written, and spraying is absolutely visible in auth logs with the right rule.",
+    },
+    {
+      question:
+        "A detection fires: a host is exfiltrating data to an unknown IP. Following NIST SP 800-61r2, a responder's FIRST action in the Containment, Eradication & Recovery phase should be to:",
+      options: [
+        "Wipe and reimage the host immediately to remove the attacker as fast as possible",
+        "Write the post-incident report so the timeline is captured while it is fresh",
+        "Contain first — isolate the host and block the malicious IP to stop the spread, without destroying evidence — because containment limits damage before you fully understand scope, whereas eradication (removing the foothold) and recovery come after, and post-incident review is a separate, later phase",
+        "Do nothing until the full root cause is understood, to avoid tipping off the attacker",
+      ],
+      correct: 2,
+      explanation:
+        "NIST 800-61r2 orders this phase as containment, then eradication, then recovery. Containment comes first because stopping the spread is urgent and can be done before you fully understand the incident — isolate the host, disable the account, block the IP. Critically, containment must not destroy the evidence you need to scope the incident, which is exactly why 'wipe and reimage immediately' is wrong: it erases the foothold and the forensic trail in one step, before you know how far the attacker reached. The post-incident report belongs to the fourth phase (Post-Incident Activity), not here. And doing nothing lets the exfiltration continue — containment is the response to that, not paralysis.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A security log is evidence written in advance: log who-did-what-to-what-and-whether-it-worked, and **never** log secrets or raw sensitive PII, because the log itself is a high-value target.
+- Structured (JSON) logging with named fields lets detection rules match on `event` and `outcome` instead of fragile string parsing — and a centralized emitter can make "never log secrets" true by construction.
+- MITRE ATT&CK gives a shared, ID-addressable vocabulary (tactics and techniques like T1110, T1078, T1190, T1059, T1486) so you can build and measure detection coverage one technique at a time, and document what each rule cannot see.
+- Alert fatigue, not missing data, is the usual reason real alerts get ignored; tuning rules toward a high true-positive rate is the core engineering of detection, not an afterthought.
+- The NIST SP 800-61r2 lifecycle runs in order — Preparation; Detection & Analysis; Containment, Eradication & Recovery; Post-Incident Activity — and loops, so each incident's lessons become the next quarter's preparation.
+
+## What's next
+
+This is the last skill-building lesson in Phase S. The capstone (s-8) puts all of it together on one deliberately vulnerable service: you will threat-model it, remediate its OWASP findings to ASVS, harden its auth, crypto, and TLS, and then wire the detection logging and the incident-response runbook from this lesson into it — producing a defended service whose work you hash-anchor via `/verify`.

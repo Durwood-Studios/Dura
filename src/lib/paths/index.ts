@@ -381,6 +381,55 @@ export const PATHS: readonly Path[] = [
     status: "complete",
   },
 
+  // ─── Security Engineering ───────────────────────────────────────────────
+  {
+    id: "security-engineer",
+    slug: "security-engineer",
+    title: "Security Engineer",
+    tagline: "Threat-model, harden, and defend production systems.",
+    description:
+      "Pairs the web + backend + systems substrate with Phase S's eight-lesson defensive security curriculum — threat modeling, the OWASP Top 10 in code, authn/authz, applied cryptography, TLS, secure SDLC + supply chain, and detection/incident response. OWASP ASVS, MITRE ATT&CK, and NIST anchored throughout.",
+    outcome:
+      "Threat-model a production service, remediate its OWASP findings to ASVS, harden authn/crypto/TLS, wire detection and an incident-response runbook, and document residual risk against NIST CSF — hash-anchored via /verify.",
+    archetype: "Systems",
+    color: "#f87171",
+    phases: [
+      { phaseId: "0", scope: "spine", rationale: "Digital-literacy foundations." },
+      { phaseId: "1", scope: "spine", rationale: "Programming fundamentals." },
+      {
+        phaseId: "2",
+        scope: "spine",
+        rationale: "Web development — the attack surface most appsec work targets.",
+      },
+      {
+        phaseId: "4",
+        scope: "spine",
+        rationale:
+          "Backend engineering — APIs, databases, auth, deployment: where security is enforced.",
+      },
+      {
+        phaseId: "5",
+        scope: "spine",
+        rationale:
+          "Systems engineering — OS, networking, TLS substrate for transport + network security.",
+      },
+      {
+        phaseId: "8",
+        scope: "spine",
+        moduleIds: ["8-4"],
+        rationale:
+          "Professional practice — the Security module (threat modeling, OWASP, secrets, supply chain).",
+      },
+      {
+        phaseId: "s",
+        scope: "spine",
+        rationale:
+          "Phase S — Security Engineering. Eight defensive lessons from threat modeling to a hardened service + IR runbook.",
+      },
+    ],
+    status: "complete",
+  },
+
   // ─── Leadership ─────────────────────────────────────────────────────────
   {
     id: "engineering-leader",

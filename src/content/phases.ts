@@ -1089,6 +1089,99 @@ export const PHASES: Phase[] = [
       ),
     ],
   },
+
+  // ─── Phase S — Security Engineering (post-Phase-5 specialization) ───────
+  // Eight defensive, code-and-practice lessons from threat modeling to a
+  // hardened production service + IR runbook. OWASP Top 10 + ASVS, MITRE
+  // ATT&CK, NIST (SSDF, 800-63B, 800-61, CSF), TLS 1.3, SLSA anchored.
+  // Capstone produces a hash-anchored hardening package via /verify.
+  {
+    id: "s",
+    slug: "s-security-engineering",
+    title: "Phase S: Security Engineering",
+    tagline: "Threat-model, harden, and defend production systems.",
+    description:
+      "Eight defensive, code-and-practice lessons from threat modeling to a hardened production service with an incident-response runbook. OWASP Top 10 + ASVS, MITRE ATT&CK, NIST (SSDF, 800-63B, 800-61, CSF 2.0), TLS 1.3, and SLSA anchored throughout. Secure-engineering / blue-team framing — the discipline, taught ethically.",
+    color: "#f87171",
+    estimatedHours: 15,
+    moduleCount: 8,
+    lessonCount: 8,
+    order: 15,
+    modules: [
+      mod(
+        "s",
+        1,
+        "threat-modeling",
+        "Threat Modeling — STRIDE, Attack Trees, DFDs",
+        "Data-flow diagrams, trust boundaries, STRIDE per-element, attack trees, and risk ranking — structured reasoning about what can go wrong.",
+        1.5,
+        1
+      ),
+      mod(
+        "s",
+        2,
+        "appsec-owasp-top-10",
+        "Application Security — The OWASP Top 10 in Code",
+        "The 2021 Top 10 as vulnerable code → exploit → fix, each mapped to OWASP ASVS verification requirements.",
+        2,
+        1
+      ),
+      mod(
+        "s",
+        3,
+        "authn-authz-sessions",
+        "Authentication, Authorization & Session Security",
+        "Argon2id, MFA, OAuth 2.1 / OIDC, JWT pitfalls, session fixation, RBAC/ABAC — what NIST 800-63B and ASVS require.",
+        2,
+        1
+      ),
+      mod(
+        "s",
+        4,
+        "applied-cryptography",
+        "Applied Cryptography — Hashing, AEAD, Key Management",
+        "Hashes vs MACs vs KDFs, authenticated encryption, nonce discipline, key rotation, the FIPS boundary — crypto used correctly, not invented.",
+        2,
+        1
+      ),
+      mod(
+        "s",
+        5,
+        "network-transport-security",
+        "Network & Transport Security — TLS 1.3, mTLS, Segmentation",
+        "The TLS 1.3 handshake, certificate validation and pinning, mutual TLS for service auth, and zero-trust segmentation.",
+        1.5,
+        1
+      ),
+      mod(
+        "s",
+        6,
+        "secure-sdlc-supply-chain",
+        "Secure SDLC & Software Supply Chain — SAST/DAST, SBOM, SLSA",
+        "SAST/DAST/SCA gates, dependency and provenance risk, SBOMs, signed builds and SLSA levels — the NIST SSDF practices.",
+        1.5,
+        1
+      ),
+      mod(
+        "s",
+        7,
+        "detection-and-incident-response",
+        "Detection, Logging & Incident Response — ATT&CK and the Blue Team",
+        "Useful security logging, detection engineering mapped to MITRE ATT&CK, and the NIST incident-response lifecycle.",
+        1.5,
+        1
+      ),
+      mod(
+        "s",
+        8,
+        "capstone-harden-a-service",
+        "Capstone — Threat-Model and Harden a Production Service",
+        "Threat-model, remediate OWASP findings to ASVS, harden authn/crypto/TLS, wire detection + an IR runbook on a vulnerable service. Hash-anchored via /verify.",
+        3,
+        1
+      ),
+    ],
+  },
 ];
 
 export function getPhase(id: string): Phase | undefined {

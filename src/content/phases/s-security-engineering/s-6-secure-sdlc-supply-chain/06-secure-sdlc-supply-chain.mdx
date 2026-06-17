@@ -1,0 +1,394 @@
+---
+title: "Secure SDLC & Software Supply Chain — SAST/DAST, SBOM, SLSA"
+description: "SAST/DAST/SCA gates, dependency and provenance risk, SBOMs, signed builds and SLSA levels — the NIST SSDF practices."
+phase: s
+module: "s-6-secure-sdlc-supply-chain"
+order: 6
+estimatedMinutes: 90
+difficulty: 3
+prerequisites:
+  - "s-2-appsec-owasp-top-10"
+  - "8-2-cicd-devops"
+standards:
+  primaryAnchor: "NIST SP 800-218 (SSDF)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - secure-sdlc
+  - ssdf
+  - cve
+  - sast
+  - dast
+  - sca
+  - iast
+  - software-supply-chain
+  - typosquatting
+  - dependency-confusion
+  - sbom
+  - cyclonedx
+  - spdx
+  - build-provenance
+  - artifact-signing
+  - sigstore
+  - cosign
+  - slsa
+  - pinned-dependency
+learningOutcomes:
+  - "Distinguish SAST, DAST, SCA, and IAST by what each can and cannot find, and place each at the correct point in a CI pipeline"
+  - "Explain the three dominant supply-chain attack classes — typosquatting, compromised maintainer/dependency, and dependency confusion — using the xz and event-stream incidents as worked examples"
+  - "Generate a CycloneDX SBOM for a project and state what an SBOM does and does not prove"
+  - "Sign a build artifact with cosign and verify the signature, and explain what build provenance adds on top of a signature"
+  - "Map a project to a SLSA v1.0 build level (L1–L3) and name the concrete control that moves it up a level"
+  - "Author CI gate steps that map to the NIST SSDF (SP 800-218) PO, PS, PW, and RV practice groups"
+professionalContext: "Most production breaches in the last few years did not come from a developer writing one bad line — they came through the build. A poisoned dependency, an unsigned artifact swapped in transit, a CI token with too much scope. After the 2020 SolarWinds compromise and the 2024 xz backdoor, supply-chain security stopped being optional: U.S. Executive Order 14028 and the resulting NIST Secure Software Development Framework (SP 800-218) now shape vendor requirements, and frameworks like SLSA define what 'we know where this binary came from' actually means. A security engineer who can stand up SAST/DAST/SCA gates, produce an SBOM, and sign artifacts with verifiable provenance is doing the work that the rest of the security program now depends on. This lesson is defensive throughout — you are hardening your own pipeline, never attacking someone else's."
+thresholdConcept: false
+---
+
+## Why this lesson exists
+
+You can write flawless application code and still ship a backdoor. In March 2024, maintainer-level access to the `xz` compression library (`liblzma`) was used to plant a backdoor that targeted OpenSSH on many Linux systems — tracked as <VocabTooltip slug="cve">CVE</VocabTooltip>-2024-3094. The malicious code was not in any application's own source. It rode in through a dependency, hidden in test fixtures and a release tarball that differed from the public git history. A developer who reviewed only their own diffs would never have seen it.
+
+That is the shape of the modern problem. The attack surface is no longer only _your code_ — it is every package you pull, every build step that runs, and every artifact you publish. This lesson covers the controls that defend the path from a developer's commit to a running binary: the scanners that gate the pipeline, the dependency risks that scanners miss, the inventory (SBOM) that lets you answer "am I affected" in minutes instead of days, and the signing and provenance that prove a binary is the one you actually built.
+
+## First principles: the pipeline is the attack surface
+
+Picture the path your code takes to production as a relay race. A developer commits source. A build server pulls dependencies and compiles. An artifact (a container image, a `.jar`, a binary) is produced. Something deploys it. At every handoff, someone could substitute a different baton and the next runner would never notice — unless each handoff is checked.
+
+A <VocabTooltip slug="secure-sdlc">secure SDLC</VocabTooltip> (Software Development Life Cycle) is the discipline of putting a check at every handoff. The <VocabTooltip slug="ssdf">SSDF</VocabTooltip> — NIST's Secure Software Development Framework, published as **SP 800-218** — names those checks and groups them. It is not a tool; it is a vocabulary of practices that any toolchain can satisfy. Its four practice groups:
+
+- **PO — Prepare the Organization.** Define security requirements, roles, and a toolchain _before_ writing code.
+- **PS — Protect the Software.** Protect code and artifacts from tampering (access control, signing, integrity verification).
+- **PW — Produce Well-Secured Software.** Design, review, test, and configure software to reduce vulnerabilities (this is where SAST/DAST/code review live).
+- **RV — Respond to Vulnerabilities.** Find, assess, and remediate vulnerabilities after release — including in dependencies.
+
+Keep these four letters in mind. Every concrete control below maps to one of them, and at the end you will wire them into a pipeline.
+
+## The mental model
+
+> A secure SDLC is a set of **gates on a conveyor belt**. Code rides the belt from commit to production. Each gate inspects a different property — your code, your dependencies, your running app, your artifact's origin — and a gate that fails stops the belt. No single gate is sufficient; the security comes from the belt, not from any one inspector.
+
+Hold that picture. SAST, DAST, SCA, IAST, SBOM generation, and signing are all gates. The rest of the lesson is what each gate inspects and where it sits.
+
+## The four scanners — what each one can and cannot find
+
+The single most common mistake is treating "we run a security scanner" as one checkbox. There are four distinct scanner classes, and they find _disjoint_ categories of problems. Confusing them leaves real gaps.
+
+| Scanner                                       | Full name                                | Sees                                                    | Finds                                                                            | Misses                                                                    |
+| --------------------------------------------- | ---------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| <VocabTooltip slug="sast">SAST</VocabTooltip> | Static Application Security Testing      | Your source code, not running                           | Code-level flaws: SQL injection sinks, hardcoded secrets, unsafe deserialization | Anything that only appears at runtime or in config; flaws in dependencies |
+| <VocabTooltip slug="dast">DAST</VocabTooltip> | Dynamic Application Security Testing     | A running instance, from outside (black-box)            | Runtime/config flaws: missing security headers, auth bypass, reflected XSS       | Code paths it never exercises; root cause (only sees symptoms)            |
+| <VocabTooltip slug="sca">SCA</VocabTooltip>   | Software Composition Analysis            | Your dependency tree                                    | Known-vulnerable dependency versions (matched to CVE databases); license risk    | Zero-days; a malicious dependency with no published CVE yet               |
+| <VocabTooltip slug="iast">IAST</VocabTooltip> | Interactive Application Security Testing | Your app from the inside, instrumented, while tests run | Runtime flaws with code-level root cause (fewer false positives than DAST)       | Code paths your test suite never triggers                                 |
+
+The intuition that ties them together: **SAST reads the recipe, DAST tastes the dish, SCA checks the ingredients' recall notices, IAST watches the kitchen while it cooks.** You want all four because a poisoned ingredient (SCA) is invisible to someone reading the recipe (SAST), and a recipe flaw (SAST) may never surface in the one dish you tasted (DAST).
+
+A concrete SAST example — the kind of finding a static scanner catches before the code ever runs:
+
+```python
+# VULNERABLE: user input concatenated into SQL — SAST flags this as a
+# tainted-data-to-SQL-sink path (CWE-89, SQL Injection / OWASP A03:2021).
+def find_user(conn, username):
+    query = "SELECT * FROM users WHERE name = '" + username + "'"
+    return conn.execute(query).fetchall()
+
+# FIXED: parameterized query — the driver sends data and SQL separately,
+# so the username can never be parsed as SQL. The taint path is broken,
+# and the SAST finding clears.
+def find_user(conn, username):
+    query = "SELECT * FROM users WHERE name = ?"
+    return conn.execute(query, (username,)).fetchall()
+```
+
+A SAST gate fails the build on the first version and passes the second. But notice what SAST cannot tell you: whether the `sqlite3` driver you imported carries a _known_ vulnerability of its own. Checking your dependencies against published vulnerability databases is SCA's job — and dependencies are where supply-chain risk concentrates. (As the next sections show, SCA catches the _known_-bad case; a freshly poisoned release with no CVE yet slips past it, which is why pinning and provenance also matter.)
+
+## Where the danger actually concentrates: dependency risk
+
+Your own code is a small fraction of what ships. A typical Node or Python service pulls in hundreds of transitive packages. Each is code you execute but did not write or review. Three attack classes dominate.
+
+**1. Typosquatting.** An attacker publishes a package whose name is a near-miss of a popular one — <VocabTooltip slug="typosquatting">typosquatting</VocabTooltip>. A developer types `reqeusts` instead of `requests`, or `python3-dateutil` instead of `python-dateutil`, and installs hostile code. The defense is not vigilance (people mistype); it is pinning and review (below).
+
+**2. Compromised maintainer / compromised dependency.** A legitimate, widely-used package is taken over and a malicious version published. Two canonical incidents:
+
+- **event-stream (2018).** A popular npm package's maintainer handed the project to a volunteer who quietly added a dependency, `flatmap-stream`, containing code that targeted a specific cryptocurrency wallet app. Millions of downloads shipped the payload before discovery.
+- **xz / liblzma (2024, CVE-2024-3094).** A maintainer built up over ~2 years inserted a backdoor into the release artifacts of a core compression library, targeting sshd. It was caught by a Postgres engineer noticing a half-second latency anomaly — not by any scanner.
+
+The lesson from both: **a malicious version often has no CVE at the moment it ships.** SCA, which matches versions against known-vulnerability databases, is blind to a brand-new poisoned release. This is why provenance and signing (later sections) matter — they let you verify _where a build came from_, not merely _whether it's on a blocklist_.
+
+**3. Dependency confusion.** If your build resolves package names against both a public registry and a private one, an attacker who publishes a package with your internal name (`acme-internal-auth`) at a _higher version number_ on the public registry can get your build to pull theirs instead. This is <VocabTooltip slug="dependency-confusion">dependency confusion</VocabTooltip>, disclosed publicly in 2021. The defense is explicit registry scoping and pinning — never let name resolution silently prefer the public source for a private name.
+
+The unifying defense across all three is the <VocabTooltip slug="pinned-dependency">pinned dependency</VocabTooltip>: lock the exact version _and_ a cryptographic hash of its contents, so the resolver installs the exact bytes you reviewed and nothing else.
+
+```bash
+# A pinned, hash-checked install. The lockfile records both the version
+# AND the SHA-256 of each artifact. If a registry serves different bytes
+# for the same version, the hash check fails and the install aborts —
+# this is what would have stopped a swapped artifact.
+
+# Python (pip): require hashes for every package; a mismatch is fatal.
+pip install --require-hashes -r requirements.txt
+
+# requirements.txt entry produced by `pip-compile --generate-hashes`:
+#   requests==2.32.3 \
+#       --hash=sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6
+```
+
+Pinning does not prove a package is _safe_ — it proves it is the _same_ as what you reviewed. Those are different guarantees, and conflating them is a common error.
+
+## Knowing what you ship: the SBOM
+
+When the next xz-class vulnerability drops at 2 a.m., the only question that matters is: **"Are we running it, and where?"** If your answer is "let me grep every repo for a week," you are already losing. A <VocabTooltip slug="sbom">SBOM</VocabTooltip> — Software Bill of Materials — is the inventory that answers that question in seconds. It is a machine-readable list of every component in a build: name, version, hash, license, and supplier.
+
+Two open standards dominate:
+
+- <VocabTooltip slug="cyclonedx">**CycloneDX**</VocabTooltip> — an OWASP project, security-first,
+  with first-class support for vulnerability and dependency-relationship data.
+- <VocabTooltip slug="spdx">**SPDX**</VocabTooltip> — an ISO/IEC 5962 standard, originally
+  license-focused, broadly used in compliance contexts.
+
+Either is acceptable; the SSDF (practice PS.3) calls for producing one. Generate a CycloneDX SBOM with the open-source `syft` tool:
+
+```bash
+# Generate a CycloneDX SBOM (JSON) for a built container image.
+# This is a PRODUCE step — run it in CI right after the artifact is built,
+# and store the SBOM as a build output alongside the artifact.
+syft acme/payments-api:1.4.2 -o cyclonedx-json > sbom.cdx.json
+
+# Later — when a new CVE lands — scan the STORED SBOM, not a live rebuild.
+# You can answer "are we affected" against last week's release in seconds.
+grype sbom:./sbom.cdx.json
+```
+
+What an SBOM proves and does not prove, stated plainly:
+
+- It **proves** what components were present in a build, so you can answer impact questions fast (this is the RV — Respond to Vulnerabilities — payoff).
+- It does **not** prove those components are safe, nor that the artifact you are running matches the SBOM. An SBOM is an _inventory_, not a _guarantee_. The integrity link — "this SBOM describes this exact artifact" — comes from signing.
+
+## Proving where a binary came from: signing and provenance
+
+A signature answers "was this artifact tampered with after the publisher signed it?" <VocabTooltip slug="build-provenance">Build provenance</VocabTooltip> answers a deeper question: "what source, what builder, and what inputs produced this artifact?" You want both.
+
+<VocabTooltip slug="sigstore">**Sigstore**</VocabTooltip> is an open-source project (a Linux
+Foundation effort) that makes <VocabTooltip slug="artifact-signing">artifact signing</VocabTooltip>
+practical without every developer managing long-lived private keys. Its CLI,
+<VocabTooltip slug="cosign">**cosign**</VocabTooltip>, supports "keyless" signing: instead of a
+stored key, it uses a short-lived certificate bound to an OIDC identity — OIDC (OpenID Connect) is
+the standard that lets one system prove "this request really is the GitHub Actions workflow it
+claims to be," so the signer's identity is the CI job itself, not a developer holding a key — and
+records the signature in a public transparency log (Rekor, Sigstore's append-only ledger) so it can
+be audited later.
+
+```bash
+# Sign a container image keyless — identity comes from the CI OIDC token,
+# not a developer-held key. The signature is recorded in the Rekor
+# transparency log so anyone can later confirm it was issued.
+# (cosign v2+ makes keyless the default; the old COSIGN_EXPERIMENTAL=1
+#  flag was removed and is no longer needed.)
+cosign sign \
+  --yes \
+  registry.acme.io/payments-api@sha256:9f86d0818...   # sign the digest, NOT a tag
+
+# Verify, asserting WHO signed and from WHICH workflow. A signature alone
+# is not enough — you must pin the expected identity, or any valid signer
+# would pass. This is the check a deploy gate runs before admitting an image.
+cosign verify \
+  --certificate-identity \
+    "https://github.com/acme/payments-api/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  registry.acme.io/payments-api@sha256:9f86d0818...
+```
+
+Two non-obvious points are load-bearing here. First, you always sign and verify a **digest** (`@sha256:...`), never a mutable tag like `:latest` — a tag can be repointed at a different image after signing, which would defeat the whole exercise. Second, verification must assert the **expected signer identity and issuer**; checking only that "some signature exists" lets any attacker who can sign _anything_ pass the gate.
+
+Provenance goes one step further than a signature. With cosign you can attach a signed **attestation** — a statement, in the in-toto format, describing how the artifact was built (source repo, commit, builder). The verifier then checks not only "this was signed" but "this was built from the commit and pipeline we expect."
+
+## SLSA: a ladder for build integrity
+
+<VocabTooltip slug="slsa">**SLSA**</VocabTooltip> ("Supply-chain Levels for Software Artifacts,"
+pronounced "salsa") is a framework that turns "is our build trustworthy?" into discrete, checkable
+levels. In **SLSA v1.0**, the **Build track** defines three levels (there is no L0 control; L0 only
+means "no guarantees"):
+
+| Level        | Requirement                                                                                                                         | What it guarantees                                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **Build L1** | The build process is scripted/automated and generates **provenance** describing how the artifact was built.                         | Consumers can see how it was built — but the provenance is not yet tamper-resistant. Stops accidental/ad-hoc builds.                |
+| **Build L2** | Provenance is **signed**, and the build runs on a **hosted build platform** (not a developer laptop).                               | The provenance can be authenticated; a developer cannot silently forge it on their own machine.                                     |
+| **Build L3** | The build platform provides **hardened, isolated builds** where the signing material is not accessible to user-defined build steps. | Even a malicious build script cannot forge provenance or exfiltrate the signing key. Defends against a compromised build _process_. |
+
+The practical reading: each level closes off a class of "the build itself lied to you" attacks. L1 says "we wrote down how we built it." L2 says "and you can trust that record came from our real build system." L3 says "and not even our own build steps could have faked that record." A project moves up a level by adopting one concrete control — most commonly, moving builds onto a hosted platform that emits signed, isolated provenance (for example, the SLSA GitHub generator).
+
+SLSA does not replace SAST/DAST/SCA. Those gates inspect the _software_; SLSA inspects the _build process that produced it_. Both are in scope for a secure SDLC; SLSA is the part the four scanners cannot see.
+
+## Putting it together: a gated CI pipeline
+
+Here is a defensive pipeline that maps each step to an SSDF practice group. This is the synthesis — the conveyor belt with all its gates, in the order they run.
+
+```yaml
+# .github/workflows/secure-build.yml
+# A defensive CI pipeline. Each gate maps to a NIST SSDF (SP 800-218)
+# practice group, noted in comments. A failed gate stops the belt.
+name: secure-build
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # PS: needed for keyless cosign / OIDC provenance
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # PW.7 — SAST: scan our own source for code-level flaws. Fail on findings.
+      - name: SAST (Semgrep)
+        run: semgrep ci --error # non-zero exit fails the build
+
+      # PW.4 / RV.1 — SCA: scan dependencies for KNOWN-vulnerable versions.
+      - name: SCA (dependency vulnerabilities)
+        run: grype dir:. --fail-on high
+
+      # PS.1 — pinned, hash-verified install: install exactly the reviewed bytes.
+      - name: Install (hash-pinned)
+        run: pip install --require-hashes -r requirements.txt
+
+      - name: Build image
+        run: docker build -t registry.acme.io/payments-api:${{ github.sha }} .
+
+      # PS.3 — SBOM: produce the inventory and keep it as a build output.
+      - name: Generate SBOM (CycloneDX)
+        run: syft registry.acme.io/payments-api:${{ github.sha }} -o cyclonedx-json > sbom.cdx.json
+
+      # PS.2 — sign the artifact + attach build provenance (moves toward SLSA L2+).
+      - name: Sign image and attest provenance
+        run: |
+          IMG=$(docker inspect --format='{{index .RepoDigests 0}}' registry.acme.io/payments-api:${{ github.sha }})
+          cosign sign --yes "$IMG"
+          cosign attest --yes --predicate sbom.cdx.json --type cyclonedx "$IMG"
+
+  dast:
+    # PW.8 — DAST: scan a RUNNING instance from the outside. Separate job
+    # because it needs the app deployed to an ephemeral test environment.
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: DAST (OWASP ZAP baseline)
+        run: zap-baseline.py -t https://payments-api.test.acme.io
+```
+
+Read the mapping: SAST and DAST are **PW** (produce well-secured software), SCA spans **PW/RV**, pinned install + signing + SBOM are **PS** (protect the software), and the whole automated, scripted pipeline plus its emitted provenance is what earns SLSA Build L1/L2. The structure — not any single tool — is the security.
+
+## Practice
+
+<SandboxExercise
+  language="javascript"
+  instructions="You are writing a deploy gate that decides whether a container image is allowed into production. Given a verification result object, return true ONLY if the artifact is trustworthy. Trustworthy means ALL of: (1) the signature is valid, (2) the signer identity equals the expected release-workflow identity (not any arbitrary signer), (3) the artifact is referenced by digest, not a mutable tag, and (4) the build's SLSA level is at least the required minimum. Implement isDeployAllowed(result, policy). The lesson's signing and SLSA sections give you every rule you need. Return a boolean."
+  initialCode={`// A deploy gate. Reject anything that is not provably the artifact we built.
+// result: {
+//   signatureValid: boolean,
+//   signerIdentity: string,     // e.g. the workflow that signed it
+//   reference: string,          // image ref, e.g. "...@sha256:9f86..." or "...:latest"
+//   slsaLevel: number           // 0..3
+// }
+// policy: { expectedIdentity: string, minSlsaLevel: number }
+
+function isDeployAllowed(result, policy) {
+// TODO: return true ONLY if every rule below holds.
+// 1. signature must be valid
+// 2. signer identity must EQUAL policy.expectedIdentity (pin the signer)
+// 3. reference must be pinned by digest (contains "@sha256:"), never a tag
+// 4. slsaLevel must be >= policy.minSlsaLevel
+}
+
+// Example: this should be ALLOWED.
+console.log(isDeployAllowed(
+{
+signatureValid: true,
+signerIdentity: "https://github.com/acme/payments-api/.github/workflows/release.yml@refs/heads/main",
+reference: "registry.acme.io/payments-api@sha256:9f86d0818",
+slsaLevel: 2,
+},
+{
+expectedIdentity: "https://github.com/acme/payments-api/.github/workflows/release.yml@refs/heads/main",
+minSlsaLevel: 2,
+}
+)); // expected: true`}
+  solution={`function isDeployAllowed(result, policy) {
+const signatureOk = result.signatureValid === true;
+// Pin the signer: a valid signature from the WRONG identity must fail,
+// otherwise any attacker who can sign anything passes the gate.
+const identityOk = result.signerIdentity === policy.expectedIdentity;
+// Reject mutable tags — a tag can be repointed after signing.
+const digestPinned = result.reference.includes("@sha256:");
+const slsaOk = result.slsaLevel >= policy.minSlsaLevel;
+return signatureOk && identityOk && digestPinned && slsaOk;
+}`}
+testCases={[
+"Returns true when signature is valid, identity matches policy exactly, reference is digest-pinned, and SLSA level meets the minimum",
+"Returns false when the signature is valid but the signer identity does not equal the expected identity",
+"Returns false when the reference is a mutable tag (no @sha256: digest) even if everything else passes",
+"Returns false when the SLSA level is below policy.minSlsaLevel",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A critical vulnerability is disclosed in a widely-used logging library. Your SCA scanner flagged nothing yesterday because the malicious version was published only an hour ago and has no CVE yet. Which statement is correct about why SCA missed it and what would have helped?",
+      options: [
+        "SCA failed because it was misconfigured; a correctly configured SCA scanner detects all malicious packages including zero-hour ones",
+        "SCA matches your dependency versions against databases of KNOWN vulnerabilities, so a brand-new malicious release with no published CVE is invisible to it; pinning to a reviewed version + hash and verifying build provenance (not relying on a blocklist) are the defenses that address the unknown-bad case",
+        "SAST would have caught it, because SAST scans dependency source code for injection flaws",
+        "Nothing helps against a compromised dependency; this is an unsolvable problem",
+      ],
+      correct: 1,
+      explanation:
+        "SCA is a known-bad detector — it works by matching versions against vulnerability databases (CVE feeds), so a freshly poisoned release that no database has cataloged passes cleanly. This is exactly the xz and event-stream failure mode. The defenses are different in kind from SCA: pin to a specific reviewed version with a content hash (so a swapped artifact fails the hash check), and verify build provenance so you trust WHERE a build came from rather than relying on a blocklist of what is already known bad. SAST scans your code, not your dependencies' code, and would not have caught it. The problem is hard but not unsolvable — provenance and pinning are the real controls.",
+    },
+    {
+      question:
+        "Your team signs every container image with cosign before deploy, and the deploy gate checks that a valid signature exists. An attacker who has compromised a low-privilege CI job (one that can sign images, but is not the release workflow) pushes a malicious image and signs it. The gate admits it. What is the fix?",
+      options: [
+        "Stop using cosign; signatures provide no security",
+        "Sign the image with a longer key so it is harder to forge",
+        "Verify the signer IDENTITY, not merely that a signature exists — pin cosign verify to the expected --certificate-identity (the release workflow) and --certificate-oidc-issuer, so a signature from any other identity is rejected; also verify by digest, never a mutable tag",
+        "Move the signing step earlier in the pipeline",
+      ],
+      correct: 2,
+      explanation:
+        "A signature only proves 'someone with signing access signed this' — it is worthless as a gate unless you assert WHO. The fix is to pin the expected identity and issuer in cosign verify (the release workflow's OIDC identity), so a signature produced by any other CI job fails verification. This is the difference between 'is it signed' and 'is it signed by the party we trust.' Verifying by digest rather than a mutable tag closes the related gap where a tag is repointed at a different image after signing. The key length and signing-step position are irrelevant to this failure.",
+    },
+    {
+      question:
+        "A project's builds run on a developer's laptop via a shell script, and the script writes a provenance file describing the build. A reviewer asks what SLSA v1.0 Build level this is and what single change would raise it. The best answer is:",
+      options: [
+        "It is Build L3 already, because provenance exists; no change needed",
+        "It is roughly Build L1 (scripted build that generates provenance, but the provenance is not signed and the build is not on a hosted platform); moving the build to a hosted build platform that produces SIGNED provenance raises it toward L2",
+        "SLSA levels apply only to open-source projects, so the level is undefined",
+        "It is Build L2, because a script counts as a hosted build platform",
+      ],
+      correct: 1,
+      explanation:
+        "SLSA v1.0 Build L1 requires a scripted/automated build that generates provenance — which this project has. But the provenance is unsigned and the build runs on a developer machine, so it cannot be authenticated and a developer could forge it; that is below L2. L2 adds signed provenance produced on a hosted build platform, so a developer cannot silently fabricate the build record on their own laptop. The single highest-leverage change is moving the build onto a hosted platform that emits signed provenance. L3 would additionally require hardened, isolated builds where signing material is unreachable from user-defined build steps — a further step beyond this question's scope. A laptop script is not a hosted build platform.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- **The four scanners find disjoint problems.** SAST reads your source, DAST tests a running instance, SCA checks dependencies against known-vulnerability databases, and IAST instruments the app during tests. You need all four because each is blind to what the others catch.
+- **Dependency risk is where breaches concentrate.** Typosquatting, compromised maintainers (event-stream, xz / CVE-2024-3094), and dependency confusion all ship hostile code that has no CVE at the moment it lands — so blocklist-based SCA cannot see it. Pinning to a reviewed version plus a content hash is the structural defense.
+- **An SBOM is an inventory, not a guarantee.** A CycloneDX or SPDX bill of materials lets you answer "are we affected, and where" in seconds when the next vulnerability drops; it does not prove the components are safe or that the artifact matches the list.
+- **Signing proves integrity; provenance proves origin.** cosign (Sigstore) signs artifacts — always by digest, with the signer identity pinned on verify — and attestations describe how the artifact was built. SLSA Build L1–L3 turns "trust the build" into checkable levels, each closing off a class of build-process attacks.
+- **The SSDF (SP 800-218) is the map.** PO/PS/PW/RV name where each gate belongs, and a real CI pipeline wires SAST, SCA, pinned installs, SBOM, signing, and DAST into one belt where a failed gate stops the line.
+
+## Connect forward
+
+You can now harden the path from commit to running binary. But controls that pass in CI can still be evaded in production, and even a perfectly gated pipeline produces an artifact that eventually gets attacked. The next lesson, **s-7 — Detection, Logging & Incident Response**, turns from prevention to detection: what to log so an attack is visible, how to map detections to MITRE ATT&CK, and the NIST incident-response lifecycle for when a gate is bypassed and you have to respond.

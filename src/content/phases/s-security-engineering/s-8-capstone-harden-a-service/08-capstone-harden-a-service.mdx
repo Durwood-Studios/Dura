@@ -1,0 +1,573 @@
+---
+title: "Capstone — Threat-Model and Harden a Production Service"
+description: "Threat-model, remediate OWASP findings to ASVS, harden authn/crypto/TLS, wire detection + an IR runbook on a vulnerable service. Hash-anchored via /verify."
+phase: s
+module: "s-8-capstone-harden-a-service"
+order: 8
+estimatedMinutes: 180
+difficulty: 5
+prerequisites:
+  - "s-2-appsec-owasp-top-10"
+  - "s-3-authn-authz-sessions"
+  - "s-7-detection-and-incident-response"
+standards:
+  primaryAnchor: "OWASP ASVS 4.0"
+  cs2023: []
+  swebok: []
+  bloom: "create"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - threat-model
+  - stride
+  - trust-boundary
+  - data-flow-diagram
+  - attack-surface
+  - broken-access-control
+  - insecure-direct-object-reference
+  - injection
+  - parameterized-query
+  - cryptographic-failure
+  - authenticated-encryption
+  - aead
+  - nonce
+  - password-hashing
+  - argon2id
+  - multi-factor-authentication
+  - totp
+  - tls-1-3
+  - cipher-suite
+  - security-logging
+  - detection-rule
+  - mitre-attck
+  - incident-response-runbook
+  - residual-risk
+  - nist-csf
+  - hash-anchored-artifact
+learningOutcomes:
+  - "Produce a STRIDE threat model of a small web service from a data-flow diagram, identifying trust boundaries and the highest-risk threats per element"
+  - "Remediate broken access control, injection, and cryptographic-failure findings to specific OWASP ASVS 4.0 verification requirements, showing the vulnerable code and the fix"
+  - "Harden authentication with Argon2id password hashing plus TOTP multi-factor, and protect data at rest with an AEAD construction using correct nonce discipline"
+  - "Configure a TLS 1.3 listener and write one ATT&CK-mapped detection rule against structured security logs"
+  - "Write an incident-response runbook aligned to the NIST SP 800-61 lifecycle and document residual risk against the six NIST CSF 2.0 functions"
+  - "Bundle the threat-model document, patched code, and runbook into one artifact, hash it with SHA-256, and anchor it via DURA /verify"
+professionalContext: "Hardening a service you did not write is the daily work of a security engineer. You inherit a codebase, build a threat model, find the OWASP findings, and remediate each one to a named verification requirement an auditor can check — not to a vague sense of 'more secure.' You harden the authentication and the crypto, stand up detection so the next attempt is seen, and write the runbook the on-call engineer follows at 3 a.m. The capstone forces you to integrate the whole phase the way a real engagement does: a threat model (s-1) that points at OWASP findings (s-2), remediated with the authn (s-3), crypto (s-4), and transport (s-5) controls, gated by the secure-SDLC practices (s-6), and watched by the detection and incident-response machinery (s-7). The hash-anchored deliverable lets a hiring manager or auditor download your hardening package, recompute the hash, confirm it is the bytes you committed, and assess the judgment in your threat model and runbook line by line."
+thresholdConcept: false
+---
+
+## Why this lesson exists
+
+You will almost never write a secure service from a blank file. You will inherit one. Someone shipped it under deadline, it works, it has users — and it has a broken access-control check on the orders endpoint, a string-concatenated SQL query, passwords stored as unsalted SHA-256, plaintext session cookies over HTTP, and no logs that would tell you an attacker ever showed up. Your job is to harden it without rewriting it, and to prove what you did to someone who will audit the claim.
+
+This is the capstone of Phase S. Across s-1 through s-7 you built the parts: structured threat modeling, the OWASP Top 10 as vulnerable-code-to-fix, authentication and session security, applied cryptography, transport security, the secure SDLC, and detection plus incident response. Here you assemble them on one deliberately-vulnerable service. You will threat-model it, remediate each finding to a specific OWASP ASVS requirement, harden the authentication and crypto, stand up a detection rule, write an incident-response runbook, document the residual risk against NIST CSF 2.0, then bundle the package, hash it, and anchor it via DURA `/verify` so the artifact is auditable. The framing is defensive throughout: every technique here is something a defender does to their own system.
+
+## The first-principles picture
+
+Security is not a feature you add. It is a property you argue for. The argument has a fixed shape, and it is the same shape every credible engagement uses.
+
+First you decide what you are protecting and from whom. A <VocabTooltip slug="threat-model">threat model</VocabTooltip> is the structured answer to "what can go wrong here?" — produced before you touch code, because a fix you can't trace back to a threat is a fix you can't justify spending time on. You draw a <VocabTooltip slug="data-flow-diagram">data-flow diagram</VocabTooltip> (the processes, data stores, and the data moving between them), mark the <VocabTooltip slug="trust-boundary">trust boundaries</VocabTooltip> (the lines where data crosses from less-trusted to more-trusted territory — the browser-to-server edge, the server-to-database edge), and walk each element asking the six STRIDE questions.
+
+Then you find the concrete weaknesses. The <VocabTooltip slug="attack-surface">attack surface</VocabTooltip> is the set of points an outsider can poke — every endpoint, every input, every dependency. The OWASP Top 10 names the categories of weakness you find there, and OWASP ASVS names the _verifiable requirements_ a fix must satisfy. "I added a check" is a hope; "this endpoint now satisfies ASVS V4.1.1 — it enforces access control at a trusted server-side chokepoint" is a claim an auditor can test.
+
+Then you watch. A control you can't see being bypassed is a control you can't trust. You emit <VocabTooltip slug="security-logging">security logs</VocabTooltip>, write a <VocabTooltip slug="detection-rule">detection rule</VocabTooltip> mapped to a known adversary technique in <VocabTooltip slug="mitre-attck">MITRE ATT&CK</VocabTooltip>, and write the <VocabTooltip slug="incident-response-runbook">runbook</VocabTooltip> the responder follows when it fires.
+
+Finally you are honest about what you did _not_ fix. No service is fully secure; every engagement ends with <VocabTooltip slug="residual-risk">residual risk</VocabTooltip> — the risk that remains after your controls are in place — documented so the owner accepts it with open eyes rather than discovering it in an incident.
+
+## The mental model
+
+> **Hardening is a chain of justified claims: a threat model points at findings, each finding is remediated to a named verifiable requirement, each control is watched by a detection, and what you couldn't fix is written down as accepted residual risk.** Every artifact in your bundle is a link in that chain. A reviewer follows the chain from "here is what can go wrong" to "here is the exact requirement my fix satisfies" to "here is how I'd see it bypassed" to "here is what I knowingly left open." A fix with no threat behind it, or a threat with no detection in front of it, is a broken link.
+
+Hold that picture. Everything below is one link in the chain, built on the same small vulnerable service.
+
+## The service under test
+
+Keep the target small enough to threat-model on one page. It is a Node/Express order service with three routes, a Postgres store, and password login. The vulnerable starting point (the kind you inherit):
+
+```js
+// app.vulnerable.js — the service as inherited. DO NOT ship this.
+import express from "express";
+import crypto from "node:crypto";
+import { pool } from "./db.js";
+
+const app = express();
+app.use(express.json());
+
+// LOGIN: passwords hashed with bare SHA-256, no salt, no rate limit.
+app.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+  // CWE-916: fast unsalted hash — trivially cracked from a DB dump.
+  const hash = crypto.createHash("sha256").update(password).digest("hex");
+  // CWE-89: SQL built by string concatenation — injectable.
+  const sql = `SELECT id FROM users WHERE email = '${email}' AND pw = '${hash}'`;
+  const { rows } = await pool.query(sql);
+  if (rows.length === 0) return res.status(401).json({ error: "bad creds" });
+  // Session id is the user id — guessable, no expiry.
+  res.json({ session: rows[0].id });
+});
+
+// ORDER: returns ANY order by id with no ownership check.
+app.get("/orders/:id", async (req, res) => {
+  // CWE-639 (IDOR): no check that the caller owns this order.
+  const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+  res.json(rows[0] ?? null);
+});
+
+app.listen(8080); // plaintext HTTP on the wire.
+```
+
+Five findings live in those twenty lines: unsalted password hashing, SQL injection, a guessable session token, a missing authorization check, and plaintext transport. The rest of the lesson remediates them in the order a real engagement would — threat model first.
+
+## Link 1 — the STRIDE threat model
+
+<VocabTooltip slug="stride">STRIDE</VocabTooltip> is a checklist of six threat categories you apply
+to each element of the data-flow diagram. The name is a mnemonic: **S**poofing (pretending to be
+someone you are not), **T**ampering (modifying data or code), **R**epudiation (denying you did
+something, with no log to prove otherwise), **I**nformation disclosure (leaking data), **D**enial of
+service (making the system unavailable), and **E**levation of privilege (gaining rights you should
+not have).
+
+The data-flow diagram for the service has three elements and two trust boundaries:
+
+```
+[ Browser ] --(1)--> [ Order Service ] --(2)--> [ Postgres ]
+   external           process              data store
+            ^trust boundary 1     ^trust boundary 2
+   (untrusted client → server)  (server → database)
+```
+
+Walking STRIDE per element produces the threat list that drives every later fix. The highest-risk entries:
+
+| Element                                   | STRIDE category        | Threat                                                                  | Drives fix                  |
+| ----------------------------------------- | ---------------------- | ----------------------------------------------------------------------- | --------------------------- |
+| `/login` (process, boundary 1)            | Spoofing               | Credential stuffing / password reuse logs an attacker in as a real user | Argon2id + MFA + rate limit |
+| `/login` (process, boundary 1)            | Tampering              | SQL injection via the `email` field rewrites the query                  | Parameterized query         |
+| `/orders/:id` (process, boundary 1)       | Elevation of privilege | Any authenticated user reads any order by guessing the id               | Server-side ownership check |
+| Browser → Service (data flow, boundary 1) | Information disclosure | Credentials and session token sent in cleartext over HTTP               | TLS 1.3                     |
+| Postgres (data store, boundary 2)         | Information disclosure | A DB dump exposes crackable password hashes                             | Argon2id (slow KDF)         |
+| `/login` (process)                        | Repudiation            | No log of failed or successful auth — can't reconstruct an incident     | Security logging            |
+
+This table is the spine of the deliverable. Each row is a threat that points at exactly one fix and, later, at one detection. That traceability is what an auditor checks.
+
+## Link 2 — remediate the OWASP findings to ASVS
+
+Three of the findings map cleanly to OWASP Top 10 2021 categories, and each fix is verified against a specific OWASP ASVS 4.0 requirement. You cite the requirement so the claim is testable, not aspirational.
+
+### A01 Broken Access Control → ASVS V4.1
+
+The `/orders/:id` route is an <VocabTooltip slug="insecure-direct-object-reference">insecure direct object reference</VocabTooltip> (IDOR, CWE-639): it exposes an internal object id with no check that the caller is allowed to see _that_ object. This is the most common high-severity web finding, and OWASP ranked <VocabTooltip slug="broken-access-control">Broken Access Control</VocabTooltip> as A01 — the number-one category — in the 2021 Top 10. ASVS V4.1.1 requires access control enforced at a trusted server-side chokepoint; V4.2.1 requires that users cannot access records they do not own by manipulating an identifier.
+
+The fix is a server-side ownership check. The caller's identity comes from the authenticated session — never from a value the client supplies:
+
+```js
+// SECURE: ownership enforced server-side from the session, not the URL.
+app.get("/orders/:id", requireSession, async (req, res) => {
+  // req.userId is set by requireSession from the verified session token.
+  // The query filters by BOTH the order id AND the owning user, so an
+  // attacker guessing another order's id gets nothing back — the access
+  // decision is made by the database row, not by trusting the URL.
+  const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1 AND user_id = $2", [
+    req.params.id,
+    req.userId,
+  ]);
+  if (rows.length === 0) return res.status(404).json({ error: "not found" });
+  res.json(rows[0]);
+});
+```
+
+Returning `404` rather than `403` is deliberate: a `403` confirms the order exists, which leaks information (a Spoofing/disclosure aid). Denying the existence of records the caller cannot see is the conservative choice.
+
+### A03 Injection → ASVS V5.3
+
+The login query concatenates the `email` string straight into SQL — <VocabTooltip slug="injection">injection</VocabTooltip> (CWE-89). An attacker submitting `email` of `' OR '1'='1' --` rewrites the query's logic. OWASP ranks Injection as A03; ASVS V5.3.4 requires that data-store queries use parameterized interfaces (prepared statements / bound parameters) rather than string concatenation.
+
+The fix is a <VocabTooltip slug="parameterized-query">parameterized query</VocabTooltip> — the driver sends the SQL template and the values on separate channels, so the value can never be parsed as SQL:
+
+```js
+// SECURE: parameters are bound, never concatenated. The driver sends the
+// query text and the $1/$2 values separately; the database treats the
+// values as data only — there is no string for an attacker to break out of.
+const { rows } = await pool.query("SELECT id, pw_hash FROM users WHERE email = $1", [email]);
+```
+
+Note the rewrite also stops fetching by `pw` in the query at all. With a slow password hash (next section) you cannot match the hash in SQL — you fetch the stored hash by email, then verify the password in the application. That structural change is what the crypto fix demands.
+
+### A02 Cryptographic Failures → ASVS V2.4 (password storage)
+
+Bare SHA-256 is a <VocabTooltip slug="cryptographic-failure">cryptographic failure</VocabTooltip> (CWE-916: use of a password hash with insufficient computational effort). SHA-256 is a _fast_ hash — an attacker with a stolen `users` table can try billions of guesses per second on a GPU. OWASP ranks Cryptographic Failures as A02. The remediation is covered fully in the authn link below; ASVS V2.4.1 requires passwords stored salted and hashed with an approved one-way key-derivation/password-hashing function resistant to offline attacks (ASVS V2.4.3/V2.4.4 name PBKDF2 and bcrypt specifically); Argon2id is the algorithm OWASP's Password Storage Cheat Sheet and NIST guidance recommend first.
+
+## Link 3 — harden authentication and crypto
+
+### Password hashing: Argon2id
+
+<VocabTooltip slug="password-hashing">Password hashing</VocabTooltip> is not encryption and not a
+plain hash — it is a deliberately *slow*, *salted* one-way function whose cost you tune so verifying
+a real login stays fast for you but mass-guessing stays expensive for an attacker.
+<VocabTooltip slug="argon2id">Argon2id</VocabTooltip> won the 2015 Password Hashing Competition and
+is memory-hard: it forces each guess to use a configured amount of RAM, which is what defeats cheap
+GPU parallelism. It is the algorithm OWASP's Password Storage Cheat Sheet recommends first, and NIST
+SP 800-63B requires a salted, memory-hard or iterated function for stored authenticators.
+
+```js
+// auth.js
+import argon2 from "argon2"; // the `argon2` npm binding to the reference C lib
+
+// OWASP Password Storage Cheat Sheet baseline for Argon2id: type id,
+// >= 19 MiB memory, >= 2 iterations, parallelism 1. argon2 stores the
+// salt and parameters INSIDE the returned encoded hash string, so there
+// is no separate salt column to manage and no chance of reusing a salt.
+const ARGON2_OPTS = {
+  type: argon2.argon2id,
+  memoryCost: 19456, // 19 MiB, in KiB
+  timeCost: 2, // iterations
+  parallelism: 1,
+};
+
+export async function hashPassword(plain) {
+  // A fresh random salt is generated per call and embedded in the output.
+  return argon2.hash(plain, ARGON2_OPTS);
+}
+
+export async function verifyPassword(stored, plain) {
+  try {
+    // Constant-time verification against the embedded salt + params.
+    return await argon2.verify(stored, plain);
+  } catch (err) {
+    // A malformed stored hash must fail closed, never throw a 500 that
+    // leaks which accounts have corrupt records.
+    console.error("argon2 verify error", err);
+    return false;
+  }
+}
+```
+
+The login handler now fetches the stored hash by email (parameterized) and verifies in the app:
+
+```js
+app.post("/login", loginRateLimit, async (req, res) => {
+  const { email, password } = req.body;
+  const { rows } = await pool.query("SELECT id, pw_hash, totp_secret FROM users WHERE email = $1", [
+    email,
+  ]);
+  // Always run a verify even when the user is absent, against a dummy hash,
+  // so the response time does not reveal whether the email exists (a timing
+  // side channel that enables account enumeration).
+  const stored = rows[0]?.pw_hash ?? DUMMY_ARGON2_HASH;
+  const ok = await verifyPassword(stored, password);
+  if (!ok || rows.length === 0) {
+    logAuthEvent({ event: "auth_failure", email, ip: req.ip });
+    return res.status(401).json({ error: "invalid credentials" });
+  }
+  // Password correct — now require the second factor (next section).
+  return startMfaChallenge(res, rows[0]);
+});
+```
+
+### Multi-factor: TOTP
+
+<VocabTooltip slug="multi-factor-authentication">Multi-factor authentication</VocabTooltip> (MFA)
+requires a second, independent proof of identity so a stolen or reused password alone cannot log an
+attacker in — directly closing the Spoofing threat from the model.
+<VocabTooltip slug="totp">TOTP</VocabTooltip> (Time-based One-Time Password, RFC 6238) derives a
+6-digit code from a shared secret and the current 30-second time window; the authenticator app and
+the server compute the same code independently.
+
+```js
+// mfa.js
+import { authenticator } from "otplib"; // RFC 6238 TOTP implementation
+
+// Verify the user's 6-digit code. otplib allows a small time-step window
+// to tolerate clock skew; keep it tight (1 step) to limit the attack window.
+export function verifyTotp(secret, token) {
+  authenticator.options = { window: 1 };
+  return authenticator.verify({ token, secret });
+}
+```
+
+NIST SP 800-63B treats a memorized secret plus a TOTP authenticator as Authenticator Assurance Level 2. Pair MFA with a login rate limit so credential stuffing is throttled before the second factor is even reached.
+
+### Data at rest: AEAD with nonce discipline
+
+Some stored fields (a saved payment token, a user's address) need confidentiality _and_ integrity at rest. The correct primitive is <VocabTooltip slug="aead">AEAD</VocabTooltip> — <VocabTooltip slug="authenticated-encryption">authenticated encryption with associated data</VocabTooltip> — which encrypts the plaintext and produces an authentication tag in one operation, so any tampering with the ciphertext is detected on decryption. Use a vetted construction: AES-256-GCM or ChaCha20-Poly1305. Never invent a mode.
+
+The single most common AEAD mistake is <VocabTooltip slug="nonce">nonce</VocabTooltip> reuse. A nonce is a number used once per key; reusing a nonce with the same key under GCM is catastrophic — it leaks the XOR of two plaintexts and can expose the authentication key. The discipline: a fresh random nonce per encryption, stored alongside the ciphertext.
+
+```js
+// field-crypto.js
+import crypto from "node:crypto";
+
+// AES-256-GCM. The 256-bit key comes from a KMS / env secret, never
+// hardcoded. We return nonce + tag + ciphertext together so decrypt has
+// everything it needs and we never reuse a nonce with this key.
+export function encryptField(plaintext, key) {
+  // 96-bit random nonce: the GCM-recommended size, fresh for EVERY call.
+  // Reusing a nonce under the same key breaks GCM completely.
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, nonce);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag(); // integrity tag — binds the ciphertext
+  // Layout: [12-byte nonce][16-byte tag][ciphertext].
+  return Buffer.concat([nonce, tag, ciphertext]);
+}
+
+export function decryptField(blob, key) {
+  const nonce = blob.subarray(0, 12);
+  const tag = blob.subarray(12, 28);
+  const ciphertext = blob.subarray(28);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, nonce);
+  decipher.setAuthTag(tag);
+  // final() THROWS if the tag does not verify — tampering fails loudly
+  // and the caller must treat a throw as "do not trust this data."
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+}
+```
+
+### Transport: TLS 1.3
+
+The plaintext-HTTP finding is closed by terminating <VocabTooltip slug="tls-1-3">TLS 1.3</VocabTooltip> (RFC 8446) in front of the service. TLS 1.3 removed the legacy, broken <VocabTooltip slug="cipher-suite">cipher suites</VocabTooltip> of earlier versions, makes forward secrecy mandatory, and encrypts more of the handshake. In production a reverse proxy (nginx, Caddy) usually terminates TLS; the principle to verify is "minimum version 1.3, modern suites only."
+
+```js
+// For a Node listener terminating TLS directly (e.g. behind no proxy):
+import https from "node:https";
+import fs from "node:fs";
+
+const tlsOptions = {
+  key: fs.readFileSync(process.env.TLS_KEY_PATH),
+  cert: fs.readFileSync(process.env.TLS_CERT_PATH),
+  // Refuse anything below TLS 1.3. No fallback to 1.2/1.1/1.0 — old
+  // versions carry downgrade and cipher weaknesses TLS 1.3 fixed.
+  minVersion: "TLSv1.3",
+};
+https.createServer(tlsOptions, app).listen(8443);
+```
+
+ASVS V9.1.2 requires that only strong cipher suites are enabled, with the strongest set as preferred; V9.1.3 requires that only the latest recommended TLS versions are enabled "such as TLS 1.2 and TLS 1.3," with the latest version preferred — which nets out to TLS 1.2 or higher and, for this build, 1.3-only. Citing these makes the transport claim checkable.
+
+## Link 4 — detection and the IR runbook
+
+Controls fail silently unless you watch them. First, emit structured security logs — machine-parsable, not free-text — so a detection can run over them.
+
+```js
+// logging.js — structured security events. One JSON object per line so a
+// log pipeline can index fields without regex-scraping prose.
+export function logAuthEvent(fields) {
+  console.log(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      kind: "security",
+      ...fields, // e.g. { event: "auth_failure", email, ip }
+    })
+  );
+}
+```
+
+Then a <VocabTooltip slug="detection-rule">detection rule</VocabTooltip> mapped to a real adversary technique. MITRE ATT&CK catalogs adversary behavior; T1110 is **Brute Force**, and its sub-technique T1110.003 is **Password Spraying** — trying one common password against many accounts to stay under per-account lockouts. The detection: many `auth_failure` events from one IP across distinct emails in a short window.
+
+```js
+// detection.js — pseudocode for the rule a SIEM would run on the log stream.
+// Mapped to MITRE ATT&CK T1110.003 (Password Spraying).
+function detectPasswordSpray(events, windowMins = 5, distinctEmailThreshold = 10) {
+  const byIp = groupBy(
+    events.filter((e) => e.event === "auth_failure"),
+    "ip"
+  );
+  for (const [ip, evs] of byIp) {
+    const recent = withinLast(evs, windowMins);
+    const distinctTargets = new Set(recent.map((e) => e.email)).size;
+    // One source IP failing against many DIFFERENT accounts is the spray
+    // signature — distinct from one user fat-fingering their own password.
+    if (distinctTargets >= distinctEmailThreshold) {
+      raiseAlert({
+        technique: "T1110.003",
+        ip,
+        distinctTargets,
+        severity: "high",
+      });
+    }
+  }
+}
+```
+
+When that alert fires, the on-call engineer follows the <VocabTooltip slug="incident-response-runbook">incident-response runbook</VocabTooltip>. NIST SP 800-61 **Rev. 2** defines the IR lifecycle in four phases; the runbook is written against them so nothing is improvised at 3 a.m. (NIST SP 800-61 **Rev. 3**, published 2025, retires the rigid four-phase lifecycle and re-organizes incident response around the six NIST CSF 2.0 functions you use in the next section — the four-phase structure here is the Rev. 2 model, still the most common shape for a service runbook):
+
+1. **Preparation** — the logging, the detection, and this runbook already exist (that is this link). Contact list and access are pre-staged.
+2. **Detection & Analysis** — the T1110.003 alert fired. Confirm scope: which IP, how many accounts, any _successful_ logins from that IP (escalate hard if yes — a spray that landed is now T1078, Valid Accounts).
+3. **Containment, Eradication & Recovery** — block the source IP at the edge, force a password reset and session revocation for any account it authenticated to, confirm MFA is enforced on those accounts, then restore normal operation.
+4. **Post-Incident Activity** — write the lessons-learned: was the threshold right, did MFA hold, what detection gap (if any) let it run as long as it did. Feed fixes back into the threat model.
+
+The runbook is prose plus that numbered procedure. It belongs in the bundle as a Markdown file.
+
+## Link 5 — residual risk against NIST CSF 2.0
+
+No hardening is complete. The honest close is a residual-risk register organized by the six functions of <VocabTooltip slug="nist-csf">NIST Cybersecurity Framework 2.0</VocabTooltip>, used in their canonical order — **Govern, Identify, Protect, Detect, Respond, Recover**. (CSF 2.0, published 2024, added **Govern** as the sixth function ahead of the original five.)
+
+| CSF 2.0 function | What this engagement did                                           | Residual risk you are accepting                                                  |
+| ---------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| **Govern**       | Mapped each fix to an ASVS requirement so decisions are auditable  | No formal ownership/review cadence for the service after handoff                 |
+| **Identify**     | STRIDE threat model + DFD of the three routes                      | Out-of-scope dependencies (the npm tree, the DB host OS) not threat-modeled here |
+| **Protect**      | Access control, parameterized queries, Argon2id+MFA, AEAD, TLS 1.3 | No WAF; no secrets-rotation automation for the AEAD key                          |
+| **Detect**       | Structured logs + one T1110.003 detection rule                     | Single detection; no coverage for injection attempts or data-exfil patterns      |
+| **Respond**      | NIST 800-61 runbook for the spray scenario                         | Runbook covers one incident class; others (data breach, DoS) undocumented        |
+| **Recover**      | Session revocation + forced reset in the runbook                   | No tested backup-restore drill; recovery time objective undefined                |
+
+The right-hand column is the point. You are not claiming "secure" — you are handing the owner a precise, framework-organized list of what remains, so accepting the residual risk is a decision, not an accident.
+
+## Practice — write the access-control fix
+
+Before you assemble the full bundle, prove you can write the single most-cited fix in the engagement: the server-side ownership check that closes the IDOR. The logic is identical in any language; here you write it in TypeScript so you can run it.
+
+<SandboxExercise
+  language="typescript"
+  instructions="Implement getOrderForUser(orderId, userId, db) so it returns an order ONLY when that order belongs to userId. db.query(orderId) returns the stored order object { id, userId, total } or null if no such order exists. Your function must (1) return null when the order does not exist, AND (2) return null when the order exists but its userId does not match the caller's userId (the IDOR case) — never leak another user's order. Return the order object only on an ownership match. The provided sequence checks an owner read, a cross-user read (must be null), and a missing-id read (must be null)."
+  initialCode={`type Order = { id: number; userId: number; total: number };
+
+interface Db {
+query(orderId: number): Order | null;
+}
+
+function getOrderForUser(orderId: number, userId: number, db: Db): Order | null {
+// TODO: fetch the order; return it ONLY if it exists AND order.userId
+// === userId. Otherwise return null. Do not reveal existence of orders
+// the caller does not own.
+return null;
+}
+
+const db: Db = {
+query(id) {
+const rows: Order[] = [
+{ id: 1, userId: 42, total: 100 },
+{ id: 2, userId: 99, total: 250 },
+];
+return rows.find((o) => o.id === id) ?? null;
+},
+};
+
+console.log("owner reads own order:", getOrderForUser(1, 42, db));
+console.log("attacker reads order 2 (not theirs):", getOrderForUser(2, 42, db));
+console.log("read of missing order 7:", getOrderForUser(7, 42, db));`}
+  solution={`type Order = { id: number; userId: number; total: number };
+
+interface Db {
+query(orderId: number): Order | null;
+}
+
+function getOrderForUser(orderId: number, userId: number, db: Db): Order | null {
+const order = db.query(orderId);
+// Fail closed on BOTH "does not exist" and "exists but not owned by the
+// caller." Collapsing them to one null also avoids leaking existence.
+if (order === null) return null;
+if (order.userId !== userId) return null;
+return order;
+}
+
+const db: Db = {
+query(id) {
+const rows: Order[] = [
+{ id: 1, userId: 42, total: 100 },
+{ id: 2, userId: 99, total: 250 },
+];
+return rows.find((o) => o.id === id) ?? null;
+},
+};
+
+console.log("owner reads own order:", getOrderForUser(1, 42, db));
+console.log("attacker reads order 2 (not theirs):", getOrderForUser(2, 42, db));
+console.log("read of missing order 7:", getOrderForUser(7, 42, db));`}
+testCases={[
+"Owner (userId 42) reading their own order 1 gets the order object back",
+"Attacker (userId 42) reading order 2 (owned by userId 99) gets null, not the order",
+"Reading a non-existent order id 7 returns null",
+"An owned order and a missing order are indistinguishable to an outsider — both yield null when not owned",
+]}
+/>
+
+## Checkpoint — reason about the design before you build
+
+These three questions check that you can defend the decisions the build encodes. Answer them before you assemble the bundle.
+
+<Quiz
+  questions={[
+    {
+      question:
+        "Your fixed /orders/:id route filters by `id = $1 AND user_id = $2`, and when no row matches it returns 404 rather than 403. A reviewer asks why 404 and not 403, since the caller clearly isn't authorized. What is the strongest answer?",
+      options: [
+        "403 is technically incorrect HTTP and breaks REST clients",
+        "Returning 403 confirms the order EXISTS but isn't yours, which leaks information an attacker can use to enumerate valid order ids (an Information Disclosure threat from the STRIDE model); 404 denies the existence of records the caller can't see, so a probing attacker learns nothing about which ids are real — the access decision is made by the row filter (ASVS V4.2.1) and the response is deliberately uniform whether the id is missing or merely not owned",
+        "404 is faster because the database does less work",
+        "It does not matter; 403 and 404 are interchangeable here",
+      ],
+      correct: 1,
+      explanation:
+        "This is the IDOR fix reasoned to completion. The query filtering by both id AND user_id is the access control (ASVS V4.1.1 / V4.2.1 — enforced server-side, keyed off the authenticated session). But the STATUS CODE is itself an information channel: a 403 distinguishes 'exists but not yours' from 'does not exist,' letting an attacker map which order ids are real. Returning a uniform 404 for both cases denies that enumeration signal. It is not about HTTP correctness (option 1), performance (option 3), or interchangeability (option 4) — it is about not leaking existence, which is exactly the Information Disclosure category STRIDE made you look for.",
+    },
+    {
+      question:
+        "You replaced unsalted SHA-256 with Argon2id and a reviewer asks why a slow, memory-hard hash matters when the database is 'behind a firewall anyway.' What is the most accurate answer?",
+      options: [
+        "Argon2id encrypts the passwords so a DB dump is useless",
+        "Password hashing defends the scenario where the firewall has ALREADY failed — an attacker who exfiltrates the users table holds the hashes offline; SHA-256 is fast, so a GPU tries billions of guesses per second and cracks weak/reused passwords in minutes, whereas Argon2id is deliberately slow and memory-hard (OWASP baseline >= 19 MiB, >= 2 iterations) so each guess is expensive and the per-account salt (embedded in the encoded hash) stops one cracking run from covering every account at once; this is exactly what NIST 800-63B and ASVS V2.4.1 require for stored authenticators",
+        "Memory-hardness makes login faster for legitimate users",
+        "The firewall makes password hashing unnecessary; SHA-256 was fine",
+      ],
+      correct: 1,
+      explanation:
+        "Password hashing is not encryption (option 1 is wrong — there is no key and no reversal). Its entire job is the post-breach scenario: assume the dump happened. SHA-256's speed is the vulnerability — it lets an attacker brute-force offline at billions of guesses per second. Argon2id is slow and memory-hard by design, so each guess costs real time and RAM, and the per-call random salt (stored inside the encoded hash string) means the attacker cannot precompute or amortize across accounts. That is precisely why NIST SP 800-63B and ASVS V2.4.1 mandate a salted, deliberately-slow function. Memory-hardness does not speed up login (option 3), and 'behind a firewall' is exactly the assumption that fails in real breaches (option 4).",
+    },
+    {
+      question:
+        "Your AEAD field encryption uses AES-256-GCM with a 96-bit random nonce generated fresh per encryption and stored alongside the ciphertext. A teammate proposes saving space by using a fixed nonce since 'the key is secret anyway.' Why is this catastrophic, and what does it have to do with the integrity guarantee?",
+      options: [
+        "Nothing is wrong; a fixed nonce with a secret key is safe in GCM",
+        "Reusing a nonce with the same key under GCM is a known catastrophic failure: it leaks the XOR of the two plaintexts encrypted under that nonce AND can expose GCM's authentication subkey, which lets an attacker FORGE valid authentication tags — destroying both the confidentiality and the integrity that AEAD exists to provide; the nonce must be unique per (key, message), which is why a fresh random 96-bit nonce per call, stored with the ciphertext, is the discipline, and rotating the key bounds how many messages ever share a key",
+        "A fixed nonce only weakens performance, not security",
+        "GCM does not use a nonce, so the question is moot",
+      ],
+      correct: 1,
+      explanation:
+        "GCM's security depends absolutely on nonce uniqueness per key. Reuse is not a minor degradation (options 1 and 3) — it leaks the XOR of the two plaintexts (a confidentiality break) and, worse, can reveal the GHASH authentication subkey, enabling an attacker to forge authentication tags. That forgery destroys the integrity half of AEAD, so the construction no longer detects tampering. The fix is a unique nonce per encryption — a fresh random 96-bit value per call is the recommended approach, stored next to the ciphertext — plus key rotation to bound how many messages share a key. GCM very much uses a nonce (option 4 is wrong); it is the single most important thing to get right.",
+    },
+  ]}
+/>
+
+## Check your understanding
+
+This is a `create`-level capstone: the competency check is that you **build and anchor** the hardening package, not that you recall facts about it. Work through the checklist, then do the open-ended extension. You have demonstrated competency when every box is checked and your bundle verifies.
+
+**Build checklist — the package you hash and anchor.** The deliverable is one archive you hash and anchor via DURA `/verify`. Produce all five parts:
+
+1. **Threat-model document** — the DFD, the trust boundaries, and the STRIDE-per-element table. Every row must point at the fix it drives. This is the spine an auditor follows.
+2. **Patched code** — the vulnerable service and the hardened service side by side, with each fix commented and tagged to its ASVS requirement (V4.1.1/V4.2.1 access control, V5.3.4 parameterized queries, V2.4.1 password storage, V9.1.x TLS). Include the Argon2id+MFA login, the AEAD field crypto, and the TLS 1.3 listener config.
+3. **Detection** — the structured-logging code plus the T1110.003 password-spray rule, with a note on the threshold you chose and why.
+4. **IR runbook** — a Markdown file structured on the NIST SP 800-61 Rev. 2 lifecycle (Preparation, Detection & Analysis, Containment/Eradication/Recovery, Post-Incident Activity) for the spray scenario, including the escalation to T1078 if a spray lands.
+5. **Residual-risk register** — the NIST CSF 2.0 table across all six functions (Govern, Identify, Protect, Detect, Respond, Recover), naming what you accepted as remaining risk.
+
+Bundle those into one archive (`tar czf phase-s-capstone.tgz threat-model.md app.hardened.js detection.js runbook.md residual-risk.md ...`), compute its SHA-256, and submit to DURA `/verify` with the title "Phase S Capstone — Harden a Production Service."
+
+> **What DURA /verify actually is.** `/verify` is a generic SHA-256 certificate lookup (`src/lib/verify/`). It does not run, scan, or grade your code — it has no idea whether your fix is correct. You compute the SHA-256 of your bundle; DURA records a certificate binding that hash to a title and a timestamp; anyone with the file recomputes the hash and looks it up at `/verify/{hash}`. A match proves the bytes a reviewer holds are the exact bytes you anchored, and _when_ you anchored them — authenticity and integrity, not quality. The security judgment in your threat model and runbook is still something a human reads and assesses. The hash only removes the question "is this the real submission, unaltered."
+
+A <VocabTooltip slug="hash-anchored-artifact">hash-anchored artifact</VocabTooltip> is therefore a portfolio piece a hiring manager or auditor can trust: download, recompute, confirm, then spend their time on the substance — your threat model's coverage, your ASVS traceability, your residual-risk honesty — instead of wondering whether you edited it after a reviewer pushed back.
+
+**Open-ended extension (pick one and add it to the bundle).** A `create`-level artifact should grow past the spec. Choose at least one, implement it, and note in your residual-risk register what it changed:
+
+- **Close a Detect gap.** Add a second detection rule for the injection attempts you remediated — e.g. flag requests whose inputs contain SQL meta-characters reaching the login route — and map it to MITRE ATT&CK. Update the CSF Detect row.
+- **Add authorization depth.** Extend the ownership check into a role model (RBAC): an `admin` role may read any order, a `user` only their own. Show the policy is enforced server-side at one chokepoint, and that adding a role does not reopen the IDOR for non-admins (ASVS V4.1).
+- **Automate the SDLC gate (s-6).** Wire a SAST/dependency-scan step into a CI config that fails the build on a high-severity finding, so the next regression is caught before merge. Cite the NIST SSDF practice it implements.
+
+## What you learned
+
+- Hardening is a chain of justified claims: a STRIDE threat model points at OWASP findings, each finding is remediated to a named OWASP ASVS requirement, each control is watched by an ATT&CK-mapped detection, and what remains is written down as accepted residual risk.
+- The three highest-frequency web findings have precise fixes you can cite: Broken Access Control (A01) closed by a server-side ownership check (ASVS V4.1/V4.2); Injection (A03) closed by parameterized queries (ASVS V5.3.4); Cryptographic Failures (A02) closed by Argon2id password storage (ASVS V2.4.1).
+- Authentication is hardened in layers — Argon2id (slow, salted, memory-hard) for the post-breach scenario, TOTP MFA so a stolen password alone fails, and a rate limit so credential stuffing is throttled — and data at rest is protected with AEAD (AES-256-GCM) under strict per-message nonce discipline, behind TLS 1.3 on the wire.
+- Detection turns silent controls into seen ones: structured security logs plus a rule mapped to MITRE ATT&CK T1110.003 (password spraying), with an IR runbook structured on the NIST SP 800-61 Rev. 2 lifecycle for the responder to follow.
+- Residual risk is documented against the six NIST CSF 2.0 functions (Govern, Identify, Protect, Detect, Respond, Recover) so the owner accepts what remains as a decision, not a surprise.
+- The deliverable is a package (threat model + patched code + detection + runbook + residual-risk register) whose SHA-256 you anchor via DURA `/verify`, a generic certificate lookup that proves authenticity and integrity, not quality.
+
+## What's next — beyond Phase S
+
+You have a threat-modeled, remediated, monitored, and hash-anchored hardening package — the artifact a security-engineering role hires for. The skills compound outward:
+
+- **Scale the model:** the STRIDE-per-element method extends from three routes to a full microservice mesh; the trust-boundary discipline is identical, only the diagram grows.
+- **Deepen detection:** one rule becomes a detection library; the ATT&CK mapping you started lets you measure coverage against the matrix and find the techniques you cannot yet see.
+- **Shift left:** fold the fixes into the secure SDLC (s-6) so regressions are caught by SAST/DAST and dependency gates before they reach production, not in a later threat model.
+- **Operate the runbook:** the NIST 800-61 runbook you wrote is the seed of a real incident-response program — tabletop-exercise it, time the recovery, and feed every drill back into the threat model.
+
+Phase S taught you to threat-model, harden, watch, and be honest about what remains. This capstone is the proof you can do all four on a system you did not write.

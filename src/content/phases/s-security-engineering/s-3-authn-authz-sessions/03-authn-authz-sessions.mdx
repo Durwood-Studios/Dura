@@ -1,0 +1,567 @@
+---
+title: "Authentication, Authorization & Session Security"
+description: "Argon2id, MFA, OAuth 2.1 / OIDC, JWT pitfalls, session fixation, RBAC/ABAC — what NIST 800-63B and ASVS require."
+phase: s
+module: "s-3-authn-authz-sessions"
+order: 3
+estimatedMinutes: 120
+difficulty: 4
+prerequisites:
+  - "s-2-appsec-owasp-top-10"
+standards:
+  primaryAnchor: "NIST SP 800-63B"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - authentication
+  - authorization
+  - password-hashing
+  - argon2id
+  - bcrypt
+  - work-factor
+  - memory-hard
+  - peppering
+  - mfa
+  - phishing-resistance
+  - webauthn
+  - passkey
+  - totp
+  - oauth-2-1
+  - oidc
+  - authorization-code-flow
+  - pkce
+  - id-token
+  - access-token
+  - jwt
+  - alg-none
+  - algorithm-confusion
+  - audience-claim
+  - session-fixation
+  - httponly
+  - samesite
+  - rbac
+  - abac
+learningOutcomes:
+  - "Choose and configure a memory-hard password hash (Argon2id parameters, or bcrypt as the fallback) that meets OWASP and NIST 800-63B guidance, and explain why fast hashes like SHA-256 are wrong for passwords"
+  - "Distinguish MFA factor types by phishing resistance and explain why WebAuthn/passkeys resist credential phishing that TOTP and SMS do not"
+  - "Trace the OAuth 2.1 authorization-code flow with PKCE end to end and explain what PKCE defends against and why implicit flow was removed in 2.1"
+  - "Identify and remediate the three classic JWT verification failures: alg=none acceptance, RS256↔HS256 algorithm confusion, and missing audience/expiry validation"
+  - "Set the cookie flags (HttpOnly, Secure, SameSite) and the session-regeneration step that defeat session fixation and reduce session theft"
+  - "Decide between RBAC and ABAC for a given authorization requirement and enforce it server-side at the resource"
+professionalContext: "Authentication and session bugs are not exotic — they are the most common way real systems get breached, and they map directly to OWASP Top 10 A07 (Identification and Authentication Failures) and A01 (Broken Access Control). A security engineer is expected to read an auth flow and name the failure mode on sight: a password column hashed with unsalted SHA-256, a JWT verifier that trusts the token's own `alg` header, a login that reuses the pre-auth session id. These are decided in code review and pen-test readouts, and the correct answers are written down in NIST SP 800-63B and the OWASP Application Security Verification Standard (ASVS). This lesson teaches the defensive posture those documents require, with the real reasoning behind each rule."
+thresholdConcept: false
+---
+
+## Why this lesson exists
+
+Most breaches do not start with a clever exploit. They start with a login. An attacker steals a database, and because the passwords were stored as plain SHA-256, they crack 80% of them overnight on a rented GPU. Or they craft a JSON Web Token, set its header to say "no signature needed," and the server believes them. Or they hand a victim a link that pins a session id, wait for the victim to log in, and walk into the authenticated session. None of these require breaking cryptography. They require the defender to have made one specific, well-documented mistake.
+
+The defenses are not folklore. <VocabTooltip slug="authentication">Authentication</VocabTooltip> (proving who you are), <VocabTooltip slug="authorization">authorization</VocabTooltip> (deciding what you may do), and session management each have a published standard that says what "correct" means: NIST SP 800-63B for digital identity, and the OWASP Application Security Verification Standard (ASVS) for verifiable requirements. This lesson walks the four surfaces where these systems fail in production — password storage, multi-factor authentication, delegated authorization (OAuth/OIDC and JWTs), and sessions — and gives you the defensive code for each.
+
+## The mental model
+
+> Authentication answers "who is this request from?" Authorization answers "is this request allowed?" A session is the cached answer to the first question so you do not re-ask it on every request. Almost every auth vulnerability is one of three things: storing the proof of identity weakly, trusting an attacker-controlled value during verification, or letting the cached answer (the session) be stolen or fixed.
+
+Hold that frame. Every fix below is an instance of it.
+
+## Part 1 — Password storage: never a fast hash
+
+### First principles
+
+A password hash exists for one scenario: your database has already been stolen, and you want the passwords inside it to remain useless. Everything about password hashing is designed for that worst case. So the question is not "how do I hash a password" — it is "given the attacker now has my hashes and unlimited offline guesses, how slow and expensive can I make each guess?"
+
+That single reframing rules out the hashes most engineers reach for first. SHA-256, SHA-3, and BLAKE2 are _designed to be fast_ — billions of operations per second on commodity hardware. Fast is correct for verifying a file download. Fast is catastrophic for a password, because the attacker's guessing rate is your hashing rate.
+
+### The mechanism — Argon2id
+
+The defense is a <VocabTooltip slug="password-hashing">password hash</VocabTooltip> that is deliberately slow and, more importantly, <VocabTooltip slug="memory-hard">memory-hard</VocabTooltip> — it forces each guess to allocate a large block of RAM, which defeats the cheap massive parallelism of GPUs and ASICs. The current first choice, per OWASP's Password Storage Cheat Sheet, is <VocabTooltip slug="argon2id">Argon2id</VocabTooltip> — the winner of the 2015 Password Hashing Competition. Argon2id is a hybrid of Argon2i and Argon2d that resists both side-channel and GPU-cracking attacks.
+
+Argon2id takes three tuning parameters, together its <VocabTooltip slug="work-factor">work factor</VocabTooltip>:
+
+- **memory cost (`m`)** — how much RAM each hash allocates. This is the GPU-resistance lever.
+- **iterations / time cost (`t`)** — how many passes over that memory.
+- **parallelism (`p`)** — how many lanes (threads) the computation uses.
+
+OWASP's current baseline recommendation is Argon2id with **m = 19 MiB, t = 2, p = 1** (one of several acceptable points on the memory/time curve; a higher-memory option is 12 MiB at t = 3). The salt is generated and stored by the library — a per-password random value that makes precomputed rainbow tables useless. You do not manage the salt yourself; the encoded hash string carries it.
+
+```typescript
+// password-storage.js — register and verify with Argon2id.
+// Library: `argon2` (node-argon2), which wraps the reference C implementation.
+import argon2 from "argon2";
+
+// Tuning per OWASP Password Storage Cheat Sheet (Argon2id baseline).
+// memoryCost is in KiB: 19456 KiB = 19 MiB. This is the GPU-resistance lever —
+// each guess must allocate this much RAM, which collapses parallel cracking.
+const ARGON2_OPTIONS = {
+  type: argon2.argon2id,
+  memoryCost: 19456, // 19 MiB
+  timeCost: 2, // 2 iterations
+  parallelism: 1, // 1 lane
+} as const;
+
+/** Hash a plaintext password at registration. Returns the encoded hash string
+ *  (algorithm, parameters, salt, and digest are all packed into one string). */
+async function hashPassword(plaintext: string): Promise<string> {
+  // The salt is generated internally and embedded in the returned string —
+  // we never store or compare salts by hand.
+  return argon2.hash(plaintext, ARGON2_OPTIONS);
+}
+
+/** Verify a login attempt against the stored hash. */
+async function verifyPassword(storedHash: string, attempt: string): Promise<boolean> {
+  try {
+    // argon2.verify reads the parameters and salt back out of storedHash,
+    // so old hashes keep verifying even after you raise the work factor.
+    return await argon2.verify(storedHash, attempt);
+  } catch {
+    // A malformed stored hash must fail closed (deny), never throw past here.
+    return false;
+  }
+}
+```
+
+The verify path reads the parameters out of the stored string, so you can raise the work factor over time and old hashes still validate — then transparently re-hash on the next successful login. Note also that `verifyPassword` does its comparison inside the library, which uses a constant-time digest comparison; never compare hashes with `===`, which can leak length and content through timing.
+
+### The fallback — bcrypt
+
+Where Argon2id is unavailable (some managed runtimes, some compliance regimes), the accepted fallback is <VocabTooltip slug="bcrypt">bcrypt</VocabTooltip> with a cost factor of **10 or more** (the work factor is `2^cost` iterations of the Blowfish key schedule). bcrypt has one sharp edge you must defend against: it ignores input beyond **72 bytes**. If you let a 200-character passphrase through, only the first 72 bytes are hashed, silently weakening long passwords. The defense is to reject or pre-hash overly long inputs.
+
+```typescript
+// bcrypt-fallback.js — bcrypt with the 72-byte trap handled.
+import bcrypt from "bcrypt";
+
+const BCRYPT_COST = 12; // 2^12 key-schedule iterations; raise as hardware improves.
+const BCRYPT_MAX_BYTES = 72; // bcrypt silently truncates beyond this.
+
+async function hashPasswordBcrypt(plaintext: string): Promise<string> {
+  // Reject input that bcrypt would silently truncate, rather than hash a
+  // weakened prefix. (Alternatively, pre-hash with SHA-256 then base64 —
+  // but rejecting keeps the failure visible and the design simple.)
+  if (Buffer.byteLength(plaintext, "utf8") > BCRYPT_MAX_BYTES) {
+    throw new Error("Password exceeds bcrypt's 72-byte limit");
+  }
+  return bcrypt.hash(plaintext, BCRYPT_COST);
+}
+```
+
+### What NIST 800-63B actually requires
+
+NIST SP 800-63B (the digital-identity authentication guideline) changed the rules many engineers still enforce out of habit. Its memorized-secret requirements:
+
+- **Minimum length 8 characters; allow at least 64.** Length is the dominant strength lever.
+- **No composition rules.** Do not force "one uppercase, one digit, one symbol" — these push users toward predictable patterns like `Password1!`.
+- **No periodic forced rotation.** Only force a reset on evidence of compromise. Scheduled 90-day rotation degrades security because users iterate (`Spring2026`, `Summer2026`).
+- **Screen new passwords against a blocklist** of known-breached and common values.
+- **Allow paste** (password managers) and **allow all printable characters including spaces.**
+
+Optionally, you may add a <VocabTooltip slug="peppering">pepper</VocabTooltip> — a secret value mixed in before hashing, held outside the database (in an HSM or KMS, not the same table). A stolen database alone is then insufficient to crack hashes. The pepper is defense in depth on top of the per-password salt, not a replacement for it.
+
+## Part 2 — MFA and phishing resistance
+
+A password is one factor: something you know. <VocabTooltip slug="mfa">Multi-factor authentication (MFA)</VocabTooltip> adds a second from a different category — something you have (a device, a security key) or something you are (a biometric). But not all second factors are equal, and the axis that matters for a security engineer is <VocabTooltip slug="phishing-resistance">phishing resistance</VocabTooltip>.
+
+| Factor                                                                     | Category     | Phishing-resistant? | Why                                                                           |
+| -------------------------------------------------------------------------- | ------------ | ------------------- | ----------------------------------------------------------------------------- |
+| SMS one-time code                                                          | have (phone) | No                  | SIM-swappable; the code can be relayed to a fake site or intercepted          |
+| <VocabTooltip slug="totp">TOTP</VocabTooltip> (authenticator app)          | have         | No                  | The 6-digit code is a bearer secret — a phishing proxy relays it in real time |
+| Push approval                                                              | have         | Weak                | Vulnerable to MFA-fatigue / prompt-bombing                                    |
+| <VocabTooltip slug="webauthn">WebAuthn</VocabTooltip> / FIDO2 security key | have         | **Yes**             | The credential signs a challenge bound to the real site's origin              |
+| <VocabTooltip slug="passkey">Passkey</VocabTooltip> (synced WebAuthn)      | have         | **Yes**             | Same origin-binding; private key never leaves the authenticator               |
+
+The reason TOTP is not phishing-resistant is structural, not a configuration mistake. A TOTP code is a short bearer secret: anyone who learns it within the time window can use it. An attacker stands up a proxy that looks like your login page, the victim types their password and TOTP code into it, and the proxy replays both to the real site instantly. The code being correct does not prove the victim was talking to _you_.
+
+<VocabTooltip slug="webauthn">WebAuthn</VocabTooltip> closes this hole with public-key cryptography
+bound to the origin. At registration the authenticator (security key, phone, or laptop) generates a
+key pair and gives the server the public key. At login the server sends a random challenge; the
+authenticator signs it together with the **origin** of the requesting site. A phishing site has a
+different origin (`login.examp1e.com`, not `login.example.com`), so the signature is over the wrong
+origin and the real server rejects it. The private key never leaves the device, and there is no
+shared secret to phish. NIST 800-63B classifies these as the basis for its highest authenticator
+assurance level (AAL3); ASVS likewise requires phishing-resistant factors for high-value flows.
+
+> Defensive takeaway: offer TOTP over SMS, and offer WebAuthn/passkeys over TOTP. For administrative and other high-value accounts, require a phishing-resistant factor. A code the user types is a secret the user can be tricked into typing somewhere else.
+
+## Part 3 — OAuth 2.1, OIDC, and the authorization-code flow with PKCE
+
+### First principles
+
+<VocabTooltip slug="oauth-2-1">OAuth 2.0</VocabTooltip> is a *delegated authorization* framework: it
+lets a user grant an application limited access to a resource without sharing their password with
+that application. <VocabTooltip slug="oidc">OpenID Connect (OIDC)</VocabTooltip> is a thin
+authentication layer on top of OAuth that adds a signed
+<VocabTooltip slug="id-token">ID token</VocabTooltip> proving *who* the user is. **OAuth 2.1** is
+the consolidation in progress that folds years of security best-current-practice into the baseline —
+most importantly, it **removes the implicit flow** and **requires PKCE** on the authorization-code
+flow.
+
+Two tokens to keep straight:
+
+- **<VocabTooltip slug="access-token">Access token</VocabTooltip>** — presented to a resource server (an API) to authorize a request. The API is the audience.
+- **<VocabTooltip slug="id-token">ID token</VocabTooltip>** — an OIDC token _for the client_, asserting the user's identity. It is not an API credential.
+
+A frequent bug is sending the ID token to an API as if it were an access token, or accepting it there. They have different audiences and different purposes.
+
+### The flow — authorization code with PKCE
+
+The <VocabTooltip slug="authorization-code-flow">authorization-code flow</VocabTooltip> never exposes a long-lived token to the browser's URL or history. The client gets a short-lived, single-use **authorization code** via redirect, then exchanges it server-to-server (or via a hardened public-client exchange) for tokens. <VocabTooltip slug="pkce">PKCE</VocabTooltip> (Proof Key for Code Exchange, RFC 7636) hardens that exchange so a stolen code is useless without a secret the attacker never saw.
+
+PKCE works like a one-time challenge the client commits to up front:
+
+1. The client generates a random high-entropy **`code_verifier`** and keeps it private.
+2. It derives a **`code_challenge` = BASE64URL(SHA-256(code_verifier))** and sends _that_ (with `code_challenge_method=S256`) on the authorization request.
+3. The authorization server records the challenge alongside the issued code.
+4. When the client redeems the code, it sends the original `code_verifier`. The server hashes it and checks it matches the stored challenge.
+
+An attacker who intercepts the authorization code (via a malicious app, a logged redirect, or a referrer leak) cannot redeem it, because they never had the `code_verifier`, and the challenge is a one-way SHA-256 of it.
+
+```typescript
+// pkce.js — generate the PKCE pair for an authorization-code request.
+// Uses Web Crypto, available in browsers and Node 18+.
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  // base64url: standard base64 with +/ → -_ and no = padding (RFC 7636 §3).
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** A high-entropy verifier (43–128 chars). 32 random bytes → 43 base64url chars. */
+function generateCodeVerifier(): string {
+  const random = new Uint8Array(32);
+  crypto.getRandomValues(random); // CSPRNG — never Math.random() for security values
+  return base64UrlEncode(random);
+}
+
+/** S256 challenge: the SHA-256 of the verifier, base64url-encoded. The server
+ *  stores this; only the holder of the verifier can later satisfy it. */
+async function deriveCodeChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return base64UrlEncode(new Uint8Array(digest));
+}
+```
+
+Why the **implicit flow was removed in OAuth 2.1**: the implicit flow returned the access token _directly in the redirect URL fragment_, where it landed in browser history, server logs, and `Referer` headers, with no exchange step to protect. It existed as a workaround for browsers that could not do a cross-origin token request; that constraint no longer holds. Authorization-code-with-PKCE supersedes it for every client type, including single-page apps.
+
+Two more checks OAuth 2.1 makes non-optional: the client must use **exact-match redirect URIs** (no wildcards, no prefix matching — an open redirect here lets an attacker steal codes) and must send and verify a **`state`** parameter to bind the response to the request and prevent CSRF on the callback.
+
+## Part 4 — JWT pitfalls
+
+A <VocabTooltip slug="jwt">JSON Web Token (JWT)</VocabTooltip> is three base64url parts — header, payload, signature — joined by dots. The header names the signing algorithm; the payload holds claims (subject, audience, expiry); the signature lets the recipient verify integrity. JWTs are everywhere in OAuth/OIDC, and they have three classic verification failures. All three share one root cause: **trusting attacker-controlled fields during verification.**
+
+### Pitfall 1 — `alg: none`
+
+The JWT spec defines an algorithm value `none` meaning "unsecured — no signature." A naive verifier reads the algorithm _out of the token's own header_ and dispatches on it. An attacker sends a token with header `{"alg":"none"}` and an empty signature, the verifier sees `none`, skips signature checking, and trusts the payload — including `{"role":"admin"}`. This is <VocabTooltip slug="alg-none">the alg=none attack</VocabTooltip>.
+
+### Pitfall 2 — RS256↔HS256 algorithm confusion
+
+RS256 is asymmetric: the issuer signs with a **private** key, verifiers check with the **public** key. HS256 is symmetric: the same **secret** both signs and verifies. <VocabTooltip slug="algorithm-confusion">Algorithm confusion</VocabTooltip> exploits a verifier that picks the algorithm from the token header while passing it the RSA public key as "the key." The attacker takes the _public_ key (which is public), forges a token signed with **HS256 using that public key as the HMAC secret**, and sets `alg: HS256`. The verifier, told to honor the header, runs HMAC-SHA256 with the public key — which the attacker also has — and the forged signature validates.
+
+The fix for both pitfalls is identical and absolute: **the verifier decides the algorithm; the token never does.** Pin an allowlist (`algorithms: ["RS256"]`) on every verify call. With a single permitted algorithm bound to the matching key type, `none` is rejected and HS256-with-public-key is rejected.
+
+### Pitfall 3 — missing `aud` / `exp` validation
+
+A valid signature only proves the token was minted by the issuer. It does _not_ prove the token was minted for _you_, or that it is still current. Two claims must be checked on every request:
+
+- **`exp` (expiry)** — reject expired tokens. A signature stays valid forever; only the expiry claim makes a token time-bounded.
+- **<VocabTooltip slug="audience-claim">`aud` (audience)</VocabTooltip>** — reject tokens whose audience is not this service. Without it, a token your auth server issued for _Service A_ is replayable against _Service B_ that shares the issuer. Also verify `iss` (issuer).
+
+```typescript
+// jwt-verify.js — verify an RS256 access token the safe way.
+// Library: `jsonwebtoken`. The options object is the security boundary.
+import jwt from "jsonwebtoken";
+
+interface VerifiedClaims {
+  sub: string;
+  scope?: string;
+}
+
+/** Verify a token signed by a known issuer. The publicKey is the issuer's
+ *  PUBLIC key. The options object — not the token — dictates the rules. */
+function verifyAccessToken(token: string, publicKey: string): VerifiedClaims {
+  // SECURE: every trust decision is made here, not read from the token header.
+  const claims = jwt.verify(token, publicKey, {
+    algorithms: ["RS256"], // allowlist → rejects alg=none AND HS256 confusion
+    audience: "https://api.example.com", // this service's identifier; rejects cross-service replay
+    issuer: "https://auth.example.com", // only tokens from our auth server
+    // `jsonwebtoken` checks `exp` automatically unless you pass ignoreExpiration.
+  });
+
+  if (typeof claims === "string" || typeof claims.sub !== "string") {
+    throw new Error("Token missing required subject claim");
+  }
+  return { sub: claims.sub, scope: typeof claims.scope === "string" ? claims.scope : undefined };
+}
+
+// VULNERABLE — do NOT do this. Shown only to recognize it in review:
+//   jwt.verify(token, publicKey);                 // no algorithms → header is trusted
+//   jwt.decode(token);                            // decode NEVER verifies; it only parses
+//   jwt.verify(token, publicKey, { algorithms }); // but no audience/issuer → replayable
+```
+
+`jwt.decode()` deserves its own warning: it parses a token _without verifying the signature at all_. It is for inspection only. Any authorization decision made from `decode()` output trusts a fully attacker-controlled blob.
+
+## Part 5 — Session fixation and secure cookies
+
+After login, you do not re-authenticate on every request — you issue a **session** and the browser returns it via cookie. That cached identity is now a target.
+
+<VocabTooltip slug="session-fixation">Session fixation</VocabTooltip> is the attack where the
+attacker *chooses the session id in advance.* They obtain a valid session id, plant it in the
+victim's browser (via a crafted link, an XSS write, or a `Set-Cookie` from a subdomain they
+control), and wait. The victim logs in. If the server keeps the *same* session id across the login
+boundary, the attacker's pre-known id is now authenticated, and the attacker rides it in.
+
+The defense is one line of discipline: **regenerate the session id at every privilege change** — on login, and again on logout and on step-up authentication. The pre-auth id the attacker planted is discarded; the post-auth id is freshly random and unknown to them.
+
+```typescript
+// session.js — defeat session fixation by regenerating on login.
+// Pattern shown with express-session; the principle is framework-independent.
+
+async function handleLogin(req, res) {
+  const user = await authenticate(req.body.email, req.body.password);
+  if (!user) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  // CRITICAL: rotate the session id across the auth boundary. Any id the victim
+  // was carrying before login (possibly planted by an attacker) is now invalid.
+  await new Promise<void>((resolve, reject) => {
+    req.session.regenerate((err) => (err ? reject(err) : resolve()));
+  });
+
+  req.session.userId = user.id; // bind identity to the FRESH session id
+  res.json({ ok: true });
+}
+```
+
+The cookie carrying the session id needs three flags, each closing a different theft vector:
+
+- **<VocabTooltip slug="httponly">HttpOnly</VocabTooltip>** — the cookie is invisible to `document.cookie`, so an XSS payload cannot read and exfiltrate the session id.
+- **Secure** — the cookie is sent only over HTTPS, so it never traverses a network where it could be sniffed in plaintext.
+- **<VocabTooltip slug="samesite">SameSite</VocabTooltip>** — `Lax` or `Strict` stops the browser from attaching the cookie to cross-site requests, which blunts CSRF.
+
+```typescript
+// cookie-flags.js — the secure session cookie configuration.
+const SESSION_COOKIE = {
+  httpOnly: true, // JS (and thus XSS) cannot read it
+  secure: true, // HTTPS only — never sent in cleartext
+  sameSite: "lax" as const, // not sent on cross-site navigations → CSRF defense
+  maxAge: 1000 * 60 * 30, // 30-minute idle lifetime; shorter = smaller theft window
+  path: "/",
+  // Do NOT set `domain` to a parent domain unless required — it widens the
+  // cookie's reach to every subdomain, including any an attacker might control.
+};
+```
+
+ASVS pulls these together: session ids must be generated by the framework's CSPRNG, rotated on authentication, invalidated server-side on logout, and carried only on `HttpOnly` + `Secure` cookies with an appropriate `SameSite` value.
+
+## Part 6 — Authorization: RBAC vs ABAC
+
+Authentication is now solid. Authorization is the second, independently-failing system — OWASP ranks Broken Access Control as the **#1** category in the 2021 Top 10. Two models dominate.
+
+<VocabTooltip slug="rbac">**RBAC (Role-Based Access Control)**</VocabTooltip> grants permissions to
+*roles*, and assigns *roles* to users. "Editors can publish articles." It is simple, auditable, and
+correct when access depends on *who* the user is in coarse terms. It struggles when access depends
+on the specific *relationship* between a user and a *resource* — RBAC alone cannot natively express
+"an editor may edit only articles they own," because that is a fact about the resource, not the
+role.
+
+<VocabTooltip slug="abac">**ABAC (Attribute-Based Access Control)**</VocabTooltip> decides from
+*attributes* of the subject, the resource, the action, and the environment. "Permit edit if
+`subject.department == resource.department` and `resource.status != 'locked'` and `now` is within
+business hours." ABAC expresses fine-grained, contextual, relationship-aware rules — at the cost of
+more complexity and harder auditing.
+
+The practical answer is usually **RBAC for coarse capability, ABAC-style checks for resource ownership and context.** And the rule that overrides the model choice:
+
+> Enforce authorization on the server, at the resource, on every request. Never trust a role or permission asserted by the client, hidden in the UI, or carried unverified in a token. A "hidden" admin button is not access control; the check that runs when the request reaches the server is.
+
+```typescript
+// authorize.js — RBAC capability + ABAC ownership, enforced server-side.
+
+type Role = "viewer" | "editor" | "admin";
+interface User {
+  id: string;
+  role: Role;
+  departmentId: string;
+}
+interface Article {
+  id: string;
+  authorId: string;
+  departmentId: string;
+  locked: boolean;
+}
+
+/** Can `user` edit `article`? Coarse capability (RBAC) AND a resource-level
+ *  ownership/context check (ABAC). Both must pass. */
+function canEditArticle(user: User, article: Article): boolean {
+  // RBAC: only these roles have the edit capability at all.
+  const hasEditCapability = user.role === "editor" || user.role === "admin";
+  if (!hasEditCapability) return false;
+
+  // ABAC: an editor may edit only within their department and only if unlocked.
+  // An admin bypasses ownership but still cannot edit a locked article.
+  if (user.role === "admin") return !article.locked;
+  return article.departmentId === user.departmentId && !article.locked;
+}
+```
+
+## Practice
+
+Fix a deliberately vulnerable JWT verifier. The function below is the kind that ships when "it works in the happy path" was the only test — it trusts the token's own header and skips audience and expiry. Rewrite `verifyToken` to be safe.
+
+<SandboxExercise
+  language="typescript"
+  instructions="The verifyToken function below is vulnerable: it lets the token's header choose the algorithm (enabling alg=none and RS256→HS256 confusion) and it never checks audience or expiry. Rewrite it to (1) pin an algorithm allowlist of exactly ['RS256'], (2) require audience 'https://api.example.com', (3) require issuer 'https://auth.example.com', and (4) keep expiry checking on. The simulated verify(token, key, options) provided in the sandbox throws if the token's alg is not in options.algorithms, if options.audience does not match the token's aud claim, if options.issuer does not match iss, or if the token is expired and ignoreExpiration is not set. Make a valid admin token verify and make a forged alg=none token, a wrong-audience token, and an expired token all throw."
+  initialCode={`// Simulated verifier: throws unless options enforce the rules.
+// (Stands in for jsonwebtoken's jwt.verify in this sandbox.)
+function verify(token, key, options) {
+  if (!options || !Array.isArray(options.algorithms)) {
+    return token.payload; // VULNERABLE PATH: no allowlist → header trusted
+  }
+  if (!options.algorithms.includes(token.header.alg)) throw new Error("alg not allowed");
+  if (options.audience && token.payload.aud !== options.audience) throw new Error("bad audience");
+  if (options.issuer && token.payload.iss !== options.issuer) throw new Error("bad issuer");
+  if (!options.ignoreExpiration && token.payload.exp < Date.now() / 1000) throw new Error("expired");
+  return token.payload;
+}
+
+const PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----...";
+
+// VULNERABLE: trusts the token's own header, checks no claims.
+function verifyToken(token) {
+return verify(token, PUBLIC_KEY); // <-- fix this call
+}
+
+// --- test tokens ---
+const now = Math.floor(Date.now() / 1000);
+const good = { header: { alg: "RS256" }, payload: { sub: "u1", role: "admin", aud: "https://api.example.com", iss: "https://auth.example.com", exp: now + 600 } };
+const forgedNone = { header: { alg: "none" }, payload: { sub: "attacker", role: "admin", aud: "https://api.example.com", iss: "https://auth.example.com", exp: now + 600 } };
+const wrongAud = { header: { alg: "RS256" }, payload: { sub: "u1", aud: "https://other.example.com", iss: "https://auth.example.com", exp: now + 600 } };
+const expired = { header: { alg: "RS256" }, payload: { sub: "u1", aud: "https://api.example.com", iss: "https://auth.example.com", exp: now - 10 } };
+
+console.log("good:", verifyToken(good).sub);
+for (const [name, t] of [["forgedNone", forgedNone], ["wrongAud", wrongAud], ["expired", expired]]) {
+try { verifyToken(t); console.log(name, "VERIFIED (BAD)"); }
+catch (e) { console.log(name, "rejected:", e.message); }
+}`}
+  solution={`function verify(token, key, options) {
+if (!options || !Array.isArray(options.algorithms)) {
+return token.payload;
+}
+if (!options.algorithms.includes(token.header.alg)) throw new Error("alg not allowed");
+if (options.audience && token.payload.aud !== options.audience) throw new Error("bad audience");
+if (options.issuer && token.payload.iss !== options.issuer) throw new Error("bad issuer");
+if (!options.ignoreExpiration && token.payload.exp < Date.now() / 1000) throw new Error("expired");
+return token.payload;
+}
+
+const PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----...";
+
+// SECURE: the verifier — not the token — decides the algorithm, and both
+// audience and issuer are pinned. Expiry checking stays on by default.
+function verifyToken(token) {
+return verify(token, PUBLIC_KEY, {
+algorithms: ["RS256"], // rejects alg=none and HS256 confusion
+audience: "https://api.example.com", // rejects cross-service replay
+issuer: "https://auth.example.com", // only our auth server
+// ignoreExpiration omitted → expired tokens are rejected
+});
+}
+
+const now = Math.floor(Date.now() / 1000);
+const good = { header: { alg: "RS256" }, payload: { sub: "u1", role: "admin", aud: "https://api.example.com", iss: "https://auth.example.com", exp: now + 600 } };
+const forgedNone = { header: { alg: "none" }, payload: { sub: "attacker", role: "admin", aud: "https://api.example.com", iss: "https://auth.example.com", exp: now + 600 } };
+const wrongAud = { header: { alg: "RS256" }, payload: { sub: "u1", aud: "https://other.example.com", iss: "https://auth.example.com", exp: now + 600 } };
+const expired = { header: { alg: "RS256" }, payload: { sub: "u1", aud: "https://api.example.com", iss: "https://auth.example.com", exp: now - 10 } };
+
+console.log("good:", verifyToken(good).sub);
+for (const [name, t] of [["forgedNone", forgedNone], ["wrongAud", wrongAud], ["expired", expired]]) {
+try { verifyToken(t); console.log(name, "VERIFIED (BAD)"); }
+catch (e) { console.log(name, "rejected:", e.message); }
+}`}
+testCases={[
+"A valid RS256 admin token with matching audience and issuer verifies and exposes its subject",
+"A token with alg=none is rejected because 'none' is not in the algorithm allowlist",
+"A token whose aud is a different service is rejected for bad audience",
+"An expired token is rejected because expiry checking is left on",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A code review shows the user table stores passwords as `SHA-256(password)` with a per-user salt. SHA-256 is a modern, well-regarded hash. Why is this still a security defect under OWASP / NIST 800-63B guidance?",
+      options: [
+        "SHA-256 is broken; collisions make password cracking trivial",
+        "The salt should be global, not per-user, so SHA-256 would be fine with one change",
+        "SHA-256 is a FAST general-purpose hash — billions of guesses per second on a GPU. Password storage requires a deliberately slow, memory-hard function (Argon2id, or bcrypt as a fallback) so that an attacker who steals the database faces an infeasible offline guessing rate. The salt defeats rainbow tables but does nothing to slow per-guess work; the fix is the algorithm class, not the salt.",
+        "Nothing is wrong; per-user salted SHA-256 is the current recommendation",
+      ],
+      correct: 2,
+      explanation:
+        "Password hashing exists for the post-breach scenario: the attacker has the hashes and unlimited offline guesses. A salt makes precomputed rainbow tables useless but leaves the per-guess cost at SHA-256 speed — billions per second on commodity GPUs. The defense is a memory-hard, deliberately slow function: Argon2id (OWASP's first choice, e.g. 19 MiB / t=2 / p=1) or bcrypt (cost ≥ 10) as the fallback. SHA-256 is not broken and collisions are irrelevant here; the defect is using a fast hash where a slow, memory-hard one is required.",
+      terms: ["argon2id", "bcrypt", "password-hashing", "memory-hard"],
+    },
+    {
+      question:
+        "An access-control bug lets an attacker forge an admin JWT. The verifier code is `jwt.verify(token, publicKey)` with no options object. Which TWO distinct attacks does this single line enable, and what one change closes both?",
+      options: [
+        "It enables SQL injection and XSS; the fix is to sanitize the token string before verifying",
+        "It enables (1) the alg=none attack — the verifier reads `alg` from the token header, so a token claiming `alg:none` skips signature checking — and (2) RS256→HS256 algorithm confusion — the attacker signs with HS256 using the known PUBLIC key as the HMAC secret and the verifier honors the header. Pinning `algorithms: ['RS256']` so the VERIFIER (not the token) dictates the algorithm closes both.",
+        "It enables session fixation and CSRF; the fix is to set the SameSite cookie flag",
+        "It enables only alg=none; algorithm confusion requires a separate, unrelated fix",
+      ],
+      correct: 1,
+      explanation:
+        "Both attacks share one root cause: letting the token's own header choose the verification algorithm. With no allowlist, a token with `alg:none` and an empty signature is accepted unsigned (alg=none), and a token signed with HS256 using the issuer's public key as the HMAC secret validates (RS256→HS256 confusion, because the public key is public). Pinning `algorithms: ['RS256']` makes the verifier — not the attacker-controlled header — decide the algorithm, rejecting both. (Audience/issuer/expiry checks are still separately required.)",
+      terms: ["jwt", "alg-none", "algorithm-confusion"],
+    },
+    {
+      question:
+        "Your login handler authenticates the user, then sets `req.session.userId = user.id` and returns — without calling `req.session.regenerate()`. The session cookie already has HttpOnly, Secure, and SameSite=Lax set. Which attack remains open, and why do the cookie flags not stop it?",
+      options: [
+        "None — HttpOnly, Secure, and SameSite together fully protect the session",
+        "Session fixation: an attacker who planted a known session id in the victim's browser before login keeps that SAME id after login, because the handler never rotated it across the auth boundary. The cookie flags defend against theft and CSRF of the cookie, but fixation needs the id to CHANGE at the privilege transition. The fix is to regenerate the session id on login (and on logout / step-up).",
+        "Algorithm confusion, because the session token is an unverified JWT",
+        "MFA fatigue, which is unrelated to session handling",
+      ],
+      correct: 1,
+      explanation:
+        "Session fixation works by fixing the session id BEFORE login and riding it AFTER. HttpOnly (blocks XSS reads), Secure (blocks cleartext sniffing), and SameSite (blunts CSRF) all protect a cookie's confidentiality and cross-site use — but none of them force the id to change at login. The specific defense is regenerating the session id at every privilege change, which discards any pre-auth id the attacker planted. Cookie flags and id rotation are complementary, not substitutes.",
+      terms: ["session-fixation", "httponly", "samesite"],
+    },
+    {
+      question:
+        "A single-page app team proposes using OAuth's implicit flow because 'it's simpler — the token comes straight back in the redirect.' Per OAuth 2.1, what is the correct response?",
+      options: [
+        "Approve it; implicit flow is the OAuth 2.1 recommendation for SPAs",
+        "Reject it: OAuth 2.1 REMOVED the implicit flow because it returns the access token directly in the redirect URL, where it leaks into browser history, logs, and Referer headers with no exchange step to protect it. The correct flow for all client types, including SPAs, is authorization-code WITH PKCE — a short-lived single-use code is exchanged for tokens, and PKCE's code_verifier makes a stolen code unusable.",
+        "Approve it but add the Secure cookie flag to the returned token",
+        "Reject it and require the resource-owner password-credentials (ROPC) grant instead",
+      ],
+      correct: 1,
+      explanation:
+        "OAuth 2.1 consolidates security best-current-practice and removes the implicit flow, which exposed the access token in the redirect URL fragment (browser history, server logs, Referer leakage) with no protected exchange. Authorization-code-with-PKCE supersedes it for every client type, including SPAs: the client commits to a SHA-256 code_challenge up front and proves possession of the code_verifier at redemption, so an intercepted authorization code is useless. ROPC is also discouraged in 2.1 (it hands the user's password to the app), so it is not the answer either.",
+      terms: ["oauth-2-1", "authorization-code-flow", "pkce"],
+    },
+  ]}
+/>
+
+## What you learned
+
+- **Passwords get a slow, memory-hard hash — never a fast one.** Argon2id (OWASP baseline ~19 MiB / t=2 / p=1) is the first choice; bcrypt (cost ≥ 10, with the 72-byte trap handled) is the fallback. NIST 800-63B sets the policy: long passwords, no composition rules, no forced rotation, breach-blocklist screening.
+- **MFA factors differ by phishing resistance.** TOTP and SMS are bearer secrets a real-time phishing proxy can relay; WebAuthn/passkeys bind the signature to the site's origin and cannot be phished. Require a phishing-resistant factor for high-value accounts.
+- **OAuth 2.1 means authorization-code with PKCE — implicit flow is gone.** PKCE's `code_verifier`/`code_challenge` makes a stolen authorization code unusable; exact-match redirect URIs and a verified `state` close the remaining holes.
+- **JWT verification must distrust the token's own header.** Pin an algorithm allowlist (defeats `alg=none` and RS256↔HS256 confusion) and validate `aud`, `iss`, and `exp` on every request. `decode()` never verifies.
+- **Sessions must be regenerated at every privilege change**, and the cookie carrying them needs HttpOnly + Secure + SameSite to resist XSS theft, sniffing, and CSRF.
+- **Authorization is its own system** (OWASP's #1 risk): RBAC for coarse capability, ABAC-style checks for ownership and context, always enforced server-side at the resource.
+
+## What's next
+
+Lesson S4 (Applied Cryptography) goes one layer beneath the password hash you configured here: hashes versus MACs versus KDFs, authenticated encryption (AEAD) and nonce discipline, key management and rotation, and the FIPS boundary — crypto used correctly, never invented. The Argon2id and JWT-signature reasoning from this lesson is the on-ramp; S4 makes the primitives underneath them precise. The Phase S capstone (S8) then has you threat-model and harden a vulnerable service end to end, hash-anchored through `/verify`.
