@@ -2,7 +2,7 @@
 
 > A public-facing view of where DURA is and where it's going. Updated when reality changes — not on a fixed cadence.
 >
-> Last updated: 2026-05-28
+> Last updated: 2026-06-16
 
 DURA is built in the open. This roadmap reflects the actual state of the work, including what's shipped, what's mid-flight, and what's deliberately deferred. Anything not on this list either hasn't been planned yet or isn't on the table.
 
@@ -12,7 +12,9 @@ DURA is built in the open. This roadmap reflects the actual state of the work, i
 
 These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 
-### Curriculum (406 lessons across 10 phases)
+### Curriculum — a 10-phase core path + 5 specialization tracks
+
+The linear core path (zero → CTO):
 
 | Phase | Focus                    | Lessons | Status  |
 | ----- | ------------------------ | ------- | ------- |
@@ -22,10 +24,20 @@ These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 | 3     | CS Fundamentals          | 40      | ✅ Live |
 | 4     | Backend Engineering      | 45      | ✅ Live |
 | 5     | Systems Engineering      | 35      | ✅ Live |
-| 6     | AI/ML Engineering        | 50      | ✅ Live |
+| 6     | AI/ML Engineering        | 62      | ✅ Live |
 | 7     | Advanced Systems         | 30      | ✅ Live |
 | 8     | Professional Practice    | 35      | ✅ Live |
 | 9     | CTO Track                | 60      | ✅ Live |
+
+**Specialization tracks** — post-Phase-5 deep dives, each a code-teaching discipline with a `/verify`-anchored capstone and a matching career path:
+
+| Phase | Focus                      | Lessons | Status  |
+| ----- | -------------------------- | ------- | ------- |
+| E     | Embedded / Firmware        | 8       | ✅ Live |
+| H     | Hardware Verification      | 8       | ✅ Live |
+| M     | Manufacturing              | 12      | ✅ Live |
+| R     | Robotics                   | 8       | ✅ Live |
+| Q     | Quantitative / HFT Systems | 8       | ✅ Live |
 
 ### Platform
 
@@ -43,6 +55,7 @@ These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 - 6 study modes (Standard, Bite-sized, Focus, Sprint, Review, Challenge)
 - Accessibility: high contrast, dyslexia font, reduced motion, site-wide font sizing
 - WCAG 2.2 AA — component-level axe-core coverage on interactive surfaces
+- Performance — lesson-page client JS trimmed ~29% (Framer Motion tree-shaking + lazy smooth-scroll); instant navigation via Link prefetch + bfcache + PWA precache
 
 ### Standards & compliance (2026-Q2 compliance sprint, closed 2026-04-26)
 
@@ -77,6 +90,8 @@ Roughly in priority order. Dates are intent, not commitments.
 
 - Discovery activities for Phases 3–9 — Pathfinding, Race Condition, Embedding Galaxy, and GC Visualizer all shipped 2026-05-28
 - Standards-alignment audit across 418 lessons — automated reconciliation against ACM CS2023, SWEBOK v4, SFIA 9, CSTA K-12, AP CS Principles/A, ISTE (audit script shipped 2026-05-28; first run found one missing module registration, fixed in the same commit)
+- **Phase S — Security Engineering** — eight defensive, standards-anchored lessons (threat modeling → OWASP Top 10 in code → authn/authz → applied cryptography → TLS/network → secure SDLC + supply chain → detection & incident response → a hardened-service capstone), anchored to OWASP ASVS, MITRE ATT&CK, and NIST. Adds a Security Engineer career path. 🚧 In progress.
+- **One-press install** — reduce PWA installation to a single in-app button across browsers/platforms. 🚧 Planned.
 
 ### Learning surfaces
 
