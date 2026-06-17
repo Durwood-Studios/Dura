@@ -10,6 +10,10 @@ import {
 import { syncGoals, fetchGoals } from "./queries/goals";
 import { syncCertificates, fetchCertificates } from "./queries/certificates";
 import { batchSyncAnalytics, syncXPEvents } from "./queries/analytics";
+import { syncSandboxSaves, fetchSandboxSaves } from "./queries/sandbox";
+import { syncAssessmentResults, fetchAssessmentResults } from "./queries/assessments";
+import { syncTutorialProgress, fetchTutorialProgress } from "./queries/tutorial";
+import { syncDojoSessions, fetchDojoSessions } from "./queries/dojo";
 import { isAnalyticsEnabled } from "@/lib/analytics/consent-gate";
 import {
   getAllEncryptedFlashcards,
@@ -24,6 +28,8 @@ import {
 import type { LessonProgress } from "@/types/curriculum";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
 import type { Goal } from "@/types/goal";
+import type { SandboxSave } from "@/types/sandbox";
+import type { TutorialProgress } from "@/types/tutorial";
 
 interface SyncResult {
   pushed: number;
@@ -161,6 +167,34 @@ export async function pushChanges(): Promise<number> {
     pushed += allXP.length;
   }
 
+  // Push sandbox saves (LWW by updatedAt on pull)
+  const allSandbox = await db.getAll("sandbox-saves");
+  if (allSandbox.length > 0) {
+    await syncSandboxSaves(userId, allSandbox);
+    pushed += allSandbox.length;
+  }
+
+  // Push assessment results (append-only, immutable)
+  const allAssessments = await db.getAll("assessment-results");
+  if (allAssessments.length > 0) {
+    await syncAssessmentResults(userId, allAssessments);
+    pushed += allAssessments.length;
+  }
+
+  // Push tutorial progress (LWW by lastActiveAt on pull)
+  const allTutorial = await db.getAll("tutorial-progress");
+  if (allTutorial.length > 0) {
+    await syncTutorialProgress(userId, allTutorial);
+    pushed += allTutorial.length;
+  }
+
+  // Push dojo sessions (append-only, immutable)
+  const allDojo = await db.getAll("dojo-sessions");
+  if (allDojo.length > 0) {
+    await syncDojoSessions(userId, allDojo);
+    pushed += allDojo.length;
+  }
+
   return pushed;
 }
 
@@ -242,6 +276,54 @@ export async function pullChanges(): Promise<{ pulled: number; conflicts: number
     const local = await db.get("certificates", remote.id);
     if (!local) {
       await db.put("certificates", remote);
+      pulled++;
+    }
+  }
+
+  // Pull sandbox saves — LWW by updatedAt
+  const remoteSandbox = await fetchSandboxSaves(userId);
+  for (const remote of remoteSandbox) {
+    const local = await db.get("sandbox-saves", remote.id);
+    if (local) {
+      const merged = mergeSandboxSave(local, remote);
+      if (merged !== local) conflicts++;
+      await db.put("sandbox-saves", merged);
+    } else {
+      await db.put("sandbox-saves", remote);
+    }
+    pulled++;
+  }
+
+  // Pull assessment results — G-Set by id (immutable; add missing only)
+  const remoteAssessments = await fetchAssessmentResults(userId);
+  for (const remote of remoteAssessments) {
+    const local = await db.get("assessment-results", remote.id);
+    if (!local) {
+      await db.put("assessment-results", remote);
+      pulled++;
+    }
+  }
+
+  // Pull tutorial progress — LWW by lastActiveAt
+  const remoteTutorial = await fetchTutorialProgress(userId);
+  for (const remote of remoteTutorial) {
+    const local = await db.get("tutorial-progress", remote.id);
+    if (local) {
+      const merged = mergeTutorialProgress(local, remote);
+      if (merged !== local) conflicts++;
+      await db.put("tutorial-progress", merged);
+    } else {
+      await db.put("tutorial-progress", remote);
+    }
+    pulled++;
+  }
+
+  // Pull dojo sessions — G-Set by id (immutable; add missing only)
+  const remoteDojo = await fetchDojoSessions(userId);
+  for (const remote of remoteDojo) {
+    const local = await db.get("dojo-sessions", remote.id);
+    if (!local) {
+      await db.put("dojo-sessions", remote);
       pulled++;
     }
   }
@@ -350,6 +432,27 @@ export function mergeGoal(local: Goal, remote: Goal): Goal {
     achievedAt,
     deadline: local.deadline ?? remote.deadline,
   };
+}
+
+/**
+ * Merge sandbox saves: whole-record LWW keyed by `updatedAt`. Strict `>` keeps
+ * mergeSandboxSave(x, x) === x (idempotent — the unchanged remote is ignored).
+ */
+export function mergeSandboxSave(local: SandboxSave, remote: SandboxSave): SandboxSave {
+  return remote.updatedAt > local.updatedAt ? remote : local;
+}
+
+/**
+ * Merge tutorial progress: whole-record LWW keyed by `lastActiveAt`. A tutorial's
+ * fields (currentStep, checkpoints, completedAt) advance together as the learner
+ * works, so the most-recently-active record is authoritative. Strict `>` keeps
+ * mergeTutorialProgress(x, x) === x (idempotent).
+ */
+export function mergeTutorialProgress(
+  local: TutorialProgress,
+  remote: TutorialProgress
+): TutorialProgress {
+  return remote.lastActiveAt > local.lastActiveAt ? remote : local;
 }
 
 /** Return the greater of two nullable numbers, preferring non-null. */
