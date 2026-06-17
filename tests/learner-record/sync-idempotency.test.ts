@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { mergeFlashcard, mergeGoal, mergeProgress, mergeReviewLog } from "@/lib/supabase/sync";
+import {
+  mergeFlashcard,
+  mergeGoal,
+  mergeProgress,
+  mergeReviewLog,
+  mergeSandboxSave,
+  mergeTutorialProgress,
+} from "@/lib/supabase/sync";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
 import type { LessonProgress } from "@/types/curriculum";
 import type { Goal } from "@/types/goal";
+import type { SandboxSave } from "@/types/sandbox";
+import type { TutorialProgress } from "@/types/tutorial";
 
 const baseCard: FlashCard = {
   id: "card-1",
@@ -244,6 +253,83 @@ describe("LFLRS-R6 — sync idempotency contract", () => {
       const thrice = applyRemote(twice, remote);
       expect(hash(once)).toBe(hash(twice));
       expect(hash(twice)).toBe(hash(thrice));
+    });
+  });
+
+  describe("mergeSandboxSave (whole-record LWW by updatedAt)", () => {
+    const baseSave: SandboxSave = {
+      id: "sb-1",
+      title: "scratch",
+      language: "typescript",
+      code: "const x = 1;",
+      createdAt: 1_000_000,
+      updatedAt: 1_500_000,
+    };
+
+    it("keeps the newer local save over an older remote", () => {
+      const newerLocal: SandboxSave = { ...baseSave, updatedAt: 2_000_000, code: "local" };
+      const olderRemote: SandboxSave = { ...baseSave, updatedAt: 1_000_000, code: "remote" };
+      expect(mergeSandboxSave(newerLocal, olderRemote).code).toBe("local");
+    });
+
+    it("takes the remote when strictly newer", () => {
+      const olderLocal: SandboxSave = { ...baseSave, updatedAt: 1_000_000, code: "local" };
+      const newerRemote: SandboxSave = { ...baseSave, updatedAt: 2_000_000, code: "remote" };
+      expect(mergeSandboxSave(olderLocal, newerRemote).code).toBe("remote");
+    });
+
+    it("treats equal updatedAt as a no-op (preserves local) — idempotency", () => {
+      const local: SandboxSave = { ...baseSave, updatedAt: 1_500_000, code: "local" };
+      const remoteSameTs: SandboxSave = { ...baseSave, updatedAt: 1_500_000, code: "remote" };
+      expect(mergeSandboxSave(local, remoteSameTs)).toBe(local);
+    });
+
+    it("is idempotent under repeated application", () => {
+      const local: SandboxSave = { ...baseSave, updatedAt: 1_000_000 };
+      const remote: SandboxSave = { ...baseSave, updatedAt: 2_000_000, code: "remote" };
+      const once = mergeSandboxSave(local, remote);
+      const twice = mergeSandboxSave(once, remote);
+      expect(once).toEqual(twice);
+    });
+  });
+
+  describe("mergeTutorialProgress (whole-record LWW by lastActiveAt)", () => {
+    const baseTut: TutorialProgress = {
+      id: "tut-1",
+      slug: "build-a-blog",
+      type: "tutorial",
+      currentStep: 1,
+      totalSteps: 10,
+      checkpoints: [],
+      startedAt: 1_000_000,
+      completedAt: null,
+      lastActiveAt: 1_500_000,
+    };
+
+    it("keeps the most-recently-active record", () => {
+      const newerLocal: TutorialProgress = { ...baseTut, lastActiveAt: 2_000_000, currentStep: 7 };
+      const olderRemote: TutorialProgress = { ...baseTut, lastActiveAt: 1_000_000, currentStep: 3 };
+      expect(mergeTutorialProgress(newerLocal, olderRemote).currentStep).toBe(7);
+      const merged = mergeTutorialProgress(olderRemote, newerLocal);
+      expect(merged.currentStep).toBe(7);
+    });
+
+    it("treats equal lastActiveAt as a no-op (preserves local) — idempotency", () => {
+      const local: TutorialProgress = { ...baseTut, lastActiveAt: 1_500_000, currentStep: 4 };
+      const remoteSameTs: TutorialProgress = {
+        ...baseTut,
+        lastActiveAt: 1_500_000,
+        currentStep: 9,
+      };
+      expect(mergeTutorialProgress(local, remoteSameTs)).toBe(local);
+    });
+
+    it("is idempotent under repeated application", () => {
+      const local: TutorialProgress = { ...baseTut, lastActiveAt: 1_000_000 };
+      const remote: TutorialProgress = { ...baseTut, lastActiveAt: 2_000_000, currentStep: 8 };
+      const once = mergeTutorialProgress(local, remote);
+      const twice = mergeTutorialProgress(once, remote);
+      expect(once).toEqual(twice);
     });
   });
 });
