@@ -10,7 +10,10 @@ import {
   Accessibility,
   Keyboard,
   Check,
+  User,
+  ChevronRight,
 } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 import { usePreferencesStore } from "@/stores/preferences";
 import { ThemeToggle } from "@/components/providers/ThemeToggle";
 import { clearAllData } from "@/lib/clearAllData";
@@ -59,6 +62,66 @@ const SHORTCUTS = [
   { keys: "1-4", action: "Rate flashcard (Again/Hard/Good/Easy)" },
 ];
 
+interface SettingsUser {
+  name: string | null;
+  email: string;
+  avatarUrl: string | null;
+}
+
+function ProfileCard(): React.ReactElement {
+  const [user, setUser] = useState<SettingsUser | null>(null);
+
+  useEffect(() => {
+    async function load(): Promise<void> {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user: sbUser },
+        } = await supabase.auth.getUser();
+        if (sbUser) {
+          setUser({
+            name: (sbUser.user_metadata?.full_name as string | null) ?? null,
+            email: sbUser.email ?? "",
+            avatarUrl: (sbUser.user_metadata?.avatar_url as string | null) ?? null,
+          });
+        }
+      } catch {
+        // Supabase not configured
+      }
+    }
+    void load();
+  }, []);
+
+  return (
+    <Link
+      href="/settings/profile"
+      className="dura-card group flex items-center gap-4 p-4 transition hover:border-[var(--color-accent)] sm:p-5"
+    >
+      {/* Avatar */}
+      <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full bg-emerald-500/10">
+        {user?.avatarUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={user.avatarUrl} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <User className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+        )}
+      </div>
+
+      {/* Info */}
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-semibold text-[var(--color-text-primary)] group-hover:text-[var(--color-accent)]">
+          {user?.name ?? "Profile"}
+        </p>
+        <p className="truncate text-xs text-[var(--color-text-muted)]">
+          {user?.email ?? "Edit name, avatar, and bio"}
+        </p>
+      </div>
+
+      <ChevronRight className="h-4 w-4 shrink-0 text-[var(--color-text-muted)] transition group-hover:text-[var(--color-accent)]" />
+    </Link>
+  );
+}
+
 export function SettingsClient(): React.ReactElement {
   const prefs = usePreferencesStore((s) => s.prefs);
   const update = usePreferencesStore((s) => s.update);
@@ -99,6 +162,9 @@ export function SettingsClient(): React.ReactElement {
 
   return (
     <div className="flex flex-col gap-8">
+      {/* ── Profile card ─────────────────────────────────────────────── */}
+      <ProfileCard />
+
       {/* ── Appearance ──────────────────────────────────────────────── */}
       <Section title="Appearance">
         <SettingRow label="Language" hint="DURA's interface language">
