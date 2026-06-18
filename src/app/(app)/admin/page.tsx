@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import dynamic from "next/dynamic";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { readAdminEmails } from "@/lib/admin";
 
 const AdminDashboard = dynamic(() =>
   import("@/components/admin/AdminDashboard").then((m) => m.AdminDashboard)
@@ -19,12 +20,18 @@ export default async function AdminPage(): Promise<React.ReactElement> {
     notFound();
   }
 
-  // Env flag alone is not a security gate — require an authenticated session too.
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) {
+
+  if (!user?.email) {
+    notFound();
+  }
+
+  // Check email against .admin file (server-side only — never sent to client)
+  const adminEmails = readAdminEmails();
+  if (adminEmails.length > 0 && !adminEmails.includes(user.email.toLowerCase())) {
     notFound();
   }
 
