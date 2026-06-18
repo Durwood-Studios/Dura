@@ -6,7 +6,22 @@ import { NextResponse, type NextRequest } from "next/server";
  * Everything else is protected — unauthenticated requests are redirected
  * to /auth/sign-in at the middleware layer (before any page renders).
  */
-const PUBLIC_PREFIXES = ["/auth", "/discover", "/privacy", "/terms", "/open-source", "/api"];
+const PUBLIC_PREFIXES = [
+  "/auth", // sign-in, sign-up, OAuth callback
+  "/about",
+  "/diagnostic-demo",
+  "/discover",
+  "/how-it-works",
+  "/install",
+  "/open-source",
+  "/prescription-demo",
+  "/privacy",
+  "/standards-watch",
+  "/standards",
+  "/terms",
+  "/offline", // PWA offline fallback
+  "/api",
+];
 
 function isPublicPath(pathname: string): boolean {
   if (pathname === "/") return true;

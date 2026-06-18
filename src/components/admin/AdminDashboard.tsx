@@ -15,7 +15,9 @@ import {
   RefreshCw,
   Check,
   AlertTriangle,
+  MessageSquare,
 } from "lucide-react";
+import type { FeedbackEntry } from "@/types/feedback";
 import {
   PHASES,
   TOTAL_LESSONS,
@@ -51,6 +53,8 @@ const IDB_STORES = [
   "certificates",
   "xp-events",
   "tutorial-progress",
+  "dojo-sessions",
+  "feedback",
 ] as const;
 
 /** Format a timestamp as relative time ("2m ago", "1h ago", etc.) */
@@ -117,6 +121,7 @@ function Section({
 export function AdminDashboard(): React.ReactElement {
   const [storeCounts, setStoreCounts] = useState<Record<string, number>>({});
   const [analyticsEvents, setAnalyticsEvents] = useState<AnalyticsEvent[]>([]);
+  const [feedbackEntries, setFeedbackEntries] = useState<FeedbackEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isClearing, setIsClearing] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -139,6 +144,13 @@ export function AdminDashboard(): React.ReactElement {
         setAnalyticsEvents(events.slice(-50).reverse());
       } catch {
         setAnalyticsEvents([]);
+      }
+
+      try {
+        const feedback = await db.getAll("feedback");
+        setFeedbackEntries(feedback.sort((a, b) => b.createdAt - a.createdAt).slice(0, 100));
+      } catch {
+        setFeedbackEntries([]);
       }
     } catch (error) {
       console.error("[AdminDashboard] Failed to load IDB data:", error);
@@ -284,6 +296,48 @@ export function AdminDashboard(): React.ReactElement {
                     </td>
                     <td className="max-w-xs truncate py-2 font-mono text-xs text-[var(--color-text-secondary)]">
                       {JSON.stringify(evt.properties)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+
+      {/* Feedback */}
+      <Section title="Learner Feedback" icon={MessageSquare}>
+        {isLoading ? (
+          <p className="text-sm text-[var(--color-text-muted)]">Loading…</p>
+        ) : feedbackEntries.length === 0 ? (
+          <p className="text-sm text-[var(--color-text-muted)]">No feedback submitted yet.</p>
+        ) : (
+          <div className="max-h-96 overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-[var(--color-bg-surface)]">
+                <tr className="border-b border-[var(--color-border)] text-left text-[var(--color-text-secondary)]">
+                  <th className="pr-4 pb-2 font-medium">Time</th>
+                  <th className="pr-4 pb-2 font-medium">Category</th>
+                  <th className="pr-4 pb-2 font-medium">Page</th>
+                  <th className="pb-2 font-medium">Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {feedbackEntries.map((f) => (
+                  <tr key={f.id} className="border-b border-[var(--color-border)]/50">
+                    <td className="py-2 pr-4 font-mono text-xs whitespace-nowrap text-[var(--color-text-muted)]">
+                      {relativeTime(f.createdAt)}
+                    </td>
+                    <td className="py-2 pr-4">
+                      <span className="rounded-full bg-[var(--color-accent)]/10 px-2 py-0.5 text-xs font-medium text-[var(--color-accent)]">
+                        {f.category}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4 font-mono text-xs text-[var(--color-text-muted)]">
+                      {f.pageUrl}
+                    </td>
+                    <td className="max-w-xs py-2 text-xs text-[var(--color-text-primary)]">
+                      {f.message}
                     </td>
                   </tr>
                 ))}
