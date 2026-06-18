@@ -7,6 +7,7 @@ import {
   MessageSquare,
   BarChart2,
   Users,
+  HardDrive,
   ShieldAlert,
   LogOut,
 } from "lucide-react";
@@ -18,6 +19,7 @@ const NAV = [
   { href: "/admin/feedback", label: "Feedback", icon: MessageSquare },
   { href: "/admin/analytics", label: "Analytics", icon: BarChart2 },
   { href: "/admin/users", label: "Users", icon: Users },
+  { href: "/admin/local", label: "Local Tools", icon: HardDrive },
 ];
 
 function AdminNav() {
