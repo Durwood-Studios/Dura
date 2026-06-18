@@ -1,0 +1,276 @@
+---
+title: "SystemVerilog Basics for Verification"
+description: "IEEE 1800-2023 in operational terms. The data types, interfaces, and class system that make SV the dominant DV language. What's synthesizable and what isn't, made explicit."
+phase: 11
+module: "h-1-systemverilog-basics"
+order: 1
+estimatedMinutes: 90
+difficulty: 3
+prerequisites:
+  - "5-1-operating-systems"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - systemverilog
+  - logic-type
+  - bit-type
+  - interface
+  - modport
+  - class
+  - mailbox
+  - fork-join
+  - synthesizable-subset
+learningOutcomes:
+  - "Distinguish SV data types: logic, bit, reg, wire, int, longint"
+  - "Use SV interfaces and modports to bundle signals across module boundaries"
+  - "Write an SV class with constructor, methods, and the new() factory"
+  - "Identify what's in the synthesizable subset vs verification-only"
+professionalContext: "SystemVerilog is the dominant hardware-description-language for design verification — used by every major chip company (Intel, AMD, NVIDIA, Apple, Qualcomm, Samsung) and every UVM-based testbench. The IEEE 1800-2023 spec unified Verilog (synthesis) and SystemVerilog (verification) into one language, but the verification subset is what DV engineers spend 95% of their time in. Engineers who know only Verilog can't run modern verification flows; engineers fluent in SV's class-based testbenches lead them."
+thresholdConcept: true
+---
+
+## Where this lesson sits
+
+SystemVerilog is two languages sharing one syntax:
+
+- A **synthesizable subset** used for RTL design (parts of `module`, `assign`, `always_ff`, `always_comb`).
+- A **verification subset** that's a full object-oriented language with classes, dynamic arrays, queues, mailboxes, and randomization (the topic of H3).
+
+Most DV engineers work in the verification subset 95% of the time. This lesson grounds that subset.
+
+The IEEE 1800-2023 spec unified Verilog 2005 and the original SystemVerilog 2005 into one standard. Subsequent revisions (2009, 2012, 2017, 2023) added incremental features. The 2023 version is the current reference.
+
+## Data types that aren't in Verilog
+
+Verilog has `wire` and `reg`. SystemVerilog adds a cleaner set:
+
+```systemverilog
+logic       a;          // 4-state (0, 1, X, Z) — replaces wire AND reg
+bit         b;          // 2-state (0, 1) — faster sim
+int         i;          // 32-bit 2-state signed
+longint     l;          // 64-bit 2-state signed
+shortint    s;          // 16-bit
+byte        x;          // 8-bit signed
+real        r;          // floating point
+string      msg;        // dynamic string
+
+logic [31:0] word;      // 32-bit logic vector
+logic [7:0][3:0] grid;  // 2D packed array
+int data [];            // dynamic array (verification only)
+int q[$];               // queue (verification only)
+```
+
+The rule of thumb:
+
+- **`logic`** replaces `wire` and `reg` in synthesizable code. Use it everywhere unless you have a specific reason.
+- **`bit`** is faster in simulation (2-state) but won't catch X/Z propagation bugs. Use for testbench-internal types where 4-state isn't needed.
+- **`int`** is convenient for loop counters and testbench variables. Don't use in synthesizable code.
+
+## Interfaces — bundling signals across module boundaries
+
+In Verilog, connecting a 20-signal bus between modules requires 20 named port connections. Every signal repeated three times (module A's port list, module B's port list, the connecting wires). Bug-prone.
+
+SystemVerilog interfaces bundle related signals:
+
+```systemverilog
+interface axi4_lite_if(input logic clk, input logic rst_n);
+    logic        awvalid;
+    logic        awready;
+    logic [31:0] awaddr;
+    logic        wvalid;
+    logic        wready;
+    logic [31:0] wdata;
+    logic [3:0]  wstrb;
+    // ... rest of AXI-Lite
+
+    // Modports define directional views
+    modport master (
+        output awvalid, awaddr, wvalid, wdata, wstrb,
+        input  awready, wready
+    );
+    modport slave (
+        input  awvalid, awaddr, wvalid, wdata, wstrb,
+        output awready, wready
+    );
+endinterface
+```
+
+Modules use the interface as a single port:
+
+```systemverilog
+module my_master(axi4_lite_if.master axi, input logic start);
+    // Inside, access signals via the interface: axi.awvalid <= 1'b1;
+endmodule
+```
+
+Two benefits:
+
+1. **Add a signal** — define it in the interface, every module using it gets it for free.
+2. **Direction enforcement** — modports make compile-time errors when a master tries to drive a slave-only signal.
+
+For testbenches, an interface is the standard handoff between the DUT and the UVM driver/monitor (Lesson H2).
+
+## Classes — the object system
+
+SystemVerilog has classes. They're the foundation of UVM and constrained-random stimulus:
+
+```systemverilog
+class packet;
+    rand bit [7:0] data;
+    rand bit [3:0] dest;
+    int           tag;
+
+    function new(int t = 0);
+        tag = t;
+    endfunction
+
+    function void print();
+        $display("packet: tag=%0d data=0x%h dest=%0d", tag, data, dest);
+    endfunction
+
+    function void copy(packet src);
+        this.data = src.data;
+        this.dest = src.dest;
+        this.tag  = src.tag;
+    endfunction
+endclass
+```
+
+Usage:
+
+```systemverilog
+packet pkt = new(42);          // Allocates with tag=42
+pkt.randomize();                // Random values for rand fields
+pkt.print();                     // Prints
+```
+
+Class instances live on the heap and are garbage-collected (when the last handle goes out of scope, the object is freed). This is the most important difference from synthesizable Verilog — classes are unsynthesizable; they exist only in simulation.
+
+The `rand` modifier marks fields the randomizer can fill in. Lesson H3 dives into constraints.
+
+## fork/join — concurrent processes
+
+A testbench needs to drive stimulus AND monitor responses AND check timing simultaneously. SystemVerilog's `fork/join` does this:
+
+```systemverilog
+initial begin
+    fork
+        // Process 1: drive stimulus
+        drive_stimulus();
+
+        // Process 2: monitor outputs
+        monitor_outputs();
+
+        // Process 3: timeout watchdog
+        begin
+            #10000;
+            $error("Timeout");
+            $finish;
+        end
+    join_any   // Wait for ANY to finish (join_any), ALL (join), or NONE (join_none)
+end
+```
+
+`join_any` is common in testbenches: wait for either the test to complete or the watchdog to fire, whichever comes first. `join_none` returns immediately and the processes continue in the background.
+
+## Mailboxes and queues for inter-process communication
+
+Two processes need to communicate. The synthesizable answer would be a FIFO IP block; the verification answer is a mailbox:
+
+```systemverilog
+mailbox #(packet) mbox = new();    // Holds packet objects, unbounded
+
+// Producer process
+packet pkt = new();
+pkt.randomize();
+mbox.put(pkt);                      // Send
+
+// Consumer process
+packet rx_pkt;
+mbox.get(rx_pkt);                   // Receive (blocks until available)
+```
+
+UVM's TLM (Transaction-Level Modeling) ports are built on this mailbox concept. We'll see them in H2.
+
+Queues `int q[$]` are similar but synchronous — both push and pop are non-blocking:
+
+```systemverilog
+int q[$];
+q.push_back(42);
+q.push_back(7);
+int x = q.pop_front();   // 42
+```
+
+## Synthesizable vs verification — the contract
+
+SystemVerilog's IEEE 1800-2023 standard defines the entire language. But only a SUBSET is synthesizable — the rest is for simulation only.
+
+| Feature                       | Synthesizable           | Verification |
+| ----------------------------- | ----------------------- | ------------ |
+| `logic`, `bit`, `int` vectors | yes                     | yes          |
+| `interface`, `modport`        | yes (with restrictions) | yes          |
+| `class`, `new`                | NO                      | yes          |
+| `mailbox`, `queue`            | NO                      | yes          |
+| `fork/join`                   | restricted              | yes          |
+| `randomize()`                 | NO                      | yes          |
+| `assert`, `cover`             | yes (with care)         | yes          |
+| `$display`, `$finish`         | NO                      | yes          |
+
+The synthesizable subset is what gets turned into actual silicon by the synthesis tool. Anything verification-only is for the testbench — it executes during simulation but never reaches the chip.
+
+DV engineers learn both, with the verification subset being their daily home.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer declares a signal as `bit [31:0] data;` inside an interface used by both an RTL block and a testbench monitor. The simulator reports correct behavior, but production silicon shows the data signal is consistently zero. What's the most likely cause?",
+      options: [
+        "Wrong synthesis tool",
+        "`bit` is a 2-state type (0, 1) — it cannot represent X (unknown) or Z (high-impedance). In simulation, the interface signal works because both ends agree on the type. But for an RTL signal that crosses a clock domain or is driven by an uninitialized register, the silicon may have an unknown initial state that the bit-type simulator couldn't represent — so the simulator showed an erroneous deterministic value where the silicon has X. The fix: use `logic` (4-state) for all interface signals that connect to RTL. `bit` is for verification-internal data only.",
+        "The synthesis tool optimized the signal away",
+        "Interface signals can't be driven",
+      ],
+      correct: 1,
+      explanation:
+        "The 2-state vs 4-state distinction matters at the RTL boundary. A `bit` simulation hides X-propagation bugs that show up in silicon as unknown initial states or contention. Always use `logic` for signals that cross RTL/RTL boundaries. `bit` is appropriate for verification-internal data structures (testbench counters, scoreboard fields) where 4-state semantics aren't needed. The IEEE 1800 spec is explicit about this.",
+    },
+    {
+      question:
+        "Why are SystemVerilog classes considered 'unsynthesizable' even though they have well-defined behavior in simulation?",
+      options: [
+        "Classes are too slow",
+        "Classes allocate on the heap and are garbage-collected — operations that have no physical hardware analog. Silicon has fixed allocation determined at synthesis time. A `new()` call has no meaningful translation to a circuit; neither does dynamic dispatch through a class handle. Classes are powerful for testbench abstractions but exist only in simulation. This is the structural reason UVM testbenches are simulation-only and don't 'become' silicon.",
+        "Synthesis tools don't support OOP",
+        "Classes require runtime memory",
+      ],
+      correct: 1,
+      explanation:
+        "Heap allocation and garbage collection have no hardware analog. Silicon is a fixed circuit determined at synthesis time; runtime allocation isn't a physical operation a chip can perform. Classes enable powerful testbench abstractions in simulation but are structurally unsynthesizable. The 'sim-only' verification subset is large and includes classes, mailboxes, fork/join_any, randomization, and most testbench infrastructure.",
+    },
+    {
+      question:
+        'An engineer wants to verify that an AXI write transaction completes within 10 clock cycles. They write the check inside an initial block as `#10 if (!completed) $error("timeout");`. What\'s structurally wrong with this approach?',
+      options: [
+        "The check itself is fine",
+        "Mixing combinational delay (`#10`) with clock-based timing leads to off-by-one and clock-domain bugs. The correct pattern uses an SVA assertion bound to the clock — `assert property (@(posedge clk) $rose(req) |-> ##[1:10] completed);` which is clock-synchronous, formally verifiable, and integrates with coverage reporting. The delay-based approach also can't be reused across different clock frequencies and doesn't generate proper coverage. SVA is what lesson H6 covers.",
+        "$error should be $fatal",
+        "10 ns is too short for AXI",
+      ],
+      correct: 1,
+      explanation:
+        "The delay-based approach mixes time-based and clock-based semantics in a way that's brittle and clock-frequency-dependent. SystemVerilog Assertions (SVA) provide clock-synchronous property checking that's the right tool: assertions are formally verifiable, integrate with simulation reporting, generate coverage, and are reusable across clock frequencies. Lesson H6 covers SVA in detail. The `#10` style is appropriate only for verification-internal timing (e.g., 'wait 10 ns before starting the next test') — never for protocol checks.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H2 introduces the UVM testbench architecture — driver, monitor, sequencer, agent, scoreboard, environment, test — and shows how the SystemVerilog primitives from this lesson (classes, interfaces, mailboxes) build the canonical UVM testbench structure. IEEE 1800.2-2020 is the standard.

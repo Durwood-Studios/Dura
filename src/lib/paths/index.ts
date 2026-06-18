@@ -234,7 +234,7 @@ export const PATHS: readonly Path[] = [
         rationale: "Systems engineering — OS + networking for real-time work.",
       },
       {
-        phaseId: "r",
+        phaseId: "13",
         scope: "spine",
         rationale: "Robotics standards literacy + ROS 2 + ROS-Industrial.",
       },
@@ -263,7 +263,7 @@ export const PATHS: readonly Path[] = [
       },
       { phaseId: "5", scope: "spine", rationale: "Systems engineering — networking + cloud." },
       {
-        phaseId: "m",
+        phaseId: "14",
         scope: "spine",
         rationale: "Manufacturing standards: QMS, GD&T, ISA-95, OPC UA, IEC 62443.",
       },
@@ -300,9 +300,9 @@ export const PATHS: readonly Path[] = [
         rationale: "Rust fundamentals + performance engineering — directly applicable to embedded.",
       },
       {
-        phaseId: "e",
+        phaseId: "10",
         scope: "spine",
-        rationale: "Phase E — Embedded / Firmware. Eight code-first lessons on ARM Cortex-M.",
+        rationale: "Phase 10 — Embedded / Firmware. Eight code-first lessons on ARM Cortex-M.",
       },
     ],
     status: "scaffold",
@@ -330,9 +330,9 @@ export const PATHS: readonly Path[] = [
         rationale: "Systems engineering — OS internals, hardware abstraction.",
       },
       {
-        phaseId: "h",
+        phaseId: "11",
         scope: "spine",
-        rationale: "Phase H — SystemVerilog + UVM + SVA + UPF, eight lessons.",
+        rationale: "Phase 11 — SystemVerilog + UVM + SVA + UPF, eight lessons.",
       },
     ],
     status: "complete",
@@ -372,10 +372,10 @@ export const PATHS: readonly Path[] = [
         rationale: "Performance engineering — profiling, hot paths, cache lines, microbenchmarks.",
       },
       {
-        phaseId: "q",
+        phaseId: "12",
         scope: "spine",
         rationale:
-          "Phase Q — Quantitative / HFT Systems. Eight code-first lessons from modern C++ to a microsecond order book.",
+          "Phase 12 — Quantitative / HFT Systems. Eight code-first lessons from modern C++ to a microsecond order book.",
       },
     ],
     status: "complete",

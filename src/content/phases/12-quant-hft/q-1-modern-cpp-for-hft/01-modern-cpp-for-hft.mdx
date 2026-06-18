@@ -1,0 +1,423 @@
+---
+title: "Modern C++ for HFT — Move Semantics, Templates, constexpr"
+description: "ISO/IEC 14882:2023 (C++23) features that matter for low-latency: move semantics, perfect forwarding, constexpr, concepts, std::span. The deliberate subset HFT teams write in."
+phase: 12
+module: "q-1-modern-cpp-for-hft"
+order: 1
+estimatedMinutes: 30
+difficulty: 4
+prerequisites:
+  - "1-3-functions"
+  - "3-1-complexity"
+  - "5-1-operating-systems"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - lvalue-rvalue
+  - move-semantics
+  - rvalue-reference
+  - move-constructor
+  - perfect-forwarding
+  - forwarding-reference
+  - std-forward
+  - rvo-nrvo
+  - copy-elision
+  - constexpr
+  - consteval
+  - concepts
+  - sfinae
+  - requires-clause
+  - std-span
+  - zero-cost-abstraction
+  - hot-path
+  - rtti
+learningOutcomes:
+  - "After this lesson you can write a move constructor and explain when the compiler calls it instead of the copy constructor"
+  - "After this lesson you can use perfect forwarding with std::forward to pass arguments through a wrapper without an extra copy"
+  - "After this lesson you can move work to compile time with constexpr and force it with consteval"
+  - "After this lesson you can constrain a template with a concept and explain why it produces a better error than SFINAE"
+  - "After this lesson you can pass a contiguous buffer as a non-owning std::span instead of a pointer-plus-length pair"
+  - "After this lesson you can state which language features HFT teams ban on the hot path and why"
+professionalContext: "HFT and quant trading systems live and die on the tail of the latency distribution — the 99.9th percentile, measured in nanoseconds. A single heap allocation, a missed move, or a virtual dispatch on the order-entry path can cost a fill. Teams at firms like Jane Street, Citadel Securities, Optiver, and Jump write in a deliberately narrowed dialect of C++: they lean hard on move semantics and templates to get abstraction with no runtime cost, push as much computation as possible to compile time with constexpr, and ban exceptions, RTTI, and runtime polymorphism on the hot path. Knowing modern C++ is table stakes for these roles; knowing which subset to write — and which features to refuse — is what separates an interview pass from a no-hire."
+thresholdConcept: false
+---
+
+## Why this lesson exists
+
+In a high-frequency trading system, the code path from "a market-data packet arrived" to "an order left the network card" is the whole business. It runs millions of times a day, and the only number that matters is how long the _slowest_ runs take. Median latency is marketing; the tail is the P&L.
+
+In that world, ordinary C++ habits become bugs. Returning a `std::vector` by value looks innocent — until you learn whether it copied or moved. A `virtual` function looks like good design — until you measure the branch misprediction it costs on every call. Throwing an exception looks like clean error handling — until you discover the compiler kept a slow path alive in your hot loop just in case.
+
+This lesson is the subset of ISO/IEC 14882:2023 — the standard the C++ committee calls **C++23** — that HFT teams actually write in, and the equally important subset they refuse to write on the hot path. Every feature here exists to answer one question: _how do I get the abstraction without paying for it at runtime?_
+
+## First principles: where does the time go?
+
+Before any feature, the mental frame. On a modern CPU, a few operations dominate the latency budget:
+
+- **A heap allocation** (`new`, or a `std::vector` that grows) is hundreds of nanoseconds and can touch a global lock. On the hot path, it is forbidden.
+- **A cache miss** — reading memory that isn't in L1/L2 — is ~100 ns. Data layout matters more than instruction count.
+- **A branch misprediction** — the CPU guessed wrong about which way an `if` went — flushes the pipeline, ~15 ns. A `virtual` call is an indirect branch the CPU often can't predict.
+- **A copy of a large object** is bounded by memory bandwidth — and is pure waste if the source was about to be destroyed anyway.
+
+Modern C++ gives you tools to eliminate the last item entirely (move semantics), to delete work before the program even runs (constexpr), and to build layered abstractions the compiler flattens to nothing (templates). The features below are not academic — each one removes a specific item from that list.
+
+> **Mental model.** Modern C++ for HFT is the art of writing expressive, high-level code that the compiler is _obligated_ to turn into the same machine code you would have written by hand in C. When an abstraction forces the compiler to add runtime work — a copy, an allocation, an indirect jump — you either rewrite it or refuse it.
+
+## Move semantics: stop copying things that are about to die
+
+Start with the oldest waste in C++: copying an object whose original is immediately thrown away.
+
+To make sense of moves you need one distinction. An **lvalue** is an expression that names a persistent object you could take the address of — a variable like `book`. An **rvalue** is a temporary with no lasting name — the result of `make_book()`, or anything you've explicitly marked as expendable. (This is the <VocabTooltip slug="lvalue-rvalue">lvalue/rvalue</VocabTooltip> value-category split.)
+
+Before C++11, a function returning a big object had to copy it. **Move semantics** lets you instead _steal_ the guts of an expiring object — transfer its internal pointer rather than duplicate the data it points to.
+
+The mechanism is the **rvalue reference**, written `T&&`. A `T&&` parameter binds only to rvalues — to temporaries the caller has agreed are expendable.
+
+```cpp
+#include <cstddef>
+#include <cstring>
+#include <utility>   // std::move, std::exchange
+
+// A toy fixed-capacity order buffer that owns a heap block.
+// Real HFT code avoids the heap entirely on the hot path; this owns one
+// so the copy-vs-move difference is visible.
+class OrderBuffer {
+public:
+    explicit OrderBuffer(std::size_t capacity)
+        : data_(new char[capacity]), size_(capacity) {}
+
+    ~OrderBuffer() { delete[] data_; }
+
+    // Copy constructor: DUPLICATES the heap block. Bandwidth-bound, slow.
+    OrderBuffer(const OrderBuffer& other)
+        : data_(new char[other.size_]), size_(other.size_) {
+        std::memcpy(data_, other.data_, size_);
+    }
+
+    // Move constructor: STEALS the pointer, leaves `other` empty but valid.
+    // `noexcept` is load-bearing: std::vector only moves (instead of copying)
+    // its elements on reallocation if their move constructor is noexcept.
+    OrderBuffer(OrderBuffer&& other) noexcept
+        : data_(std::exchange(other.data_, nullptr)),  // take ptr, null the source
+          size_(std::exchange(other.size_, 0)) {}
+
+    std::size_t size() const { return size_; }
+
+private:
+    char* data_;
+    std::size_t size_;
+};
+
+OrderBuffer make_buffer() {
+    OrderBuffer local(4096);
+    return local;   // moved out (or elided — see RVO below), never copied
+}
+```
+
+`std::move` does **not** move anything. It is a cast: it turns an lvalue into an rvalue reference so the move constructor becomes eligible. The work happens in the move constructor you wrote.
+
+```cpp
+OrderBuffer a(4096);
+OrderBuffer b(std::move(a));  // b steals a's block. a is now empty-but-valid.
+// Reading a.size() is fine (it's 0); using a as if it still owned data is a bug.
+```
+
+The contract after a move: the moved-from object is in a _valid but unspecified_ state. You may destroy it or assign to it; you may not assume it still holds its old value.
+
+## RVO: the copy that never happened
+
+Look again at `make_buffer()`. It constructs `local` and returns it. You might expect a move on the way out. Often there is not even a move — the object is built directly in the caller's storage.
+
+This is **copy elision**. Under C++23, the named-return case (returning a named local — historically called **NRVO**) is a permitted optimization the compiler will almost always take. The unnamed case — `return OrderBuffer(4096);` — is _mandatory_ elision since C++17: the standard forbids the compiler from emitting any copy or move there at all.
+
+```cpp
+OrderBuffer guaranteed() {
+    return OrderBuffer(4096);  // C++17+: NO copy, NO move. Built in place. Guaranteed.
+}
+```
+
+> **Mental model.** Returning a large object by value is not a performance problem in modern C++. The compiler either elides the copy entirely (<VocabTooltip slug="rvo-nrvo">RVO/NRVO</VocabTooltip>) or moves it. Writing `return std::move(local);` to "help" actually _hurts_ — it forces a move by turning the named object into an rvalue, defeating NRVO. Trust the elision; do not `std::move` a return value.
+
+## Perfect forwarding: passing arguments through without a copy
+
+A generic wrapper — a logger, a factory, an object pool's `emplace` — needs to accept any arguments and pass them to a constructor _exactly as it received them_. An rvalue argument should stay an rvalue (so it can be moved); an lvalue should stay an lvalue (so it is not stolen out from under the caller).
+
+The tool is the **forwarding reference** (also called a universal reference): a `T&&` where `T` is a template parameter being deduced. It is _not_ the same as a plain rvalue reference, even though it looks identical — the deduction context changes the meaning. It binds to both lvalues and rvalues and remembers which it got.
+
+```cpp
+#include <utility>   // std::forward
+#include <vector>
+
+template <typename T, typename... Args>
+T& emplace_into(std::vector<T>& pool, Args&&... args) {
+    // Args&&... here is a FORWARDING reference (Args is deduced), not an
+    // rvalue reference. std::forward preserves each argument's value category:
+    // rvalues stay movable, lvalues stay copy-only.
+    return pool.emplace_back(std::forward<Args>(args)...);
+}
+```
+
+`std::forward<Args>(args)` is a conditional cast: it yields an rvalue reference when the caller passed an rvalue, and an lvalue reference when the caller passed an lvalue. Using `std::move` here instead would be a bug — it would unconditionally treat _every_ argument as expendable, silently stealing from lvalues the caller still needs.
+
+> The rule of thumb HFT code lives by: **`std::move` on an rvalue reference you own; `std::forward` on a forwarding reference you are passing through.** Move where the type is fixed, forward where the type was deduced.
+
+## constexpr and consteval: delete the work before the program runs
+
+The cheapest computation is the one that already happened at compile time. `constexpr` marks a function or variable as _usable_ in a constant expression — the compiler may evaluate it during compilation if the inputs are known then.
+
+```cpp
+#include <array>
+#include <cstdint>
+
+// Tick sizes for a venue, computed once at compile time into a lookup table.
+// No runtime loop, no initialization order problem, lives in read-only memory.
+constexpr std::array<std::int64_t, 8> make_tick_table() {
+    std::array<std::int64_t, 8> table{};
+    std::int64_t tick = 1;
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        table[i] = tick;
+        tick *= 10;   // 1, 10, 100, ... price increments by decimal band
+    }
+    return table;
+}
+
+constexpr auto kTickTable = make_tick_table();  // built by the compiler, not at startup
+```
+
+C++23 widened `constexpr` substantially — more of the standard library and language is usable in constant expressions than in earlier standards. But `constexpr` only _permits_ compile-time evaluation; if you call the function with runtime inputs, it runs at runtime.
+
+When you want to _guarantee_ compile-time evaluation, use **consteval** (an "immediate function," added in C++20 and available in C++23). A `consteval` function that the compiler cannot evaluate at compile time is a compile error, not a runtime fallback.
+
+```cpp
+// consteval: MUST run at compile time. Encodes a fixed-point price scale so a
+// typo'd exponent fails the build instead of producing a wrong runtime value.
+consteval std::int64_t price_scale(int decimal_places) {
+    std::int64_t scale = 1;
+    for (int i = 0; i < decimal_places; ++i) scale *= 10;
+    return scale;
+}
+
+constexpr std::int64_t kUsdScale = price_scale(4);  // OK: evaluated at compile time
+// int n = read_config(); price_scale(n);           // ERROR: n is not a constant
+```
+
+In HFT this matters because startup-time initialization and runtime branching both cost something. A table baked into the binary has no initialization cost and lives in cache-friendly read-only memory.
+
+## Concepts vs SFINAE: constraining templates without the pain
+
+Templates are how C++ achieves <VocabTooltip slug="zero-cost-abstraction">zero-cost abstraction</VocabTooltip> — code generic over types that compiles down to the same instructions as a hand-specialized version, with no runtime dispatch. But an unconstrained template accepts _any_ type, and a mismatch historically produced a wall of unreadable errors deep inside the template body.
+
+The old way to constrain a template was **SFINAE** — "Substitution Failure Is Not An Error." You wrote machinery (`std::enable_if`) that made the template silently drop out of overload resolution when a type didn't qualify. It worked, but it was write-only code and its errors were notorious.
+
+C++20 introduced **concepts** — named, readable predicates on types — and C++23 keeps them as the standard tool. A concept says, in one place, what a type must support. Compare the two ways to require "a type you can add to itself":
+
+```cpp
+#include <concepts>
+#include <type_traits>
+
+// --- The SFINAE way (pre-C++20): works, but the intent is buried. ---
+template <typename T,
+          typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+T twice_sfinae(T value) { return value + value; }
+
+// --- The concepts way (C++20/23): the constraint IS the signature. ---
+template <std::integral T>          // std::integral is a standard concept
+T twice(T value) { return value + value; }
+
+// Or spell the requirement out with a requires-clause:
+template <typename T>
+    requires std::integral<T> || std::floating_point<T>
+T twice_either(T value) { return value + value; }
+```
+
+When you call `twice("hello")`, the concept version tells you, in plain language, that `const char*` does not satisfy `std::integral` — at the call site. The SFINAE version buries the same failure in a substitution-failure cascade. Same runtime cost (zero — it's all compile time); dramatically better diagnostics and readability. HFT codebases standardized on concepts the moment compilers shipped them, because template-heavy code with bad errors is template-heavy code nobody can maintain.
+
+## std::span: a non-owning view of contiguous memory
+
+A C habit that survives into a lot of C++ is passing a buffer as two arguments: a pointer and a length. The two can disagree. `std::span<T>` (added in C++20, part of C++23) packages them into one object: a non-owning view over a contiguous sequence — a pointer plus a count, with bounds you can query and range-based iteration.
+
+```cpp
+#include <span>
+#include <cstdint>
+#include <cstring>   // std::memcpy
+
+// Parse a fixed-layout market-data message out of a received frame.
+// span owns nothing — it points into a buffer someone else manages,
+// so there is no allocation and no copy. Pass it by value (it's two words).
+std::int32_t read_price(std::span<const std::byte> frame) {
+    // Read through subspan, not raw .data(): subspan() is the bounds-aware
+    // path — it can be checked (and in a debug build will fault on overrun),
+    // whereas frame.data() + 8 throws span's length away and is unchecked.
+    std::int32_t price = 0;
+    std::span<const std::byte> field = frame.subspan(8, sizeof(price));  // price at byte offset 8
+    std::memcpy(&price, field.data(), sizeof(price));
+    return price;
+}
+
+// A std::array, a std::vector, or a raw C array all convert to a span
+// with no copy. The function above works with all three callers unchanged.
+```
+
+`std::span` does not own the memory and does not free it — the lifetime belongs to whatever the span points into. Pass it _by value_: it is small (pointer + size), and copying it copies only the view, never the data. It replaces the fragile pointer-plus-length idiom with one type that carries its own length and can be bounds-checked, at zero runtime cost over the raw pointer.
+
+## What HFT teams refuse on the hot path
+
+Modern C++ is large. The HFT dialect is defined as much by exclusions as inclusions. On the latency-critical path (not necessarily elsewhere in the system), these are commonly banned:
+
+- **Exceptions.** Throwing is acceptable cost-wise; the problem is that the _possibility_ of throwing constrains the optimizer and the unwinding tables bloat the binary. Hot-path code is often compiled `-fno-exceptions` and returns errors as values (e.g. an error enum or a `std::expected`, which C++23 added).
+- **RTTI** (run-time type information — `dynamic_cast`, `typeid`). It implies runtime type lookups and the per-class metadata that goes with them. Built with `-fno-rtti`.
+- **Runtime polymorphism** (`virtual` functions). A virtual call is an indirect branch through a vtable — an extra memory load and a branch the CPU frequently mispredicts. The fix is compile-time polymorphism: templates and concepts, which the compiler resolves and inlines. The abstraction survives; the indirect jump does not.
+- **Heap allocation** (`new`, growing containers). Hundreds of nanoseconds and a possible lock. Hot-path data lives in pre-allocated buffers, object pools, or on the stack.
+
+The thread that connects every banned feature: each introduces work the compiler _cannot_ see through and eliminate. Everything in the "use" column — moves, `constexpr`, templates, `std::span` — is transparent to the optimizer and collapses to nothing at runtime.
+
+## Try it
+
+DURA's sandbox executes JavaScript, not C++, so you cannot compile a real move constructor here. But the _semantics_ — transfer ownership out of an expiring source, leave it empty-but-valid; preserve an lvalue you were only passing through — are language-independent, and modelling them in code you can actually run is the fastest way to prove you understand the contract.
+
+Implement two functions that mirror the C++ rules exactly:
+
+- `moveBuffer(source)` models a **move constructor**: it must take `source.data` (an array standing in for the owned heap block), hand it to a brand-new object, and leave `source` empty-but-valid (`source.data` becomes `null`, `source.size` becomes `0`) — the moved-from contract. It must _not_ copy the array.
+- `forwardInto(pool, arg)` models **perfect forwarding into an object pool**: it must push `arg` onto `pool` _without_ emptying it when the caller still owns it (an lvalue). The caller's object must be intact afterward — the `std::forward`-preserves-lvalues rule.
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement moveBuffer(source): return a new object that takes over source.data, then set source.data = null and source.size = 0 (moved-from = empty but valid; do NOT copy the array). Implement forwardInto(pool, arg): push arg onto pool and return pool, leaving arg untouched (forwarding an lvalue must not steal from it)."
+  initialCode={`// moveBuffer models a C++ move constructor: steal the storage,
+// leave the source empty-but-valid. Do not copy the array.
+function moveBuffer(source) {
+  // 1. capture source.data
+  // 2. null out source.data and zero source.size
+  // 3. return { data: <captured>, size: <its length> }
+}
+
+// forwardInto models perfect forwarding of an lvalue into a pool:
+// the caller still owns arg, so it must be intact afterward.
+function forwardInto(pool, arg) {
+// push arg onto pool, return pool, do NOT mutate arg
+}
+
+const a = { data: [1, 2, 3, 4], size: 4 };
+const b = moveBuffer(a);
+console.log(b); // { data: [1,2,3,4], size: 4 }
+console.log(a); // { data: null, size: 0 } <- moved-from
+
+const pool = [];
+const order = { id: 7 };
+forwardInto(pool, order);
+console.log(pool[0]); // { id: 7 }
+console.log(order); // { id: 7 } <- still owned by the caller`}
+  solution={`function moveBuffer(source) {
+const stolen = source.data;
+source.data = null;
+source.size = 0;
+return { data: stolen, size: stolen.length };
+}
+
+function forwardInto(pool, arg) {
+pool.push(arg);
+return pool;
+}
+
+const a = { data: [1, 2, 3, 4], size: 4 };
+const b = moveBuffer(a);
+console.log(b);
+console.log(a);
+
+const pool = [];
+const order = { id: 7 };
+forwardInto(pool, order);
+console.log(pool[0]);
+console.log(order);`}
+testCases={[
+"moveBuffer transfers data to the new object and leaves the source empty-but-valid (data null, size 0)",
+"moveBuffer does not copy: the new object's data is the same array instance the source held",
+"forwardInto pushes the argument onto the pool and leaves the caller's object intact",
+]}
+/>
+
+## Practice
+
+Fill in the blanks to complete the move constructor and the perfect-forwarding wrapper. Recall the rule: `std::move` where the type is fixed (an rvalue reference you own), `std::forward` where the type was deduced (a forwarding reference you pass through).
+
+<FillBlank
+  prompt={`// Move constructor: steal the pointer, leave the source empty-but-valid.
+// Marked ___ so std::vector will move (not copy) on reallocation.
+Quote(Quote&& other) ___
+    : data_(std::exchange(other.data_, nullptr)) {}
+
+// Forwarding wrapper: preserve each argument's value category.
+template <typename T, typename... Args>
+T& build(std::vector<T>& pool, Args&&... args) {
+return pool.emplace_back(std::\_\_\_<Args>(args)...);
+}`}
+answers={["noexcept", "forward"]}
+hints={[
+"The keyword that lets vector choose move over copy on reallocation.",
+"Args is deduced, so the arguments are forwarding references — preserve their category, do not unconditionally steal.",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A function builds a large `std::vector<Order> orders` locally and ends with `return orders;`. A reviewer suggests changing it to `return std::move(orders);` to make it faster. What is the correct response?",
+      options: [
+        "Accept it — std::move always avoids a copy and is strictly faster",
+        "Reject it — `return orders;` already triggers NRVO (the compiler builds the vector directly in the caller's storage with no copy and no move); writing `std::move(orders)` turns the named local into an rvalue, which defeats NRVO and forces an actual move that otherwise would not have happened",
+        "Accept it — without std::move the vector is deep-copied on the way out",
+        "Reject it, but only because std::move requires including <utility>",
+      ],
+      correct: 1,
+      explanation:
+        "Returning a named local is the NRVO case: under C++23 the compiler is permitted (and in practice will) construct the object directly in the caller's return slot, eliminating both copy and move. Wrapping it in std::move forces the compiler to treat it as an rvalue, which disqualifies NRVO and reintroduces a move that the elision would have avoided. The guidance is concrete: never std::move a return value. The deep-copy claim is false in modern C++ — worst case it moves, best case (the common case) it elides.",
+    },
+    {
+      question:
+        "Inside a forwarding wrapper `template <typename... Args> void log(Args&&... args)`, you need to pass `args` on to another function. You write `target(std::move(args)...)` instead of `std::forward`. What breaks?",
+      options: [
+        "Nothing — std::move and std::forward are interchangeable inside a template",
+        "It fails to compile because std::move cannot take a parameter pack",
+        "For any argument the caller passed as an lvalue (a named variable they still intend to use), std::move unconditionally casts it to an rvalue, so `target` may move-from / steal that object's contents, leaving the caller's variable empty-but-valid — a silent correctness bug, not a compile error",
+        "It is slower but otherwise correct, because std::move adds a runtime branch",
+      ],
+      correct: 2,
+      explanation:
+        "Args&&... in a deduced context is a forwarding reference: it binds to both lvalues and rvalues and remembers which. std::forward replays that distinction, so lvalues stay lvalues. std::move discards the distinction and casts everything to an rvalue, so any lvalue the caller passed can be moved-from by the callee — the caller's variable is left in a valid-but-unspecified (typically empty) state. It compiles fine and runs fine in tests where every argument happens to be a temporary, which is what makes it a dangerous, hard-to-spot bug. std::move adds no runtime branch; it is a compile-time cast.",
+    },
+    {
+      question:
+        "Why do HFT teams replace `virtual` functions with templates plus concepts on the hot path, given both express 'this works for several types'?",
+      options: [
+        "Templates produce smaller binaries, which is the primary latency concern",
+        "A virtual call is resolved at runtime through a vtable — an extra memory load and an indirect branch the CPU often mispredicts (~15 ns on a flush) — whereas a template is resolved at compile time and inlined, so the abstraction collapses to direct, predictable machine code with no indirect jump; concepts add readable compile-time constraints without adding any runtime cost",
+        "virtual functions cannot be marked constexpr, and all hot-path code must be constexpr",
+        "Concepts perform the type check at runtime, which catches more bugs than virtual dispatch",
+      ],
+      correct: 1,
+      explanation:
+        "Runtime polymorphism dispatches through a vtable: each virtual call is an indirect branch (load the function pointer, jump through it) that the branch predictor frequently misses, flushing the pipeline. On a path measured in nanoseconds that cost is real and repeated. Templates resolve the type at compile time, so the compiler can inline the call and emit a direct branch — same expressiveness, zero indirection. Concepts are purely a compile-time constraint mechanism; they improve diagnostics and readability but add no runtime work and perform no runtime checks. Binary size is a secondary concern, not the driver, and the constexpr claim is fabricated.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- **Move semantics** transfers ownership of an expiring object's internals instead of copying them. You write a `move-constructor` taking `T&&`, mark it `noexcept`, and use `std::move` (a cast, not an action) to opt an lvalue into being moved.
+- **RVO/NRVO** means returning a large object by value is free or nearly free in C++23 — the copy is elided or moved automatically. Never `std::move` a return value; it defeats the elision.
+- **Perfect forwarding** with a forwarding reference (`T&&` in a deduced context) and `std::forward` passes arguments through a wrapper preserving their lvalue/rvalue category. Forward where the type was deduced; move where it is fixed.
+- **constexpr** lets a function run at compile time when inputs are known; **consteval** forces it, turning a runtime mistake into a build error. Both delete work before the program runs.
+- **Concepts** constrain templates with named, readable predicates and produce call-site errors, replacing the write-only **SFINAE** machinery at the same (zero) runtime cost. **std::span** packages a pointer-plus-length into one non-owning, bounds-aware view.
+- HFT hot paths **ban exceptions, RTTI, virtual dispatch, and heap allocation** — every one introduces work the optimizer cannot eliminate. The features you keep are exactly the ones that collapse to nothing at runtime.
+
+## What's next
+
+The next lesson takes this dialect into memory: cache lines, false sharing, data-oriented layout, and lock-free queues — how the _placement_ of bytes, not just the code that touches them, decides whether your order makes it out before the market moves.

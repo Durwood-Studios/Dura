@@ -1,0 +1,294 @@
+---
+title: "Rust on Cortex-M — embedded-hal and RTIC"
+description: "Port the E5 UART driver to Rust. embedded-hal traits give you cross-vendor APIs; RTIC gives you a static, race-free task model. The memory-safety argument made operationally concrete."
+phase: 10
+module: "e-6-rust-cortex-m"
+order: 1
+estimatedMinutes: 120
+difficulty: 4
+prerequisites:
+  - "e-5-drivers"
+  - "7-3-rust-fundamentals"
+standards:
+  primaryAnchor: "Rust Reference (rust-lang.org)"
+  cs2023: ["SF-Foundations", "PL-LangIndep"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - embedded-hal
+  - rtic
+  - peripheral-singleton
+  - svd
+  - pac
+  - hal
+  - no-std
+  - cortex-m-crate
+  - probe-rs
+learningOutcomes:
+  - "Set up a Rust no_std project that compiles for ARM Cortex-M"
+  - "Use the embedded-hal traits to write driver code that compiles for multiple vendors"
+  - "Structure an application with RTIC's task/resource model"
+  - "Explain why Rust's ownership rules eliminate the read-modify-write race from E2/E3 at compile time"
+  - "Trace the layering: SVD → PAC → HAL → application"
+professionalContext: "Rust on embedded is the fastest-growing serious option for new firmware projects in 2026. Apex.AI, Volkswagen, Espressif, and increasingly automotive Tier 1s ship Rust firmware in production. The memory-safety argument matters operationally: Rust's borrow checker eliminates the entire class of read-modify-write races, use-after-free, and out-of-bounds bugs that consume most of a senior engineer's debugging time in C codebases. Engineers fluent in BOTH C and Rust on embedded are positioned for the safety-critical and security-critical work that's increasingly Rust-default."
+thresholdConcept: true
+---
+
+## The ecosystem layering
+
+A Rust embedded project sits on a four-layer stack:
+
+```
+┌──────────────────────────┐
+│  Application (your code) │
+├──────────────────────────┤
+│  HAL (e.g. stm32f4xx-hal)│   ← embedded-hal trait implementations
+├──────────────────────────┤
+│  PAC (Peripheral Access  │   ← typed register access, generated from SVD
+│   Crate, e.g. stm32f4)   │
+├──────────────────────────┤
+│  cortex-m, cortex-m-rt   │   ← Cortex-M core + runtime (vector table, etc.)
+└──────────────────────────┘
+```
+
+The PAC is auto-generated from the chip vendor's SVD (System View Description, an XML format for register definitions). It gives you typed register access — `peripherals.GPIOD.moder.write(|w| w.moder12().output())` instead of E2's `*(volatile uint32_t *)0x40020C00 |= ...`.
+
+The HAL implements the `embedded-hal` traits — `embedded_hal::digital::OutputPin`, `embedded_hal::serial::Write`, etc. — so driver code compiled against the traits works on ANY chip with a HAL.
+
+## Setting up the project
+
+```toml
+# Cargo.toml
+[package]
+name = "phase-e-rust"
+edition = "2024"
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+embedded-hal = "1.0"
+stm32f4xx-hal = { version = "0.21", features = ["stm32f407"] }
+rtic = { version = "2.0", features = ["thumbv7-backend"] }
+```
+
+```toml
+# .cargo/config.toml
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+runner = "probe-rs run --chip STM32F407VGTx"
+```
+
+`thumbv7em-none-eabihf` is the target triple: ARMv7E-M Thumb-2 with hardware float, no OS, EABI calling convention, hard-float ABI. The Rust toolchain knows how to cross-compile to this.
+
+`probe-rs` replaces `st-flash` + `openocd` as the canonical Rust embedded flashing/debugging tool. `cargo run` flashes the binary and shows defmt log output.
+
+## The LED blink — Rust port of E2
+
+```rust
+#![no_std]
+#![no_main]
+
+use cortex_m_rt::entry;
+use panic_halt as _;
+use stm32f4xx_hal::{pac, prelude::*};
+
+#[entry]
+fn main() -> ! {
+    // The peripheral singletons. Calling take() consumes them; calling
+    // take() a second time returns None. This is how Rust prevents two
+    // pieces of code from concurrently configuring the same peripheral.
+    let dp = pac::Peripherals::take().unwrap();
+
+    // Enable GPIOD clock and configure PD12 as output — typed builder API
+    let gpiod = dp.GPIOD.split();
+    let mut led = gpiod.pd12.into_push_pull_output();
+
+    let mut delay = dp.TIM2.delay_ms(&dp.RCC.constrain().cfgr.freeze());
+
+    loop {
+        led.set_high();
+        delay.delay_ms(500_u32);
+        led.set_low();
+        delay.delay_ms(500_u32);
+    }
+}
+```
+
+Differences from the E2 C version:
+
+- `#![no_std]` declares we're not using the standard library (no heap, no OS calls). The `core` library is still available.
+- `pac::Peripherals::take()` returns `Option<Peripherals>` — only the first caller gets it. This is the **peripheral singleton** pattern, enforced at compile time via Rust's ownership.
+- `.into_push_pull_output()` is a TYPE CHANGE — `pd12` becomes a different Rust type after this call. The type now encodes that the pin is an output. Calling `set_high()` is only valid on output-typed pins; the compiler enforces this.
+- `panic_halt as _` declares the panic handler — a Rust embedded project must declare what happens on panic (we choose to spin in a tight loop).
+
+## The peripheral-singleton pattern
+
+Why does the Rust HAL force you through `take()`? Look at this C bug:
+
+```c
+// File 1
+void config_uart(void) { USART2_CR1 = 0x2000; }
+
+// File 2 — unaware of File 1
+void other_uart_thing(void) { USART2_CR1 = 0x0008; }
+```
+
+Two pieces of code configure the same peripheral. The LAST one wins; the first one's intent is silently lost. The C compiler doesn't notice.
+
+In Rust:
+
+```rust
+let dp = pac::Peripherals::take().unwrap();   // OK
+let dp2 = pac::Peripherals::take();            // Returns None — already taken!
+```
+
+Once a piece of code owns the USART2 handle, no other code in the program can get it. To configure USART2 from two different modules, you pass the handle explicitly. The compiler enforces single ownership.
+
+This eliminates an entire class of "who configured this peripheral last" debugging.
+
+## RTIC — task model without an RTOS
+
+RTIC (Real-Time Interrupt-driven Concurrency) is a Rust framework that takes RTOS-like concurrency and resolves it AT COMPILE TIME using Rust's type system. No kernel; no priority inversion; no race conditions across tasks.
+
+```rust
+#![no_std]
+#![no_main]
+
+use rtic::app;
+
+#[app(device = stm32f4xx_hal::pac, peripherals = true, dispatchers = [EXTI0])]
+mod app {
+    use stm32f4xx_hal::{
+        gpio::{Output, PushPull, gpiod::PD12},
+        pac::TIM2,
+        prelude::*,
+        timer::Timer,
+    };
+
+    #[shared]
+    struct Shared {
+        rx_count: u32,
+    }
+
+    #[local]
+    struct Local {
+        led: PD12<Output<PushPull>>,
+        timer: Timer<TIM2>,
+    }
+
+    #[init]
+    fn init(ctx: init::Context) -> (Shared, Local) {
+        let dp = ctx.device;
+        let rcc = dp.RCC.constrain();
+        let clocks = rcc.cfgr.sysclk(168.MHz()).freeze();
+
+        let gpiod = dp.GPIOD.split();
+        let led = gpiod.pd12.into_push_pull_output();
+
+        let mut timer = dp.TIM2.counter_us(&clocks);
+        timer.start(500.millis()).unwrap();
+        timer.listen(stm32f4xx_hal::timer::Event::Update);
+
+        (Shared { rx_count: 0 }, Local { led, timer })
+    }
+
+    // High priority — blink LED on every timer tick
+    #[task(binds = TIM2, local = [led, timer], priority = 2)]
+    fn tim2_tick(ctx: tim2_tick::Context) {
+        ctx.local.led.toggle();
+        ctx.local.timer.wait().ok();
+    }
+
+    // Lower priority — process received bytes
+    #[task(shared = [rx_count], priority = 1)]
+    async fn process_rx(mut ctx: process_rx::Context) {
+        ctx.shared.rx_count.lock(|c| *c += 1);
+    }
+}
+```
+
+What RTIC enforces at compile time:
+
+- **Each resource belongs to ONE task or is explicitly `#[shared]`.** Sharing requires `.lock()`, which is checked.
+- **Lock priorities are statically known.** Priority-inversion-free by construction.
+- **Tasks can't accidentally call blocking kernel functions** (there's no kernel).
+- **The vector table is generated from the `#[task(binds = ...)]` annotations.** No vector-table editing.
+
+This isn't an RTOS replacement for every use case — RTIC works best when the application's task structure is statically known. For dynamic task creation, FreeRTOS or Embassy are better fits.
+
+## Reading the disassembly — Rust does what you'd expect
+
+A common worry about Rust: "is the safety free, or does it add overhead?" Look at the disassembly of `led.set_high()`:
+
+```
+LDR  r0, [r0]              ; Load BSRR address
+MOV  r1, #0x1000           ; bit 12
+STR  r1, [r0]              ; Set
+BX   lr                    ; Return
+```
+
+That's the same code GCC produces from `GPIOD->BSRR = (1U << 12);` in C. The type-system checks happen at compile time and erase to nothing at runtime. Rust gives you the safety with no runtime cost.
+
+## When NOT to use Rust on embedded
+
+Rust on embedded is excellent for new projects. It's harder to justify when:
+
+- You're maintaining a 500K-line C codebase — porting incrementally is possible (via FFI) but the team needs to learn Rust deeply first.
+- The vendor's HAL ecosystem in Rust is immature for your chip. Major STM32, nRF, RP2040, ESP families have great Rust HALs; obscure parts may not.
+- Your team has zero Rust experience and the deadline doesn't allow training. Senior C engineers pick up Rust in weeks, not days.
+- Safety certification: pre-certified C libraries (e.g., MISRA-compliant code) may not have Rust equivalents yet. The Ferrocene project is changing this — Rust certified for ISO 26262 ASIL D — but it's commercial and recent.
+
+The trajectory is clear: Rust will own a growing share of new embedded work through the late 2020s. Senior embedded engineers in 2026 need at minimum reading fluency.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question: "Why does pac::Peripherals::take() return an Option and only succeed once?",
+      options: [
+        "Performance",
+        "The singleton pattern is a compile-time guarantee that no two pieces of code can independently configure the same peripheral. The C analog — File A and File B both write USART2_CR1 with conflicting values — silently produces 'whoever runs last wins' bugs. Rust forces explicit ownership transfer: a piece of code that holds the peripheral handle must pass it to any other code that needs access. This eliminates a category of configuration bugs that consume substantial debugging time in C embedded codebases.",
+        "Rust doesn't support global state",
+        "Embedded Rust is single-threaded",
+      ],
+      correct: 1,
+      explanation:
+        "The singleton pattern enforces explicit ownership at compile time. Without it, multiple modules can independently configure the same peripheral with conflicting settings — a class of bug that's silent in C and shows up at runtime in odd ways. With it, sharing the peripheral requires passing the handle, making the relationship explicit. Rust DOES support global state (via statics with interior mutability), but the singleton pattern is the recommended embedded idiom. Embedded Rust is NOT inherently single-threaded — RTIC, Embassy, and FreeRTOS bindings all support concurrent tasks.",
+    },
+    {
+      question: "How does RTIC eliminate priority inversion structurally?",
+      options: [
+        "It uses priority inheritance like FreeRTOS",
+        "RTIC's task and resource model is resolved at compile time. The framework analyzes which tasks access which #[shared] resources, computes the maximum priority ceiling per resource, and inserts atomic lock acquisitions that mask interrupts up to the ceiling. The result: no task can preempt another while a shared resource is locked, so the inversion scenario (low task holds resource, medium task preempts, high task waits) cannot occur. This is the Stack Resource Policy (SRP) made automatic by the type system.",
+        "RTIC tasks don't share resources",
+        "RTIC uses a global lock",
+      ],
+      correct: 1,
+      explanation:
+        "RTIC implements the Stack Resource Policy automatically. The compiler analyzes the task/resource graph and inserts the right NVIC priority masking around each lock. By the time the code runs, no task can preempt another while holding a lock that the preempter would need to acquire. This eliminates priority inversion structurally, not via runtime detection. Priority inheritance (FreeRTOS) detects and corrects inversion at runtime; RTIC prevents it at compile time. RTIC absolutely supports shared resources (option 3). A global lock (option 4) would defeat real-time guarantees.",
+    },
+    {
+      question:
+        "An engineer benchmarks an LED toggle in Rust vs C and measures identical assembly output. What does this tell us?",
+      options: [
+        "Rust has a bug — it should be slower",
+        "Rust's type-system checks (ownership, lifetimes, peripheral singletons) happen at compile time and erase to nothing at runtime. The generated machine code is the same as C's because the IR after type-checking is similar and LLVM optimizes both equivalently. The safety is FREE at runtime; the cost is in compile time and developer time learning the type system. This is the 'zero-cost abstraction' principle Rust inherits from C++.",
+        "The benchmark is incorrect",
+        "Identical assembly is coincidence",
+      ],
+      correct: 1,
+      explanation:
+        "Zero-cost abstractions are a core Rust principle. The type system checks happen during compilation and have no runtime representation. By the time LLVM is optimizing the IR, both Rust and C codepaths look similar enough that the generated machine code is often identical. This means Rust gives you compile-time memory safety with no runtime tax — the safety is free. The cost is paid in compile time, developer onboarding, and slightly more complex APIs. The 'free safety' argument is what drives Rust adoption in performance-critical embedded contexts.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson E7 turns to MISRA-C:2023 — not as a rule-list reader, but as a practical engineering discipline. You'll see specific MISRA rules in action, understand what bugs they prevent (most of which Rust prevents structurally), and learn how the deviation-policy mechanism handles the few cases where the rules can't be followed. Then E8 ties everything together with a capstone real-time sensor pipeline on STM32F4.

@@ -1,0 +1,597 @@
+---
+title: "Capstone — Microsecond-Latency Order Book"
+description: "Build a working in-memory order book that consumes ITCH market data, maintains a price-level book, computes mid/spread, and writes events to a lock-free queue. Latency-profiled and hash-anchored."
+phase: 12
+module: "q-8-capstone-order-book"
+order: 8
+estimatedMinutes: 180
+difficulty: 5
+prerequisites:
+  - "q-2-ieee-754-numerics"
+  - "q-4-lock-free-data-structures"
+  - "q-6-market-data-itch-ouch"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "create"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - limit-order-book
+  - price-level
+  - best-bid
+  - best-ask
+  - top-of-book
+  - mid-price
+  - spread
+  - tick-size
+  - integer-price
+  - book-update-event
+  - add-order-message
+  - order-executed-message
+  - order-cancel-message
+  - order-id-map
+  - array-of-levels
+  - hot-path
+  - tail-latency
+  - rdtsc
+  - tsc-frequency
+  - latency-percentile
+  - hash-anchored-artifact
+learningOutcomes:
+  - "Build a limit order book in C++23 that ingests ITCH Add/Execute/Cancel messages and maintains bid and ask price levels"
+  - "Implement O(1) best-bid and best-ask retrieval and compute mid-price and spread in integer ticks"
+  - "Emit book-update events into the SPSC lock-free ring from q-4 without taking a lock on the hot path"
+  - "Profile per-message handling latency with rdtsc and report p50/p99/p99.9 percentiles"
+  - "Produce a single bundle (source + build output + latency report), hash it with SHA-256, and anchor it via DURA /verify"
+professionalContext: "The order book is the single most-rewritten data structure in low-latency trading. Every market-making and arbitrage desk maintains one, and a candidate who can build one — correctly handling partial fills, cancels, and the integer-price representation real venues use — is demonstrating the exact skill the desk hires for. The capstone forces you to integrate the whole phase: IEEE 754 reasoning about why prices are integers, not doubles (q-2); cache-aware layout so the hot path stays in L1 (q-3); the SPSC ring and memory orderings that hand events to a downstream strategy thread without a lock (q-4); and the ITCH wire format the book consumes (q-6). The hash-anchored artifact lets an interviewer download your source, recompute the hash, confirm it is the bytes you committed, and read a latency report you can defend line by line."
+thresholdConcept: false
+---
+
+## Why this lesson exists
+
+A trading strategy is only as good as its picture of the market. That picture is the order book: at every instant, which prices buyers are bidding, which prices sellers are asking, and how much size sits at each. The strategy reads the top of that book — the highest bid and lowest ask — thousands of times a second and decides whether to send an order. If your book is wrong by one message, or slow by one microsecond, the strategy trades on stale truth and loses money.
+
+This is the capstone of Phase Q. Across q-1 through q-7 you built the parts: the C++ subset HFT teams write in, integer numerics, cache-aware layout, the lock-free SPSC ring, kernel-bypass networking, and the ITCH/OUCH and FIX wire formats. Here you assemble them into one program that does real work — consume a stream of ITCH messages, maintain a correct book, and hand book-update events to a downstream thread through the lock-free ring, all on a measured hot path. You will profile it, bundle it, hash it, and anchor it via DURA `/verify` so the artifact is auditable.
+
+## The first-principles picture
+
+Forget code for a moment. A market is a list of resting intentions. Some people have said "I will buy up to 100 shares at \$42.10 or better" — those are bids. Others have said "I will sell up to 100 shares at \$42.12 or better" — those are asks (also called offers). Each such resting intention is a <VocabTooltip slug="limit-order-book">limit order</VocabTooltip> waiting at a specific price.
+
+Two orders at the same price are interchangeable for the purpose of "how much can I trade at \$42.10" — so we group them. A <VocabTooltip slug="price-level">price level</VocabTooltip> is one price plus the total resting quantity at that price. The book is two sorted lists of price levels: bids (sorted highest-price-first, because the best thing a buyer offers you is the highest price) and asks (sorted lowest-price-first, because the best thing a seller offers you is the lowest price).
+
+The two prices the strategy cares about most:
+
+- The <VocabTooltip slug="best-bid">best bid</VocabTooltip> — the highest price any buyer is currently bidding.
+- The <VocabTooltip slug="best-ask">best ask</VocabTooltip> — the lowest price any seller is currently asking.
+
+Together these are the <VocabTooltip slug="top-of-book">top of book</VocabTooltip>. From them you compute two derived numbers the strategy lives on: the <VocabTooltip slug="mid-price">mid-price</VocabTooltip> (the average of best bid and best ask — a single "fair value" estimate) and the <VocabTooltip slug="spread">spread</VocabTooltip> (best ask minus best bid — the cost of crossing the market immediately, and a liquidity signal).
+
+The market changes by exactly three kinds of events, which on Nasdaq arrive as ITCH messages (q-6): an order is **added** to the book, an order is **executed** (fully or partially — a trade happened against it), or an order is **canceled** (the resting intention is withdrawn). Your book is a function that takes the stream of these three events and, at every step, can answer "what is the top of book right now."
+
+## The mental model
+
+> **An order book is two sorted maps from price to resting quantity, plus a side table from order-id to that order's price and size.** The sorted maps answer "what is the best price and how much is there." The order-id table answers "when message X says cancel order 7, which price level does that touch and by how much." Every ITCH message is a small, bounded edit to those three structures. Nothing more.
+
+Hold that picture. Everything below is the mechanism that expresses it in C++.
+
+## Why prices are integers, not doubles
+
+q-2 established that <VocabTooltip slug="integer-price">binary64 cannot represent \$42.10 exactly</VocabTooltip> — the nearest double is `42.10000000000000142...`. If you store prices as `double`, two orders that a human reads as "the same price" can compare unequal, and sorting becomes nondeterministic at the bit level. Real venues solve this by quoting prices in integer ticks.
+
+A <VocabTooltip slug="tick-size">tick size</VocabTooltip> is the smallest price increment a venue allows — for most US equities it is one cent. ITCH already delivers price as an integer: Nasdaq TotalView-ITCH 5.0 encodes price as a 4-byte unsigned integer in units of 1/10000 of a dollar (so \$42.10 arrives as `421000`). We keep it that way. An <VocabTooltip slug="integer-price">integer price</VocabTooltip> is the price expressed as a count of those minimum units, stored in a `std::uint32_t`. Comparisons are exact, sorting is total and deterministic, and arithmetic for mid and spread is integer arithmetic — no rounding surprises on the hot path.
+
+```cpp
+// price_types.hpp
+#include <cstdint>
+
+// Nasdaq TotalView-ITCH 5.0 prices are fixed-point: integer count of
+// 1/10000-dollar units. We never convert to double on the hot path.
+using Price = std::uint32_t;   // e.g. 421000 == $42.1000
+using Qty   = std::uint32_t;   // shares
+using OrderId = std::uint64_t; // ITCH order reference number is 8 bytes
+```
+
+## Choosing the book's data structure
+
+The mental model says "two sorted maps." The literal C++ for that is `std::map<Price, Qty>` — a balanced tree, O(log n) per edit, top of book at `begin()` or `rbegin()`. It is correct and a fine starting point. But a tree scatters nodes across the heap, so each edit chases pointers through cache lines you do not own — exactly the <VocabTooltip slug="hot-path">hot-path</VocabTooltip> cache behavior q-3 warned against.
+
+The production answer for liquid instruments is an <VocabTooltip slug="array-of-levels">array of levels keyed by integer price</VocabTooltip>. Because price is already a small integer and trading clusters tightly around the current price, you can map a band of prices directly onto array slots: `levels[price - base_price]` is the quantity resting at that price. Indexing is O(1), the array is contiguous so the hot band stays in L1, and finding the best price is a bounded scan from a remembered cursor.
+
+This capstone uses the array-of-levels design for the resting quantities and a hash map for the order-id table. We will keep an explicit `best_bid_index` and `best_ask_index` so <VocabTooltip slug="top-of-book">top of book</VocabTooltip> reads are O(1), and only scan when an edit empties the current best level.
+
+```cpp
+// book.hpp
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <unordered_map>
+#include "price_types.hpp"
+
+// Price band the book tracks. A real deployment sizes this to the
+// instrument's daily range; out-of-band prices are a rare slow path
+// (reseat the band) we omit here to keep the capstone focused.
+inline constexpr std::size_t kLevels = 1u << 16; // 65536 price slots
+
+struct RestingOrder {
+    Price price;   // the integer price this order sits at
+    Qty   qty;     // remaining shares (decremented by partial executes)
+    bool  is_buy;  // true == bid side, false == ask side
+};
+
+class OrderBook {
+public:
+    void add(OrderId id, bool is_buy, Price price, Qty qty);
+    void execute(OrderId id, Qty executed_qty);
+    void cancel(OrderId id);
+
+    // O(1) top-of-book reads. nullopt when that side is empty.
+    std::optional<Price> best_bid() const { return best_bid_idx_ ? std::optional<Price>(*best_bid_idx_ + base_) : std::nullopt; }
+    std::optional<Price> best_ask() const { return best_ask_idx_ ? std::optional<Price>(*best_ask_idx_ + base_) : std::nullopt; }
+
+    // Mid in half-ticks (so an odd spread does not lose its last tick to
+    // integer division): (bid + ask) without dividing. The caller scales.
+    std::optional<std::uint64_t> mid_2x() const;
+    std::optional<std::uint32_t> spread() const;
+
+    // Size resting at the current best level on each side (0 when empty).
+    // The feed thread reads these to fill a BookUpdate event.
+    Qty bid_qty_at_best() const { return best_bid_idx_ ? bid_qty_[*best_bid_idx_] : 0; }
+    Qty ask_qty_at_best() const { return best_ask_idx_ ? ask_qty_[*best_ask_idx_] : 0; }
+
+private:
+    // Find the new best on a side after an edit emptied the current best slot.
+    void reseat_best(bool is_buy, std::size_t emptied_slot);
+
+    Price base_ = 0; // price of array slot 0
+    std::array<Qty, kLevels> bid_qty_{}; // resting buy quantity per slot
+    std::array<Qty, kLevels> ask_qty_{}; // resting sell quantity per slot
+
+    // Best-price cursors stored as slot indices (offset from base_).
+    // optional == "this side is currently empty."
+    std::optional<std::size_t> best_bid_idx_;
+    std::optional<std::size_t> best_ask_idx_;
+
+    // The id table: which price/side/qty does an order reference point at.
+    // Required because execute/cancel messages name an order id, not a price.
+    std::unordered_map<OrderId, RestingOrder> orders_;
+
+    std::size_t slot(Price p) const { return p - base_; }
+};
+```
+
+## The three message handlers
+
+Each handler is a bounded edit to the three structures. Read each as a direct translation of the mental model.
+
+### Add
+
+An <VocabTooltip slug="add-order-message">Add Order message</VocabTooltip> (ITCH message type `A`, or `F` with an attribution field) introduces a new resting order. We record it in the id table and add its quantity to its price slot. If the new order is better than the current best on its side, we move the best cursor.
+
+```cpp
+// book.cpp
+void OrderBook::add(OrderId id, bool is_buy, Price price, Qty qty) {
+    const std::size_t s = slot(price);
+
+    // id table first: execute/cancel will need to find this order by id.
+    orders_[id] = RestingOrder{price, qty, is_buy};
+
+    if (is_buy) {
+        bid_qty_[s] += qty; // aggregate: multiple orders share a level
+        // A higher slot index == higher price == better bid.
+        if (!best_bid_idx_ || s > *best_bid_idx_) best_bid_idx_ = s;
+    } else {
+        ask_qty_[s] += qty;
+        // A lower slot index == lower price == better ask.
+        if (!best_ask_idx_ || s < *best_ask_idx_) best_ask_idx_ = s;
+    }
+}
+```
+
+### Execute
+
+An <VocabTooltip slug="order-executed-message">Order Executed message</VocabTooltip> (ITCH type `E`) reports that some quantity of a resting order traded. It may be a partial fill — the order stays in the book with less size — or it may finish the order. We decrement both the level and the order's remembered size, and if the order is exhausted we remove it.
+
+```cpp
+void OrderBook::execute(OrderId id, Qty executed_qty) {
+    auto it = orders_.find(id);
+    if (it == orders_.end()) return; // unknown id: ignore (defensive)
+
+    RestingOrder& o = it->second;
+    const Qty fill = (executed_qty < o.qty) ? executed_qty : o.qty;
+    o.qty -= fill;
+
+    Qty& level = o.is_buy ? bid_qty_[slot(o.price)] : ask_qty_[slot(o.price)];
+    level -= fill; // the traded shares leave the resting book
+
+    if (o.qty == 0) {
+        const bool was_buy = o.is_buy;
+        const std::size_t s = slot(o.price);
+        orders_.erase(it); // fully filled: gone from the id table
+        // Reseat ONLY when the emptied slot IS the current best. Emptying a
+        // non-best level (e.g. an order resting behind the top) must not
+        // disturb the best cursor — reseating from a lower slot would walk
+        // past and clobber the still-correct best.
+        const auto& best = was_buy ? best_bid_idx_ : best_ask_idx_;
+        if (level == 0 && best && *best == s) reseat_best(was_buy, s);
+    }
+}
+```
+
+### Cancel
+
+An <VocabTooltip slug="order-cancel-message">Order Cancel message</VocabTooltip> (ITCH type `X` for a partial cancel, `D` for a full delete) withdraws resting quantity. The structure is the same as execute, minus the "this was a trade" semantics — the shares leave the book without a fill.
+
+```cpp
+void OrderBook::cancel(OrderId id) {
+    auto it = orders_.find(id);
+    if (it == orders_.end()) return;
+
+    RestingOrder& o = it->second;
+    Qty& level = o.is_buy ? bid_qty_[slot(o.price)] : ask_qty_[slot(o.price)];
+    level -= o.qty;             // remove all of this order's remaining size
+    const bool was_buy = o.is_buy;
+    const std::size_t s = slot(o.price);
+    orders_.erase(it);
+    // Same guard as execute(): only reseat when the slot we just emptied was
+    // the current best on its side. Cancelling a resting order behind the top
+    // leaves the best cursor untouched.
+    const auto& best = was_buy ? best_bid_idx_ : best_ask_idx_;
+    if (level == 0 && best && *best == s) reseat_best(was_buy, s);
+}
+```
+
+`reseat_best` is the only place we scan. It runs only when an edit empties the current best level — uncommon relative to total message volume — so the amortized cost stays near O(1):
+
+```cpp
+void OrderBook::reseat_best(bool is_buy, std::size_t emptied_slot) {
+    if (is_buy) {
+        // Walk down from the emptied slot looking for the next non-empty bid.
+        std::size_t s = emptied_slot;
+        while (s > 0 && bid_qty_[s] == 0) --s;
+        best_bid_idx_ = (bid_qty_[s] != 0) ? std::optional<std::size_t>(s) : std::nullopt;
+    } else {
+        // Walk up for the next non-empty ask.
+        std::size_t s = emptied_slot;
+        while (s + 1 < kLevels && ask_qty_[s] == 0) ++s;
+        best_ask_idx_ = (ask_qty_[s] != 0) ? std::optional<std::size_t>(s) : std::nullopt;
+    }
+}
+```
+
+## Mid and spread, in integers
+
+With O(1) cursors, mid and spread are integer arithmetic. We return mid as twice the mid (`bid + ask`) so an odd-tick spread does not silently drop its last tick to integer division; the consumer divides by two only when it needs a display value.
+
+```cpp
+std::optional<std::uint64_t> OrderBook::mid_2x() const {
+    auto b = best_bid();
+    auto a = best_ask();
+    if (!b || !a) return std::nullopt;
+    return static_cast<std::uint64_t>(*b) + static_cast<std::uint64_t>(*a);
+}
+
+std::optional<std::uint32_t> OrderBook::spread() const {
+    auto b = best_bid();
+    auto a = best_ask();
+    if (!b || !a) return std::nullopt;
+    return *a - *b; // ask is always >= bid in a well-formed book
+}
+```
+
+## Handing events to the strategy: the SPSC ring
+
+The book lives on the feed-handler thread. The strategy lives on another thread. They must not share a lock — a lock on the hot path is the latency killer q-4 exists to avoid. Instead, after each message the book pushes a small <VocabTooltip slug="book-update-event">book-update event</VocabTooltip> (top-of-book snapshot) into the single-producer single-consumer lock-free ring you built in q-4. The feed thread is the sole producer; the strategy thread is the sole consumer.
+
+```cpp
+// event.hpp
+#include "price_types.hpp"
+
+// Plain-old-data, trivially copyable so the ring can memcpy it. Carries
+// the derived top-of-book the strategy reads — not the whole book.
+struct BookUpdate {
+    Price    bid;       // 0 == side empty
+    Price    ask;       // 0 == side empty
+    Qty      bid_qty;   // size at best bid
+    Qty      ask_qty;   // size at best ask
+    std::uint64_t seq;  // monotonic sequence for gap detection downstream
+};
+```
+
+```cpp
+// On the feed thread, after handling each message:
+//   spsc_ring is the SpscRing<BookUpdate, 4096> from q-4 (Capacity is a
+//   required power-of-two template argument — q-4 static_asserts it).
+BookUpdate ev{};
+ev.bid     = book.best_bid().value_or(0);
+ev.ask     = book.best_ask().value_or(0);
+ev.bid_qty = book.bid_qty_at_best(); // small accessors over the cursors
+ev.ask_qty = book.ask_qty_at_best();
+ev.seq     = ++sequence;
+
+// push returns false if the consumer has fallen behind and the ring is
+// full. On a healthy hot path it never blocks and never allocates. We count
+// drops rather than block the feed — a stalled strategy must not stall the feed.
+if (!spsc_ring.push(ev)) ++dropped_updates;
+```
+
+The contract from q-4 holds: `push` uses a `release` store on the write index and the consumer uses an `acquire` load, so the consumer sees the fully-written `BookUpdate` or none of it — never a torn struct.
+
+## The latency-profiling harness
+
+A capstone that says "it's fast" without numbers is not a capstone. You measure the per-message handling cost and report percentiles, because in trading the number that matters is not the average — it is the <VocabTooltip slug="tail-latency">tail</VocabTooltip>. A book that is fast at p50 but slow at p99.9 still loses the one-in-a-thousand race that mattered.
+
+We time with <VocabTooltip slug="rdtsc">`rdtsc`</VocabTooltip>, the x86-64 instruction that reads the CPU's time-stamp counter (a cycle counter). It is far cheaper than a `std::chrono` syscall and has sub-nanosecond resolution. The portable, correct way to read it is the compiler intrinsic — not hand-written assembly:
+
+```cpp
+// timing.hpp
+#if defined(_MSC_VER)
+#include <intrin.h>      // __rdtsc / __rdtscp on MSVC
+#else
+#include <x86intrin.h>   // __rdtsc / __rdtscp on GCC and Clang (x86-64)
+#endif
+#include <cstdint>
+
+// __rdtscp waits for all PRIOR instructions to retire before reading the TSC
+// (and returns the core id), so the read cannot float ABOVE earlier work. It
+// does NOT stop LATER instructions from being reordered before the read, so a
+// start-of-region __rdtscp can still let subsequent work execute ahead of it.
+// Intel's documented practice is to pair it with an LFENCE that also fences the
+// instructions after the read, fully bracketing the timed span:
+inline std::uint64_t cycles_now() {
+    unsigned aux;
+    const std::uint64_t tsc = __rdtscp(&aux); // serializes against earlier ops
+    _mm_lfence();                              // also block later ops crossing up
+    return tsc;
+}
+```
+
+> **rdtsc measures cycles, not nanoseconds.** The time-stamp counter increments at a fixed reference frequency (the <VocabTooltip slug="tsc-frequency">TSC frequency</VocabTooltip>, "invariant TSC" on modern CPUs), which is usually the CPU's base clock — not necessarily its current turbo frequency. To convert cycles to nanoseconds you must measure the TSC frequency at startup (spin for a known wall-clock interval via `std::chrono::steady_clock`, count cycles, divide). Report both: raw cycles are reproducible across runs on the same machine; nanoseconds let a reader compare machines.
+
+The harness wraps each message, collects per-message cycle counts, then computes percentiles:
+
+```cpp
+// profile.cpp
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>    // std::printf for the percentile report
+#include <vector>
+#include "timing.hpp"
+#include "book.hpp"
+
+// A latency percentile is the value below which that fraction of samples
+// fall: p99 == "99% of messages were handled at least this fast."
+std::uint64_t percentile(std::vector<std::uint64_t>& samples, double p) {
+    if (samples.empty()) return 0;
+    // nth_element is O(n) average and avoids a full sort of millions of points.
+    const std::size_t k =
+        static_cast<std::size_t>(p * static_cast<double>(samples.size() - 1));
+    std::nth_element(samples.begin(), samples.begin() + k, samples.end());
+    return samples[k];
+}
+
+void profile_replay(OrderBook& book, const std::vector<ItchMessage>& feed) {
+    std::vector<std::uint64_t> cycles;
+    cycles.reserve(feed.size()); // never allocate inside the timed loop
+
+    for (const ItchMessage& m : feed) {
+        const std::uint64_t t0 = cycles_now();
+        dispatch(book, m); // calls add / execute / cancel by message type
+        const std::uint64_t t1 = cycles_now();
+        cycles.push_back(t1 - t0);
+    }
+
+    std::printf("messages   : %zu\n", cycles.size());
+    std::printf("p50  cycles: %llu\n", (unsigned long long)percentile(cycles, 0.50));
+    std::printf("p99  cycles: %llu\n", (unsigned long long)percentile(cycles, 0.99));
+    std::printf("p99.9 cycles: %llu\n", (unsigned long long)percentile(cycles, 0.999));
+}
+```
+
+Two measurement disciplines that separate a credible report from a misleading one: pin the thread to one core (so the TSC stays on one clock domain and the OS does not migrate you mid-measurement), and warm the cache with a throwaway replay before the timed replay (so you measure steady-state, not cold-start page faults). Document both in your report — a reviewer will ask.
+
+## Practice — the book logic, before the C++
+
+Before you build the C++ version, prove you have the book invariant right. The logic is identical in any language; here you implement it in TypeScript so you can run it in the browser and watch the top of book react to each event. Integer prices, three handlers, O(1) top-of-book via remembered cursors — the same mental model, no toolchain required.
+
+<SandboxExercise
+  language="typescript"
+  instructions="Implement a minimal integer-price order book. Prices are integers (cents). You maintain bidQty and askQty as Maps from price to total resting quantity, plus an orders Map from id to {price, qty, isBuy}. Implement add(id, isBuy, price, qty), cancel(id) (remove all of that order's remaining qty from its level), and bestBid()/bestAsk() (highest key with non-zero bid qty / lowest key with non-zero ask qty, or null if that side is empty). Then mid() returns (bestBid + bestAsk) / 2 or null. The provided test sequence adds three bids and two asks, cancels one bid, and checks the top of book updates correctly."
+  initialCode={`type Resting = { price: number; qty: number; isBuy: boolean };
+
+class OrderBook {
+private bidQty = new Map<number, number>();
+private askQty = new Map<number, number>();
+private orders = new Map<number, Resting>();
+
+add(id: number, isBuy: boolean, price: number, qty: number): void {
+// TODO: record the order in this.orders, then add qty to the
+// correct side's level map (create the entry if absent).
+}
+
+cancel(id: number): void {
+// TODO: look up the order; subtract its remaining qty from its
+// level; delete the order from this.orders. If the level hits 0,
+// delete the level entry so it stops counting as a best candidate.
+}
+
+bestBid(): number | null {
+// TODO: highest price among bidQty entries with qty > 0, else null.
+return null;
+}
+
+bestAsk(): number | null {
+// TODO: lowest price among askQty entries with qty > 0, else null.
+return null;
+}
+
+mid(): number | null {
+const b = this.bestBid();
+const a = this.bestAsk();
+return b === null || a === null ? null : (b + a) / 2;
+}
+}
+
+const book = new OrderBook();
+book.add(1, true, 4210, 100);
+book.add(2, true, 4209, 200);
+book.add(3, true, 4208, 50);
+book.add(4, false, 4212, 100);
+book.add(5, false, 4213, 75);
+console.log("best bid", book.bestBid(), "best ask", book.bestAsk(), "mid", book.mid());
+book.cancel(1); // remove the top bid
+console.log("after cancel: best bid", book.bestBid(), "mid", book.mid());`}
+  solution={`type Resting = { price: number; qty: number; isBuy: boolean };
+
+class OrderBook {
+private bidQty = new Map<number, number>();
+private askQty = new Map<number, number>();
+private orders = new Map<number, Resting>();
+
+add(id: number, isBuy: boolean, price: number, qty: number): void {
+this.orders.set(id, { price, qty, isBuy });
+const side = isBuy ? this.bidQty : this.askQty;
+side.set(price, (side.get(price) ?? 0) + qty);
+}
+
+cancel(id: number): void {
+const o = this.orders.get(id);
+if (!o) return;
+const side = o.isBuy ? this.bidQty : this.askQty;
+const remaining = (side.get(o.price) ?? 0) - o.qty;
+if (remaining <= 0) side.delete(o.price);
+else side.set(o.price, remaining);
+this.orders.delete(id);
+}
+
+bestBid(): number | null {
+let best: number | null = null;
+for (const [price, qty] of this.bidQty) {
+if (qty > 0 && (best === null || price > best)) best = price;
+}
+return best;
+}
+
+bestAsk(): number | null {
+let best: number | null = null;
+for (const [price, qty] of this.askQty) {
+if (qty > 0 && (best === null || price < best)) best = price;
+}
+return best;
+}
+
+mid(): number | null {
+const b = this.bestBid();
+const a = this.bestAsk();
+return b === null || a === null ? null : (b + a) / 2;
+}
+}
+
+const book = new OrderBook();
+book.add(1, true, 4210, 100);
+book.add(2, true, 4209, 200);
+book.add(3, true, 4208, 50);
+book.add(4, false, 4212, 100);
+book.add(5, false, 4213, 75);
+console.log("best bid", book.bestBid(), "best ask", book.bestAsk(), "mid", book.mid());
+book.cancel(1); // remove the top bid
+console.log("after cancel: best bid", book.bestBid(), "mid", book.mid());`}
+testCases={[
+"After five adds, best bid is 4210, best ask is 4212, mid is 4211",
+"After cancelling order 1 (the 4210 bid), best bid drops to 4209 and mid becomes 4210.5",
+"bestBid and bestAsk return null when their side has no resting quantity",
+"Cancelling an unknown order id is a no-op, not a crash",
+]}
+/>
+
+## Checkpoint — reason about the design before you build
+
+These three questions check that you can defend the design decisions the build encodes. Answer them before you write the C++ — they are the reasoning the competency check below asks you to put into practice.
+
+<Quiz
+  questions={[
+    {
+      question:
+        "Your book stores prices as `double`. Two ITCH Add messages arrive for what a trader reads as the same price, $42.10. One was computed as 4210 ticks × 0.01, the other parsed directly. They end up in different price-level slots and the book reports a one-cent-wide phantom level. What is the root cause and the fix?",
+      options: [
+        "The ITCH feed is corrupt; request a retransmission",
+        "binary64 cannot represent 0.01 or 42.10 exactly (q-2), so 4210 × 0.01 and a directly-parsed 42.10 can differ in their low bits and compare unequal; the fix is to never use double for price — keep the venue's integer tick representation (ITCH already delivers price as a 4-byte integer in 1/10000-dollar units) and store Price as a uint32_t so equality and ordering are exact",
+        "Increase the floating-point comparison epsilon to 0.005 so near-equal prices merge",
+        "Switch the levels container from std::map to std::unordered_map",
+      ],
+      correct: 1,
+      explanation:
+        "This is the q-2 numerics lesson applied directly. 0.01 and 42.10 have no exact binary64 representation, so arithmetic that 'should' produce the same price can produce two distinct doubles whose bits differ — and a map keyed on double then files them as two levels. Epsilon comparison (option 2) papers over it and breaks the total ordering a sorted book needs. The container choice (option 3) is irrelevant to the equality bug. The feed is fine (option 1) — it sent integers; the bug is the program converting them to double. The fix is structural: prices are integers end to end, which is exactly why the capstone types Price as uint32_t.",
+    },
+    {
+      question:
+        "After handling each ITCH message, the feed thread pushes a BookUpdate into the SPSC ring for the strategy thread. A reviewer asks why you used the lock-free ring from q-4 instead of a std::mutex-guarded std::queue, given the mutex version is simpler. What is the strongest answer?",
+      options: [
+        "The mutex version is wrong and would corrupt data",
+        "A mutex on the hot path adds an unbounded tail: under contention a lock acquire can block the feed thread on the strategy thread's scheduling, and a single blocked push stalls feed processing — the exact tail-latency failure trading systems cannot tolerate; the SPSC ring's push is wait-free (a release store to the write index, no kernel call, no allocation), so the feed thread's per-message cost stays bounded, and the acquire/release pairing guarantees the consumer reads a complete BookUpdate or none, never a torn struct",
+        "Lock-free is always faster than locks in every case",
+        "std::queue cannot store trivially-copyable structs",
+      ],
+      correct: 1,
+      explanation:
+        "The mutex version is correct (option 1 is wrong) and std::queue holds POD fine (option 4 is wrong). 'Lock-free is always faster' (option 3) is false in general — uncontended mutexes are cheap. The real argument is about the tail: a mutex introduces a path where the feed thread can block on the strategy thread, and in HFT the cost is not the average lock time but the worst case when it does contend, which is unbounded with respect to your code. The SPSC ring's push is wait-free and allocation-free, bounding the per-message cost, and the q-4 acquire/release contract prevents torn reads. Bounded tail latency is the whole reason the ring exists.",
+    },
+    {
+      question:
+        "Your latency report says 'p50 = 38 cycles, p99 = 41 cycles, p99.9 = 9,800 cycles.' A reviewer flags the p99.9. What is the most likely real-world cause, and does it invalidate the book design?",
+      options: [
+        "The book is fundamentally broken; redesign the data structure",
+        "The p99.9 spike is almost certainly a reseat_best scan that ran when an edit emptied the current best level and had to walk to the next non-empty slot, or an L1/L2 cache miss / page fault when an edit touched a cold part of the price band; it does not invalidate the array-of-levels design — it identifies the design's known slow path; you'd document it, and could bound it further by capping scan distance or keeping a secondary index of populated levels, but a rare bounded scan amortizing to near-O(1) is the expected, defensible behavior",
+        "rdtsc is unreliable above p99 and the number should be discarded",
+        "The percentile calculation is wrong; p99.9 cannot exceed p99 by that much",
+      ],
+      correct: 1,
+      explanation:
+        "A two-order-of-magnitude jump from p99 to p99.9 is the signature of a rare slow path, not a broken design (option 1) or a measurement artifact (option 3 — rdtsc is fine; __rdtscp orders against prior instructions and, paired with LFENCE as in the harness, brackets the timed span cleanly). p99.9 CAN exceed p99 by orders of magnitude — that is exactly what tail latency means, so option 4 misunderstands percentiles. In this book the rare slow path is reseat_best (scanning for the next best level after the current one empties) and cold-cache touches when an edit lands outside the hot price band. The honest move is to name the cause in the report and, if needed, bound it — capping scan distance or maintaining a side index of non-empty levels. Knowing and documenting your own tail is the proficiency the capstone certifies.",
+    },
+  ]}
+/>
+
+## Check your understanding
+
+This is a `create`-level capstone: the competency check is that you **build** the artifact, not that you recognize facts about it. Work through the checklist, then do the open-ended extension. You have demonstrated competency when every box is checked and your bundle verifies.
+
+**Build checklist — the bundle you hash and anchor.** The capstone deliverable is a single archive you hash and anchor via DURA `/verify`. Produce all four parts:
+
+1. **Source code** — `price_types.hpp`, `book.hpp`, `book.cpp`, `event.hpp`, `timing.hpp`, `profile.cpp`, the q-4 SPSC ring header, an ITCH parser (yours from q-6 or a small replayer over a captured/synthetic feed), and a `Makefile` or `CMakeLists.txt`. It must compile clean with `-O3 -march=native -std=c++23`.
+2. **Build output** — the compiler invocation log and the resulting binary's size/symbol summary (`nm -C --size-sort`), so a reviewer sees it compiled clean at the stated optimization level.
+3. **A latency report** — a short Markdown file with: machine description (CPU model, measured TSC frequency), message count, and the p50/p99/p99.9 table in both cycles and nanoseconds, plus your methodology (core pinning, cache warm-up). State any number you are unsure of as a range, not a point.
+4. **A correctness note** — the replay you ran (e.g. "10M synthetic ITCH messages; book matched a reference `std::map` book at every top-of-book snapshot") so the numbers describe a _correct_ book, not a fast wrong one. Make sure your test set includes the case the design hinges on: cancelling or executing-out a **non-best** level and confirming the top of book is unchanged.
+
+Bundle those into one archive (`tar czf phase-q-capstone.tgz ...`), compute its SHA-256, and submit to DURA `/verify` with the title "Phase Q Capstone — Microsecond Order Book."
+
+> **What DURA /verify actually is.** `/verify` is a generic SHA-256 certificate lookup (`src/lib/verify/`). It does not run, grade, or even read your code. You compute the SHA-256 of your bundle; DURA records a certificate binding that hash to a title and a timestamp; anyone with the file recomputes the hash and looks it up at `/verify/{hash}`. A match proves the bytes a reviewer holds are the exact bytes you anchored, and _when_ you anchored them — authenticity and integrity, not quality. The engineering judgment in your latency report is still something a reviewer reads and assesses. The hash only removes the question "is this the real submission."
+
+A <VocabTooltip slug="hash-anchored-artifact">hash-anchored artifact</VocabTooltip> is therefore a portfolio piece an interviewer can trust: download, recompute, confirm, then spend their time on the substance — your data-structure choices and your tail-latency numbers — instead of wondering whether you edited it after the fact.
+
+**Open-ended extension (pick one and add it to the bundle).** A `create`-level artifact should grow past the spec. Choose at least one, implement it, and note in your report what changed in the latency profile:
+
+- **Bound the tail you measured.** Replace the unbounded `reseat_best` scan with a secondary index of populated price slots (e.g. a bitset over the band, or an intrusive sorted set of non-empty levels) so reseating is sub-linear. Re-run the harness and show the p99.9 movement.
+- **Add the consumer.** Write the strategy-thread side that drains the SPSC ring with `pop()`, detects sequence gaps via `BookUpdate::seq`, and prints mid/spread — turning the producer-only capstone into an end-to-end two-thread pipeline.
+- **Order-by-order book.** Extend the aggregated price levels into FIFO queues per level so you can model queue position, and show that top-of-book reads stay O(1).
+
+## What you learned
+
+- An order book is two sorted price-to-quantity structures plus an order-id table; every ITCH Add/Execute/Cancel message is a bounded edit to those three structures, and the top of book is read off remembered best-price cursors in O(1).
+- Prices are integers (the venue's tick units), never doubles — the q-2 reason made concrete: binary64 cannot represent decimal prices exactly, so integer ticks are the only representation with exact equality and total ordering.
+- The array-of-levels layout keeps the hot price band contiguous in cache (q-3), and `reseat_best` is the single bounded scan that runs only when an edit empties the current best level.
+- Book-update events leave the feed thread for the strategy thread through the q-4 SPSC ring's wait-free `push`, with the acquire/release pairing guaranteeing no torn reads and no lock on the hot path.
+- You profile per-message cost with `rdtscp`, report p50/p99/p99.9 in cycles and nanoseconds (after measuring the TSC frequency), and judge the system by its tail — not its average.
+- The deliverable is a bundle (source + build output + latency report + correctness note) whose SHA-256 you anchor via DURA `/verify`, a generic certificate lookup that proves authenticity and integrity, not quality.
+
+## What's next — beyond Phase Q
+
+You have a working, measured, hash-anchored order book — the artifact a low-latency desk hires for. The skills compound outward:
+
+- **Strategy layer**: the BookUpdate stream you produce is the input to a market-making or statistical-arbitrage strategy; the next natural build is the consumer that reads the ring and decides when to quote.
+- **Multi-symbol and order-by-order books**: extend from aggregated price levels to a full order-by-order book (FIFO queues per level) when you need queue-position modeling.
+- **Kernel-bypass ingest**: wire the q-5 DPDK/io_uring path in front of the ITCH parser so packets reach the book without the kernel network stack.
+- **Determinism for risk and compliance**: the q-2 deterministic-FP discipline matters again when the same feed must replay bit-identically for post-trade reconstruction.
+
+Phase Q taught you the substrate the whole industry rewrites. This capstone is the proof you can assemble it.

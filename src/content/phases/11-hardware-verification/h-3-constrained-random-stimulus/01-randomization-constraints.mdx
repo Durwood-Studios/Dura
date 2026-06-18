@@ -1,0 +1,188 @@
+---
+title: "Constrained-Random Stimulus"
+description: "rand fields, constraint blocks, soft constraints, the solver. One sequence generates hundreds of scenarios automatically."
+phase: 11
+module: "h-3-constrained-random-stimulus"
+order: 1
+estimatedMinutes: 90
+difficulty: 4
+prerequisites:
+  - "h-2-uvm-testbench-architecture"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - rand
+  - randc
+  - constraint
+  - soft-constraint
+  - randomize-with
+  - solver
+  - distribution
+learningOutcomes:
+  - "Mark class fields as rand or randc and explain the difference"
+  - "Write constraint blocks that express valid stimulus relationships"
+  - "Use soft constraints and inline randomize-with overrides"
+  - "Debug constraint solver conflicts"
+professionalContext: "Constrained-random stimulus is the productivity engine of modern DV. A team writes ONE transaction class with rand fields and constraints; the testbench then generates thousands of unique transactions automatically, exploring scenarios humans would never enumerate. Engineers who can write effective constraints find DUT bugs at 10x the rate of directed-test engineers. This is why UVM teams structure stimulus generation as 'sequences of constrained-random transactions' instead of 'lists of specific scenarios.'"
+thresholdConcept: true
+---
+
+## The shift in mindset
+
+Directed testing: an engineer enumerates scenarios — "send a write to address 0; then a write to 0xFF; then a write to 0x100..." Each scenario hand-written.
+
+Constrained-random: an engineer describes the SPACE of valid transactions, and the solver generates random instances. One class definition produces thousands of unique scenarios.
+
+```systemverilog
+class write_txn;
+    rand bit [31:0] addr;
+    rand bit [31:0] data;
+    rand bit [3:0]  strb;
+
+    constraint addr_aligned   { addr[1:0] == 2'b00; }
+    constraint strb_meaningful { strb != 4'b0000; }
+    constraint addr_range      { addr inside { [32'h0000_0000 : 32'h0001_FFFF] }; }
+endclass
+
+// Usage
+write_txn tx = new();
+repeat (1000) begin
+    tx.randomize();
+    drive(tx);   // Each iteration is a unique, valid write
+end
+```
+
+The solver picks `addr`, `data`, `strb` values that satisfy all constraints. 1000 unique writes — far more scenario coverage than anyone would write by hand.
+
+## rand vs randc
+
+```systemverilog
+rand  bit [3:0] x;    // Each randomize() picks fresh — may repeat
+randc bit [3:0] y;    // Cycles through all 16 values before repeating
+```
+
+`randc` is useful when you want to GUARANTEE coverage of every value in the range. `rand` is faster and produces more "interesting" distributions but doesn't guarantee value-set coverage.
+
+## Constraint relationships
+
+Constraints can relate multiple fields:
+
+```systemverilog
+class burst_txn;
+    rand bit [7:0]  len;
+    rand bit [31:0] addr;
+
+    // Aligned to len bytes
+    constraint align { (addr % len) == 0; }
+
+    // Don't cross a 4 KB boundary (AXI requirement)
+    constraint no_4k_cross {
+        ((addr & 32'hFFFF_F000) == ((addr + len - 1) & 32'hFFFF_F000));
+    }
+endclass
+```
+
+## Soft constraints — overridable defaults
+
+```systemverilog
+constraint c_default_small {
+    soft addr inside { [0 : 32'h0FFF] };   // Soft: prefer small but allow override
+}
+```
+
+`soft` constraints can be overridden by an external `randomize() with` call. Use them for sensible defaults that specific tests want to relax.
+
+## Inline overrides
+
+In a specific test, override constraints without editing the class:
+
+```systemverilog
+tx.randomize() with { addr inside { [32'h1_0000 : 32'h2_0000] }; };
+```
+
+This adds an extra constraint for this one randomize call — useful when the same transaction class is reused across many tests with different address ranges.
+
+## Distribution control
+
+```systemverilog
+constraint c_data {
+    data dist {
+        32'h0          := 30,    // 30% weight: zero
+        [32'h1:32'hFF] := 50,    // 50%: small
+        [32'h100:32'hFFFF_FFFF] := 20   // 20%: large
+    };
+}
+```
+
+`dist` controls the probability distribution. Useful when uniform distribution doesn't exercise corner cases — bias toward boundary values that are most likely to find bugs.
+
+## Solver conflicts
+
+When constraints can't be simultaneously satisfied, the solver fails:
+
+```systemverilog
+constraint c1 { x > 100; }
+constraint c2 { x < 50; }
+// randomize() returns 0; tx is unchanged
+```
+
+Debugging:
+
+1. Disable constraints one at a time (`tx.c1.constraint_mode(0);`) to find which conflict.
+2. Use simulator's constraint debugging (Questa's `-debug_solver`, VCS's `-constraint_debug`).
+3. Avoid over-constraint: each constraint should have a clear necessity.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer's constrained-random testbench runs 10,000 transactions but functional coverage only reports 40% closure. What's the most likely structural issue?",
+      options: [
+        "Run more transactions",
+        "The constraints are biasing the solver away from coverage holes. Random generation explores the SOLVER-WEIGHTED distribution, not the coverage-target distribution. The fix: add `dist` directives to bias toward under-covered values, OR write directed-random sequences that force specific corner cases. Pure random is necessary but not sufficient — you guide it with constraints toward coverage closure. Running more iterations of the same biased distribution doesn't close the holes.",
+        "The DUT has a bug",
+        "Coverage model is wrong",
+      ],
+      correct: 1,
+      explanation:
+        "Constrained random doesn't automatically achieve coverage closure. The solver picks values that satisfy constraints uniformly, which may leave corner cases unreached. Coverage holes are debugged by: (1) checking which bins are empty; (2) adding `dist` weights to bias toward those values; (3) writing targeted sequences. Pure scale (more iterations) helps marginally but doesn't fix structural biasing. This is the 'coverage-driven verification' loop: constrain, randomize, measure coverage, refine constraints.",
+    },
+    {
+      question:
+        "An engineer writes a constraint `addr inside { [0 : MAX_ADDR] }; addr % 4 == 0;` and the solver returns randomize failures. They notice MAX_ADDR is 32'hFFFF_FFFF. What's the issue?",
+      options: [
+        "The solver doesn't support modulo",
+        "MAX_ADDR is unsigned 32-bit max; the constraint `addr <= MAX_ADDR` is always true for any 32-bit value. The modulo constraint is the real one being applied. With 4-byte alignment, ~25% of values satisfy — solver should succeed. The 'failure' is likely from OTHER over-constraints in the testbench fighting this one. Use constraint_mode(0) to disable constraints one at a time and identify the actual conflict. Solver supports modulo on bit vectors.",
+        "Modulo on bit vectors is undefined",
+        "Use bit shifts instead",
+      ],
+      correct: 1,
+      explanation:
+        "The constraint as written is satisfiable (25% of 32-bit values are 4-byte aligned). The failure must come from another constraint in the testbench conflicting with this one. The debug pattern: disable constraints one at a time with `constraint_mode(0)` to isolate the conflict. Modulo IS supported on bit vectors. Bit shifts work but aren't the issue. Always debug over-constraint by reduction.",
+    },
+    {
+      question:
+        "Why use `randc` instead of `rand` for a transaction-type selector field with 8 values?",
+      options: [
+        "randc is faster",
+        "`randc` cycles through all values before repeating, guaranteeing that across 8 (or N×8) randomize() calls every transaction type is exercised at least once. With `rand`, the probability of missing a value in 8 random draws is significant (~36% chance any particular value is missed). Use `randc` when you NEED coverage of every value in the set — for transaction types, address regions in small ranges, opcode selectors, anywhere the value-set is small and complete coverage matters more than independence between draws.",
+        "rand can't be used for enumerated types",
+        "randc is the default",
+      ],
+      correct: 1,
+      explanation:
+        "`randc` provides guaranteed-cycling — every value appears before any repeat. For a small finite set (8 transaction types, 16 opcodes, etc.), this guarantees coverage that pure rand would miss probabilistically. Use rand when independence between draws matters; use randc when value-set coverage matters more. randc has slightly more overhead than rand but is far cheaper than missed coverage.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H4 introduces functional coverage — the measurement layer that tells you when constrained-random stimulus has covered enough scenarios. Covergroups + coverpoints + bins + cross coverage close the verification loop: stimulate, measure, refine, repeat.

@@ -1,0 +1,208 @@
+---
+title: "Low-Power Verification with UPF"
+description: "IEEE 1801 Unified Power Format. Power domains, isolation, retention, power-aware simulation. The DV layer over the power-intent spec."
+phase: 11
+module: "h-7-low-power-verification-upf"
+order: 1
+estimatedMinutes: 75
+difficulty: 4
+prerequisites:
+  - "h-2-uvm-testbench-architecture"
+standards:
+  primaryAnchor: "IEEE 1801-2018 (UPF)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - upf
+  - power-domain
+  - isolation-cell
+  - retention
+  - power-state-table
+  - level-shifter
+  - always-on
+learningOutcomes:
+  - "Read a UPF file and identify power domains, isolation strategy, and retention"
+  - "Run power-aware simulation and identify isolation violations"
+  - "Write assertions that catch missing isolation"
+  - "Distinguish RTL behavior from power-aware behavior"
+professionalContext: "Modern SoCs have 20+ power domains that turn off independently to save battery. The UPF (Unified Power Format) is how the design intent is captured — what shuts off, what isolates, what retains state. DV teams run power-aware simulation that respects the UPF; bugs caught here are the difference between a phone that lasts 8 hours and one that lasts 4. Engineers literate in UPF + power-aware verification work on premium mobile, datacenter, and edge-AI chips where power matters."
+thresholdConcept: false
+---
+
+## Why power-aware
+
+A normal RTL simulator drives all flops with the supplies always on. Real silicon has multiple power supplies, and parts of the design turn off independently. When a power domain turns off:
+
+- All flops in that domain lose state (unless explicitly retained).
+- Outputs of the domain become unknown unless isolated.
+- Inputs to the domain from other domains may need level-shifting if voltages differ.
+
+A bug in power-domain interface logic produces silicon that boots wrong, hangs after sleep, or burns power. UPF + power-aware sim is how DV catches these pre-silicon.
+
+## UPF — the power intent
+
+UPF is a separate file from the RTL that describes power topology:
+
+```tcl
+# example.upf — power intent for a SoC fragment
+create_power_domain TOP -include_scope
+create_power_domain PD_CPU -elements {cpu/*}
+create_power_domain PD_GPU -elements {gpu/*}
+
+# Supplies
+create_supply_set ss_top      -function {power VDD} -function {ground VSS}
+create_supply_set ss_cpu_sw   -function {power VDD_CPU} -function {ground VSS}
+create_supply_set ss_gpu_sw   -function {power VDD_GPU} -function {ground VSS}
+
+associate_supply_set ss_top    -handle TOP.primary
+associate_supply_set ss_cpu_sw -handle PD_CPU.primary
+associate_supply_set ss_gpu_sw -handle PD_GPU.primary
+
+# Isolation: outputs of PD_CPU must hold at logic 0 when CPU is off
+set_isolation cpu_iso -domain PD_CPU \
+    -isolation_signal pmu/cpu_iso_en -isolation_sense high \
+    -clamp_value 0 -applies_to outputs
+
+# Retention: these flops keep state across power-down
+set_retention cpu_ret -domain PD_CPU \
+    -retention_supply ss_top.primary \
+    -save_signal pmu/cpu_save \
+    -restore_signal pmu/cpu_restore
+
+# Power states
+add_power_state PD_CPU.primary \
+    -state ON  { -supply_expr { power == \`{FULL_ON, 1.0V} && ground == \`{FULL_ON, 0V}} } \
+    -state OFF { -supply_expr { power == \`{OFF}                                  } }
+```
+
+Reading this:
+
+- Two switchable domains (CPU, GPU) plus an always-on top domain.
+- Each switchable domain has its own supply.
+- When CPU is off, outputs must clamp to 0 (the isolation strategy).
+- Certain flops retain state (using always-on retention supply) across power-down.
+- Power states define when supplies are on or off.
+
+## Power-aware simulation
+
+The simulator reads RTL + UPF and produces a power-aware netlist that models supply behavior:
+
+- When PD_CPU is off, all signals in `cpu/*` become X (unknown).
+- Isolation cells force outputs to 0 while CPU is off.
+- Retention flops keep their state through the off period and restore it.
+- Level shifters between domains adjust voltage levels.
+
+A power-aware sim that violates these constraints produces an X-propagation in the destination domain. Without UPF awareness, the same bug looks like correct behavior in RTL sim and fails only in silicon.
+
+## Common bugs power-aware sim catches
+
+### Missing isolation
+
+```systemverilog
+// In RTL (PD_CPU side)
+assign cpu_done = ...;   // No isolation; goes directly to PD_TOP
+
+// PD_TOP uses cpu_done:
+always_ff @(posedge clk) begin
+    if (cpu_done) state <= NEXT;
+end
+```
+
+When PD_CPU is off, `cpu_done` is X. PD_TOP samples X, and the state machine becomes undefined. Power-aware sim shows this immediately; RTL sim does not.
+
+UPF fix: add `set_isolation` for outputs of PD_CPU; insertion tools add the isolation cells in synthesis.
+
+### Retention vs non-retention flops
+
+A flop marked for retention saves state through power-down. A flop NOT marked must be re-initialized on power-up.
+
+```systemverilog
+// Counter that needs to keep counting across sleep
+reg [7:0] cycle_count;   // Must be retention
+```
+
+If the designer forgot to mark this for retention, the count resets every sleep cycle. Silicon symptom: incorrect timing measurements, lost configuration.
+
+### Power-on sequence
+
+When PD_CPU turns back on:
+
+1. Supply voltages stabilize (~tens of µs).
+2. Isolation enable is deasserted (outputs become real).
+3. Retention restore signal is asserted (state restored).
+4. Reset is released.
+
+Bugs in this sequence cause boot failures. Power-aware sim models the timing.
+
+## Assertions for power transitions
+
+```systemverilog
+// Isolation must be enabled before power-down
+property p_iso_before_off;
+    @(posedge clk)
+        $rose(cpu_pwr_req) |-> ##[0:5] cpu_iso_en;
+endproperty
+assert property (p_iso_before_off);
+
+// State must be saved before turning off
+property p_save_before_off;
+    @(posedge clk)
+        cpu_save |=> ##[0:10] cpu_pwr_off;
+endproperty
+assert property (p_save_before_off);
+```
+
+These assertions express the power sequencing protocol. Power-aware sim runs them with the same UVM machinery from H2-H5.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer's RTL simulation passes 100% but the chip fails to wake from sleep mode. What's the most likely structural gap?",
+      options: [
+        "More RTL simulation",
+        "RTL simulation doesn't model power domain behavior — all flops are always powered. Power-aware simulation reads the UPF file and models supply behavior: when a domain turns off, its signals become X, isolation cells clamp outputs, retention flops save/restore state. Bugs in power-sequencing logic (isolation timing, retention save/restore order, level shifters) only manifest in power-aware sim, not in plain RTL sim. The fix: run power-aware sim with UPF, add assertions on power sequencing.",
+        "Larger SRAM",
+        "Different reset polarity",
+      ],
+      correct: 1,
+      explanation:
+        "Plain RTL sim has all supplies always on — it can't catch power-sequencing bugs. Power-aware sim respects the UPF file's domain behavior and produces X-propagation when isolation is missing or retention is wrong. Wake-from-sleep bugs are exactly the class power-aware sim catches that RTL sim doesn't. Modern SoCs need this; without it, the bugs ship.",
+    },
+    {
+      question:
+        "Why use isolation cells instead of just relying on the upstream design not driving X?",
+      options: [
+        "Isolation cells are required by the spec",
+        "When a power domain is off, every signal IN that domain is electrically undefined (X). Upstream consumers receiving these signals would get X-propagation that breaks logic in always-on domains. Isolation cells are physical gates inserted at the domain boundary that clamp outputs to a known value (typically 0) while the source domain is off. The 'consumer just shouldn't drive X' argument doesn't help — the SOURCE produces X because it's unpowered; isolation is the gating that prevents the X from spreading. This is hardware-level inevitability, not a design choice.",
+        "Performance",
+        "Backward compatibility",
+      ],
+      correct: 1,
+      explanation:
+        "When a domain is unpowered, its output signals are electrically X — not because of design choice but because there's no supply driving them. Isolation cells are physical gates at the domain boundary that force the signal to a defined value (0 typically) regardless of what the source domain says. Without isolation, X propagates into always-on logic and breaks it. This is the physical reality the UPF formalism captures.",
+    },
+    {
+      question:
+        "What's the difference between retention and non-retention flops in a power-aware design?",
+      options: [
+        "Performance",
+        "Retention flops have a small always-on secondary supply that preserves their state when the primary supply is off. After power-up, the saved state is restored on a restore signal. Non-retention flops lose their state — they must be re-initialized after power-up. Marking the wrong flops for retention costs power (more flops on the always-on supply); marking too few costs functionality (the part you wanted to remember was lost). The choice is power vs functionality per flop.",
+        "Retention is required",
+        "Non-retention is faster",
+      ],
+      correct: 1,
+      explanation:
+        "Retention flops use a small always-on supply to preserve state through power-down — useful for configuration registers, counters, important state. Non-retention flops save the always-on power but reset to a default on power-up. The choice is per-flop: critical state goes retention; everything else is non-retention. Over-retention costs power; under-retention costs functionality. UPF specifies which flops retain.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H8 — the Phase H capstone — assembles a complete UVM testbench for a UART IP block: SystemVerilog interface, agent (driver + monitor + sequencer), constrained-random sequences, functional coverage, SVA assertions, plus a power-aware option. The result is a working portfolio artifact you can hash-anchor via /verify.

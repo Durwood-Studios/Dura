@@ -1,0 +1,313 @@
+---
+title: "Capstone — A Real-Time Sensor Pipeline on STM32F4"
+description: "ADC + DMA + RTOS task + UART telemetry. End-to-end firmware that compiles, flashes, and runs. Everything from E1-E7 in one cell. Hash-anchored via /verify."
+phase: 10
+module: "e-8-capstone"
+order: 1
+estimatedMinutes: 180
+difficulty: 5
+prerequisites:
+  - "e-1-c-toolchain-arm-cortex-m"
+  - "e-2-bare-metal-c"
+  - "e-3-interrupts-and-dma"
+  - "e-4-rtos-fundamentals"
+  - "e-5-drivers"
+  - "e-6-rust-cortex-m"
+  - "e-7-misra-c-2023"
+standards:
+  primaryAnchor: "ARMv7-M Architecture Reference Manual"
+  cs2023: ["SF-Foundations", "SE-CodeQuality"]
+  swebok: []
+  bloom: "create"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - sensor-pipeline
+  - double-buffer
+  - hash-anchored-artifact
+  - traceability-matrix
+  - telemetry
+  - latency-budget
+learningOutcomes:
+  - "Compose ADC + DMA + RTOS + UART into a working real-time sensor pipeline"
+  - "Document the latency budget end-to-end (sample acquisition → telemetry transmission)"
+  - "Produce a hash-anchored portfolio artifact a hiring manager can audit"
+  - "Choose C or Rust deliberately based on project requirements"
+professionalContext: "The capstone is the artifact that proves you can ship embedded firmware. An employer can read the source, watch the demo, recompute the hash, and verify against /verify — all in under five minutes. Engineers with a working sensor-pipeline capstone in their portfolio reach the interview pile that engineers without one don't. The artifact also forces you to integrate everything from E1-E7: linker scripts work, ISRs are short, DMA double-buffers, RTOS tasks communicate via queues, MISRA-conformant style (or Rust). The complete picture."
+thresholdConcept: false
+---
+
+## The capstone
+
+You will build a real-time sensor pipeline on STM32F4 Discovery (or equivalent Cortex-M4 board) that:
+
+1. Samples an analog input via ADC1, channel 0, at 1 kHz.
+2. Uses DMA to copy samples into a double-buffered SRAM region.
+3. An RTOS task (FreeRTOS or RTIC) processes each buffer: computes mean, min, max.
+4. Telemetry is sent via UART at 115200 baud as JSON lines: `{"ts":12345,"mean":2048,"min":2032,"max":2061}`.
+5. The application is MISRA-C:2023 conformant OR written in Rust — your choice.
+
+The complete project source, a recorded video demonstrating it working, and the hash-anchored /verify certificate are the portfolio artifacts.
+
+## The architecture
+
+```
+ADC1 ──────────► DMA2 Stream 0 ──────► [buffer A] [buffer B]
+                                              │         │
+                                              │ TC/HT interrupt
+                                              ▼         ▼
+                                      ┌──────────────────────┐
+                                      │  process_task        │ (RTOS, priority 3)
+                                      │  - dequeue buffer    │
+                                      │  - compute stats     │
+                                      │  - post to telemetry │
+                                      └──────────────────────┘
+                                                  │
+                                                  ▼ queue
+                                      ┌──────────────────────┐
+                                      │  telemetry_task      │ (RTOS, priority 2)
+                                      │  - format JSON       │
+                                      │  - send via DMA UART │
+                                      └──────────────────────┘
+```
+
+Key design choices:
+
+- **Double buffer via half-transfer interrupt** (E3). DMA fills buffer B while the task processes buffer A; on the next half-transfer, the roles flip. Zero data loss at the sample rate.
+- **ISR posts to queue; task processes** (E4). The DMA HT/TC ISR enqueues a "buffer ready" message; the process task wakes when the queue has data. ISR work is minimal.
+- **Telemetry runs at lower priority than processing**. JSON formatting + UART transmission takes longer than processing; lower priority prevents it from interfering with sample handling.
+- **No dynamic allocation** (E7). Buffers, queues, and tasks are statically allocated. Stack sizes are documented. No malloc anywhere.
+
+## Latency budget
+
+The capstone requires a documented end-to-end latency budget:
+
+| Stage                          | Budget                    | Worst case (measured)    |
+| ------------------------------ | ------------------------- | ------------------------ |
+| ADC conversion                 | 1.0 ms (1 sample @ 1 kHz) | varies                   |
+| DMA half-transfer (50 samples) | 50.0 ms                   | 50.0 ms                  |
+| ISR latency                    | < 100 µs                  | measure with GPIO toggle |
+| Queue post + task wake         | < 1 ms                    | measure                  |
+| Statistics compute             | < 5 ms                    | measure                  |
+| Telemetry queue post           | < 100 µs                  | measure                  |
+| JSON format                    | < 2 ms                    | measure                  |
+| UART DMA transmit start        | < 100 µs                  | measure                  |
+| **Total end-to-end**           | **~58 ms**                | **measure**              |
+
+A target of `acquisition_complete → telemetry_transmitted < 100 ms` is appropriate for a 1 kHz sensor. The actual measured value goes in the documentation.
+
+## The implementation outline (C, MISRA-conformant)
+
+```c
+// main.c — outline
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "stm32f4xx_setup.h"
+
+#define BUFFER_SAMPLES  100U
+#define HALF_SAMPLES    50U
+
+static uint16_t adc_buffer[BUFFER_SAMPLES];
+static QueueHandle_t buffer_queue;
+static QueueHandle_t telemetry_queue;
+
+typedef struct {
+    uint16_t *start;
+    uint16_t  count;
+} buffer_msg_t;
+
+typedef struct {
+    uint32_t timestamp_ms;
+    uint16_t mean;
+    uint16_t min;
+    uint16_t max;
+} telemetry_msg_t;
+
+/* ISR: DMA half-transfer or transfer-complete. Selects which half is
+ * ready and enqueues a buffer-ready message. */
+void DMA2_Stream0_IRQHandler(void) {
+    BaseType_t woken = pdFALSE;
+    buffer_msg_t msg;
+
+    if ((DMA2_LISR & DMA_LISR_HTIF0) != 0U) {
+        DMA2_LIFCR = DMA_LIFCR_CHTIF0;
+        msg.start = &adc_buffer[0];
+        msg.count = HALF_SAMPLES;
+        (void)xQueueSendFromISR(buffer_queue, &msg, &woken);
+    }
+    if ((DMA2_LISR & DMA_LISR_TCIF0) != 0U) {
+        DMA2_LIFCR = DMA_LIFCR_CTCIF0;
+        msg.start = &adc_buffer[HALF_SAMPLES];
+        msg.count = HALF_SAMPLES;
+        (void)xQueueSendFromISR(buffer_queue, &msg, &woken);
+    }
+    portYIELD_FROM_ISR(woken);
+}
+
+/* Process task: receive buffer, compute mean/min/max, post telemetry */
+static void process_task(void *params) {
+    (void)params;
+    buffer_msg_t buf_msg;
+    telemetry_msg_t tlm_msg;
+
+    for (;;) {
+        if (xQueueReceive(buffer_queue, &buf_msg, portMAX_DELAY) == pdPASS) {
+            uint32_t sum = 0U;
+            uint16_t min_val = UINT16_MAX;
+            uint16_t max_val = 0U;
+            for (uint16_t i = 0U; i < buf_msg.count; i++) {
+                uint16_t v = buf_msg.start[i];
+                sum += v;
+                if (v < min_val) { min_val = v; }
+                if (v > max_val) { max_val = v; }
+            }
+            tlm_msg.timestamp_ms = xTaskGetTickCount();
+            tlm_msg.mean = (uint16_t)(sum / buf_msg.count);
+            tlm_msg.min  = min_val;
+            tlm_msg.max  = max_val;
+            (void)xQueueSend(telemetry_queue, &tlm_msg, 0U);
+        }
+    }
+}
+
+/* Telemetry task: format JSON, send via UART DMA */
+static void telemetry_task(void *params) {
+    (void)params;
+    telemetry_msg_t tlm_msg;
+    static char json_buf[96];
+
+    for (;;) {
+        if (xQueueReceive(telemetry_queue, &tlm_msg, portMAX_DELAY) == pdPASS) {
+            int n = snprintf(json_buf, sizeof(json_buf),
+                "{\"ts\":%lu,\"mean\":%u,\"min\":%u,\"max\":%u}\n",
+                (unsigned long)tlm_msg.timestamp_ms,
+                tlm_msg.mean, tlm_msg.min, tlm_msg.max);
+            if ((n > 0) && ((size_t)n < sizeof(json_buf))) {
+                uart_dma_send((const uint8_t *)json_buf, (uint16_t)n);
+            }
+        }
+    }
+}
+
+int main(void) {
+    system_clock_init();
+    gpio_init();
+    uart_init(115200U);
+    adc_dma_init(adc_buffer, BUFFER_SAMPLES);
+
+    buffer_queue    = xQueueCreate(4U,  sizeof(buffer_msg_t));
+    telemetry_queue = xQueueCreate(8U,  sizeof(telemetry_msg_t));
+
+    (void)xTaskCreate(process_task,   "proc", 384U, NULL, 3U, NULL);
+    (void)xTaskCreate(telemetry_task, "tlm",  512U, NULL, 2U, NULL);
+
+    enable_dma2_stream0_irq();
+    adc_start();
+
+    vTaskStartScheduler();
+
+    for (;;) { }  /* unreachable */
+}
+```
+
+This is the skeleton — peripheral init details (system_clock_init, gpio_init, uart_init, adc_dma_init) come from E2/E3/E5 patterns. Everything is statically allocated, ISRs are short, and the task structure matches the architecture diagram.
+
+## The deliverables
+
+Your /verify-anchored capstone submission must include:
+
+1. **Source code** — all .c, .h, .ld, Makefile (or Cargo.toml + Rust source). MISRA-C:2023 conformance report from your static analyzer if C; clippy clean if Rust.
+2. **README** — how to build, how to flash, how to observe the telemetry. Hardware setup diagram (which pin is the analog input, how UART is connected).
+3. **Latency budget document** — the table above with measured values, plus your measurement methodology (GPIO toggle + logic analyzer is typical).
+4. **Architecture diagram** — the ASCII or drawn architecture from above, annotated with priority numbers.
+5. **Demo video** — 30-90 seconds showing the board running and a terminal capturing the telemetry stream.
+6. **MISRA deviation log** (if C) — any rules you chose to deviate from with justifications.
+7. **Hash anchor** — SHA-256 of the bundled package; /verify certificate; both included as Appendix V.
+
+## Grading rubric
+
+| Section                  | Acceptable                                                 | Incomplete                              |
+| ------------------------ | ---------------------------------------------------------- | --------------------------------------- |
+| Working binary           | Builds clean; flashes; produces telemetry output           | Doesn't compile or run                  |
+| ISR discipline           | ISRs ≤ 50 lines, no blocking calls, no allocation          | printf or mutex in ISR; >100 lines      |
+| Static allocation        | No malloc anywhere; buffers + queues sized at compile time | Heap usage; runtime sizing              |
+| Documentation            | All deliverables above present; latency measured           | Missing diagram, video, or measurements |
+| MISRA conformance (if C) | Analyzer clean with documented deviations                  | Analyzer warnings ignored               |
+| /verify hash             | Certificate present in Appendix V                          | Missing or invalid                      |
+
+## Submission
+
+1. Bundle source + docs + video into a single archive.
+2. Compute SHA-256.
+3. Submit to /verify with title "Phase E Capstone — Real-Time Sensor Pipeline (STM32F4)".
+4. Append the returned certificate as Appendix V.
+5. Publish — GitHub, portfolio site, LinkedIn. The /verify URL goes in the description so reviewers can audit.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A reviewer audits a capstone submission. The ISR for DMA half-transfer is 80 lines, includes a printf call, and acquires a mutex before posting to the buffer queue. What are the structural issues?",
+      options: [
+        "No issues — the ISR works in testing",
+        "Three violations of E3/E4 patterns: (1) ISR length should be minimal — printf in an ISR blocks for milliseconds at typical baud rates, blowing the latency budget; (2) mutex acquisition in an ISR can cause priority-inversion bugs (the Pathfinder failure mode) — ISRs should use xQueueSendFromISR which is interrupt-safe by design; (3) 80 lines suggests work that should be in a task. The fix: ISR clears the flag, enqueues the buffer pointer with xQueueSendFromISR, and exits — total maybe 15 lines.",
+        "The mutex is fine in an ISR if priority inheritance is enabled",
+        "printf is fine if it goes to a UART",
+      ],
+      correct: 1,
+      explanation:
+        "The capstone's grading rubric and E3/E4 patterns both forbid these moves. ISRs must be short, must not block, must not allocate, must not take mutexes. The FromISR variants of kernel calls exist precisely so ISRs can communicate with tasks safely. Priority inheritance applies to mutexes that tasks hold, not to mutexes ISRs might take — and FreeRTOS forbids the latter. printf in an ISR is a classic anti-pattern: it serializes byte-by-byte at UART speed, holding off other interrupts the whole time. The fix is the standard 'short ISR enqueues; task processes' decomposition.",
+    },
+    {
+      question:
+        "An engineer submits a capstone where the ADC buffer is allocated via malloc at boot. The static analyzer flags MISRA-C:2023 Rule 21.3 (no allocation functions). The engineer adds a deviation document arguing 'one-time allocation at boot has no fragmentation risk.' Is this an acceptable deviation?",
+      options: [
+        "Yes — the argument is sound",
+        "Marginal. The technical claim is correct (one-time allocation at boot won't fragment, since nothing is freed after), but the deviation misses MISRA's full reasoning: dynamic allocation introduces a failure mode (malloc returns NULL) and a code path (the NULL check) that adds complexity without benefit for buffers whose size is known at compile time. A reviewer would likely require either: (1) reject the deviation and use static allocation, or (2) accept the deviation with explicit NULL-check handling and a boot-time assertion that the allocation succeeded. The structurally cleaner choice is static allocation — there's no advantage to malloc here.",
+        "No — MISRA rules cannot be deviated under any circumstances",
+        "Yes — MISRA always allows deviation for embedded targets",
+      ],
+      correct: 1,
+      explanation:
+        "Deviations need to engage with the full reasoning behind the rule, not just one aspect. The fragmentation argument is correct but incomplete — malloc adds a failure path and complexity that's unnecessary when sizes are static. A rigorous reviewer would push back. Static allocation is simpler and removes the NULL-check entirely. Rule 21.3 IS deviation-eligible (it's Required, not Mandatory) but the deviation must be technically grounded. The Mandatory rules (option 3) can't be deviated, but 21.3 isn't Mandatory.",
+    },
+    {
+      question:
+        "An employer reviews your capstone via /verify. They recompute SHA-256 on the package they downloaded and compare to the hash on the certificate. The hashes match. What does this prove?",
+      options: [
+        "The code is correct and the architecture is good",
+        "It proves the bytes you produced at the time of anchoring are the bytes the employer is reviewing — no edits to hide gaps, no after-the-fact substitutions, no impersonation of someone else's work. The /verify timestamp also proves WHEN the work was produced. The hash anchor does NOT prove the code is correct, the architecture is good, or the engineering judgment is sound — those are still review questions. But it eliminates the 'is this the real submission' question entirely, which is the credentialing layer that substitutes for a vendor cert.",
+        "It proves the employer cannot copy the work",
+        "It proves the code is bug-free",
+      ],
+      correct: 1,
+      explanation:
+        "The /verify hash anchor proves AUTHENTICITY and INTEGRITY, not quality. The employer can trust that the bytes they're reviewing are the same bytes you anchored at the certificate's timestamp; that's the credentialing value. It does NOT validate the engineering — they still have to read the code. It does not prevent copying (the source is available to whoever has the file). And it does not prove correctness — only that the package is unmodified since anchoring. The 'real submission' guarantee is the substantial part: in a world without vendor certs, /verify is how 'I did this work' becomes auditable.",
+    },
+  ]}
+/>
+
+## What's next — beyond Phase E
+
+You've completed Phase E. You can:
+
+- Build firmware from scratch with a known-good toolchain, linker script, and startup code.
+- Write bare-metal C against any Cortex-M chip given its reference manual.
+- Use interrupts and DMA correctly, with the deferred-work pattern.
+- Structure an application with an RTOS and avoid priority inversion.
+- Write drivers for UART, SPI, I2C, ADC with the right traffic-shape decomposition.
+- Port a driver to Rust and read embedded-hal + RTIC code.
+- Author MISRA-C:2023 conformant code or argue principled deviations.
+- Ship a hash-anchored portfolio artifact.
+
+Phase E is the foundation. Beyond it:
+
+- **Robotics SW**: pair Phase E with Phase R (ROS 2 + safety standards).
+- **Automotive**: add ISO 26262 / AUTOSAR study; consider Apex.Grace (Rust safety-certified).
+- **Medical devices**: pair Phase E with the forthcoming Phase B (IEC 62304, FDA).
+- **Hardware verification**: cross over into Phase H (SystemVerilog UVM).
+
+The skills from Phase E transfer across all of these. Standards literacy compounds.

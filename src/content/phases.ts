@@ -594,14 +594,14 @@ export const PHASES: Phase[] = [
     ],
   },
 
-  // ─── Phase E — Embedded / Firmware (post-Phase-5, code-teaching) ───────
+  // ─── Phase 10 — Embedded / Firmware (post-Phase-5, code-teaching) ──────
   // Eight-lesson code-first curriculum for ARM Cortex-M. C and Rust on
   // bare metal, RTOS, drivers, MISRA-C:2023 in practice, and a capstone
   // real-time sensor pipeline on STM32F4. Hash-anchored capstone via /verify.
   {
-    id: "e",
-    slug: "e-embedded",
-    title: "Phase E: Embedded / Firmware",
+    id: "10",
+    slug: "10-embedded",
+    title: "Phase 10: Embedded / Firmware",
     tagline: "Ship production firmware against ARM Cortex-M.",
     description:
       "Eight code-teaching lessons from C-literacy to a working real-time sensor pipeline on STM32. C and Rust on bare metal, RTOS fundamentals, drivers for the four canonical buses, MISRA-C:2023 in practice. Code-first — standards appear only where they're load-bearing.",
@@ -612,7 +612,7 @@ export const PHASES: Phase[] = [
     order: 12,
     modules: [
       mod(
-        "e",
+        "10",
         1,
         "c-toolchain-arm-cortex-m",
         "C Toolchain for ARM Cortex-M",
@@ -621,7 +621,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "e",
+        "10",
         2,
         "bare-metal-c",
         "Bare-Metal C — Registers, Peripherals, the Boot Sequence",
@@ -630,7 +630,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "e",
+        "10",
         3,
         "interrupts-and-dma",
         "Interrupts and DMA",
@@ -639,7 +639,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "e",
+        "10",
         4,
         "rtos-fundamentals",
         "RTOS Fundamentals — Tasks, Queues, Priority Inversion",
@@ -648,7 +648,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "e",
+        "10",
         5,
         "drivers",
         "Drivers — UART, SPI, I2C, ADC",
@@ -657,7 +657,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "e",
+        "10",
         6,
         "rust-cortex-m",
         "Rust on Cortex-M — embedded-hal + RTIC",
@@ -666,7 +666,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "e",
+        "10",
         7,
         "misra-c-2023",
         "MISRA-C:2023 — When Style Is a Safety Requirement",
@@ -675,7 +675,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "e",
+        "10",
         8,
         "capstone",
         "Capstone — A Real-Time Sensor Pipeline",
@@ -686,14 +686,14 @@ export const PHASES: Phase[] = [
     ],
   },
 
-  // ─── Phase H — Hardware Verification (post-Phase-5, code-teaching) ─────
+  // ─── Phase 11 — Hardware Verification (post-Phase-5, code-teaching) ─────
   // Eight-lesson SystemVerilog + UVM curriculum. IEEE 1800-2023 + IEEE
   // 1800.2-2020 anchored. Capstone is a complete UVM testbench for a
   // UART IP block, hash-anchored via /verify.
   {
-    id: "h",
-    slug: "h-hardware-verification",
-    title: "Phase H: Hardware Verification",
+    id: "11",
+    slug: "11-hardware-verification",
+    title: "Phase 11: Hardware Verification",
     tagline: "Stand up a UVM testbench for any IP block.",
     description:
       "Eight code-teaching lessons that move you from SystemVerilog literacy to a complete UVM testbench. IEEE 1800-2023 + IEEE 1800.2-2020 anchored throughout.",
@@ -704,7 +704,7 @@ export const PHASES: Phase[] = [
     order: 13,
     modules: [
       mod(
-        "h",
+        "11",
         1,
         "systemverilog-basics",
         "SystemVerilog Basics for Verification",
@@ -713,7 +713,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "h",
+        "11",
         2,
         "uvm-testbench-architecture",
         "UVM Testbench Architecture",
@@ -722,7 +722,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "h",
+        "11",
         3,
         "constrained-random-stimulus",
         "Constrained-Random Stimulus",
@@ -731,7 +731,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "h",
+        "11",
         4,
         "functional-coverage",
         "Functional Coverage — Coverpoints, Bins, Cross",
@@ -740,7 +740,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "h",
+        "11",
         5,
         "uvm-sequences",
         "UVM Sequences and Virtual Sequences",
@@ -749,7 +749,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "h",
+        "11",
         6,
         "formal-verification-sva",
         "Formal Verification — SVA Assertions",
@@ -758,7 +758,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "h",
+        "11",
         7,
         "low-power-verification-upf",
         "Low-Power Verification with UPF",
@@ -767,7 +767,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "h",
+        "11",
         8,
         "capstone-uart-uvm-tb",
         "Capstone — UVM Testbench for a UART IP Block",
@@ -778,13 +778,13 @@ export const PHASES: Phase[] = [
     ],
   },
 
-  // ─── Phase Q — Quant / HFT Systems (post-Phase-5, code-teaching) ───────
+  // ─── Phase 12 — Quant / HFT Systems (post-Phase-5, code-teaching) ──────
   // Eight lessons on microsecond-latency C++ for quant trading. ISO
   // C++23 + IEEE 754-2019 + FIX + Nasdaq ITCH/OUCH anchored.
   {
-    id: "q",
-    slug: "q-quant-hft",
-    title: "Phase Q: Quantitative / HFT Systems",
+    id: "12",
+    slug: "12-quant-hft",
+    title: "Phase 12: Quantitative / HFT Systems",
     tagline: "Build microsecond-latency C++ for quant trading.",
     description:
       "Eight code-teaching lessons from modern C++ to a working order book. ISO C++23, IEEE 754-2019, FIX, and Nasdaq ITCH/OUCH anchored throughout.",
@@ -795,7 +795,7 @@ export const PHASES: Phase[] = [
     order: 14,
     modules: [
       mod(
-        "q",
+        "12",
         1,
         "modern-cpp-for-hft",
         "Modern C++ for HFT",
@@ -804,7 +804,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "q",
+        "12",
         2,
         "ieee-754-numerics",
         "IEEE 754 Numerics",
@@ -813,7 +813,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "q",
+        "12",
         3,
         "cache-aware-programming",
         "Cache-Aware Programming + False Sharing",
@@ -822,7 +822,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "q",
+        "12",
         4,
         "lock-free-data-structures",
         "Lock-Free Data Structures",
@@ -831,7 +831,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "q",
+        "12",
         5,
         "kernel-bypass-networking",
         "Kernel-Bypass Networking — DPDK + io_uring",
@@ -840,7 +840,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "q",
+        "12",
         6,
         "market-data-itch-ouch",
         "Market Data — ITCH + OUCH",
@@ -849,7 +849,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "q",
+        "12",
         7,
         "fix-protocol-order-entry",
         "FIX Protocol",
@@ -858,7 +858,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "q",
+        "12",
         8,
         "capstone-order-book",
         "Capstone — Microsecond Order Book",
@@ -869,14 +869,14 @@ export const PHASES: Phase[] = [
     ],
   },
 
-  // ─── Phase R — Robotics (post-Phase-5 specialization) ──────────────────
+  // ─── Phase 13 — Robotics (post-Phase-5 specialization) ─────────────────
   // Eight-lesson curriculum anchored to ISO 10218:2025, ISO 12100, the
   // functional-safety triad, and ROS-Industrial. Capstone produces a
   // hash-anchored R15.06-2025 risk-assessment package via /verify.
   {
-    id: "r",
-    slug: "r-robotics",
-    title: "Phase R: Robotics",
+    id: "13",
+    slug: "13-robotics",
+    title: "Phase 13: Robotics",
     tagline: "Build robots that pass real safety reviews.",
     description:
       "Eight lessons anchored to the 2025 unified ISO 10218 family + the functional-safety triad + ROS-Industrial. Capstone hash-anchors a complete R15.06-2025 risk-assessment package as a /verify artifact a hiring manager can audit.",
@@ -887,7 +887,7 @@ export const PHASES: Phase[] = [
     order: 10,
     modules: [
       mod(
-        "r",
+        "13",
         1,
         "iso-8373-vocabulary",
         "ISO 8373 Vocabulary",
@@ -896,7 +896,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "r",
+        "13",
         2,
         "iso-12100-risk",
         "ISO 12100 Risk Assessment",
@@ -905,7 +905,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "r",
+        "13",
         3,
         "functional-safety",
         "Functional Safety: PL ↔ SIL",
@@ -914,7 +914,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "r",
+        "13",
         4,
         "collaborative-modes",
         "The Four Collaborative Modes",
@@ -923,7 +923,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "r",
+        "13",
         5,
         "pfl-testing",
         "PFL Testing: RIA TR R15.806",
@@ -932,7 +932,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "r",
+        "13",
         6,
         "ros-industrial",
         "ROS 2 + ROS-Industrial",
@@ -941,7 +941,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "r",
+        "13",
         7,
         "cybersecurity",
         "Robot Cybersecurity: 10218 × 62443",
@@ -950,7 +950,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "r",
+        "13",
         8,
         "capstone",
         "Capstone: R15.06-2025 Risk-Assessment Package",
@@ -961,15 +961,15 @@ export const PHASES: Phase[] = [
     ],
   },
 
-  // ─── Phase M — Manufacturing (post-Phase-5 specialization) ──────────────
+  // ─── Phase 14 — Manufacturing (post-Phase-5 specialization) ─────────────
   // Twelve-lesson curriculum anchored to the manufacturing-standards stack
   // ISO 9001 + AS9100/IATF 16949, Core Tools, GD&T/MBD, ISA-95/88,
   // MTConnect + OPC UA + TSN, IEC 62443, Lean / Six Sigma, RAMI 4.0 / IIRA.
   // Viable for non-CS-degreed learners (prereqs through Phase 5 only).
   {
-    id: "m",
-    slug: "m-manufacturing",
-    title: "Phase M: Manufacturing",
+    id: "14",
+    slug: "14-manufacturing",
+    title: "Phase 14: Manufacturing",
     tagline: "Build a manufacturing engineer hiring managers actually test.",
     description:
       "Twelve lessons anchored to ISO 9001, AS9100, IATF 16949 + Core Tools, ASME Y14.5/Y14.41 GD&T + MBD, ISA-95/88, MTConnect + OPC UA + TSN, IEC 62443, Lean / Six Sigma. Five hash-anchorable /verify artifacts: PPAP package, DMAIC project, GD&T stack-up, OEE computation, MTConnect→OPC UA bridge.",
@@ -980,7 +980,7 @@ export const PHASES: Phase[] = [
     order: 11,
     modules: [
       mod(
-        "m",
+        "14",
         1,
         "iso-9001-baseline",
         "ISO 9001 Baseline",
@@ -989,7 +989,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         2,
         "as9100-iatf-supersets",
         "Industry Supersets: AS9100 + IATF 16949",
@@ -998,7 +998,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         3,
         "iatf-core-tools",
         "IATF Core Tools",
@@ -1007,7 +1007,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         4,
         "lean-tps",
         "Lean / Toyota Production System",
@@ -1016,7 +1016,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         5,
         "six-sigma-dmaic",
         "Six Sigma DMAIC",
@@ -1025,7 +1025,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         6,
         "asme-y14-5-gdt",
         "ASME Y14.5 GD&T + Tolerance Stack-Up",
@@ -1034,7 +1034,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         7,
         "asme-y14-41-mbd",
         "ASME Y14.41 Model-Based Definition",
@@ -1043,7 +1043,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         8,
         "ipc-a-610-classes",
         "IPC-A-610J Acceptability + Class Framework",
@@ -1052,7 +1052,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         9,
         "ipc-7711-rework",
         "IPC-7711/7721 Rework",
@@ -1061,7 +1061,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         10,
         "isa-95-isa-88",
         "ISA-95 Pyramid + ISA-88 Batch",
@@ -1070,7 +1070,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         11,
         "mtconnect-opcua-tsn",
         "MTConnect + OPC UA + IEC/IEEE 60802 TSN",
@@ -1079,7 +1079,7 @@ export const PHASES: Phase[] = [
         1
       ),
       mod(
-        "m",
+        "14",
         12,
         "iec-62443-rami-iira",
         "IEC 62443 + RAMI 4.0 + IIRA",

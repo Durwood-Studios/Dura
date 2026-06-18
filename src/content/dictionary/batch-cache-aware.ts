@@ -12,7 +12,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Cache Line",
     aliases: ["cache block"],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -29,7 +29,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Cache Hierarchy",
     aliases: ["memory hierarchy", "L1 L2 L3"],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -46,7 +46,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Spatial Locality",
     aliases: [],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -63,7 +63,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Temporal Locality",
     aliases: [],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -80,7 +80,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Cache Hit",
     aliases: [],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -97,7 +97,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Cache Miss",
     aliases: [],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -114,7 +114,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Array of Structs (AoS)",
     aliases: ["array-of-structs"],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -131,7 +131,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Structure of Arrays (SoA)",
     aliases: ["structure-of-arrays"],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -148,7 +148,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "False Sharing",
     aliases: [],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -165,7 +165,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Cache-Line Padding",
     aliases: ["padding to a cache line", "alignas padding"],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -182,7 +182,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Prefetch",
     aliases: ["prefetching", "__builtin_prefetch"],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:
@@ -199,7 +199,7 @@ export const CACHE_AWARE_TERMS: DictionaryTerm[] = [
     term: "Hardware Destructive Interference Size",
     aliases: ["std::hardware_destructive_interference_size", "destructive interference size"],
     category: "systems",
-    phaseIds: ["q"],
+    phaseIds: ["12"],
     lessonIds: ["q-3-cache-aware-programming"],
     definitions: {
       beginner:

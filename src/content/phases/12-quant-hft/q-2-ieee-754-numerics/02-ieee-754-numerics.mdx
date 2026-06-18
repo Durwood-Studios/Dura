@@ -1,0 +1,353 @@
+---
+title: "IEEE 754 Numerics — Fast Math, Denormals, Determinism"
+description: "IEEE 754-2019 binary64 in operational terms. Why -ffast-math changes results, denormal-flush, fused multiply-add, deterministic-FP for risk systems."
+phase: 12
+module: "q-2-ieee-754-numerics"
+order: 2
+estimatedMinutes: 30
+difficulty: 4
+prerequisites:
+  - "q-1-modern-cpp-for-hft"
+standards:
+  primaryAnchor: "IEEE 754-2019"
+  cs2023: []
+  swebok: []
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - binary64
+  - significand
+  - biased-exponent
+  - unit-in-the-last-place
+  - rounding-mode
+  - round-to-nearest-even
+  - floating-point-associativity
+  - ffast-math
+  - funsafe-math-optimizations
+  - reproducible-floating-point
+  - denormal
+  - flush-to-zero
+  - denormals-are-zero
+  - fused-multiply-add
+  - fixed-point
+  - ticks
+  - deterministic-pricing
+learningOutcomes:
+  - "Decode a binary64 value into its sign, biased exponent, and significand fields, and explain what unit-in-the-last-place means at a given magnitude"
+  - "Explain why floating-point addition is not associative, and predict when -ffast-math will change a sum's result"
+  - "Identify the denormal latency cliff and explain what FTZ/DAZ trade away to avoid it"
+  - "Explain when a fused-multiply-add changes a computed result versus a separate multiply-then-add"
+  - "Justify why HFT pricing and risk systems often represent prices as integer ticks instead of binary64"
+  - "State the conditions under which two machines produce bit-identical floating-point results"
+professionalContext: "On a trading desk, a P&L number that differs by one cent between the matching engine, the risk system, and the end-of-day reconciliation report triggers a control investigation that can halt trading. The difference is almost never a bug in the business logic — it is two binary64 sums computed in a different order, or one machine compiled with -ffast-math and another without, or a denormal flushed to zero on one host. Quant developers who understand IEEE 754 at the bit level diagnose these in minutes; those who treat double as 'a number with decimals' burn days and erode the desk's trust in the systems. This lesson is the difference between owning your numerics and being owned by them."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A risk system reports the book's value as `$10,000,000.01`. The matching engine's own tally says `$10,000,000.00`. Same trades, same prices, same formulas — one cent apart. Someone has to explain the cent before the desk can keep trading, because a controls team cannot tell the difference between a one-cent rounding artifact and a one-cent embezzlement until someone proves which it is.
+
+The cent is almost never a logic bug. It is the floating-point arithmetic doing exactly what the IEEE 754 standard says it must — adding the same numbers in a different order, on a binary that was compiled with a different math flag, or on a CPU that handled a tiny intermediate value differently. This lesson makes that behavior predictable instead of mysterious, so you can be the person who explains the cent in two minutes instead of the person who loses two days.
+
+## First principles: a double is a struct, not a decimal
+
+A `double` looks like a decimal number when you print it, so it is tempting to reason about it as one. It is not. A `double` is a fixed-width binary record — a tiny struct laid out in 64 bits — and every operation on it is defined by the IEEE 754-2019 standard, which is the document CPU vendors, compiler authors, and language standards all defer to.
+
+Picture a number written in scientific notation, but in base two:
+
+```
+value = (-1)^sign × 1.fffffff…  × 2^(exponent)
+                    └ significand ┘   └ power of two ┘
+```
+
+The "1.fffff" part is the <VocabTooltip slug="significand">significand</VocabTooltip> — the meaningful digits. The power of two is the exponent — where the binary point sits. The sign is one bit. That is the whole idea: a double stores _significant binary digits_ and _a scale_, not "the number 10000000.01."
+
+The trap is right there. Some decimal values — `0.1`, `0.2`, `10000000.01` — have no finite representation in base two, the same way `1/3` has no finite representation in base ten. The double stores the _nearest representable binary value_, and "nearest" leaves a gap. That gap is where the cent lives.
+
+## The mental model
+
+> A `double` is a 64-bit record holding a sign bit, an 11-bit biased exponent, and a 52-bit fraction. It represents the closest binary value to your number — not your number. Every arithmetic operation rounds the exact mathematical result back onto the nearest representable double. The accumulated rounding is deterministic, but it depends on the _order_ of operations and the _flags_ the binary was compiled with.
+
+Hold that picture. Everything below is a consequence of it.
+
+## The mechanism: binary64 layout
+
+IEEE 754-2019 calls the 64-bit format <VocabTooltip slug="binary64">binary64</VocabTooltip> (C and C++ map `double` to it on every mainstream platform). The 64 bits split into three fields:
+
+```
+ 63        62 ──────────── 52 51 ───────────────────────────── 0
+┌──┬──────────────────────────┬──────────────────────────────────┐
+│S │   biased exponent (11)    │      fraction / significand (52)  │
+└──┴──────────────────────────┴──────────────────────────────────┘
+ 1 bit         11 bits                       52 bits
+```
+
+- **Sign (S):** 1 bit. `0` = positive, `1` = negative.
+- **<VocabTooltip slug="biased-exponent">Biased exponent</VocabTooltip>:** 11 bits. The stored value is the actual exponent plus a bias of `1023`. So a stored `1023` means `2^0`; a stored `1024` means `2^1`. The bias lets the field stay an unsigned integer while encoding negative exponents.
+- **Fraction:** 52 bits. For normal numbers there is an _implicit leading 1_ before the binary point, so the effective <VocabTooltip slug="significand">significand</VocabTooltip> is 53 bits of precision while only 52 are stored.
+
+You can see the bits directly. The portable, standard-conformant way to reinterpret a double's bytes as an integer is `memcpy` (type punning through a union is undefined behavior in C++; `std::bit_cast` in C++20 is the modern equivalent of this `memcpy`):
+
+```cpp
+#include <cstdint>
+#include <cstdio>
+#include <cstring>   // std::memcpy
+
+// Reinterpret the 8 bytes of a double as a uint64_t WITHOUT violating
+// strict aliasing. memcpy is the canonical, defined way to do this.
+uint64_t bits_of(double value) {
+    uint64_t raw;
+    std::memcpy(&raw, &value, sizeof raw);
+    return raw;
+}
+
+int main() {
+    double price = 0.1;            // NOT exactly 0.1 — the nearest binary64
+    uint64_t raw = bits_of(price);
+
+    uint64_t sign     = raw >> 63;
+    uint64_t exponent = (raw >> 52) & 0x7FF;   // 11 exponent bits
+    uint64_t fraction = raw & 0xF'FFFF'FFFF'FFFF; // low 52 bits
+
+    // %016llx prints all 16 hex digits so the layout is visible.
+    std::printf("0.1 bits = 0x%016llx\n", (unsigned long long)raw);
+    std::printf("  sign=%llu exp=%llu(unbiased %lld) frac=0x%013llx\n",
+                (unsigned long long)sign,
+                (unsigned long long)exponent,
+                (long long)exponent - 1023,
+                (unsigned long long)fraction);
+    return 0;
+}
+```
+
+Compiled and run, this prints `0.1 bits = 0x3fb999999999999a`. The repeating `9999…a` fraction is the giveaway: `0.1` is a repeating fraction in binary, so binary64 stores the nearest 53-bit approximation. The actual stored value is `0.1000000000000000055511151231257827021181583404541015625`. That tail is real, and it is why ten additions of `0.1` do not land exactly on `1.0`.
+
+## Unit in the last place: the size of the gap
+
+The gap between one representable double and the next is one <VocabTooltip slug="unit-in-the-last-place">unit in the last place</VocabTooltip> (ULP). It is not a fixed amount — it scales with magnitude, because the significand has a fixed number of bits but the exponent slides the binary point.
+
+```cpp
+#include <cmath>
+#include <cstdio>
+
+int main() {
+    // std::nextafter returns the next representable double toward +inf.
+    // The difference is exactly one ULP at that magnitude.
+    double small = 1.0;
+    double big   = 10'000'000.0;   // a realistic notional / price level
+
+    std::printf("ULP near 1.0          = %.20g\n", std::nextafter(small, 2.0) - small);
+    std::printf("ULP near 10,000,000.0 = %.20g\n", std::nextafter(big, big + 1.0) - big);
+    return 0;
+}
+```
+
+This prints roughly `2.2e-16` near `1.0` but about `1.9e-9` near ten million. The lesson for pricing: at a notional of ten million dollars, the smallest difference a `double` can even represent is around two-billionths of a dollar — fine for that magnitude, but the moment you _sum many such values_, each addition rerounds to that grid, and the rounding errors accumulate in an order-dependent way. That order dependence is the next mechanism.
+
+## Rounding modes and why addition is not associative
+
+When an operation's exact result falls between two representable doubles, IEEE 754 rounds it according to the active <VocabTooltip slug="rounding-mode">rounding mode</VocabTooltip>. The default — the one your program uses unless you change it — is <VocabTooltip slug="round-to-nearest-even">round-to-nearest, ties-to-even</VocabTooltip>: pick the closer representable value, and on an exact tie pick the one whose last bit is `0`. Ties-to-even exists so that rounding a long stream of values does not drift systematically upward the way "round half up" does.
+
+Because every individual addition rounds, **floating-point addition is not associative**: `(a + b) + c` can differ from `a + (b + c)`. This is not a CPU bug; it is a direct consequence of rounding after each step.
+
+```cpp
+#include <cstdio>
+
+int main() {
+    // Three values chosen so the rounding order is visible.
+    double a = 1e16;     // huge
+    double b = -1e16;    // cancels a exactly
+    double c = 1.0;      // tiny relative to a and b
+
+    double left  = (a + b) + c;   // (1e16 + -1e16) + 1 = 0 + 1 = 1
+    double right = a + (b + c);   // 1e16 + (-1e16 + 1) = 1e16 + -1e16 = 0
+    //                              the +1 vanishes: 1 is below the ULP at 1e16
+
+    std::printf("(a + b) + c = %.1f\n", left);   // 1.0
+    std::printf("a + (b + c) = %.1f\n", right);  // 0.0
+    return 0;
+}
+```
+
+`(a + b) + c` gives `1.0`; `a + (b + c)` gives `0.0`. Same three numbers, different grouping, different answer — because adding `1.0` to `1e16` rounds straight back to `1e16` (the `1` is smaller than one ULP at that magnitude), so the `+1` is lost when it happens first.
+
+This is the mechanism behind the one-cent reconciliation break. If the matching engine sums fills in fill order and the risk system sums positions in symbol order, they are computing the same mathematical total with different _groupings_, and IEEE 754 guarantees only that each grouping is correctly rounded — not that the two groupings agree.
+
+## Why -ffast-math changes results
+
+The compiler flag <VocabTooltip slug="ffast-math">-ffast-math</VocabTooltip> (a GCC/Clang umbrella that turns on <VocabTooltip slug="funsafe-math-optimizations">-funsafe-math-optimizations</VocabTooltip> among others) tells the compiler: _you may assume floating-point arithmetic is associative and that infinities, NaNs, and signed zeros do not occur._ With that permission, the compiler reorders and combines arithmetic to go faster — for example, summing an array using four parallel accumulators (vectorization) instead of one strict left-to-right chain.
+
+The catch follows directly from the non-associativity above: **reordering the additions changes the rounding, so it changes the bits of the result.** A binary compiled with `-ffast-math` can produce a different sum than the same source compiled without it. It can also break correctness outright — code that checks `if (x != x)` to detect a NaN is silently deleted, because `-ffast-math` lets the compiler assume `x == x` is always true.
+
+```cpp
+// Summing this array can yield different results under -ffast-math because
+// the compiler is free to re-associate (e.g. pairwise / vectorized) the adds.
+double sum_book(const double* pnl, int count) {
+    double total = 0.0;            // strict left-to-right WITHOUT -ffast-math
+    for (int i = 0; i < count; ++i) {
+        total += pnl[i];           // each += rerounds to nearest binary64
+    }
+    return total;                  // bit-exact and reproducible across hosts
+}                                  //   ...only when -ffast-math is OFF
+```
+
+For a graphics or signal-processing workload, the speed is worth the last-bit drift. For a P&L number that must reconcile to the cent across three systems, it is not. The operational rule on most desks: **risk and pricing translation units are compiled WITHOUT -ffast-math**, and that decision is documented, because a single source file accidentally built with it is enough to produce an unreconcilable book.
+
+## The denormal latency cliff
+
+The smallest _normal_ binary64 has the implicit leading `1` and the smallest exponent. Below that magnitude, IEEE 754 keeps representing numbers using <VocabTooltip slug="denormal">denormals</VocabTooltip> (also called subnormals): the implicit leading bit becomes `0`, trading precision for the ability to represent values gradually down to zero. This "gradual underflow" is mathematically elegant — it means `x - y == 0` if and only if `x == y`.
+
+The operational problem is speed. On most x86 CPUs, an arithmetic operation that produces or consumes a denormal is handled by a microcode-assisted slow path that can be **tens to hundreds of times slower** than the same operation on normal numbers. In a hot loop — a pricing model, a moving average that decays toward zero — a stray denormal turns a 5-nanosecond multiply into a 200-nanosecond stall. In a latency-sensitive trading loop, that is a catastrophe that appears as random, hard-to-reproduce latency spikes.
+
+Two CPU mode bits avoid it by refusing to deal in denormals:
+
+- <VocabTooltip slug="flush-to-zero">Flush-To-Zero (FTZ)</VocabTooltip>: any *result* that would be
+  denormal is forced to `0`.
+- <VocabTooltip slug="denormals-are-zero">Denormals-Are-Zero (DAZ)</VocabTooltip>: any denormal
+  *input* is treated as `0` before the operation.
+
+```cpp
+#include <pmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE
+#include <xmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE
+
+// Set on each trading thread at startup. These are SSE control-word bits,
+// so they are PER-THREAD and must be set on every thread that does math.
+void enable_ftz_daz() {
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);       // FTZ: results -> 0
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON); // DAZ: inputs -> 0
+}
+```
+
+The trade is explicit: FTZ/DAZ buy you bounded latency at the cost of leaving strict IEEE 754 conformance. Tiny values that _should_ be denormal become exactly zero, which breaks the "gradual underflow" guarantee. For HFT, bounded latency wins almost every time — but it is a deliberate, documented choice, and it is _another_ reason two machines can disagree: one with FTZ on, one with it off, fed the same tiny intermediate.
+
+## Fused multiply-add
+
+A <VocabTooltip slug="fused-multiply-add">fused multiply-add</VocabTooltip> (FMA) computes `a * b + c` with a _single_ rounding at the end, instead of rounding the product `a * b` first and then rounding the addition. The standard C function is `std::fma`. Because the intermediate product is kept at full internal precision, an FMA is _more accurate_ than a separate multiply-then-add — and when the exact product is not representable, the two produce _different bits_. The example below is rigged so the difference is unmissable: the separate path rounds the product, cancels it, and lands on exactly `0`, while the fused path recovers the rounding residual the separate path destroyed.
+
+```cpp
+#include <cmath>     // std::fma
+#include <cstdio>
+
+int main() {
+    // a is the largest double strictly below 2.0. a*a is NOT exactly
+    // representable, so the separate multiply must round it.
+    double a = 0x1.fffffffffffffp+0;   // 2 - 2^-52
+    double c = -(a * a);               // c = -(rounded a*a)
+
+    double separate = a * a + c;        // rounds (a*a), THEN adds c -> exact 0
+    double fused    = std::fma(a, a, c); // ONE rounding of the exact a*a + c
+
+    // separate is exactly 0: the rounded product cancels c completely.
+    // fused recovers the rounding residual the separate path threw away,
+    // so the two DIFFER. FMA is the more accurate of the two.
+    std::printf("separate = %.20g\n", separate);  // 0
+    std::printf("fused    = %.20g\n", fused);      // ~4.93e-32
+    return 0;
+}
+```
+
+This matters two ways on a desk. First, a compiler with FMA-capable hardware (modern x86, ARM) may _contract_ `a * b + c` into a single FMA on its own unless told not to (`-ffp-contract=off` forbids it; `=fast` allows it freely). So the same source compiled for two CPU targets can produce different results purely because one fused and one did not. Second, when you _want_ the extra accuracy — a dot product in a risk calculation — calling `std::fma` explicitly gets it portably. Either way, the rule is the same as `-ffast-math`: if the number must reconcile, the contraction setting is part of the binary's identity and must be pinned.
+
+## Why HFT prices in integer ticks
+
+Step back from the bit-twiddling and ask the engineering question: if `double` cannot exactly represent `10000000.01`, why use it for money at all?
+
+The answer on most desks is: **for prices and P&L, you often do not.** Exchanges quote prices on a discrete grid — a minimum price increment called a <VocabTooltip slug="ticks">tick</VocabTooltip>. A stock trading in penny increments has a tick of `$0.01`; a future might tick in quarters of a point. Every valid price is an exact integer multiple of the tick. So instead of storing `100.07` as a lossy `double`, you store the integer `10007` <VocabTooltip slug="ticks">ticks</VocabTooltip> (hundredths of a dollar) in an `int64_t`.
+
+```cpp
+#include <cstdint>
+
+// Price as an exact count of ticks. With a $0.01 tick, $100.07 -> 10007.
+// int64_t holds prices into the quadrillions of ticks: no overflow risk
+// at any realistic price, and EVERY value is exact.
+using Ticks = int64_t;
+
+constexpr int64_t TICKS_PER_DOLLAR = 100;  // $0.01 tick size
+
+// Notional in tick-cents: shares are integers, price is integer ticks,
+// so the product is an EXACT integer. No rounding, no reconciliation break.
+int64_t notional_tick_cents(int64_t shares, Ticks price_ticks) {
+    return shares * price_ticks;            // exact; associative; reproducible
+}
+```
+
+This is <VocabTooltip slug="fixed-point">fixed-point</VocabTooltip> arithmetic: a scaled integer where the program tracks the implied decimal position. Integer addition _is_ associative and _is_ bit-identical on every machine and every compiler flag — the entire class of bugs above disappears. The cost is that you, not the hardware, manage the scale: you must round explicitly at division points, watch for overflow on large products (which is why `int64_t`, not `int32_t`), and convert to `double` only at the edges where you genuinely need fractional math (a square root in a volatility calc, say). The discipline is: **integers for the things that must reconcile, double only where the math is inherently real-valued — and never store money in a double you intend to compare for equality.**
+
+## Practice: predict the bits
+
+Before the competency check, reason through these without a compiler. Type your answer, then reveal.
+
+<FillBlank
+  question="Floating-point addition is not associative because IEEE 754 rounds the result after every individual operation. The compiler flag that grants permission to re-associate (and therefore can change a sum's bits) is ______ (give the GCC/Clang umbrella flag)."
+  answer="-ffast-math"
+/>
+
+<FillBlank
+  question="To make a price like $100.07 exactly representable and reproducible across machines and compiler flags, an HFT system stores it as an integer count of ______ instead of a double."
+  answer="ticks"
+/>
+
+<FillBlank
+  question="An operation that produces or consumes a subnormal value can be 10-100x slower on x86. The CPU mode bit that forces a subnormal RESULT to zero to avoid this cliff is abbreviated ______."
+  answer="FTZ"
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A matching engine and a risk system both sum the same 5,000 fills and disagree by one cent. Both run the identical source formula. What is the single most likely cause, and how do you confirm it?",
+      options: [
+        "A logic bug in the formula — diff the source files line by line",
+        "The two systems sum the fills in a different ORDER (or one binary was built with -ffast-math), so the per-addition IEEE 754 rounding accumulates differently; confirm by re-summing both books in a single canonical order on one binary without -ffast-math and checking the cent disappears — or by representing the prices as integer ticks so the sum becomes exact and order-independent",
+        "Floating-point hardware is non-deterministic, so small disagreements are expected and should be tolerated with an epsilon",
+        "One CPU is faster than the other, which changes the arithmetic results",
+      ],
+      correct: 1,
+      explanation:
+        "IEEE 754 guarantees each addition is correctly rounded, NOT that two different groupings of the same addends agree — floating-point addition is not associative. A different sum order, or a -ffast-math build that re-associates, produces a different last-bit result that can surface as a cent at money magnitudes. The fix/confirmation is to impose a single canonical sum order on one non-fast-math binary, or to move money to integer ticks where addition is exact and associative. FP hardware is deterministic given the same operations in the same order and the same control bits — it is not random — so tolerating it with an epsilon hides the real cause.",
+    },
+    {
+      question:
+        "Your pricing loop shows random latency spikes — most iterations take 5ns, a few take 200ns, with no pattern in the inputs. The values involved decay toward zero over time. What is happening, and what is the trade-off of the standard fix?",
+      options: [
+        "Cache misses; fix by prefetching, with no downside",
+        "The decaying values are crossing into the subnormal (denormal) range, and each subnormal operation hits the slow microcode path; enabling FTZ/DAZ on every math thread forces subnormals to zero and restores bounded latency, at the cost of leaving strict IEEE 754 conformance (tiny values that should be denormal become exactly 0, breaking gradual underflow)",
+        "The compiler inserted FMA instructions that are slower than separate multiply-add",
+        "Branch misprediction; fix by removing the loop's conditionals",
+      ],
+      correct: 1,
+      explanation:
+        "Values decaying toward zero eventually enter the subnormal range, and on x86 a subnormal operand or result is handled by a slow microcode-assisted path that can be tens to hundreds of times slower — producing exactly these input-independent, intermittent spikes. FTZ (flush subnormal results to zero) and DAZ (treat subnormal inputs as zero) eliminate the cliff and restore deterministic latency, but they trade away strict IEEE 754 conformance: gradual underflow is gone and a host with FTZ on can disagree with one that has it off. The fix is deliberate and must be documented because it is another source of cross-machine divergence.",
+    },
+    {
+      question:
+        "Two trading hosts are supposed to produce bit-identical results from the same source. Under what conditions is bit-identical floating-point output actually guaranteed?",
+      options: [
+        "Always, as long as both run the same source code — the language guarantees it",
+        "Never — floating-point is inherently non-reproducible across machines",
+        "When both binaries are compiled with the same flags (no -ffast-math divergence, the same -ffp-contract / FMA-contraction setting), run with the same rounding mode and the same FTZ/DAZ control bits, perform the operations in the same order, and the math is computed on formats of the same width; pin all of these and binary64 is fully deterministic, which is why reproducible-FP risk systems lock them down explicitly",
+        "Only when both hosts have the exact same CPU model number, regardless of compiler flags",
+      ],
+      correct: 2,
+      explanation:
+        "IEEE 754 arithmetic is deterministic: the result of each operation is a defined function of its inputs, the operation, and the rounding mode. Bit-identical output across machines therefore requires controlling everything that can change the operations or their rounding — matching compiler flags (especially -ffast-math and FMA contraction via -ffp-contract), the same rounding mode, the same FTZ/DAZ state, the same operation order, and consistent operand widths (an extended-precision intermediate vs a strict binary64 one will diverge). Same source alone is NOT enough, because flags and contraction change the emitted operations. It is fully achievable — reproducible-FP risk systems do exactly this — so it is neither automatic nor impossible.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A `double` is the IEEE 754-2019 **binary64** format: a sign bit, an 11-bit biased exponent, and a 52-bit fraction with an implicit leading 1 — it stores the _nearest representable binary value_, not your decimal number, and the gap to the next value is one ULP, which grows with magnitude.
+- Floating-point addition is **not associative** because every operation rounds; `-ffast-math` (via `-funsafe-math-optimizations`) lets the compiler re-associate for speed, which changes the result's bits and is why pricing/risk code is built without it.
+- **Denormals** give gradual underflow but trigger a 10-100x latency cliff on x86; **FTZ/DAZ** restore bounded latency by flushing subnormals to zero, trading away strict IEEE 754 conformance — a deliberate, documented choice.
+- A **fused multiply-add** rounds once instead of twice, so it is more accurate but produces different bits; compiler FMA contraction (`-ffp-contract`) must be pinned for reproducibility.
+- HFT systems represent prices and P&L as integer **ticks** (fixed-point in `int64_t`) so that addition is exact, associative, and bit-identical across machines — reserving `double` for inherently real-valued math at the edges.
+- Bit-identical FP across machines is achievable but not free: it requires matching flags, rounding mode, FTZ/DAZ state, operation order, and operand width.
+
+## What's next
+
+The next lesson moves from the numbers themselves to _where they live_: the cache hierarchy and memory layout that decide whether a price update is read in 4 nanoseconds or 200. You will see why the same integer-tick `Price` struct that makes arithmetic deterministic also has to be laid out for the cache line — because in HFT, correct-but-slow is only a slower way to be wrong.
