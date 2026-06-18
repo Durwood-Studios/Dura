@@ -217,12 +217,15 @@ The full token set lives in `standards/dls/dls-1.0.md` §Design Tokens. Surfaces
 
 ### Phase Colors (curriculum phase identity — orthogonal to DLS)
 
+Core phases 0–9 plus specialty phases 10–14 (numeric IDs, not letter suffixes):
+
 ```
-Phase 0: #6ee7b7    Phase 5: #f0abfc
-Phase 1: #93c5fd    Phase 6: #67e8f9
-Phase 2: #c4b5fd    Phase 7: #fcd34d
-Phase 3: #fda4af    Phase 8: #a3e635
-Phase 4: #fdba74    Phase 9: #f472b6
+Phase 0:  #6ee7b7    Phase 5:  #f0abfc
+Phase 1:  #93c5fd    Phase 6:  #67e8f9
+Phase 2:  #c4b5fd    Phase 7:  #fcd34d
+Phase 3:  #fda4af    Phase 8:  #a3e635
+Phase 4:  #fdba74    Phase 9:  #f472b6
+Phase 10–14: specialty phases — consult the phase registry for colors
 ```
 
 ### Typography
@@ -400,6 +403,12 @@ Prohibited operations (Codex must NOT do):
 - Write or modify `supabase/migrations/**` without explicit instruction per migration
 - Apply any change directly to the live Supabase project (defer all Supabase work to `xDocs/active/<sprint>/staged/supabase/` per ADR 0001)
 
+### Route Topology Notes
+
+- `/admin` — protected admin route. Gated by JWT `app_metadata.is_admin === true`. Lives **outside** the `(app)` route group. Layout is at `src/app/admin/layout.tsx` — see High-Risk Surfaces.
+- `/settings/profile` — user profile settings page. Inside the `(app)` group, auth-required.
+- Staged migrations `016` and `017` exist in `xDocs/active/supabase-golive-2026-06/staged/supabase/`. Do not apply them without explicit instruction.
+
 ---
 
 ## High-Risk Surfaces
@@ -414,6 +423,7 @@ Codex must flag any changes to these paths explicitly:
 - `supabase/migrations/**` (schema changes)
 - `src/lib/payments/**` (if created)
 - `next.config.ts` (CSP and security headers)
+- `src/app/admin/layout.tsx` (admin route guard — JWT is_admin check)
 - `AGENTS.md`, `CODEOWNERS`, this set of paths in `standards/aindgs/capabilities.yaml`
 
 ---
@@ -432,26 +442,32 @@ Before pushing a `package.json` change that adds, removes, or version-bumps a ru
 
 ## Provenance Format
 
-All commits containing AI-generated code must include the provenance tag in the commit message:
+All commits whose diff contains AI-generated or AI-assisted code must carry a provenance trailer in the **commit message body** (NOT the header):
 
 ```
-[AI: <agent> ~X%] <conventional-commit-subject> (<optional-standard-or-law>)
+AI-assisted: <agent> ~X%
 ```
 
 Where:
 
-- `<agent>` is the AI tool (`Codex` for DURA today)
-- `~X%` is the approximate percentage of AI-generated lines in the commit. Honest estimate. `100%` = entirely AI-generated.
-- For commits with no AI involvement at all, the tag is **omitted** (so a future audit can distinguish "human-only" from "AI ~0% guidance")
+- `<agent>` is the AI tool (e.g. `codex`, `claude-code`)
+- `~X%` is the approximate percentage of AI-generated lines. Honest estimate. `100%` = entirely AI-generated; `0%` = AI guided, human typed.
+- The trailer is its own line in the commit body, conventionally just above any `Co-Authored-By:` line.
+- The conventional header (`type(scope): subject`) stays clean — provenance never occupies header space.
+- For commits with **no AI involvement at all** on non-high-risk diffs, the trailer may be omitted (so audits can distinguish human-only from AI-guided).
+- On CODEOWNERS-listed paths, use `Human-only: <one-line reason>` if no AI was involved — explicit opt-out required for audit on high-risk paths.
 
-Full rationale and examples live in [`xDocs/decisions/0002-ai-provenance-format.md`](xDocs/decisions/0002-ai-provenance-format.md). The CI provenance gate (compliance Phase 4) will enforce the format on commits touching paths listed in CODEOWNERS as high-risk.
+**Do NOT use the old header-prefix form** (`[AI: …] subject`) — it breaks the conventional-commits parser and was formally deprecated 2026-05-21.
+
+Full rationale and examples live in [`xDocs/decisions/0002-ai-provenance-format.md`](xDocs/decisions/0002-ai-provenance-format.md). The commitlint rule `ai-provenance-required` (live since 2026-05-21) enforces the trailer on commits touching CODEOWNERS-listed paths.
 
 ---
 
 ## Changelog
 
-| Date       | Change                                                                                                                                                                    | Rationale                                                                                                |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| 2026-04-25 | Added AINDGS-1.0 required sections (Capability Boundary, High-Risk Surfaces, Review Triggers, Provenance Format, Changelog)                                               | Compliance Sprint Phase 1-D / AINDGS-R1 / R4 / R5                                                        |
-| 2026-04-26 | Aligned DESIGN SYSTEM to DLS-1.0: blue accent canonical, emerald → `--color-celebration` semantic, Geist + Geist Mono replace DM Sans / JetBrains Mono / Instrument Serif | Motion Sprint P0 (conflict resolutions #1, #2 captured in `xDocs/active/motion-2026-q2/build-prompt.md`) |
-| Inception  | Initial AGENTS.md (Rules 0–7, Design System, Workflow)                                                                                                                    | Project intelligence baseline                                                                            |
+| Date       | Change                                                                                                                                                                                                                                                       | Rationale                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| 2026-06-18 | Added admin route topology (`/admin` JWT is_admin, outside (app) group); specialty phases 10–14 (numeric); `/settings/profile`; staged migrations 016–017; updated provenance format to body-trailer; added `src/app/admin/layout.tsx` to High-Risk Surfaces | Sync with current CLAUDE.md state                                                                        |
+| 2026-04-25 | Added AINDGS-1.0 required sections (Capability Boundary, High-Risk Surfaces, Review Triggers, Provenance Format, Changelog)                                                                                                                                  | Compliance Sprint Phase 1-D / AINDGS-R1 / R4 / R5                                                        |
+| 2026-04-26 | Aligned DESIGN SYSTEM to DLS-1.0: blue accent canonical, emerald → `--color-celebration` semantic, Geist + Geist Mono replace DM Sans / JetBrains Mono / Instrument Serif                                                                                    | Motion Sprint P0 (conflict resolutions #1, #2 captured in `xDocs/active/motion-2026-q2/build-prompt.md`) |
+| Inception  | Initial AGENTS.md (Rules 0–7, Design System, Workflow)                                                                                                                                                                                                       | Project intelligence baseline                                                                            |

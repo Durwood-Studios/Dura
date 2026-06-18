@@ -15,26 +15,27 @@
 
 ---
 
-A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 406 lessons, 100 project tutorials, 500+ dictionary terms, 20 interactive Discovery activities, 12 career tracks — all offline-capable, all free forever.
+A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 450+ lessons across 15 phases, a technical dictionary, spaced-repetition flashcards, code sandboxes, and cross-device sync — all offline-capable, all free forever.
 
 ## Features
 
-- **Discovery Center** — 6 rooms, 20 interactive activities for young learners (ages 5-12), zero data collection
-- **406 lessons** across 10 phases — Digital Literacy to CTO Track
-- **100 project tutorials** — build real, deployable artifacts across 12 career tracks
-- **35 how-to guides** — practical, step-by-step problem-solving
-- **12 career tracks** — Frontend, Backend, AI/ML, Security, DevOps, and 7 more with skill graphs
+- **450+ lessons** across 15 phases — Digital Literacy through specialty engineering tracks
+- **Learning paths / career tracks** — structured progressions with skill graphs
+- **FSRS-5 spaced repetition** — flashcard system for long-term retention
+- **Code sandboxes** — write and run code in-browser with templates, fullscreen, console, and save management
+- **DURA Dictionary** — 500+ technical terms with tiered definitions
+- **AI inference layer** — local-first AI features integrated into the learning experience
+- **Skill placement assessments** — adaptive path recommendations based on demonstrated knowledge
+- **Goal setting** — daily, weekly, phase, and career goals
+- **Lesson progress tracking** — scroll position, time-on-lesson, and quiz completion
+- **Cross-device sync** — optional Supabase sync; offline-first and always works without it
+- **Annotations / community notes** — collaborative margin notes on lessons
+- **Admin dashboard** — JWT-gated `/admin` for content and platform management
 - **Mastery-gated** — advance when you prove it, not when time passes
 - **Dual point system** — Activity Points (effort) and Mastery Points (proof), honestly separated
-- **Offline-first** — works without internet after first load
-- **Spaced repetition** — FSRS-5 flashcard system for long-term retention
-- **500+ dictionary terms** — 3-tier definitions, individually indexed for SEO
-- **Code sandboxes** — write and run JavaScript, TypeScript, React in-browser
-- **Skill assessment** — 35-question placement test with adaptive path recommendations
-- **Certificates** — verified, shareable, downloadable as PDF
-- **6 study modes** — Standard, Bite-sized, Focus, Sprint, Review, Challenge
-- **Accessibility** — high contrast, dyslexia font, reduced motion, site-wide font sizing
-- **PWA** — installable on Windows, Mac, Linux, iOS, Android with platform-specific install guides
+- **PWA** — installable on Windows, Mac, Linux, iOS, Android; service worker with update notifications
+- **Dark / light theme** — toggle with amber sun glow accent
+- **Edge rate limiting** — hardened auth endpoints
 - **Privacy-first** — no cookies, no tracking, no ads, local-first data
 - **Free forever** — AGPLv3 licensed, no paywalls, no premium tiers
 
@@ -53,9 +54,11 @@ Open [http://localhost:3000](http://localhost:3000). That's it.
 
 ## Tech Stack
 
-Next.js 15 · React 19 · TypeScript · Tailwind v4 · Zustand · IndexedDB · Serwist (PWA) · Shiki · MDX · Sandpack
+Next.js 15 (App Router) · TypeScript strict · Tailwind v4 · Supabase (19 tables, RLS) · Zustand · IndexedDB · FSRS-5 · Serwist (PWA) · Framer Motion v12 · Lucide React · MDX · Sandpack
 
 ## Curriculum
+
+### Core Phases
 
 | Phase | Focus                    | Lessons |
 | ----- | ------------------------ | ------- |
@@ -65,12 +68,22 @@ Next.js 15 · React 19 · TypeScript · Tailwind v4 · Zustand · IndexedDB · S
 | 3     | CS Fundamentals          | 40      |
 | 4     | Backend Engineering      | 45      |
 | 5     | Systems Engineering      | 35      |
-| 6     | AI/ML Engineering        | 50      |
+| 6     | AI/ML Engineering        | 62      |
 | 7     | Advanced Systems         | 30      |
 | 8     | Professional Practice    | 35      |
 | 9     | CTO Track                | 60      |
 
-Plus 35 how-to guides, 100 project tutorials, a [Discovery Center](https://dura.vercel.app/discover) for young learners, and an [AI Engineering Competency Framework](https://dura.vercel.app/standards/ai-engineering).
+### Specialty Phases
+
+| Phase | Focus                      | Lessons |
+| ----- | -------------------------- | ------- |
+| 10    | Embedded / Firmware        | 8       |
+| 11    | Hardware Verification      | 8       |
+| 12    | Quantitative / HFT Systems | 8       |
+| 13    | Robotics                   | 8       |
+| 14    | Manufacturing              | 12      |
+
+**Total: 15 phases · 450+ lessons**
 
 Standards: ACM CS2023 · SWEBOK v4 · SFIA 9 · CSTA K-12 · AP CS Principles · AP CS A · ISTE
 
@@ -78,15 +91,15 @@ Standards: ACM CS2023 · SWEBOK v4 · SFIA 9 · CSTA K-12 · AP CS Principles ·
 
 ```
 src/
-  app/          — Next.js routes (55+ routes)
+  app/          — Next.js App Router routes
   components/   — React components
-  content/      — MDX lessons, dictionary, howtos, tutorials, skills, roles
+  content/      — MDX lessons, dictionary, skills, roles
   lib/          — Utilities, IDB, analytics, FSRS, sync engine
   stores/       — Zustand state management
   types/        — TypeScript interfaces
 supabase/
-  migrations/   — 13 SQL migrations (ready to run)
-  README.md     — Setup guide
+  migrations/   — SQL migrations (19 tables, RLS on everything)
+  README.md     — Supabase setup guide
 ```
 
 See [PLANNING.md](PLANNING.md) for full architecture documentation.
@@ -97,9 +110,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, code standards, a
 
 ## License
 
-Core platform: [AGPL-3.0](LICENSE) · APIs: Apache-2.0
+[AGPLv3](LICENSE) — the source stays open, legally and permanently.
 
-Free forever. No paywalls. No premium tiers.
+Free forever. No paywalls. No premium tiers. Future revenue (if any) comes from new products built on top of DURA — never from restricting what already exists.
 
 ---
 

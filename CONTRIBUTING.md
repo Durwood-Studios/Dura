@@ -16,10 +16,22 @@ DURA is open source and we welcome contributions. Whether you're fixing a typo, 
 git clone https://github.com/Durwood-Studios/Dura.git
 cd Dura
 npm install
+cp .env.example .env.local   # then fill in the two Supabase keys
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000). The dev server uses Turbopack for fast reloads.
+
+### Environment Variables
+
+`.env.local` requires two keys (both are public by design — the Supabase anon key is safe for client-side use; RLS protects the data):
+
+```
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+```
+
+**Never add `SUPABASE_SERVICE_ROLE_KEY`.** It is not used and must not exist in this codebase.
 
 ### Verify Your Changes
 
@@ -56,6 +68,11 @@ See [PLANNING.md](PLANNING.md) for the full architecture and design decisions.
   docs: update contributing guide
   ```
 - **Allowed types:** feat, fix, docs, style, refactor, perf, test, build, ci, chore
+- **AI provenance trailer** — if any part of your commit was AI-assisted, add this line to the commit body (not the header):
+  ```
+  AI-assisted: claude-code ~80%
+  ```
+  Use `Human-only: <reason>` on high-risk paths when no AI was involved. This is enforced by commitlint on CODEOWNERS-listed files.
 
 ## How to Contribute
 
@@ -94,6 +111,17 @@ Follow the format in `src/content/dictionary/`. Each term needs:
 - `advanced` — spec-level precision with edge cases
 - `seeAlso` — related terms that exist in the dictionary
 
+### Curriculum Content (Lessons)
+
+Lesson content lives in `src/content/phases/`. All lessons must conform to **LP-1.0** (Lesson Pedagogy standard), defined in [`standards/pedagogy/lp-1.0.md`](standards/pedagogy/lp-1.0.md). The core invariant: a lesson must walk a learner with only the listed prerequisites from zero understanding to verifiable competency in the lesson's topic.
+
+**Phase numbering:**
+
+- Phases 0–9 — core curriculum (CS fundamentals through advanced systems)
+- Phases 10–14 — specialty tracks (e.g. Phase Q / Quantitative & HFT Systems is one of these)
+
+Read LP-1.0 before adding or significantly editing a lesson. Non-conforming lessons will be flagged in review.
+
 ### Lesson Improvements
 
 - Fix typos and unclear explanations
@@ -104,6 +132,20 @@ Follow the format in `src/content/dictionary/`. Each term needs:
 ### Translation
 
 Not yet supported but planned. If you're interested in translating DURA, open an issue to discuss.
+
+### Admin Route
+
+The `/admin` route is protected by an `is_admin` JWT claim. To access it in development:
+
+1. In Supabase Studio, run:
+   ```sql
+   UPDATE auth.users
+   SET raw_app_meta_data = '{"is_admin": true}'
+   WHERE email = 'your@email.com';
+   ```
+2. Sign out and sign back in to refresh the JWT.
+
+This is a local dev step only — do not commit credentials or bypass RLS.
 
 ## What NOT to Do
 
