@@ -153,7 +153,7 @@ export function Sidebar(): React.ReactElement {
   }
 
   return (
-    <aside className="hidden h-screen w-60 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg-primary)] lg:flex">
+    <aside className="hidden h-screen w-60 shrink-0 flex-col overflow-hidden border-r border-[var(--color-border)] bg-[var(--color-bg-primary)] lg:flex">
       {/* ── Logo ───────────────────────────────────────────────────── */}
       <div className="px-5 pt-5 pb-4">
         <Link href="/" className="group inline-flex items-center gap-2 no-underline">
