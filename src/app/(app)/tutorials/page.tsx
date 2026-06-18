@@ -717,11 +717,35 @@ const TUTORIALS = [
   },
 ] as const;
 
-const DIFFICULTY_COLORS: Record<string, string> = {
-  beginner: "bg-emerald-100 text-emerald-700",
-  intermediate: "bg-amber-100 text-amber-700",
-  advanced: "bg-rose-100 text-rose-700",
+// DLS-1.0: no hardcoded color classes — semantic vars adapt to dark mode.
+// Emerald is reserved for --color-celebration (mastery moments only).
+type Difficulty = "beginner" | "intermediate" | "advanced";
+
+const DIFFICULTY_CONFIG: Record<Difficulty, { label: string; dot: string; badge: string }> = {
+  beginner: {
+    label: "Beginner",
+    dot: "bg-[var(--color-success)]",
+    badge: "border border-[var(--color-success)] text-[var(--color-success)]",
+  },
+  intermediate: {
+    label: "Intermediate",
+    dot: "bg-[var(--color-warning)]",
+    badge: "border border-[var(--color-warning)] text-[var(--color-warning)]",
+  },
+  advanced: {
+    label: "Advanced",
+    dot: "bg-[var(--color-error)]",
+    badge: "border border-[var(--color-error)] text-[var(--color-error)]",
+  },
 };
+
+/** Format minutes as "45 min" or "2h 30m" for readability at higher values. */
+function formatDuration(minutes: number): string {
+  if (minutes < 60) return `${String(minutes)} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m > 0 ? `${String(h)}h ${String(m)}m` : `${String(h)}h`;
+}
 
 export default function TutorialsPage(): React.ReactElement {
   return (
@@ -729,39 +753,48 @@ export default function TutorialsPage(): React.ReactElement {
       <h1 className="mb-2 text-3xl font-semibold text-[var(--color-text-primary)]">
         Project Tutorials
       </h1>
-      <p className="mb-8 text-[var(--color-text-secondary)]">
-        Build real projects from scratch with guided, step-by-step instructions and interactive
-        checkpoints.
+      <p className="mb-6 text-[var(--color-text-secondary)]">
+        Build real projects from scratch. Each tutorial ships a working, deployable artifact — no
+        toy examples.
       </p>
 
-      <div className="space-y-4">
-        {TUTORIALS.map((tutorial, i) => (
-          <Link
-            key={tutorial.slug}
-            href={`/tutorials/${tutorial.slug}`}
-            className="group flex gap-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 transition hover:border-emerald-300 hover:shadow-sm"
-          >
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-lg font-bold text-emerald-600">
-              {i + 1}
-            </div>
-            <div className="flex-1">
-              <div className="mb-2 flex items-center gap-2">
-                <span
-                  className={`rounded-full px-2 py-0.5 text-xs font-medium ${DIFFICULTY_COLORS[tutorial.difficulty]}`}
-                >
-                  {tutorial.difficulty}
-                </span>
-                <span className="text-xs text-[var(--color-text-muted)]">
-                  {tutorial.minutes} min
-                </span>
+      <div className="space-y-3">
+        {TUTORIALS.map((tutorial, i) => {
+          const diff = tutorial.difficulty as Difficulty;
+          const config = DIFFICULTY_CONFIG[diff];
+          return (
+            <Link
+              key={tutorial.slug}
+              href={`/tutorials/${tutorial.slug}`}
+              className="group flex gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4 transition hover:border-[var(--color-accent)] hover:shadow-sm sm:gap-5 sm:p-5"
+            >
+              {/* Ordinal badge */}
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--color-bg-subtle)] text-sm font-semibold text-[var(--color-text-muted)]">
+                {i + 1}
               </div>
-              <h2 className="mb-1 text-lg font-semibold text-[var(--color-text-primary)] group-hover:text-emerald-700">
-                {tutorial.title}
-              </h2>
-              <p className="text-sm text-[var(--color-text-secondary)]">{tutorial.description}</p>
-            </div>
-          </Link>
-        ))}
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Difficulty dot + label */}
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full bg-transparent px-2 py-0.5 text-xs font-medium ${config.badge}`}
+                  >
+                    <span className={`h-1.5 w-1.5 rounded-full ${config.dot}`} aria-hidden="true" />
+                    {config.label}
+                  </span>
+                  <span className="text-xs text-[var(--color-text-muted)]">
+                    {formatDuration(tutorial.minutes)}
+                  </span>
+                </div>
+                <h2 className="text-base font-semibold text-[var(--color-text-primary)] group-hover:text-[var(--color-accent)] sm:text-lg">
+                  {tutorial.title}
+                </h2>
+                <p className="text-sm leading-snug text-[var(--color-text-secondary)]">
+                  {tutorial.description}
+                </p>
+              </div>
+            </Link>
+          );
+        })}
       </div>
     </div>
   );

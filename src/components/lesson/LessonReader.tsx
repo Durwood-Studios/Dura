@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight } from "lucide-react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import { evaluate } from "@mdx-js/mdx";
 import * as runtime from "react/jsx-runtime";
 import { mdxComponents } from "@/components/lesson/MDXComponents";
@@ -8,6 +8,7 @@ import { CompletionGate } from "@/components/lesson/CompletionGate";
 import { BiteMode } from "@/components/lesson/BiteMode";
 import { StandardsBadges } from "@/components/lesson/StandardsBadges";
 import { AITutorMount } from "@/components/lesson/AITutor/AITutorMount";
+import { AnnotationsPanel } from "@/components/lesson/AnnotationsPanel";
 import { formatMinutes } from "@/lib/utils";
 import { ShareButton } from "@/components/seo/ShareButton";
 import { buildBadges } from "@/lib/standards";
@@ -17,6 +18,7 @@ import type { LoadedLesson, NextLessonRef } from "@/lib/content";
 interface LessonReaderProps {
   lesson: LoadedLesson;
   next?: NextLessonRef;
+  prev?: NextLessonRef;
   shareUrl: string;
 }
 
@@ -26,9 +28,16 @@ function nextLabel(next: NextLessonRef): string {
   return `Next: ${next.title}`;
 }
 
+function prevLabel(prev: NextLessonRef): string {
+  if (prev.scope === "module") return `Prev module: ${prev.contextLabel ?? prev.title}`;
+  if (prev.scope === "phase") return `Prev phase: ${prev.contextLabel ?? prev.title}`;
+  return `Prev: ${prev.title}`;
+}
+
 export async function LessonReader({
   lesson,
   next,
+  prev,
   shareUrl,
 }: LessonReaderProps): Promise<React.ReactElement> {
   const { meta, body } = lesson;
@@ -36,10 +45,26 @@ export async function LessonReader({
   // Compile and evaluate MDX using @mdx-js/mdx directly.
   // next-mdx-remote/rsc strips JSX expression props (arrays/objects)
   // from client components. evaluate() preserves them.
-  const { default: MDXContent } = await evaluate(body, {
-    ...runtime,
-    development: false,
-  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type MDXComponentType = React.ComponentType<{ components?: Record<string, any> }>;
+  let MDXContent: MDXComponentType;
+  try {
+    const result = await evaluate(body, { ...runtime, development: false });
+    MDXContent = result.default as MDXComponentType;
+  } catch (err) {
+    console.error(`[LessonReader] MDX compile error in ${meta.id}:`, err);
+    function MDXFallback(): React.ReactElement {
+      return (
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-6 text-center">
+          <p className="font-mono text-sm text-rose-400">Content unavailable</p>
+          <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+            This lesson has a formatting issue. Your progress is safe.
+          </p>
+        </div>
+      );
+    }
+    MDXContent = MDXFallback;
+  }
 
   const hasQuiz = /<Quiz\b/.test(body);
 
@@ -103,18 +128,33 @@ export async function LessonReader({
         vocabulary={meta.vocabulary}
       />
 
-      {next && (
+      <AnnotationsPanel lessonId={meta.id} />
+
+      {(prev || next) && (
         <nav
           aria-label="Lesson navigation"
-          className="mt-8 flex justify-end border-t border-[var(--color-border)] pt-6"
+          className="mt-8 flex items-center justify-between border-t border-[var(--color-border)] pt-6"
         >
-          <Link
-            href={next.href}
-            className="group inline-flex items-center gap-2 text-sm font-medium text-[var(--color-text-secondary)] transition hover:text-[var(--color-accent)]"
-          >
-            {nextLabel(next)}
-            <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-          </Link>
+          {prev ? (
+            <Link
+              href={prev.href}
+              className="group inline-flex items-center gap-2 text-sm font-medium text-[var(--color-text-secondary)] transition hover:text-[var(--color-accent)]"
+            >
+              <ArrowLeft className="h-4 w-4 transition-transform group-hover:-translate-x-0.5" />
+              {prevLabel(prev)}
+            </Link>
+          ) : (
+            <span />
+          )}
+          {next && (
+            <Link
+              href={next.href}
+              className="group inline-flex items-center gap-2 text-sm font-medium text-[var(--color-text-secondary)] transition hover:text-[var(--color-accent)]"
+            >
+              {nextLabel(next)}
+              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+            </Link>
+          )}
         </nav>
       )}
 

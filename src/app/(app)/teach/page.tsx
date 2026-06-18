@@ -7,8 +7,7 @@ import { CurriculumBrowser } from "@/components/teacher/CurriculumBrowser";
 
 export const metadata: Metadata = {
   title: "Teach — DURA",
-  description:
-    "Browse DURA's full curriculum, filter by standards, and export teacher resources. No login required.",
+  description: "Browse DURA's full curriculum, filter by standards, and export teacher resources.",
 };
 
 export default async function TeachPage(): Promise<React.ReactElement> {
@@ -30,8 +29,7 @@ export default async function TeachPage(): Promise<React.ReactElement> {
           </h1>
           <p className="mt-2 max-w-[640px] text-sm text-[var(--color-text-secondary)]">
             Browse every phase, module, and lesson in DURA. Filter by standard, search by title,
-            drill into a lesson to view frontmatter, and download teacher resources. No login
-            required — the whole curriculum is public.
+            drill into a lesson to view frontmatter, and download teacher resources.
           </p>
         </div>
         <Link

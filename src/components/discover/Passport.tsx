@@ -123,29 +123,28 @@ export function Passport(): React.ReactElement {
         {doneCount} of {total} explored
       </p>
 
-      <div className="flex flex-wrap justify-center gap-3">
+      <div className="flex flex-wrap justify-center gap-3" role="list">
         {ALL_ACTIVITIES.map((activity) => {
           const isDone = completedSet.has(activity.slug);
+          const label = getLabel(activity.slug);
           return (
             <div
               key={activity.slug}
+              role="listitem"
+              aria-label={isDone ? `${label} — completed` : `${label} — not yet explored`}
               className="flex flex-col items-center gap-1"
-              title={getLabel(activity.slug)}
             >
               <div
-                className="flex h-10 w-10 items-center justify-center rounded-full transition-colors duration-200"
-                style={
+                className={
                   isDone
-                    ? { backgroundColor: activity.color, borderColor: activity.color }
-                    : undefined
+                    ? "flex h-10 w-10 items-center justify-center rounded-full transition-colors duration-200"
+                    : "flex h-10 w-10 items-center justify-center rounded-full border-2 border-dashed border-[var(--color-border)] transition-colors duration-200"
                 }
-                {...(!isDone && {
-                  className:
-                    "flex h-10 w-10 items-center justify-center rounded-full border-2 border-dashed border-[var(--color-border)] transition-colors duration-200",
-                })}
+                style={isDone ? { backgroundColor: activity.color } : undefined}
+                aria-hidden="true"
               >
                 {isDone ? (
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                     <path
                       d="M3 8.5L6.5 12L13 4"
                       stroke="white"

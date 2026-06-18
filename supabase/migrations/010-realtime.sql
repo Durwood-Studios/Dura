@@ -7,7 +7,7 @@
 -- the profiles table to the realtime publication so clients can subscribe
 -- to profile changes (avatar updates, display name changes, etc.).
 --
--- The activity_feed table stores a per-user event log populated
+-- The activity table stores a per-user event log populated
 -- automatically via triggers when milestones occur (lesson completed,
 -- phase completed, streak milestone, etc.).
 
@@ -23,7 +23,7 @@ alter publication supabase_realtime add table public.profiles;
 -- Activity feed table
 -- ---------------------------------------------------------------------------
 
-create table public.activity_feed (
+create table public.activity (
   id         uuid        primary key default gen_random_uuid(),
   user_id    uuid        not null references public.profiles(id) on delete cascade,
   event_type text        not null,   -- 'lesson_completed', 'phase_completed', 'cert_earned', 'streak_milestone'
@@ -34,10 +34,10 @@ create table public.activity_feed (
 );
 
 -- RLS: users can only see their own feed
-alter table public.activity_feed enable row level security;
+alter table public.activity enable row level security;
 
 create policy "Users read own feed"
-  on public.activity_feed
+  on public.activity
   for select to authenticated
   using (user_id = auth.uid());
 
@@ -45,13 +45,13 @@ create policy "Users read own feed"
 -- (triggers run as SECURITY DEFINER so they bypass RLS, but this policy
 -- also permits client-side inserts for custom events if needed)
 create policy "Users insert own feed"
-  on public.activity_feed
+  on public.activity
   for insert to authenticated
   with check (user_id = auth.uid());
 
 -- Index for fast feed retrieval sorted by recency
-create index idx_activity_feed_user
-  on public.activity_feed (user_id, created_at desc);
+create index idx_activity_user
+  on public.activity (user_id, created_at desc);
 
 -- ---------------------------------------------------------------------------
 -- Trigger: auto-log lesson completions into the activity feed
@@ -62,7 +62,7 @@ returns trigger as $$
 begin
   -- Only fire when completed_at transitions from null to a real timestamp
   if NEW.completed_at is not null and OLD.completed_at is null then
-    insert into public.activity_feed (user_id, event_type, title, detail, metadata)
+    insert into public.activity (user_id, event_type, title, detail, metadata)
     values (
       NEW.user_id,
       'lesson_completed',

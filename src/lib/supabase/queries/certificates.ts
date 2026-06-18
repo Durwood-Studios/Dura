@@ -111,7 +111,7 @@ export async function getCertificateByHash(hash: string): Promise<Certificate | 
     return {
       id: row.id,
       phaseId: row.phase_id,
-      userId: row.user_id,
+      userId: null, // omitted on public lookup — hash is the capability token, not the user_id
       displayName: row.display_name,
       phaseTitle: row.phase_title,
       score: Number(row.score),

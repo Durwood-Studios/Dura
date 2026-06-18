@@ -133,7 +133,7 @@ export default function DiscoverPage(): React.ReactElement {
             href="/paths"
             className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text-primary)] transition hover:bg-[var(--color-bg-subtle)]"
           >
-            Browse all phases
+            Browse learning paths
           </Link>
         </div>
       </section>

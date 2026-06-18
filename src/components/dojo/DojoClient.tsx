@@ -526,8 +526,14 @@ function DojoSetup(): React.ReactElement {
       </div>
 
       <div className="mt-8">
-        <label className="block text-sm font-medium text-[var(--color-text-primary)]">Phase</label>
+        <label
+          htmlFor="dojo-phase-select"
+          className="block text-sm font-medium text-[var(--color-text-primary)]"
+        >
+          Phase
+        </label>
         <select
+          id="dojo-phase-select"
           value={phase ?? ""}
           onChange={(e) => setPhase(e.target.value || undefined)}
           className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"

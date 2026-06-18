@@ -42,10 +42,13 @@ create policy "Read approved annotations" on public.annotations
 create policy "Create own annotations" on public.annotations
   for insert to authenticated with check (user_id = auth.uid());
 
--- Users can update their own pending annotations
+-- Users can update their own pending annotations.
+-- WITH CHECK prevents updating status to anything other than 'pending',
+-- closing the self-approval bypass (no WITH CHECK = user could set status='approved').
 create policy "Update own pending" on public.annotations
   for update to authenticated
-  using (user_id = auth.uid() and status = 'pending');
+  using (user_id = auth.uid() and status = 'pending')
+  with check (user_id = auth.uid() and status = 'pending');
 
 -- Users can delete their own
 create policy "Delete own annotations" on public.annotations

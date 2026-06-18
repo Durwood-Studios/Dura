@@ -24,6 +24,7 @@ import {
   Flame,
 } from "lucide-react";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
+import { FeedbackButton } from "@/components/feedback/FeedbackButton";
 import { cn } from "@/lib/utils";
 import { levelProgress } from "@/lib/xp";
 import { getTotalXP } from "@/lib/db/xp";
@@ -168,6 +169,11 @@ export function Sidebar(): React.ReactElement {
           </div>
         ))}
       </nav>
+
+      {/* ── Feedback ───────────────────────────────────────────────── */}
+      <div className="px-3 pb-1">
+        <FeedbackButton />
+      </div>
 
       {/* ── Bottom stats card ──────────────────────────────────────── */}
       {/* Min 24px top clearance + a divider so the 20px dura-glow-emerald on

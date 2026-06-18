@@ -234,6 +234,72 @@ export async function resolveNextLesson(
   return undefined;
 }
 
+/**
+ * Resolve the previous lesson in curriculum order, walking backward across
+ * module and phase boundaries. Returns undefined when already at the very
+ * first lesson of Phase 0.
+ */
+export async function resolvePreviousLesson(
+  phaseId: string,
+  moduleId: string,
+  lessonId: string
+): Promise<NextLessonRef | undefined> {
+  // 1) Try the previous lesson within the same module.
+  const siblings = await listLessons(phaseId, moduleId);
+  const idx = siblings.findIndex((l) => l.id === lessonId);
+  if (idx > 0) {
+    const prev = siblings[idx - 1];
+    return {
+      href: `/paths/${phaseId}/${moduleId}/${prev.id}`,
+      title: prev.title,
+      scope: "lesson",
+    };
+  }
+
+  // 2) Try the last lesson of the previous module in the same phase.
+  const phase = PHASES.find((p) => p.id === phaseId);
+  if (!phase) return undefined;
+  const modules = [...phase.modules].sort((a, b) => a.order - b.order);
+  const modIdx = modules.findIndex((m) => m.id === moduleId);
+  if (modIdx > 0) {
+    const prevMod = modules[modIdx - 1];
+    const prevModLessons = await listLessons(phaseId, prevMod.id);
+    const lastLesson = prevModLessons[prevModLessons.length - 1];
+    if (lastLesson) {
+      return {
+        href: `/paths/${phaseId}/${prevMod.id}/${lastLesson.id}`,
+        title: lastLesson.title,
+        scope: "module",
+        contextLabel: prevMod.title,
+      };
+    }
+  }
+
+  // 3) Fall back to the last lesson of the last module of the previous phase.
+  const phases = [...PHASES].sort((a, b) => a.order - b.order);
+  const phaseIdx = phases.findIndex((p) => p.id === phaseId);
+  if (phaseIdx > 0) {
+    const prevPhase = phases[phaseIdx - 1];
+    const prevPhaseModules = [...prevPhase.modules].sort((a, b) => a.order - b.order);
+    const lastMod = prevPhaseModules[prevPhaseModules.length - 1];
+    if (lastMod) {
+      const lastModLessons = await listLessons(prevPhase.id, lastMod.id);
+      const lastLesson = lastModLessons[lastModLessons.length - 1];
+      if (lastLesson) {
+        return {
+          href: `/paths/${prevPhase.id}/${lastMod.id}/${lastLesson.id}`,
+          title: lastLesson.title,
+          scope: "phase",
+          contextLabel: prevPhase.title,
+        };
+      }
+    }
+  }
+
+  // Already at the very first lesson.
+  return undefined;
+}
+
 export async function listLessons(phaseId: string, moduleId: string): Promise<LessonMeta[]> {
   try {
     const phaseDir = await findPhaseDir(phaseId);

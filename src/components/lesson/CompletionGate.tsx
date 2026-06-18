@@ -31,8 +31,8 @@ interface CompletionGateProps {
   vocabulary?: string[];
 }
 
-const SCROLL_REQUIRED = 85;
-const TIME_REQUIRED_RATIO = 0.7;
+const SCROLL_REQUIRED = 50;
+const TIME_REQUIRED_RATIO = 0.25;
 const XP_TWEEN_MS = 1000;
 
 const MILESTONE_MESSAGES: Record<number, string> = {

@@ -104,13 +104,11 @@ function StatusBadge({ status }: { status: PathStatus }): React.ReactElement {
   const { label, color } = config[status];
   return (
     <span
-      className="rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide uppercase"
+      className="rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide uppercase"
       style={{
         color,
         backgroundColor: `color-mix(in srgb, ${color} 10%, transparent)`,
         borderColor: `color-mix(in srgb, ${color} 30%, transparent)`,
-        borderWidth: 1,
-        borderStyle: "solid",
       }}
     >
       {label}

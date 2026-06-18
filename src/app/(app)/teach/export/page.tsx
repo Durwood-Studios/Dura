@@ -8,8 +8,7 @@ import { ExportHubClient } from "@/components/teacher/ExportHubClient";
 
 export const metadata: Metadata = {
   title: "Export — DURA",
-  description:
-    "Download DURA's curriculum, dictionary, quiz bank, and standards map. No login required.",
+  description: "Download DURA's curriculum, dictionary, quiz bank, and standards map.",
 };
 
 export default async function TeachExportPage(): Promise<React.ReactElement> {

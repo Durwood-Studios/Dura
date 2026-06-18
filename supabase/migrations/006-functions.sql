@@ -59,14 +59,14 @@ create trigger set_updated_at
 -- ============================================================
 create or replace function public.get_certificate_by_hash(hash text)
 returns table (
-  id uuid,
+  id text,
   phase_id text,
   user_id uuid,
   display_name text,
   phase_title text,
-  score numeric,
+  score real,
   total_questions integer,
-  completed_at timestamptz,
+  completed_at bigint,
   verification_hash text,
   standards text[]
 )
@@ -117,9 +117,9 @@ begin
       item ->> 'lessonId',
       item ->> 'phaseId',
       item ->> 'moduleId',
-      to_timestamp((item ->> 'startedAt')::bigint / 1000.0),
+      (item ->> 'startedAt')::bigint,
       case when item ->> 'completedAt' is not null
-        then to_timestamp((item ->> 'completedAt')::bigint / 1000.0)
+        then (item ->> 'completedAt')::bigint
         else null
       end,
       (item ->> 'scrollPercent')::numeric,

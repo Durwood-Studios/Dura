@@ -14,6 +14,8 @@ import { InstallPrompt } from "@/components/pwa/InstallPrompt";
 import { OfflineIndicator } from "@/components/pwa/OfflineIndicator";
 import { NotificationScheduler } from "@/components/pwa/NotificationScheduler";
 
+// Auth gate is enforced at the middleware layer — unauthenticated requests
+// are redirected to /auth/sign-in before any layout renders.
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
     <div className="flex min-h-screen bg-[var(--color-bg-primary)] text-[var(--color-text-primary)]">

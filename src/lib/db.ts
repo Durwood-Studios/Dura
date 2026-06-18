@@ -9,9 +9,10 @@ import type { AssessmentResult, Certificate } from "@/types/assessment";
 import type { XPEvent } from "@/types/xp";
 import type { TutorialProgress } from "@/types/tutorial";
 import type { DojoSession } from "@/types/dojo";
+import type { FeedbackEntry } from "@/types/feedback";
 
 export const DB_NAME = "dura";
-export const DB_VERSION = 6;
+export const DB_VERSION = 7;
 
 export interface DuraDBSchema extends DBSchema {
   progress: {
@@ -85,6 +86,11 @@ export interface DuraDBSchema extends DBSchema {
     key: string;
     value: DojoSession;
     indexes: { "by-completed": number; "by-phase": string };
+  };
+  feedback: {
+    key: string;
+    value: FeedbackEntry;
+    indexes: { "by-created": number; "by-synced": number };
   };
 }
 
@@ -173,6 +179,12 @@ export function getDB(): Promise<DuraDB> {
           const store = db.createObjectStore("dojo-sessions", { keyPath: "id" });
           store.createIndex("by-completed", "completedAt");
           store.createIndex("by-phase", "phaseFilter");
+        }
+        // v7: learner feedback
+        if (!db.objectStoreNames.contains("feedback")) {
+          const store = db.createObjectStore("feedback", { keyPath: "id" });
+          store.createIndex("by-created", "createdAt");
+          store.createIndex("by-synced", "synced");
         }
       },
       blocked() {

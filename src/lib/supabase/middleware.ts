@@ -2,14 +2,26 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
- * Refresh the Supabase auth session on every matched request.
- * Must be called from Next middleware so cookies can be written
- * back onto the outgoing response.
+ * Public paths that do not require authentication.
+ * Everything else is protected — unauthenticated requests are redirected
+ * to /auth/sign-in at the middleware layer (before any page renders).
+ */
+const PUBLIC_PREFIXES = ["/auth", "/discover", "/privacy", "/terms", "/open-source", "/api"];
+
+function isPublicPath(pathname: string): boolean {
+  if (pathname === "/") return true;
+  return PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"));
+}
+
+/**
+ * Refresh the Supabase auth session and enforce the auth gate in one
+ * round-trip. Industry-standard middleware approach: runs at the edge
+ * before any page HTML is sent, so unauthenticated users are redirected
+ * immediately without seeing a flash of protected content.
  *
- * Supabase is optional in DURA — the app must work fully without it
- * (CLAUDE.md Rule 3). When the env vars are missing (fresh clone with
- * no `.env.local`, or self-hosters who don't want auth), pass the
- * request through untouched rather than crashing the middleware.
+ * Supabase is optional in DURA (CLAUDE.md Rule 3). When env vars are
+ * absent the request passes through untouched — self-hosters without
+ * Supabase get full access.
  */
 export async function updateSession(request: NextRequest): Promise<NextResponse> {
   let response = NextResponse.next({ request });
@@ -35,8 +47,19 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
     },
   });
 
-  // Touching getUser() forces a token refresh if needed.
-  await supabase.auth.getUser();
+  // getUser() refreshes the token if needed AND gives us the session state —
+  // one network call does both jobs.
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  // Auth gate: redirect unauthenticated users to sign-in for protected paths.
+  if (!user && !isPublicPath(request.nextUrl.pathname)) {
+    const signInUrl = new URL("/auth/sign-in", request.url);
+    // Preserve the intended destination so sign-in can redirect back.
+    signInUrl.searchParams.set("redirectTo", request.nextUrl.pathname);
+    return NextResponse.redirect(signInUrl);
+  }
 
   return response;
 }

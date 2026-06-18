@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
 import type { Provider } from "@supabase/supabase-js";
@@ -9,6 +10,9 @@ import type { Provider } from "@supabase/supabase-js";
  * Client-side sign-in form with email/password and OAuth providers.
  */
 export default function SignInForm(): React.ReactElement {
+  const searchParams = useSearchParams();
+  const redirectTo = searchParams.get("redirectTo") ?? "/dashboard";
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -31,8 +35,7 @@ export default function SignInForm(): React.ReactElement {
         return;
       }
 
-      // Redirect handled by auth state change in AuthProvider
-      window.location.href = "/dashboard";
+      window.location.href = redirectTo;
     } catch (err) {
       setError(err instanceof Error ? err.message : "An unexpected error occurred");
     } finally {
@@ -48,7 +51,7 @@ export default function SignInForm(): React.ReactElement {
       const { error: authError } = await supabase.auth.signInWithOAuth({
         provider,
         options: {
-          redirectTo: `${window.location.origin}/auth/callback?next=/dashboard`,
+          redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(redirectTo)}`,
         },
       });
 
@@ -187,12 +190,6 @@ export default function SignInForm(): React.ReactElement {
             Create account
           </Link>
         </p>
-        <Link
-          href="/dashboard"
-          className="text-[var(--color-text-muted)] underline underline-offset-2 hover:text-[var(--color-text-secondary)]"
-        >
-          Continue without account
-        </Link>
       </div>
     </div>
   );

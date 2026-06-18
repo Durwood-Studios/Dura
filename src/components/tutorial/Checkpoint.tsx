@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { completeCheckpoint } from "@/lib/db/tutorial-progress";
 import type { CheckpointStatus } from "@/types/tutorial";
 
 interface CheckpointProps {
@@ -14,6 +15,12 @@ interface CheckpointProps {
   challenge?: string;
   /** Expected answer (case-insensitive match) */
   answer?: string;
+  /**
+   * Progress record id for the enclosing tutorial. When provided, completing
+   * this checkpoint persists the update to IndexedDB via completeCheckpoint().
+   * Omit for read-only or stateless usage.
+   */
+  progressId?: string;
   /** Called when user completes this checkpoint */
   onComplete?: (id: string) => void;
   children?: React.ReactNode;
@@ -26,21 +33,34 @@ export function Checkpoint({
   status,
   challenge,
   answer,
+  progressId,
   onComplete,
   children,
 }: CheckpointProps): React.ReactElement {
   const [userInput, setUserInput] = useState("");
   const [isWrong, setIsWrong] = useState(false);
 
+  /**
+   * Central completion handler: persist to IDB when progressId is set,
+   * then bubble up to the optional caller-supplied onComplete.
+   */
+  function handleComplete(): void {
+    if (progressId) {
+      // Fire-and-forget — errors are logged inside completeCheckpoint.
+      void completeCheckpoint(progressId, id);
+    }
+    onComplete?.(id);
+  }
+
   function handleSubmit(e: React.FormEvent): void {
     e.preventDefault();
     if (!answer) {
-      onComplete?.(id);
+      handleComplete();
       return;
     }
     if (userInput.trim().toLowerCase() === answer.trim().toLowerCase()) {
       setIsWrong(false);
-      onComplete?.(id);
+      handleComplete();
     } else {
       setIsWrong(true);
     }
@@ -98,7 +118,7 @@ export function Checkpoint({
 
       {status === "active" && !challenge && (
         <button
-          onClick={() => onComplete?.(id)}
+          onClick={handleComplete}
           className="mt-3 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-500"
         >
           Mark Complete

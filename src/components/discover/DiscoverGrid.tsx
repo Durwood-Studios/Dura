@@ -52,14 +52,14 @@ export function DiscoverGrid({ rooms }: { rooms: Room[] }): React.ReactElement {
                 {room.tagline}
               </p>
 
-              {/* Footer: activity count + curriculum link */}
+              {/* Footer: activity count + Explore CTA */}
               <div className="mt-5 flex items-center justify-between border-t border-[var(--color-border)] pt-4">
                 <span className="text-xs text-[var(--color-text-muted)]">
-                  {room.activityCount} activities
+                  {room.activityCount} {room.activityCount === 1 ? "activity" : "activities"}
                 </span>
-                <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-text-secondary)]">
-                  Phase {room.phaseId}
-                  <ArrowRight size={12} className="transition group-hover:translate-x-0.5" />
+                <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] transition group-hover:gap-1.5">
+                  Explore
+                  <ArrowRight size={12} aria-hidden="true" />
                 </span>
               </div>
             </div>

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { loadLesson, resolveNextLesson } from "@/lib/content";
+import { loadLesson, resolveNextLesson, resolvePreviousLesson } from "@/lib/content";
 import { LessonReader } from "@/components/lesson/LessonReader";
 import { GatingGuard } from "@/components/paths/GatingGuard";
 import { ClassroomSurface } from "@/components/surfaces";
@@ -32,9 +32,11 @@ export default async function LessonPage({
   const lesson = await loadLesson(phaseId, moduleId, lessonId);
   if (!lesson) notFound();
 
-  // Walk the curriculum end-to-end: next lesson in module, then first lesson
-  // of next module, then first lesson of next phase.
-  const next = await resolveNextLesson(phaseId, moduleId, lessonId);
+  // Walk the curriculum end-to-end in both directions.
+  const [next, prev] = await Promise.all([
+    resolveNextLesson(phaseId, moduleId, lessonId),
+    resolvePreviousLesson(phaseId, moduleId, lessonId),
+  ]);
 
   const shareUrl = `${SITE_URL}/paths/${phaseId}/${moduleId}/${lessonId}`;
 
@@ -44,7 +46,7 @@ export default async function LessonPage({
   return (
     <ClassroomSurface>
       <GatingGuard phaseId={phaseId} moduleId={moduleId} moduleTitle={moduleTitle}>
-        <LessonReader lesson={lesson} next={next} shareUrl={shareUrl} />
+        <LessonReader lesson={lesson} next={next} prev={prev} shareUrl={shareUrl} />
       </GatingGuard>
     </ClassroomSurface>
   );
