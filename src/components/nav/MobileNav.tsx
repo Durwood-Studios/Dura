@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   X,
   LayoutDashboard,
@@ -21,10 +21,19 @@ import {
   Swords,
   Signpost,
   Sparkles,
+  LogOut,
+  User,
 } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
+import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+
+interface DrawerUser {
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+}
 
 const TABS = [
   { href: "/dashboard", label: "Home", icon: LayoutDashboard },
@@ -132,6 +141,8 @@ export function MobileDrawer(): React.ReactElement | null {
   const pathname = usePathname();
   const open = useUIStore((s) => s.mobileNavOpen);
   const close = useUIStore((s) => s.setMobileNav);
+  const [user, setUser] = useState<DrawerUser | null>(null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -145,6 +156,38 @@ export function MobileDrawer(): React.ReactElement | null {
       document.body.style.overflow = "";
     };
   }, [open, close]);
+
+  useEffect(() => {
+    async function loadUser(): Promise<void> {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user: sbUser },
+        } = await supabase.auth.getUser();
+        if (sbUser) {
+          setUser({
+            email: sbUser.email ?? "",
+            name: (sbUser.user_metadata?.full_name as string | null) ?? null,
+            avatarUrl: (sbUser.user_metadata?.avatar_url as string | null) ?? null,
+          });
+        }
+      } catch {
+        // Supabase not configured
+      }
+    }
+    void loadUser();
+  }, []);
+
+  async function handleSignOut(): Promise<void> {
+    setIsSigningOut(true);
+    close(false);
+    try {
+      await fetch("/api/auth/sign-out", { method: "POST" });
+      window.location.href = "/auth/sign-in";
+    } catch {
+      setIsSigningOut(false);
+    }
+  }
 
   if (!open) return null;
 
@@ -219,11 +262,46 @@ export function MobileDrawer(): React.ReactElement | null {
           ))}
         </nav>
 
-        {/* Footer */}
-        <div className="border-t border-[var(--color-border)] px-5 py-3">
-          <p className="text-xs text-[var(--color-text-muted)]">
-            Free forever. Offline-first. Open source.
-          </p>
+        {/* Footer — user profile + sign-out */}
+        <div className="border-t border-[var(--color-border)] px-4 py-3">
+          {user ? (
+            <div className="flex items-center gap-3">
+              {/* Avatar */}
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--color-bg-subtle)]">
+                {user.avatarUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={user.avatarUrl} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  <User className="h-4 w-4 text-[var(--color-text-muted)]" />
+                )}
+              </div>
+
+              {/* Name / email */}
+              <div className="min-w-0 flex-1">
+                {user.name && (
+                  <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">
+                    {user.name}
+                  </p>
+                )}
+                <p className="truncate text-xs text-[var(--color-text-muted)]">{user.email}</p>
+              </div>
+
+              {/* Sign-out */}
+              <button
+                type="button"
+                onClick={() => void handleSignOut()}
+                disabled={isSigningOut}
+                aria-label="Sign out"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-subtle)] hover:text-[var(--color-text-primary)] disabled:opacity-40"
+              >
+                <LogOut className="h-5 w-5" />
+              </button>
+            </div>
+          ) : (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Free forever. Offline-first. Open source.
+            </p>
+          )}
         </div>
       </div>
     </div>
