@@ -9,9 +9,9 @@ import { PHASE_6_QUESTIONS } from "@/content/questions/phase-6";
 import { PHASE_7_QUESTIONS } from "@/content/questions/phase-7";
 import { PHASE_8_QUESTIONS } from "@/content/questions/phase-8";
 import { PHASE_9_QUESTIONS } from "@/content/questions/phase-9";
-import { PHASE_E_QUESTIONS } from "@/content/questions/phase-e";
-import { PHASE_R_QUESTIONS } from "@/content/questions/phase-r";
-import { PHASE_M_QUESTIONS } from "@/content/questions/phase-m";
+import { PHASE_10_QUESTIONS } from "@/content/questions/phase-10";
+import { PHASE_13_QUESTIONS } from "@/content/questions/phase-13";
+import { PHASE_14_QUESTIONS } from "@/content/questions/phase-14";
 
 /**
  * Every authored question across every phase. Isomorphic — safe to
@@ -29,9 +29,9 @@ export const ALL_QUESTIONS: AssessmentQuestion[] = [
   ...PHASE_7_QUESTIONS,
   ...PHASE_8_QUESTIONS,
   ...PHASE_9_QUESTIONS,
-  ...PHASE_E_QUESTIONS,
-  ...PHASE_R_QUESTIONS,
-  ...PHASE_M_QUESTIONS,
+  ...PHASE_10_QUESTIONS,
+  ...PHASE_13_QUESTIONS,
+  ...PHASE_14_QUESTIONS,
 ];
 
 /**
@@ -50,9 +50,9 @@ export const QUESTION_COUNT: number =
   PHASE_7_QUESTIONS.length +
   PHASE_8_QUESTIONS.length +
   PHASE_9_QUESTIONS.length +
-  PHASE_E_QUESTIONS.length +
-  PHASE_R_QUESTIONS.length +
-  PHASE_M_QUESTIONS.length;
+  PHASE_10_QUESTIONS.length +
+  PHASE_13_QUESTIONS.length +
+  PHASE_14_QUESTIONS.length;
 
 export function getAllQuestions(): AssessmentQuestion[] {
   return ALL_QUESTIONS;

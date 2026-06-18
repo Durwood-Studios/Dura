@@ -33,7 +33,7 @@ function q(
   };
 }
 
-export const PHASE_M_QUESTIONS: AssessmentQuestion[] = [
+export const PHASE_14_QUESTIONS: AssessmentQuestion[] = [
   // ── Module m-1: ISO 9001:2015 ─────────────────────────────────────────────
 
   q(

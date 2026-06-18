@@ -1,7 +1,7 @@
 import type { AssessmentQuestion } from "@/types/assessment";
 
 /**
- * Phase E question bank — 64 questions across 8 modules (8 each).
+ * Phase 10 question bank — 64 questions across 8 modules (8 each).
  * Covers ARM Cortex-M toolchain, bare-metal GPIO, interrupts/DMA,
  * FreeRTOS, peripheral drivers, Rust embedded/RTIC, MISRA-C, and capstone.
  */
@@ -19,7 +19,7 @@ function q(
 ): AssessmentQuestion {
   return {
     id,
-    phaseId: "e",
+    phaseId: "10",
     moduleId,
     type,
     question,
@@ -32,7 +32,7 @@ function q(
   };
 }
 
-export const PHASE_E_QUESTIONS: AssessmentQuestion[] = [
+export const PHASE_10_QUESTIONS: AssessmentQuestion[] = [
   // ── Module e-1: C Toolchain & ARM Architecture ────────────────────────────
   q(
     "e-1-q1",

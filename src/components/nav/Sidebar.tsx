@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   BookOpen,
@@ -22,7 +22,10 @@ import {
   Swords,
   Zap,
   Flame,
+  LogOut,
+  User,
 } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
 import { FeedbackButton } from "@/components/feedback/FeedbackButton";
 import { cn } from "@/lib/utils";
@@ -84,9 +87,18 @@ interface SidebarStats {
   streakAlive: boolean;
 }
 
+interface SidebarUser {
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+}
+
 export function Sidebar(): React.ReactElement {
   const pathname = usePathname();
+  const router = useRouter();
   const [stats, setStats] = useState<SidebarStats | null>(null);
+  const [user, setUser] = useState<SidebarUser | null>(null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
 
   useEffect(() => {
     async function load(): Promise<void> {
@@ -106,6 +118,39 @@ export function Sidebar(): React.ReactElement {
     }
     void load();
   }, []);
+
+  useEffect(() => {
+    async function loadUser(): Promise<void> {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user: sbUser },
+        } = await supabase.auth.getUser();
+        if (sbUser) {
+          setUser({
+            email: sbUser.email ?? "",
+            name: (sbUser.user_metadata?.full_name as string | null) ?? null,
+            avatarUrl: (sbUser.user_metadata?.avatar_url as string | null) ?? null,
+          });
+        }
+      } catch {
+        // Supabase not configured — no user shown
+      }
+    }
+    void loadUser();
+  }, []);
+
+  async function handleSignOut(): Promise<void> {
+    setIsSigningOut(true);
+    try {
+      const supabase = createClient();
+      await supabase.auth.signOut();
+      router.push("/auth/sign-in");
+    } catch (error) {
+      console.error("[sidebar] sign-out failed", error);
+      setIsSigningOut(false);
+    }
+  }
 
   return (
     <aside className="hidden h-screen w-60 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg-primary)] lg:flex">
@@ -216,6 +261,44 @@ export function Sidebar(): React.ReactElement {
                 style={{ width: `${stats.xpPercent}%` }}
               />
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── User profile + sign-out ────────────────────────────────── */}
+      {user && (
+        <div className="border-t border-[var(--color-border)] px-3 py-3">
+          <div className="flex items-center gap-2">
+            {/* Avatar */}
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--color-bg-surface)]">
+              {user.avatarUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={user.avatarUrl} alt="" className="h-full w-full object-cover" />
+              ) : (
+                <User className="h-4 w-4 text-[var(--color-text-muted)]" />
+              )}
+            </div>
+
+            {/* Name / email */}
+            <div className="min-w-0 flex-1">
+              {user.name && (
+                <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">
+                  {user.name}
+                </p>
+              )}
+              <p className="truncate text-xs text-[var(--color-text-muted)]">{user.email}</p>
+            </div>
+
+            {/* Sign-out button */}
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              disabled={isSigningOut}
+              aria-label="Sign out"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-text-primary)] disabled:opacity-40"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
           </div>
         </div>
       )}
