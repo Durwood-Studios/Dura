@@ -202,6 +202,7 @@ function BentoCard({ onRestart, onDismiss, prefersReduced }: BentoProps): React.
 export function UpdateAvailable(): React.ReactElement | null {
   const { updateAvailable, applyUpdate } = useServiceWorkerUpdate();
   const [phase, setPhase] = useState<Phase>("pill");
+  const [blackout, setBlackout] = useState(false);
   const [mounted, setMounted] = useState(false);
   const prefersReduced = useReducedMotion() ?? false;
 
@@ -214,18 +215,17 @@ export function UpdateAvailable(): React.ReactElement | null {
 
   const handleRestart = () => {
     if (prefersReduced) {
-      // Reduced motion: skip all theatrics, apply immediately
       void applyUpdate();
       return;
     }
 
-    // Phase transition:
-    //   • "bento" AnimatePresence exit fires (backdrop + card fade / dissolve)
-    //   • "exploding" mounts simultaneously at z-[9999] — confetti fires
-    //     THROUGH the still-fading backdrop, giving the "bursting out" effect
-    //   • applyUpdate() waits long enough for confetti to peak
     setPhase("exploding");
-    setTimeout(() => void applyUpdate(), 1400);
+    // Fade to solid black at T+1100ms (confetti is peaking / fading).
+    // Covers both the "empty blurred page" gap after CSS animations
+    // finish AND the browser's own white flash on page unload.
+    setTimeout(() => setBlackout(true), 1100);
+    // Reload fires 400ms later — cleanly under the black cover.
+    setTimeout(() => void applyUpdate(), 1500);
   };
 
   const portal =
@@ -257,8 +257,7 @@ export function UpdateAvailable(): React.ReactElement | null {
               )}
             </AnimatePresence>
 
-            {/* ── Confetti — exploding phase only; backdrop stays alive
-                above so confetti fires through a still-blurred world ── */}
+            {/* ── Confetti — exploding phase only ── */}
             <AnimatePresence>
               {phase === "exploding" && (
                 <motion.div
@@ -270,6 +269,20 @@ export function UpdateAvailable(): React.ReactElement | null {
                 >
                   <ConfettiLayer />
                 </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* ── Blackout — fades in just before applyUpdate() so the
+                browser's own page-unload white flash is invisible ── */}
+            <AnimatePresence>
+              {blackout && (
+                <motion.div
+                  key="blackout"
+                  className="fixed inset-0 z-[10000] bg-black"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.35, ease: "easeIn" }}
+                />
               )}
             </AnimatePresence>
           </>,
