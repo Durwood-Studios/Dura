@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { motion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { Lightbulb, Sprout, Rocket, Hammer, GraduationCap, ArrowRight } from "lucide-react";
 
 interface PathCard {
@@ -64,23 +64,37 @@ const PATHS: PathCard[] = [
 
 /** Audience-routing cards that help visitors find the right entry point. */
 export function PathSelector(): React.ReactElement {
+  const shouldReduceMotion = useReducedMotion();
+
   return (
-    <section className="bg-[#F5F5F4] px-6 py-24 sm:py-32 dark:bg-[#0a0a0f]">
+    <section className="bg-[#F5F5F4] px-4 py-24 sm:px-6 sm:py-32 dark:bg-[#0a0a0f]">
       <div className="mx-auto max-w-6xl">
         <div className="mx-auto max-w-2xl text-center">
-          <h2 className="text-3xl font-semibold tracking-tight text-[#171717] sm:text-4xl dark:text-[#f0f0f0]">
+          <motion.h2
+            initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, margin: "-60px" }}
+            transition={{ duration: 0.5, ease: "easeOut" }}
+            className="text-3xl font-semibold tracking-tight text-[#171717] sm:text-4xl dark:text-[#f0f0f0]"
+          >
             Where are you on your journey?
-          </h2>
-          <p className="mt-4 text-lg text-[#525252] dark:text-[#a0a0a8]">
+          </motion.h2>
+          <motion.p
+            initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 8 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, margin: "-60px" }}
+            transition={{ duration: 0.5, ease: "easeOut", delay: 0.07 }}
+            className="mt-4 text-lg text-[#525252] dark:text-[#a0a0a8]"
+          >
             DURA meets you where you are — from first curiosity to engineering leadership.
-          </p>
+          </motion.p>
         </div>
 
         <div className="mt-16 grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-6">
           {PATHS.map((path, i) => (
             <Link key={path.title} href={path.href} className="block">
               <motion.article
-                initial={{ opacity: 0, y: 16 }}
+                initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 16 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, margin: "-50px" }}
                 transition={{
@@ -88,12 +102,21 @@ export function PathSelector(): React.ReactElement {
                   delay: i * 0.07,
                   ease: "easeOut",
                 }}
-                className="group relative flex items-start gap-5 overflow-hidden rounded-xl border border-[#E5E5E5] bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-shadow duration-200 hover:shadow-[0_4px_12px_rgba(0,0,0,0.08)] dark:border-white/8 dark:bg-white/[0.03] dark:shadow-none dark:hover:shadow-[0_4px_12px_rgba(0,0,0,0.3)]"
+                className="group relative flex min-h-[80px] items-start gap-5 overflow-hidden rounded-xl border border-[#E5E5E5] bg-white p-5 shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-200 hover:-translate-y-0.5 motion-reduce:hover:translate-y-0 dark:border-white/8 dark:bg-white/[0.03]"
                 style={{ borderLeftWidth: 4, borderLeftColor: path.color }}
               >
+                {/* Color-matched drop shadow on hover */}
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 rounded-xl opacity-0 transition-opacity duration-200 group-hover:opacity-100 motion-reduce:hidden"
+                  style={{
+                    boxShadow: `0 8px 28px ${path.color}22`,
+                  }}
+                />
+
                 {/* Icon */}
                 <div
-                  className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg"
+                  className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-105 motion-reduce:group-hover:scale-100"
                   style={{
                     background: `${path.color}1a`,
                     color: path.color,
@@ -104,7 +127,7 @@ export function PathSelector(): React.ReactElement {
 
                 {/* Content */}
                 <div className="min-w-0 flex-1">
-                  <h3 className="text-lg font-semibold text-[#171717] dark:text-[#f0f0f0]">
+                  <h3 className="text-base font-semibold text-[#171717] sm:text-lg dark:text-[#f0f0f0]">
                     {path.title}
                   </h3>
                   <p className="mt-1 text-sm leading-relaxed text-[#525252] dark:text-[#a0a0a8]">
@@ -112,10 +135,10 @@ export function PathSelector(): React.ReactElement {
                   </p>
                 </div>
 
-                {/* Hover arrow */}
+                {/* Arrow indicator — always visible on mobile, slide-in on desktop */}
                 <span
                   aria-hidden
-                  className="mt-1 shrink-0 text-lg opacity-100 transition-all duration-200 motion-reduce:transition-none sm:translate-x-[-4px] sm:opacity-0 sm:group-hover:translate-x-0 sm:group-hover:opacity-100"
+                  className="mt-1 shrink-0 text-lg transition-all duration-200 motion-reduce:transition-none sm:translate-x-[-4px] sm:opacity-0 sm:group-hover:translate-x-0 sm:group-hover:opacity-100"
                   style={{ color: path.color }}
                 >
                   &rarr;
