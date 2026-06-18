@@ -232,33 +232,40 @@ export function UpdateAvailable(): React.ReactElement | null {
     mounted && typeof document !== "undefined"
       ? createPortal(
           <>
-            {/* ── Bento phase: blur backdrop + card ── */}
+            {/* ── Backdrop — spans BOTH bento and exploding phases so the
+                page never flashes through while confetti is in the air.
+                When phase goes bento→exploding the condition stays true,
+                so AnimatePresence keeps the backdrop mounted (no exit). */}
             <AnimatePresence>
-              {phase === "bento" && (
-                <>
-                  <BlurBackdrop key="backdrop" onClick={handleDismiss} />
-                  <BentoCard
-                    key="card"
-                    onRestart={handleRestart}
-                    onDismiss={handleDismiss}
-                    prefersReduced={prefersReduced}
-                  />
-                </>
+              {(phase === "bento" || phase === "exploding") && (
+                <BlurBackdrop
+                  key="backdrop"
+                  onClick={phase === "bento" ? handleDismiss : () => {}}
+                />
               )}
             </AnimatePresence>
 
-            {/* ── Exploding phase: backdrop + card exit, confetti fires above ──
-                The two AnimatePresence blocks run independently so the
-                "bento" exits can overlap with the confetti mounting. */}
+            {/* ── Bento card — bento phase only ── */}
+            <AnimatePresence>
+              {phase === "bento" && (
+                <BentoCard
+                  key="card"
+                  onRestart={handleRestart}
+                  onDismiss={handleDismiss}
+                  prefersReduced={prefersReduced}
+                />
+              )}
+            </AnimatePresence>
+
+            {/* ── Confetti — exploding phase only; backdrop stays alive
+                above so confetti fires through a still-blurred world ── */}
             <AnimatePresence>
               {phase === "exploding" && (
-                // Confetti wrapper fades itself out after pieces finish
                 <motion.div
                   key="confetti-root"
                   initial={{ opacity: 1 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  // Allow a long exit so the last few pieces finish gracefully
                   transition={{ delay: 1.0, duration: 0.4 }}
                 >
                   <ConfettiLayer />
