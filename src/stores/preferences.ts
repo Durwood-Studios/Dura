@@ -24,7 +24,14 @@ export const usePreferencesStore = create<PreferencesState>((set) => ({
   },
 
   update: async (patch) => {
-    const next = await patchPreferencesDb(patch);
-    set({ prefs: next });
+    // Optimistic update — UI reacts immediately, IDB persistence is background
+    set((s) => ({ prefs: { ...s.prefs, ...patch } }));
+    try {
+      const persisted = await patchPreferencesDb(patch);
+      // Re-sync in case patchPreferences normalised any values
+      set({ prefs: persisted });
+    } catch (error) {
+      console.error("[preferences] Failed to persist update:", error);
+    }
   },
 }));

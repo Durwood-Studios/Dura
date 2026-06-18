@@ -29,9 +29,12 @@ export function TopBar(): React.ReactElement {
 
   const isDark = theme === "dark" || (theme === "system" && systemDark);
 
-  const cycleTheme = () => {
-    const next = theme === "light" ? "dark" : theme === "dark" ? "system" : "light";
-    void update({ theme: next });
+  const toggleTheme = () => {
+    // Simple binary toggle: light ↔ dark.
+    // "system" collapses into whichever resolved mode is active so the
+    // first click always flips the visible state rather than jumping to
+    // an invisible intermediate.
+    void update({ theme: isDark ? "light" : "dark" });
   };
 
   return (
@@ -51,7 +54,7 @@ export function TopBar(): React.ReactElement {
       </div>
       <button
         type="button"
-        onClick={cycleTheme}
+        onClick={toggleTheme}
         aria-label={`Theme: ${theme}. Click to change.`}
         className="flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-text-primary)] lg:h-8 lg:w-8"
       >
