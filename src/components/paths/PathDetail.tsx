@@ -112,12 +112,11 @@ export function PathDetail({ path }: { path: Path }): React.ReactElement {
         </section>
       )}
 
-      {path.status !== "complete" && (
+      {path.status === "preview" && (
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-5 text-sm text-[var(--color-text-secondary)]">
-          <strong className="text-[var(--color-text-primary)]">A note on status:</strong>{" "}
-          {path.status === "scaffold"
-            ? "Some phases on this path are standards-literacy focused rather than code-teaching focused. The path is runnable today and adds real value, but hands-on lesson modules will deepen over time."
-            : "One or more phases on this path are still under development. The path is a forward-looking promise — use it to plan, but expect the dependency phases to ship over coming releases."}
+          <strong className="text-[var(--color-text-primary)]">Coming soon:</strong> One or more
+          phases on this path are still under development. The path is a forward-looking promise —
+          use it to plan, but expect the dependency phases to ship over coming releases.
         </section>
       )}
     </main>
@@ -202,8 +201,8 @@ function StatusBadge({ status }: { status: PathStatus }): React.ReactElement {
       color: "var(--color-accent-emerald)",
     },
     scaffold: {
-      label: "Scaffold",
-      color: "var(--color-rating-hard)",
+      label: "In Progress",
+      color: "var(--color-text-muted)",
     },
     preview: {
       label: "Preview",

@@ -211,15 +211,14 @@ export const PATHS: readonly Path[] = [
     status: "complete",
   },
 
-  // ─── Robotics / Manufacturing (scaffold — Phase R/M skew toward
-  // standards literacy rather than code-teaching) ────────────────────────
+  // ─── Robotics / Manufacturing / Embedded specialty tracks ───────────────
   {
     id: "robotics-software-engineer",
     slug: "robotics-software-engineer",
     title: "Robotics Software Engineer",
     tagline: "Write ROS 2 code that ships through a safety review.",
     description:
-      "Pairs the CS + systems substrate with Phase R's standards literacy (ISO 10218-1:2025, functional safety, collaborative modes, PFL testing) and the ROS 2 + ROS-Industrial lesson. Phase R is currently standards-heavy; the code-teaching depth will deepen as Phase R gains hands-on lesson modules.",
+      "Pairs the CS + systems substrate with Phase 13's standards literacy (ISO 10218-1:2025, functional safety, collaborative modes, PFL testing) and hands-on ROS 2 + ROS-Industrial lessons. Covers kinematic modelling, MoveIt 2 motion planning, real-time control, and the full safety-case documentation workflow.",
     outcome:
       "Ship a ROS 2 application against URsim with a documented safety case that maps to a R15.06-2025 risk-assessment package.",
     archetype: "Robotics",
@@ -240,7 +239,7 @@ export const PATHS: readonly Path[] = [
       },
       { phaseId: "8", scope: "elective", rationale: "Professional practice." },
     ],
-    status: "scaffold",
+    status: "complete",
   },
   {
     id: "manufacturing-systems-engineer",
@@ -248,7 +247,7 @@ export const PATHS: readonly Path[] = [
     title: "Manufacturing Systems Engineer",
     tagline: "Bridge the shop floor and the IT stack.",
     description:
-      "For engineers integrating MES, SCADA, OPC UA, MTConnect, and PPAP workflows. Pairs the backend + systems substrate with Phase M's twelve-lesson manufacturing-standards stack. Currently standards-heavy; the M11 MTConnect → OPC UA bridge sandbox is the code-teaching anchor.",
+      "For engineers integrating MES, SCADA, OPC UA, MTConnect, and PPAP workflows. Pairs the backend + systems substrate with Phase 14's twelve-lesson manufacturing-standards stack covering QMS, GD&T, ISA-95, OPC UA, IEC 62443, and a hands-on MTConnect → OPC UA bridge capstone.",
     outcome:
       "Stand up a working MTConnect → OPC UA bridge against a simulated CNC and integrate it into an MES with documented zones and conduits.",
     archetype: "Manufacturing",
@@ -269,17 +268,17 @@ export const PATHS: readonly Path[] = [
       },
       { phaseId: "8", scope: "elective", rationale: "Professional practice." },
     ],
-    status: "scaffold",
+    status: "complete",
   },
 
-  // ─── Embedded — Phase E exists, lessons being authored ────────────────
+  // ─── Embedded ──────────────────────────────────────────────────────────
   {
     id: "embedded-engineer",
     slug: "embedded-engineer",
     title: "Embedded / Firmware Engineer",
     tagline: "Ship production firmware against ARM Cortex-M.",
     description:
-      "C and Rust on bare metal, RTOS fundamentals, MISRA-C:2023 compliant style, driver development for the four canonical buses, and a real-time capstone application. Code-first throughout — Phase E is DURA's flagship code-teaching discipline phase.",
+      "C and Rust on bare metal, RTOS fundamentals, MISRA-C:2023 compliant style, driver development for the four canonical buses (UART, SPI, I2C, CAN), DMA-driven peripherals, and a real-time sensor pipeline capstone. Code-first throughout — eight hands-on lessons targeting ARM Cortex-M.",
     outcome:
       "Build production firmware against an ARM Cortex-M target with documented register access, RTOS scheduling, DMA-driven peripherals, and a real-time sensor pipeline that compiles, flashes, and runs.",
     archetype: "Embedded",
@@ -302,10 +301,10 @@ export const PATHS: readonly Path[] = [
       {
         phaseId: "10",
         scope: "spine",
-        rationale: "Phase 10 — Embedded / Firmware. Eight code-first lessons on ARM Cortex-M.",
+        rationale: "Embedded / Firmware — eight code-first lessons on ARM Cortex-M.",
       },
     ],
-    status: "scaffold",
+    status: "complete",
   },
 
   // ─── Hardware Verification ──────────────────────────────────────────────

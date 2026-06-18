@@ -93,8 +93,8 @@ function StatusBadge({ status }: { status: PathStatus }): React.ReactElement {
       color: "var(--color-accent-emerald)",
     },
     scaffold: {
-      label: "Scaffold",
-      color: "var(--color-rating-hard)",
+      label: "In Progress",
+      color: "var(--color-text-muted)",
     },
     preview: {
       label: "Preview",
