@@ -76,5 +76,20 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
     return NextResponse.redirect(signInUrl);
   }
 
+  // Email confirmation gate: if Supabase email confirmation is enabled,
+  // require the user to verify their email before accessing protected routes.
+  // OAuth users (GitHub, Google, Apple) have email confirmed automatically.
+  if (
+    user &&
+    !isPublicPath(request.nextUrl.pathname) &&
+    // email_confirmed_at is null/undefined for unconfirmed email accounts
+    user.email_confirmed_at === null &&
+    // Only enforce for email/password users (identities[0].provider === "email")
+    user.identities?.some((id) => id.provider === "email") &&
+    !request.nextUrl.pathname.startsWith("/auth")
+  ) {
+    return NextResponse.redirect(new URL("/auth/verify-email", request.url));
+  }
+
   return response;
 }

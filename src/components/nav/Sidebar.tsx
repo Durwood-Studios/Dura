@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   BookOpen,
@@ -95,7 +95,6 @@ interface SidebarUser {
 
 export function Sidebar(): React.ReactElement {
   const pathname = usePathname();
-  const router = useRouter();
   const [stats, setStats] = useState<SidebarStats | null>(null);
   const [user, setUser] = useState<SidebarUser | null>(null);
   const [isSigningOut, setIsSigningOut] = useState(false);
@@ -143,9 +142,11 @@ export function Sidebar(): React.ReactElement {
   async function handleSignOut(): Promise<void> {
     setIsSigningOut(true);
     try {
-      const supabase = createClient();
-      await supabase.auth.signOut();
-      router.push("/auth/sign-in");
+      // POST to server-side route so the refresh token is revoked server-side,
+      // not just cleared from client storage (OWASP A07 — session management).
+      const res = await fetch("/api/auth/sign-out", { method: "POST" });
+      // The API route redirects to /auth/sign-in — follow it.
+      window.location.href = res.url || "/auth/sign-in";
     } catch (error) {
       console.error("[sidebar] sign-out failed", error);
       setIsSigningOut(false);

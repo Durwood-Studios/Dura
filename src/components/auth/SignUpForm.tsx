@@ -45,13 +45,14 @@ export default function SignUpForm(): React.ReactElement {
       });
 
       if (authError) {
-        setError(authError.message);
+        // Generic message prevents email enumeration (OWASP A07)
+        setError("Account creation failed. Please try a different email or contact support.");
         return;
       }
 
       setIsSuccess(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "An unexpected error occurred");
+    } catch {
+      setError("Account creation failed. Please try again.");
     } finally {
       setIsLoading(false);
     }
@@ -70,10 +71,10 @@ export default function SignUpForm(): React.ReactElement {
       });
 
       if (authError) {
-        setError(authError.message);
+        setError("OAuth sign in failed. Please try again.");
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "An unexpected error occurred");
+    } catch {
+      setError("OAuth sign in failed. Please try again.");
     }
   }
 

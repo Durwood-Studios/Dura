@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { safeRedirectPath } from "@/lib/safe-url";
 import Link from "next/link";
 import type { Provider } from "@supabase/supabase-js";
 
@@ -11,7 +12,8 @@ import type { Provider } from "@supabase/supabase-js";
  */
 export default function SignInForm(): React.ReactElement {
   const searchParams = useSearchParams();
-  const redirectTo = searchParams.get("redirectTo") ?? "/dashboard";
+  // Validate redirectTo to prevent open redirect attacks (OWASP A01)
+  const redirectTo = safeRedirectPath(searchParams.get("redirectTo"), "/dashboard");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -31,13 +33,14 @@ export default function SignInForm(): React.ReactElement {
       });
 
       if (authError) {
-        setError(authError.message);
+        // Generic message prevents email enumeration (OWASP A07)
+        setError("Invalid email or password. Please try again.");
         return;
       }
 
       window.location.href = redirectTo;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "An unexpected error occurred");
+    } catch {
+      setError("Sign in failed. Please try again.");
     } finally {
       setIsLoading(false);
     }
@@ -56,10 +59,10 @@ export default function SignInForm(): React.ReactElement {
       });
 
       if (authError) {
-        setError(authError.message);
+        setError("OAuth sign in failed. Please try again.");
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "An unexpected error occurred");
+    } catch {
+      setError("OAuth sign in failed. Please try again.");
     }
   }
 
