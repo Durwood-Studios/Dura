@@ -26,7 +26,7 @@ export function PageTransition({ children }: { children: React.ReactNode }): Rea
     return <>{children}</>;
   }
 
-  // Discover surface gets a horizontal slide; everything else gets the default fade
+  // Discover surface gets a horizontal slide; everything else gets a pure presence fade
   const toDiscover = isDiscover(pathname);
 
   const variants = toDiscover
@@ -36,14 +36,16 @@ export function PageTransition({ children }: { children: React.ReactNode }): Rea
         exit: { opacity: 0, x: -40 },
       }
     : {
-        initial: { opacity: 0, y: 8 },
-        animate: { opacity: 1, y: 0 },
-        exit: { opacity: 0, y: -4 },
+        // Pure opacity fade — no axis shift so the page feels like it "arrives"
+        // rather than flying in. DLS-2.0 §Surface Transitions.
+        initial: { opacity: 0 },
+        animate: { opacity: 1 },
+        exit: { opacity: 0 },
       };
 
   const transition = toDiscover
     ? { ...SPRINGS.fluid, duration: undefined }
-    : { duration: 0.25, ease: "easeOut" as const };
+    : { duration: 0.35, ease: [0.25, 0.1, 0.25, 1] as const };
 
   return (
     <AnimatePresence mode="wait">
