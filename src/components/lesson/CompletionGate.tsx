@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Check, Lock, ArrowRight, Repeat } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 import { useProgressStore } from "@/stores/progress";
 import { XP_AWARDS, levelFromXP } from "@/lib/xp";
 import { track } from "@/lib/analytics";
@@ -97,6 +99,7 @@ export function CompletionGate({
   nextTitle,
   vocabulary = [],
 }: CompletionGateProps): React.ReactElement {
+  const pathname = usePathname();
   const scrollPercent = useProgressStore((s) => s.scrollPercent);
   const timeSpentMs = useProgressStore((s) => s.timeSpentMs);
   const quizPassed = useProgressStore((s) => s.quizPassed);
@@ -136,6 +139,21 @@ export function CompletionGate({
   const [streakDays, setStreakDays] = useState<number>(0);
   const [streakExtended, setStreakExtended] = useState<boolean>(false);
   const mountedRef = useRef(true);
+
+  // Auth state — checked once on mount; offline-first completion never blocked
+  const [isAuthed, setIsAuthed] = useState(false);
+  const [showSyncPrompt, setShowSyncPrompt] = useState(false);
+  useEffect(() => {
+    createClient()
+      .auth.getUser()
+      .then(({ data }) => {
+        setIsAuthed(!!data.user);
+      })
+      .catch(() => {
+        // Auth unavailable — treat as unauthenticated
+        setIsAuthed(false);
+      });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -187,6 +205,8 @@ export function CompletionGate({
       const after = before + XP_AWARDS.lesson;
       setNewLevel(levelFromXP(after));
       setCelebrating(true);
+      // Nudge unauthenticated learners toward sign-in so progress syncs
+      if (!isAuthed) setShowSyncPrompt(true);
     } catch (error) {
       console.error("[gate] completion failed", error);
       return;
@@ -308,6 +328,17 @@ export function CompletionGate({
       >
         {ready ? `Complete lesson (+${XP_AWARDS.lesson} XP)` : "Keep going"}
       </button>
+      {showSyncPrompt && (
+        <p className="mt-3 text-xs text-[var(--color-text-secondary)]">
+          Progress saved locally.{" "}
+          <Link
+            href={`/auth/sign-in?next=${encodeURIComponent(pathname)}`}
+            className="text-[var(--color-accent)] underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
+          >
+            Sign in to sync across devices
+          </Link>
+        </p>
+      )}
     </section>
   );
 }
