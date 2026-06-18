@@ -56,9 +56,17 @@ export function TopBar(): React.ReactElement {
         type="button"
         onClick={toggleTheme}
         aria-label={`Theme: ${theme}. Click to change.`}
-        className="flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-text-primary)] lg:h-8 lg:w-8"
+        className={
+          isDark
+            ? "flex h-11 w-11 items-center justify-center rounded-lg text-amber-400 transition hover:bg-amber-500/10 hover:text-amber-300 lg:h-8 lg:w-8"
+            : "flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-text-primary)] lg:h-8 lg:w-8"
+        }
       >
-        {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        {isDark ? (
+          <Sun className="h-4 w-4 drop-shadow-[0_0_6px_rgba(251,191,36,0.7)]" aria-hidden />
+        ) : (
+          <Moon className="h-4 w-4" aria-hidden />
+        )}
       </button>
       <button
         type="button"
