@@ -23,16 +23,30 @@ import {
   Sparkles,
   LogOut,
   User,
+  Zap,
+  Flame,
 } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
+import { FeedbackButton } from "@/components/feedback/FeedbackButton";
 import { createClient } from "@/lib/supabase/client";
+import { getTotalXP } from "@/lib/db/xp";
+import { levelProgress } from "@/lib/xp";
+import { getCurrentStreak } from "@/lib/streak-manager";
+import { isStreakAlive } from "@/lib/streak";
 import { cn } from "@/lib/utils";
 
 interface DrawerUser {
   email: string;
   name: string | null;
   avatarUrl: string | null;
+}
+
+interface DrawerStats {
+  level: number;
+  xpPercent: number;
+  streakDays: number;
+  streakAlive: boolean;
 }
 
 const TABS = [
@@ -142,6 +156,7 @@ export function MobileDrawer(): React.ReactElement | null {
   const open = useUIStore((s) => s.mobileNavOpen);
   const close = useUIStore((s) => s.setMobileNav);
   const [user, setUser] = useState<DrawerUser | null>(null);
+  const [stats, setStats] = useState<DrawerStats | null>(null);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   useEffect(() => {
@@ -175,7 +190,23 @@ export function MobileDrawer(): React.ReactElement | null {
         // Supabase not configured
       }
     }
+    async function loadStats(): Promise<void> {
+      try {
+        const totalXp = await getTotalXP();
+        const lp = levelProgress(totalXp);
+        const streak = await getCurrentStreak();
+        setStats({
+          level: lp.level,
+          xpPercent: lp.percent,
+          streakDays: streak.current,
+          streakAlive: isStreakAlive(streak),
+        });
+      } catch {
+        // IDB not ready
+      }
+    }
     void loadUser();
+    void loadStats();
   }, []);
 
   async function handleSignOut(): Promise<void> {
@@ -183,10 +214,10 @@ export function MobileDrawer(): React.ReactElement | null {
     close(false);
     try {
       await fetch("/api/auth/sign-out", { method: "POST" });
-      window.location.href = "/auth/sign-in";
     } catch {
-      setIsSigningOut(false);
+      // proceed to navigate regardless
     }
+    window.location.href = "/auth/sign-in";
   }
 
   if (!open) return null;
@@ -261,6 +292,53 @@ export function MobileDrawer(): React.ReactElement | null {
             </div>
           ))}
         </nav>
+
+        {/* Feedback */}
+        <div className="border-t border-[var(--color-border)] px-3 py-2">
+          <FeedbackButton />
+        </div>
+
+        {/* Stats card — mirrors sidebar; visible here covers mobile < sm where TopBar hides them */}
+        {stats && (
+          <div className="px-3 pb-2">
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/10">
+                    <Zap className="h-3.5 w-3.5 text-emerald-500" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-[var(--color-text-primary)]">
+                      Level {stats.level}
+                    </p>
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                      {stats.xpPercent}% to next
+                    </p>
+                  </div>
+                </div>
+                {stats.streakDays > 0 && (
+                  <div
+                    className={cn(
+                      "flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold",
+                      stats.streakAlive
+                        ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                        : "bg-[var(--color-bg-subtle)] text-[var(--color-text-muted)]"
+                    )}
+                  >
+                    <Flame className="h-3 w-3" />
+                    {stats.streakDays}
+                  </div>
+                )}
+              </div>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--color-bg-primary)]">
+                <div
+                  className="dura-progress h-full transition-all duration-500"
+                  style={{ width: `${stats.xpPercent}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Footer — user profile + sign-out */}
         <div className="border-t border-[var(--color-border)] px-4 py-3">

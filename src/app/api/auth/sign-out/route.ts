@@ -32,10 +32,9 @@ export async function POST(): Promise<NextResponse> {
     // Still redirect to sign-in even on error — client state will be stale
   }
 
-  return NextResponse.redirect(
-    new URL("/auth/sign-in", process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
-    {
-      status: 303, // 303 See Other — correct for POST → GET redirect
-    }
-  );
+  // Return JSON, not a redirect. NextResponse.redirect() creates a new
+  // response object that bypasses the Next.js cookie store, so the Supabase
+  // Set-Cookie clearing headers from signOut() are never applied.
+  // The client navigates to /auth/sign-in via window.location.href.
+  return NextResponse.json({ ok: true });
 }
