@@ -1,0 +1,303 @@
+---
+title: "SLOs, SLAs, and Error Budgets"
+description: "Learn how reliability targets are defined, measured, and used to balance feature velocity against system stability through error budgets."
+phase: 8
+module: "8-7"
+order: 1
+estimatedMinutes: 12
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-4", "SE-5"]
+  swebok: ["Software Engineering Management", "Software Quality"]
+  bloom: "understand"
+  sfia: 5
+  dreyfus: "competent"
+vocabulary:
+  - slo
+  - sla
+  - sli
+  - error-budget
+  - availability
+  - latency-percentile
+  - burn-rate
+learningOutcomes:
+  - "Define an SLO for a given service, specifying the SLI metric, target threshold, and measurement window"
+  - "Calculate the remaining error budget for a service given its current error rate and SLO target"
+  - "Explain why an error budget bridges reliability engineering and product development teams"
+  - "Identify when an error budget policy should pause feature releases and redirect effort to reliability work"
+prerequisites:
+  - distributed-systems-basics
+  - http-status-codes
+  - percentiles-and-averages
+---
+
+## Why this matters
+
+Your service is degraded. Users are complaining. Your team is arguing about whether to ship the new feature or stop everything to fix reliability. Without shared, measurable targets, this argument never resolves — the loudest voice wins. Service Level Objectives give every team member the same scoreboard so reliability decisions become engineering problems, not politics.
+
+For teams practicing SRE or any modern operations discipline, error budgets are how you prevent two failure modes simultaneously: SRE teams that say "no" to every release in the name of reliability, and product teams that ship constantly and ignore stability. The error budget is the mathematical middle ground — you get to spend exactly as much reliability as you can afford, no more.
+
+## From "the site is slow" to a number
+
+Before naming any concept, consider what it means to manage a service without reliability targets. An on-call engineer wakes up at 2 AM. The monitoring dashboard shows "elevated error rate." But elevated compared to what? Is 0.5% errors on a checkout service acceptable? What about 2%? Without a baseline, every incident is a subjective debate.
+
+A **Service Level Indicator** (SLI) is a carefully defined metric that captures one dimension of user experience. A good SLI is:
+
+- Directly measurable from your infrastructure
+- Directly correlated to user pain
+- Expressed as a ratio or rate, not a raw count
+
+Common SLIs:
+
+- Request success rate: `successful_requests / total_requests`
+- Latency percentile: "99th percentile of request duration"
+- Availability: "fraction of minutes the service returned successful responses"
+
+> _An SLI is just a number that tells you how your service is actually performing from the user's perspective._
+
+## SLOs: the target
+
+A **Service Level Objective** (SLO) is a target value (or range) for an SLI, measured over a rolling window. It is an internal commitment — your team's goal for itself.
+
+```yaml
+# An SLO document for a payment processing service
+service: payment-processor
+slos:
+  - name: availability
+    sli: "successful HTTP responses / total HTTP responses"
+    # Exclude 4xx client errors — those aren't our reliability problem
+    exclude: "status_code >= 400 AND status_code < 500"
+    target: 99.9% # 43.8 minutes of downtime allowed per month
+    window: 30d # Rolling 30-day window, not calendar month
+
+  - name: latency
+    sli: "p99 request duration"
+    target: "< 500ms" # 99% of requests complete in under 500ms
+    window: 30d
+
+  - name: checkout-success
+    sli: "successful checkout completions / checkout attempts"
+    target: 99.5% # Business-critical — tighter than general availability
+    window: 7d # Weekly window for faster feedback
+```
+
+## SLAs: the external contract
+
+A **Service Level Agreement** (SLA) is a contractual obligation to a customer, usually with financial penalties for violations. SLAs are always weaker than SLOs — never promise customers what you haven't exceeded internally.
+
+```
+Internal SLO: 99.9% availability  ← what your team targets
+External SLA: 99.5% availability  ← what you promise customers
+
+The 0.4% gap is your safety margin.
+If your SLO fails, you have time to fix it before the SLA triggers.
+```
+
+## Error budgets: your reliability currency
+
+The error budget is the inverse of your SLO target: it is the amount of unreliability you are _allowed_ to have.
+
+```javascript
+// Error budget math
+function calculateErrorBudget(sloTarget, windowDays) {
+  const totalMinutes = windowDays * 24 * 60;
+
+  // How much downtime is allowed?
+  const allowedDowntimeMinutes = totalMinutes * (1 - sloTarget / 100);
+
+  return {
+    sloTarget: `${sloTarget}%`,
+    windowDays,
+    totalMinutes,
+    allowedDowntimeMinutes: allowedDowntimeMinutes.toFixed(1),
+    // Mental model: this is your "budget" to spend on risky deployments
+    // and incidents before customers feel real pain
+  };
+}
+
+console.log(calculateErrorBudget(99.9, 30));
+// { sloTarget: "99.9%", windowDays: 30, totalMinutes: 43200,
+//   allowedDowntimeMinutes: "43.2" }
+
+console.log(calculateErrorBudget(99.99, 30));
+// { sloTarget: "99.99%", windowDays: 30, totalMinutes: 43200,
+//   allowedDowntimeMinutes: "4.3" }
+// Four nines = 4 minutes of downtime budget per month
+```
+
+## Burn rate: how fast you're spending the budget
+
+Burn rate tells you how quickly you're consuming your error budget relative to the expected pace. A burn rate of 1 means you're spending exactly at the budgeted rate — you'll use the full budget by the end of the window. A burn rate of 5 means you're spending 5× faster than sustainable.
+
+```javascript
+function calculateBurnRate(currentErrorRate, sloTarget) {
+  // errorBudgetFraction = 1 - (sloTarget / 100)
+  // e.g., for 99.9% SLO: errorBudgetFraction = 0.001
+  const errorBudgetFraction = 1 - sloTarget / 100;
+
+  // Burn rate = actual error rate / budgeted error rate
+  const burnRate = currentErrorRate / errorBudgetFraction;
+
+  let severity;
+  if (burnRate > 14.4) {
+    // At this rate, you'll exhaust your 30-day budget in under 2 hours
+    severity = "page-immediately";
+  } else if (burnRate > 6) {
+    // Budget exhausted in under 5 days
+    severity = "page-within-1-hour";
+  } else if (burnRate > 1) {
+    // Burning faster than sustainable, but not emergency
+    severity = "ticket-and-monitor";
+  } else {
+    // Within budget
+    severity = "no-action";
+  }
+
+  return { burnRate: burnRate.toFixed(2), severity };
+}
+
+// Service with 99.9% SLO currently seeing 2% error rate
+console.log(calculateBurnRate(0.02, 99.9));
+// { burnRate: "20.00", severity: "page-immediately" }
+// 2% errors on a 99.9% SLO = burning budget 20× faster than allowed
+```
+
+## The error budget policy
+
+The policy answers: _what do we do when the budget is running low?_
+
+```yaml
+# Example error budget policy
+error_budget_policy:
+  thresholds:
+    healthy: # > 50% budget remaining
+      action: "normal release cadence"
+
+    at_risk: # 25-50% remaining
+      action: "reduce release velocity"
+      steps:
+        - "increase canary deployment percentage"
+        - "add reliability work to sprint backlog"
+
+    critical: # < 25% remaining
+      action: "reliability sprint"
+      steps:
+        - "pause non-critical feature releases"
+        - "engineering team shifts to reliability work"
+        - "root-cause all recent incidents"
+
+    exhausted: # 0% remaining (SLO violated)
+      action: "freeze releases"
+      steps:
+        - "no new features until budget recovers"
+        - "incident review with leadership"
+        - "SLO target re-evaluation"
+```
+
+The policy transforms error budgets from metrics into decisions. It removes the need for a debate: "we have 15% budget left, the policy says reliability sprint."
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// You manage the API for a file-storage service.
+// Your SLO: 99.95% availability over a 30-day rolling window.
+//
+// Given the incident log below, calculate:
+// 1. Total error budget in minutes
+// 2. Minutes consumed by each incident
+// 3. Remaining budget in minutes and as a percentage
+// 4. Whether the SLO was violated
+
+const SLO_TARGET = 99.95; // percent
+const WINDOW_DAYS = 30;
+
+const incidents = [
+{ name: "database-failover", durationMinutes: 8 },
+{ name: "cdn-outage", durationMinutes: 14 },
+{ name: "memory-leak-deploy", durationMinutes: 3 },
+];
+
+function analyzeErrorBudget(sloTarget, windowDays, incidents) {
+// TODO: calculate totalMinutes in the window
+// TODO: calculate errorBudgetMinutes (allowed downtime)
+// TODO: calculate minutesConsumed (sum of incident durations)
+// TODO: calculate remainingMinutes
+// TODO: calculate remainingPercent (0-100)
+// TODO: determine if SLO was violated (remainingMinutes < 0)
+
+return {
+totalWindowMinutes: 0, // fill in
+errorBudgetMinutes: 0, // fill in
+minutesConsumed: 0, // fill in
+remainingMinutes: 0, // fill in
+remainingPercent: "0%", // fill in (e.g. "42.5%")
+sloViolated: false, // fill in
+};
+}
+
+const result = analyzeErrorBudget(SLO_TARGET, WINDOW_DAYS, incidents);
+console.log(JSON.stringify(result, null, 2));
+
+// Expected output (approximately):
+// {
+// "totalWindowMinutes": 43200,
+// "errorBudgetMinutes": 21.6,
+// "minutesConsumed": 25,
+// "remainingMinutes": -3.4,
+// "remainingPercent": "-15.7%",
+// "sloViolated": true
+// }`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="A service has a 99.9% availability SLO over 30 days. The team ships a bad deploy that causes 60 minutes of downtime. What happens next?"
+  options={[
+    "The SLA is violated and customers receive credits automatically",
+    "The SLO is violated; the error budget is exhausted and the budget policy should freeze releases",
+    "Nothing — 60 minutes is within the allowed budget of 43.2 minutes for 99.9%",
+    "The on-call engineer is paged based on the 60-minute violation",
+  ]}
+  answer={1}
+  explanation="At 99.9% over 30 days, the error budget is 43.2 minutes. 60 minutes exceeds that, so the SLO is violated. Per the error budget policy, this triggers a release freeze and reliability sprint. The SLA (external contract) has a separate, weaker target and may or may not be violated."
+/>
+
+<Quiz
+  question="Why should an SLA always be set weaker than the corresponding SLO?"
+  options={[
+    "Because SLAs are legal documents and must use conservative language",
+    "So the engineering team has a safety margin — if the SLO fails, there is time to recover before the SLA triggers financial penalties",
+    "Because customers don't understand technical metrics and need simpler numbers",
+    "SLOs are aspirational; SLAs are the real target teams should optimize for",
+  ]}
+  answer={1}
+  explanation="The gap between SLO and SLA is intentional protection. Your SLO is your internal goal; if you slip below it, you have a buffer before you breach the customer contract. Teams that set SLO = SLA have no margin for error."
+/>
+
+<FillBlank
+  question="Error budget = 1 minus the SLO ______. A 99.9% SLO leaves a 0.1% budget."
+  answer="target"
+/>
+
+<Quiz
+  question="Your service has a 99.9% SLO. The current error rate is 1% (0.01). What is the approximate burn rate?"
+  options={[
+    "Burn rate 1 — exactly on budget",
+    "Burn rate 5 — moderate overspend",
+    "Burn rate 10 — severe overspend, page within 1 hour",
+    "Burn rate 0.1 — well under budget",
+  ]}
+  answer={2}
+  explanation="Burn rate = current error rate / budgeted error rate. For a 99.9% SLO, the budget is 0.001 (0.1%). An actual error rate of 0.01 (1%) gives burn rate = 0.01 / 0.001 = 10. At 10×, you exhaust the 30-day budget in about 3 days."
+/>
+
+## What you learned
+
+- An SLI is a measured ratio of user experience (e.g., successful requests / total requests); an SLO is the target for that metric over a time window
+- The error budget is the allowed amount of unreliability derived from the SLO — it is what you are permitted to spend on risky deployments and incidents
+- Burn rate quantifies how fast the error budget is being consumed relative to the sustainable pace; high burn rate triggers escalating alerts
+- An error budget policy turns the budget number into actionable decisions — pausing releases, shifting to reliability work, or freezing deploys based on remaining budget
+
+Next up: how to structure on-call rotations and runbooks so that when an incident fires, your team responds with confidence instead of confusion.

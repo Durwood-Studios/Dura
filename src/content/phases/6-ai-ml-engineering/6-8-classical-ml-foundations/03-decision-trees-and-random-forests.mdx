@@ -1,0 +1,331 @@
+---
+title: "Decision Trees and Random Forests"
+description: "Trees make decisions by splitting data at thresholds. Forests combine hundreds of trees into a robust, non-linear model that rarely needs tuning."
+phase: 6
+module: "6-8"
+order: 3
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["AL-1", "DS-2"]
+  swebok: ["Software Design", "Software Testing"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - entropy
+  - information-gain
+  - bagging
+  - ensemble
+  - hyperparameter
+learningOutcomes:
+  - "Implement the information gain calculation for a decision tree split and identify the best split for a given feature"
+  - "Train a Random Forest classifier using scikit-learn and interpret feature importances to explain which features drove predictions"
+  - "Explain why bagging reduces variance and how Out-of-Bag error estimates generalization without a held-out validation set"
+  - "Identify when a decision tree is overfitting by comparing training vs test accuracy and apply max_depth to constrain it"
+prerequisites:
+  - "Logistic regression and the concept of classification (lesson 6-8-02)"
+  - "Python dictionaries, lists, and basic class usage"
+  - "Concept of training/test split for model evaluation"
+---
+
+## Why this matters
+
+Random Forests are the ML practitioner's Swiss Army knife. They work on tabular data with almost no preprocessing, handle mixed feature types (continuous, ordinal, categorical-encoded), rarely overfit catastrophically, and give you feature importances for free. Gradient boosted trees (XGBoost, LightGBM) — which dominate Kaggle competitions and production recommendation systems — are extensions of the same idea. You cannot understand them without understanding the base: the decision tree.
+
+Equally important: trees are one of the few model families where you can actually _explain_ a prediction to a non-technical stakeholder. "The model flagged this loan because income was below $40k AND the credit history was less than 2 years" is a real explanation, not a post-hoc rationalization.
+
+## How a tree makes decisions
+
+Imagine you are a doctor diagnosing whether a patient has the flu. Your first question might be: "Is their temperature above 38°C?" If yes, follow up: "Do they have body aches?" If no to the first question, ask something else. You are building a decision tree in your head — a sequence of yes/no questions that routes each patient to a diagnosis.
+
+A decision tree formalizes this: it learns a series of threshold splits on features that separate classes as cleanly as possible. At each node, it asks "which feature, split at which value, best divides the data into pure groups?"
+
+> **A decision tree is a flowchart that the data learned to draw — each node is a threshold question, each leaf is a prediction.**
+
+```python
+from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+iris = load_iris()
+X, y = iris.data, iris.target
+feature_names = iris.feature_names
+class_names = iris.target_names
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# max_depth=3 limits the tree to 3 levels — prevents memorizing training noise
+tree = DecisionTreeClassifier(max_depth=3, random_state=42)
+tree.fit(X_train, y_train)
+
+train_acc = tree.score(X_train, y_train)
+test_acc  = tree.score(X_test,  y_test)
+print(f"Train accuracy: {train_acc:.2%}")
+print(f"Test accuracy:  {test_acc:.2%}")
+
+# Print the learned rules as text — this is what makes trees interpretable
+print("\nLearned decision rules:")
+print(export_text(tree, feature_names=feature_names))
+```
+
+## Information gain: how trees choose splits
+
+The tree needs a way to measure which split is "best." It uses **information gain**: the reduction in uncertainty (entropy) after the split. Entropy measures how mixed a set of labels is — 0 if all labels are the same, maximized when labels are equally mixed.
+
+```python
+import numpy as np
+from collections import Counter
+
+def entropy(labels):
+    """
+    Measures label impurity — 0 = perfectly pure, 1 = maximally mixed.
+    log₂ because we measure information in bits.
+    """
+    n = len(labels)
+    if n == 0:
+        return 0.0
+    counts = Counter(labels)
+    return -sum(
+        (c/n) * np.log2(c/n)
+        for c in counts.values()
+        if c > 0
+    )
+
+def information_gain(parent_labels, left_labels, right_labels):
+    """
+    How much does this split reduce uncertainty?
+    More gain = better split = this feature/threshold is more informative.
+    """
+    n = len(parent_labels)
+    n_left, n_right = len(left_labels), len(right_labels)
+    child_entropy = (
+        (n_left / n)  * entropy(left_labels) +
+        (n_right / n) * entropy(right_labels)
+    )
+    return entropy(parent_labels) - child_entropy
+
+# Example: splitting 10 emails (5 spam, 5 ham) on "contains word FREE"
+# Split A: 4 spam + 0 ham left, 1 spam + 5 ham right
+labels_all   = [1,1,1,1,1,0,0,0,0,0]
+labels_left  = [1,1,1,1]      # mostly spam — a clean split
+labels_right = [1,0,0,0,0,0]  # mostly ham, one spam
+
+gain = information_gain(labels_all, labels_left, labels_right)
+print(f"Parent entropy:   {entropy(labels_all):.4f}")      # 1.0 — perfectly mixed
+print(f"Post-split entropy: {(4/10)*entropy(labels_left) + (6/10)*entropy(labels_right):.4f}")
+print(f"Information gain:  {gain:.4f}")  # how much uncertainty this split removed
+```
+
+## Overfitting and max_depth
+
+A fully grown tree without constraints will memorize every training example — achieving 100% training accuracy while generalizing poorly. Each leaf can end up representing a single training point. The fix: limit the tree's depth.
+
+```python
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+X, y = make_classification(
+    n_samples=300, n_features=10, n_informative=5,
+    n_redundant=3, random_state=42
+)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=0)
+
+print(f"{'Max Depth':<12} {'Train Acc':<12} {'Test Acc':<12} {'Verdict'}")
+print("-" * 50)
+for depth in [2, 4, 6, 10, None]:  # None = unlimited depth
+    clf = DecisionTreeClassifier(max_depth=depth, random_state=0)
+    clf.fit(X_train, y_train)
+    tr = clf.score(X_train, y_train)
+    te = clf.score(X_test, y_test)
+    gap = tr - te
+    verdict = "overfit" if gap > 0.1 else "ok"
+    print(f"{str(depth):<12} {tr:<12.2%} {te:<12.2%} {verdict}")
+```
+
+## Random forests: combining many weak trees
+
+A single decision tree is fragile — small changes in the training data can produce very different trees. **Random forests** fix this by training many trees on random subsets of the data (bagging) and random subsets of features, then aggregating their predictions by majority vote.
+
+Why does this work? Each tree makes different errors. When you average 100 trees, the errors cancel out — but the signal reinforces. This is **variance reduction through ensembling**.
+
+> **A Random Forest trains 100+ trees on different data samples and feature subsets, then votes. No individual tree needs to be great — only uncorrelated in their mistakes.**
+
+```python
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+cancer = load_breast_cancer()
+X, y = cancer.data, cancer.target
+feature_names = cancer.feature_names
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# n_estimators: how many trees to grow
+# max_features: how many features each tree considers at each split
+# — sqrt(n_features) is the default and usually best for classification
+rf = RandomForestClassifier(
+    n_estimators=200,
+    max_features="sqrt",
+    random_state=42,
+    n_jobs=-1          # use all CPU cores — trees are embarrassingly parallel
+)
+rf.fit(X_train, y_train)
+
+print(f"Test accuracy: {rf.score(X_test, y_test):.2%}")
+
+# Out-of-Bag (OOB) estimate: each tree was trained on ~63% of data
+# The remaining ~37% are "out of bag" — never seen by that tree
+# OOB score estimates generalization without needing a separate validation set
+rf_oob = RandomForestClassifier(n_estimators=200, oob_score=True, random_state=42)
+rf_oob.fit(X_train, y_train)
+print(f"OOB score (free validation estimate): {rf_oob.oob_score_:.2%}")
+
+# Feature importances: how much does each feature reduce impurity on average?
+importances = rf.feature_importances_
+top5_idx = np.argsort(importances)[::-1][:5]
+print("\nTop 5 features by importance:")
+for i in top5_idx:
+    print(f"  {feature_names[i]:<35} {importances[i]:.4f}")
+```
+
+## Practice
+
+<SandboxExercise
+  language="python"
+  instructions="Train a Random Forest on the wine dataset. Then: (1) print train and test accuracy, (2) print the top 3 most important features, (3) predict the class probabilities for the first test example and print which class is most likely."
+  initialCode={`from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import load_wine
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+wine = load_wine()
+X, y = wine.data, wine.target
+feature_names = wine.feature_names
+class_names = wine.target_names
+
+X_train, X_test, y_train, y_test = train_test_split(
+X, y, test_size=0.25, random_state=7
+)
+
+# TODO: Train RandomForestClassifier with 100 trees, random_state=7
+
+rf = None
+
+# TODO: Print train and test accuracy
+
+# TODO: Print top 3 most important features with their importance scores
+
+# TODO: Predict class probabilities for X_test[0] and print the most likely class`}
+
+solution={`from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import load_wine
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+wine = load_wine()
+X, y = wine.data, wine.target
+feature_names = wine.feature_names
+class_names = wine.target_names
+
+X_train, X_test, y_train, y_test = train_test_split(
+X, y, test_size=0.25, random_state=7
+)
+
+rf = RandomForestClassifier(n_estimators=100, random_state=7)
+rf.fit(X_train, y_train)
+
+print(f"Train accuracy: {rf.score(X_train, y_train):.2%}")
+print(f"Test accuracy: {rf.score(X_test, y_test):.2%}")
+
+importances = rf.feature*importances*
+top3_idx = np.argsort(importances)[::-1][:3]
+print("\nTop 3 features:")
+for i in top3_idx:
+print(f" {feature_names[i]:<30} {importances[i]:.4f}")
+
+# predict_proba returns probability for each class
+
+probs = rf.predict_proba(X_test[0:1])[0]
+best_class = class_names[np.argmax(probs)]
+print(f"\nFirst test example: most likely class = {best_class}")
+print(f"Class probabilities: {dict(zip(class_names, probs.round(3)))}")`}
+testCases={["rf.fit is called", "train and test accuracy are printed", "top 3 features are printed", "predict_proba is used for the first test example"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "Why does Random Forest randomize which features each tree can use at each split?",
+      options: [
+        "To speed up training by looking at fewer features",
+        "To ensure trees are uncorrelated, so their errors cancel when aggregated",
+        "To prevent the model from using irrelevant features",
+        "Because decision trees cannot handle high-dimensional data",
+      ],
+      correct: 1,
+      explanation:
+        "If every tree used the same features, they would make similar splits and be highly correlated. Correlated trees' errors do not cancel — you just get the same wrong answer 100 times. Feature randomization forces diversity, which is what makes ensembling work.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A decision tree achieves 99% training accuracy but only 72% test accuracy. What is the most likely cause?",
+      options: [
+        "The tree is too shallow and underfitting",
+        "The dataset is too large for a single tree",
+        "The tree is overfitting — it has memorized training examples including their noise",
+        "The test set is drawn from a different distribution",
+      ],
+      correct: 2,
+      explanation:
+        "A large gap between train and test accuracy is the classic overfitting signature. A deep unconstrained tree will find splits that perfectly separate training examples — even ones that are accidents of sampling — and these splits do not generalize.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What does Out-of-Bag (OOB) score estimate?",
+      options: [
+        "Training accuracy on the full training set",
+        "Test accuracy on a held-out test set you provide",
+        "Generalization accuracy using the data each tree did not see during training",
+        "The number of features that contribute to predictions",
+      ],
+      correct: 2,
+      explanation:
+        "Each tree in a Random Forest is trained on a bootstrap sample (~63% of training data). The ~37% of examples not used to train a given tree are 'out of bag' — those examples are used to evaluate that tree. Averaging OOB errors across all trees gives a free validation estimate.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Decision trees choose splits by maximizing ___ gain, which measures the reduction in ___. Random forests reduce model ___ by training many trees on different ___ samples and voting by majority."
+  answers={["information", "entropy", "variance", "bootstrap"]}
+  hints={[
+    "The metric that measures how much a split reduces uncertainty.",
+    "Measure of label impurity.",
+    "The type of error that ensembling reduces.",
+    "Random sampling with replacement.",
+  ]}
+/>
+
+## What you learned
+
+- Decision trees split data at feature thresholds chosen to maximize information gain — the reduction in entropy (label impurity).
+- Unconstrained trees memorize training data; `max_depth` limits this. Monitor the gap between training and test accuracy to detect overfitting.
+- Random forests train many diverse trees on bootstrap samples with feature subsets, then vote — errors cancel while signal reinforces.
+- Out-of-Bag score gives a free generalization estimate without a separate validation set.
+- Feature importances from a Random Forest rank which features reduce impurity most across all trees.
+
+Next, you will learn Support Vector Machines — a completely different approach that finds the widest possible margin between classes, making SVMs especially powerful when training data is scarce.

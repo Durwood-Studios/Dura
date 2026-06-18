@@ -1,0 +1,500 @@
+---
+title: "Scaling Reads and Writes — Caching, Sharding, Replication"
+description: "The three mechanisms that let a single-server database design survive millions of concurrent users without fundamental redesign."
+phase: 8
+module: "8-6"
+order: 2
+estimatedMinutes: 20
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-2", "SF-3"]
+  swebok: ["Software Design", "Software Maintenance"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - cache-aside
+  - write-through-cache
+  - cache-invalidation
+  - read-replica
+  - replication-lag
+  - horizontal-sharding
+  - shard-key
+  - consistent-hashing
+  - hot-shard
+learningOutcomes:
+  - "Distinguish cache-aside from write-through caching and state one trade-off of each"
+  - "Explain why replication lag exists and identify one scenario where it causes a user-visible bug"
+  - "Choose an appropriate shard key for a given access pattern and explain why a poor shard key creates a hot shard"
+  - "Describe how consistent hashing reduces data movement when a shard node is added or removed"
+  - "Analyze a given read or write bottleneck and recommend whether caching, replication, or sharding best addresses it"
+prerequisites:
+  - "SQL databases and indexes"
+  - "What a cache is (key-value lookup)"
+  - "Client-server model"
+  - "Back-of-envelope capacity estimation (lesson 1)"
+  - "TCP/IP networking basics"
+---
+
+## Why this matters
+
+Every database you have ever used has a ceiling — a point where concurrent connections, disk I/O, or CPU saturate and response times collapse. For a toy project that ceiling is invisible. For a system with a million users it arrives fast, and when it does, you have three tools available: caching (answer queries without touching the database), replication (spread reads across multiple database copies), and sharding (spread data across multiple database instances).
+
+Understanding when to reach for each tool — and the failure modes each introduces — separates engineers who "made it fast" from engineers who understand why it is fast and what will break next. This lesson dissects all three mechanisms at a level where you can apply them in a design interview or a real architecture review.
+
+## Part 1 — Caching
+
+Think about a bookstore with a reference desk. Every customer who asks "where is the mystery section?" could trigger a walk to check the store map. Or the librarian could just remember — because the mystery section does not move. That memory is a cache: a place where frequently-needed answers live closer to the requester than the authoritative source.
+
+> **A cache is just a faster storage layer between the caller and the source of truth, paid for with the risk that the answer might be stale.**
+
+### Cache-aside (lazy loading)
+
+The most common pattern. The application is responsible for managing the cache.
+
+```python
+import redis
+import json
+from database import db  # hypothetical DB client
+
+r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+
+def get_user_profile(user_id: int) -> dict:
+    cache_key = f"user:{user_id}:profile"
+
+    # 1. Check cache first
+    cached = r.get(cache_key)
+    if cached:
+        return json.loads(cached)  # Cache hit — never touched the database
+
+    # 2. Cache miss — go to the source of truth
+    user = db.query("SELECT * FROM users WHERE id = %s", [user_id])
+    if not user:
+        return None
+
+    # 3. Populate the cache for future reads
+    # TTL of 300 seconds — why? So stale data self-heals within 5 minutes
+    # rather than requiring explicit invalidation on every profile update.
+    r.setex(cache_key, 300, json.dumps(user))
+
+    return user
+```
+
+**Trade-off:** The first request after a cache miss (or after startup, or after a cache flush) always hits the database. Under sudden traffic spikes — called a "thundering herd" — thousands of requests can miss simultaneously and all hit the database at once.
+
+**Mitigation — probabilistic early expiration:**
+
+```python
+import random
+import time
+
+def get_with_jitter(cache_key: str, ttl_base: int = 300) -> str | None:
+    """Add random jitter to TTL so keys don't all expire simultaneously."""
+    # Jitter ±15% of TTL so a cluster of 1000 related keys expires
+    # spread over ~90 seconds instead of all at once.
+    jitter = random.uniform(-0.15 * ttl_base, 0.15 * ttl_base)
+    return r.get(cache_key)  # Check; set TTL with jitter on write elsewhere
+```
+
+### Write-through caching
+
+The cache is updated on every write, before acknowledging success to the caller.
+
+```python
+def update_user_email(user_id: int, new_email: str) -> bool:
+    # 1. Write to database (source of truth first)
+    success = db.execute(
+        "UPDATE users SET email = %s WHERE id = %s",
+        [new_email, user_id]
+    )
+    if not success:
+        return False
+
+    # 2. Immediately update the cache — write-through means the cache
+    # is ALWAYS consistent with the database after a successful write.
+    # The cost: every write pays a cache-write penalty even for rarely-read data.
+    cache_key = f"user:{user_id}:profile"
+    user = db.query("SELECT * FROM users WHERE id = %s", [user_id])
+    r.setex(cache_key, 300, json.dumps(user))
+
+    return True
+```
+
+|                    | Cache-aside                      | Write-through                    |
+| ------------------ | -------------------------------- | -------------------------------- |
+| Cache consistency  | Stale until TTL expires          | Always consistent after write    |
+| Cold-start penalty | Yes (every key misses first)     | No (populated on write)          |
+| Wasted space       | Reads only what is needed        | Writes even unused keys          |
+| Best for           | Read-heavy, tolerates stale data | Write-heavy, consistency matters |
+
+### Cache invalidation — the hard problem
+
+Phil Karlton famously said the two hard problems in computer science are cache invalidation and naming things. Here is why:
+
+```python
+# Scenario: user updates their username. Two caches hold the old name.
+#
+#   Cache key "user:42:profile" → { name: "alice", ... }
+#   Cache key "user:42:posts"   → [ { author: "alice", ... }, ... ]
+#
+# You update the database. What do you delete from cache?
+
+def invalidate_on_user_update(user_id: int):
+    # Option A: delete the specific key you know changed
+    r.delete(f"user:{user_id}:profile")
+    # Problem: you forgot the posts cache. It still shows "alice".
+
+    # Option B: delete everything related to this user (tag-based invalidation)
+    keys = r.keys(f"user:{user_id}:*")  # DANGER in production!
+    # r.keys() scans the ENTIRE keyspace and blocks Redis while it runs.
+    # On a 10M-key Redis instance this can take seconds.
+
+    # Option C (production-safe): use a version counter
+    # Cache key includes a version number. On any update, bump the version.
+    # Old keys become unreachable without explicit deletion — they expire via TTL.
+    version = r.incr(f"user:{user_id}:version")
+    # Future reads use "user:42:profile:v5" — old keys at v4 just age out.
+```
+
+The version-counter pattern is the most robust approach for complex objects with multiple related cache keys. It trades a small amount of storage (stale keys until TTL) for correctness guarantees.
+
+---
+
+## Part 2 — Replication
+
+A single database server handles both reads and writes. As read volume grows, you can offload reads to read replicas — copies of the primary that stay synchronized via the write-ahead log (WAL) or binlog.
+
+```
+                 ┌─────────────────────────────────────┐
+                 │           Application Layer          │
+                 │   "Writes go primary,                │
+                 │    reads go replica."                │
+                 └────────────┬─────────────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              │ Writes (15%)  │               │ Reads (85%)
+              ▼               │               ▼
+      ┌──────────────┐        │     ┌──────────────────┐
+      │   Primary DB │        │     │  Read Replica 1  │
+      │  (reads +    │────────┘     ├──────────────────┤
+      │   writes)    │  async WAL   │  Read Replica 2  │
+      └──────────────┘  replication ├──────────────────┤
+                                    │  Read Replica 3  │
+                                    └──────────────────┘
+```
+
+### Replication lag — the invisible bug factory
+
+Async replication means replicas are always slightly behind the primary. This is usually fine. It becomes a user-visible bug in specific patterns:
+
+```python
+# Bug scenario: "Read Your Own Writes"
+#
+# 1. User updates their profile picture (write → primary)
+# 2. Redirect to profile page (read → replica)
+# 3. Replica is 200ms behind. Still shows old picture.
+# 4. User thinks the save failed. Refreshes. Now sees new picture.
+# This is a confusing, trust-destroying experience.
+
+def update_profile_picture(user_id: int, image_url: str):
+    db_primary.execute(
+        "UPDATE users SET avatar_url = %s WHERE id = %s",
+        [image_url, user_id]
+    )
+
+    # Fix Option 1: route the immediate read after a write to the primary
+    # (not the replica). Accept the primary-load cost for this one call.
+    return db_primary.query(
+        "SELECT * FROM users WHERE id = %s", [user_id]
+    )
+
+    # Fix Option 2: write a "dirty flag" to the cache after every write.
+    # If the flag exists, next read goes to primary. Flag expires in 2 seconds
+    # (longer than typical replication lag).
+    r.setex(f"user:{user_id}:wrote_recently", 2, "1")
+```
+
+```python
+def get_user_profile_smart(user_id: int) -> dict:
+    """Route to primary if user just wrote something — prevents stale reads."""
+    if r.exists(f"user:{user_id}:wrote_recently"):
+        return db_primary.query("SELECT * FROM users WHERE id = %s", [user_id])
+    return db_replica.query("SELECT * FROM users WHERE id = %s", [user_id])
+```
+
+**When to use replicas vs. caching:** Replicas are best for queries that cannot be easily cached — large analytical queries, varied filter combinations, or data that changes frequently. Caching is better for point lookups (user by ID, post by ID) with predictable access patterns.
+
+---
+
+## Part 3 — Sharding (Horizontal Partitioning)
+
+Replication copies all data to every replica. Sharding splits data across multiple nodes so each node owns a subset. This is how you scale writes — which replication cannot help with, because all writes still go to the single primary.
+
+Think of it like a library with 26 sections: books A-E in room 1, F-J in room 2, and so on. No single room holds everything, but you always know exactly which room to enter.
+
+> **Sharding is just partitioning your data by a key so that any query that provides the key knows exactly which database instance to contact.**
+
+### Choosing a shard key
+
+The shard key is the most consequential decision in a sharded architecture. A bad key creates "hot shards" — nodes that receive disproportionate traffic while others sit idle.
+
+```python
+# Scenario: a messaging app. We need to shard the messages table.
+
+# Option A: shard by message_id (bad for most queries)
+shard_index = message_id % num_shards
+# Problem: "give me all messages for user 42" must query ALL shards.
+# Every conversation view becomes a scatter-gather across N databases.
+
+# Option B: shard by user_id (natural for most queries)
+shard_index = user_id % num_shards
+# "Give me messages for user 42" → always hits shard (42 % 8) = 2.
+# Fast. But: celebrities (users with 10M conversations) create hot shards.
+
+# Option C: shard by conversation_id (best for this use case)
+shard_index = conversation_id % num_shards
+# Every message in a conversation is co-located.
+# "Give me all messages in conversation 99" → single shard hit.
+# Users can have conversations across multiple shards, which is fine —
+# the app fetches conversation metadata separately (also sharded by conversation_id).
+```
+
+**Hot shard analysis:**
+
+```python
+# Detecting a hot shard in production
+def check_shard_distribution(messages_by_shard: dict[int, int]) -> None:
+    total = sum(messages_by_shard.values())
+    avg = total / len(messages_by_shard)
+
+    for shard_id, count in messages_by_shard.items():
+        ratio = count / avg
+        if ratio > 3.0:
+            # This shard is getting 3x average traffic — a hot shard.
+            # Mitigation: split this shard (add a node, re-balance) or
+            # add a secondary key (conversation_id + date bucket).
+            print(f"HOT SHARD {shard_id}: {ratio:.1f}x average ({count} vs {avg:.0f})")
+```
+
+### Consistent hashing
+
+Naive modulo sharding (`user_id % num_shards`) has a catastrophic flaw: when you add a node, almost every key remaps to a different shard, requiring a full data migration.
+
+Consistent hashing places both nodes and keys on a virtual ring. Adding a node only remaps the keys that were nearest to that node — roughly `1/N` of all keys instead of all of them.
+
+```python
+import hashlib
+import bisect
+
+class ConsistentHashRing:
+    def __init__(self, nodes: list[str], virtual_nodes: int = 150):
+        self.ring: dict[int, str] = {}
+        self.sorted_keys: list[int] = []
+        # Each physical node gets `virtual_nodes` positions on the ring.
+        # More virtual nodes = more even distribution, less load variance
+        # when a node is added or removed.
+        for node in nodes:
+            for i in range(virtual_nodes):
+                virtual_key = f"{node}:vnode:{i}"
+                hash_val = int(hashlib.md5(virtual_key.encode()).hexdigest(), 16)
+                self.ring[hash_val] = node
+                bisect.insort(self.sorted_keys, hash_val)
+
+    def get_node(self, key: str) -> str:
+        if not self.ring:
+            raise ValueError("Ring is empty")
+        hash_val = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        # Find the first node clockwise from this key's position on the ring
+        idx = bisect.bisect_right(self.sorted_keys, hash_val) % len(self.sorted_keys)
+        return self.ring[self.sorted_keys[idx]]
+
+# Usage
+ring = ConsistentHashRing(["db-shard-1", "db-shard-2", "db-shard-3"])
+
+# Adding a 4th node only remaps ~25% of keys, not all of them
+ring_expanded = ConsistentHashRing(["db-shard-1", "db-shard-2", "db-shard-3", "db-shard-4"])
+```
+
+## Putting it together — when to use what
+
+```
+Is the bottleneck READS?
+├─ Yes, data is cacheable (point lookups, hot objects)?
+│   └─ Add a cache layer (Redis/Memcached) — cache-aside is usually fine
+├─ Yes, queries are complex / varied (can't cache easily)?
+│   └─ Add read replicas and route reads away from primary
+└─ Yes, both?
+    └─ Cache first, then replicate if cache misses are still too high
+
+Is the bottleneck WRITES?
+├─ Yes, writes per second approaching database limits?
+│   └─ Shard — distribute write load across multiple primaries
+├─ Yes, write amplification from too many replicas?
+│   └─ Reduce replica count or switch to async replication
+└─ Yes, schema contention (hot rows)?
+    └─ Partition within a single node first (table partitioning)
+       before jumping to cross-node sharding (operational complexity)
+```
+
+<SandboxExercise
+  language="python"
+  instructions="The get_leaderboard function below queries the database on every call. It is being called 5,000 times per second and the database is saturating. Implement a cache-aside pattern using the provided mock Redis client. The leaderboard updates every 60 seconds, so a 60-second TTL is acceptable."
+  initialCode={`import json
+import time
+
+# Mock Redis client — behaves like redis-py
+
+class MockRedis:
+def **init**(self):
+self.\_store = {}
+self.\_expiry = {}
+
+    def get(self, key):
+        if key in self._expiry and time.time() > self._expiry[key]:
+            del self._store[key]
+            del self._expiry[key]
+        return self._store.get(key)
+
+    def setex(self, key, ttl_seconds, value):
+        self._store[key] = value
+        self._expiry[key] = time.time() + ttl_seconds
+
+r = MockRedis()
+
+# Mock database — simulates an expensive query (200ms)
+
+def db_query_leaderboard(game_id: int) -> list[dict]:
+time.sleep(0.2) # Simulate DB latency
+return [
+{"rank": 1, "user": "alice", "score": 9800},
+{"rank": 2, "user": "bob", "score": 9400},
+{"rank": 3, "user": "carol", "score": 8900},
+]
+
+# TODO: Implement cache-aside caching for this function.
+
+# The leaderboard changes every 60 seconds, so stale data is acceptable
+
+# within that window. Use "leaderboard:{game_id}" as the cache key.
+
+def get_leaderboard(game_id: int) -> list[dict]: # Currently always hits the database — fix this
+return db_query_leaderboard(game_id)
+
+# Test: first call should miss, second should hit cache
+
+import time
+start = time.time()
+result1 = get_leaderboard(42)
+print(f"First call (cache miss):  {(time.time()-start)*1000:.0f}ms — {result1[0]}")
+
+start = time.time()
+result2 = get_leaderboard(42)
+print(f"Second call (cache hit?): {(time.time()-start)\*1000:.0f}ms — {result2[0]}")`}
+  solution={`import json
+import time
+
+class MockRedis:
+def **init**(self):
+self.\_store = {}
+self.\_expiry = {}
+
+    def get(self, key):
+        if key in self._expiry and time.time() > self._expiry[key]:
+            del self._store[key]
+            del self._expiry[key]
+        return self._store.get(key)
+
+    def setex(self, key, ttl_seconds, value):
+        self._store[key] = value
+        self._expiry[key] = time.time() + ttl_seconds
+
+r = MockRedis()
+
+def db_query_leaderboard(game_id: int) -> list[dict]:
+time.sleep(0.2)
+return [
+{"rank": 1, "user": "alice", "score": 9800},
+{"rank": 2, "user": "bob", "score": 9400},
+{"rank": 3, "user": "carol", "score": 8900},
+]
+
+def get_leaderboard(game_id: int) -> list[dict]:
+cache_key = f"leaderboard:{game_id}"
+
+    cached = r.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
+    leaderboard = db_query_leaderboard(game_id)
+    r.setex(cache_key, 60, json.dumps(leaderboard))
+    return leaderboard
+
+import time
+start = time.time()
+result1 = get_leaderboard(42)
+print(f"First call (cache miss):  {(time.time()-start)*1000:.0f}ms")
+
+start = time.time()
+result2 = get_leaderboard(42)
+print(f"Second call (cache hit): {(time.time()-start)\*1000:.0f}ms")`}
+testCases={["Second call completes in <10ms", "Cache key is leaderboard:42", "TTL is 60 seconds"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "A social media app stores user timelines. Users sometimes see posts in their feed that disappear when they refresh the page. What is the most likely cause?",
+      options: [
+        "The database is corrupting data under load",
+        "Replication lag — the read hit a replica that had not yet received the delete",
+        "The cache TTL is set too high",
+        "The load balancer is routing to the wrong server",
+      ],
+      correct: 1,
+      explanation:
+        "A post that appears then disappears on refresh is the classic replication lag symptom. The delete was applied to the primary; the read hit a replica that was milliseconds behind and still had the old data.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "You are sharding a user table by user_id % 4, giving you 4 shards. You decide to add a 5th shard to handle growth. What is the primary cost of this operation?",
+      options: [
+        "All queries must now use two joins instead of one",
+        "The cache must be completely flushed",
+        "Almost every row must migrate to a different shard because the modulo result changes",
+        "Read replicas cannot be used with modulo sharding",
+      ],
+      correct: 2,
+      explanation:
+        "With naive modulo sharding, changing the divisor from 4 to 5 changes the shard assignment for most rows. Consistent hashing solves this by only remapping keys adjacent to the new node on the ring.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "You have a write-through cache. A power failure causes your cache server to restart before the database write completes. What is the state of your data?",
+      options: [
+        "The database has the new data; the cache has stale data (cache miss on next read)",
+        "Both the database and cache have the new data",
+        "Neither has the new data — the write was lost",
+        "The cache has the new data but the database has old data",
+      ],
+      correct: 0,
+      explanation:
+        "If the database write succeeded but the cache update failed (due to crash), you get a cache miss on the next read — which then goes to the database and finds the correct data. The write-through pattern writes DB first, then cache, so the worst failure mode is a stale cache, not data loss.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- Cache-aside reads from cache first, falling back to the database on miss; write-through updates the cache on every write — each trades consistency for different performance properties.
+- Cache invalidation requires explicit invalidation strategies; version counters are more robust than key-pattern deletes at scale.
+- Read replicas reduce load on the primary by routing reads elsewhere, but async replication creates lag that produces stale reads — the "read your own writes" pattern is a common victim.
+- Sharding distributes writes across multiple database instances; shard key selection determines whether load is even or skewed toward hot shards.
+- Consistent hashing minimizes data movement when the cluster topology changes, making it the standard approach for production sharding rings.
+
+In the next lesson, you will apply all three of these techniques in a complete case study: designing a URL shortener from scratch.

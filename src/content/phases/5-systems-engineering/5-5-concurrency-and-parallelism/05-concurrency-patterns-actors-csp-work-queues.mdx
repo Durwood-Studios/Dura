@@ -1,0 +1,545 @@
+---
+title: "Concurrency Patterns — Actors, CSP, Work Queues"
+description: "Apply three architectural patterns for building correct concurrent systems: the Actor model, Communicating Sequential Processes (CSP), and work queues — each eliminating a different class of concurrency bug by structuring how state and communication are organized."
+phase: 5
+module: "5-5"
+order: 5
+estimatedMinutes: 18
+difficulty: "advanced"
+standards:
+  cs2023: ["OS-2", "PD-1", "PD-2", "SE-6"]
+  swebok: ["Computing Fundamentals", "Software Construction", "Software Design"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - actor-model
+  - mailbox
+  - channel
+  - csp
+  - work-queue
+  - backpressure
+  - fan-out
+  - fan-in
+  - goroutine
+learningOutcomes:
+  - "Implement a work queue in Go that distributes tasks across a fixed pool of worker goroutines"
+  - "Explain how the Actor model eliminates shared-state race conditions by confining mutable state to a single actor"
+  - "Write a Go channel pipeline that fans out to multiple workers and fans in results to a single collector"
+  - "Apply backpressure to a producer/consumer channel pair to prevent unbounded memory growth"
+  - "Compare Actor, CSP, and work-queue patterns and select the appropriate one for a described concurrency problem"
+prerequisites:
+  - "Understanding of threads and goroutines (Lesson 1 of this module)"
+  - "Understanding of race conditions and why shared mutable state is dangerous (Lesson 2 of this module)"
+  - "Basic Go or Python syntax"
+  - "Conceptual understanding of queues and producer/consumer relationships"
+---
+
+## Why this matters
+
+The previous lessons covered the primitives: mutexes, atomics, event loops. Primitives are the right tool for implementing a data structure or a kernel subsystem. They are the wrong starting point for a web service, a data pipeline, or a game server. At the application level, the primitives compose into patterns — and the pattern you choose determines whether your system is easy to reason about, or a latent deadlock waiting for a Tuesday morning.
+
+Three patterns dominate concurrent system design: **Actors** (message-passing, encapsulated state — Erlang, Akka, Swift Actors), **CSP** (typed channels as first-class values — Go, Clojure core.async, Kotlin coroutines), and **work queues** (tasks distributed across a pool — Python multiprocessing, Java ExecutorService, Go worker pools). Each one eliminates a class of bug by removing an assumption that causes that bug. Understanding when each is appropriate is what separates someone who makes concurrent code work from someone who makes it scale.
+
+## The post office model
+
+Picture three different ways to coordinate work between people in an office building:
+
+**Actors**: each person has their own locked inbox. You deposit a message in their inbox. They process messages from their inbox one at a time, in their own time. They own all their own tools — no one else touches them. The post office delivers messages; senders never wait for recipients.
+
+**CSP**: instead of inboxes, there are shared conveyor belts between specific people. If you put something on the belt and the person at the other end isn't ready, the belt is full and you wait. If they're fast and you're slow, the belt is empty and they wait. The belt enforces a synchronization point.
+
+**Work queue**: there's a communal inbox and a pool of workers who all grab from it. Each worker is fungible — any of them can handle any task. The inbox fills up when work arrives faster than workers can process it.
+
+> **Actor model: state is private; communication is fire-and-forget messages. CSP: state is local; synchronization happens at the channel boundary. Work queues: state is in the task; any worker can execute any task.**
+
+## Work queues: the most common pattern
+
+A work queue is the simplest and most practical pattern. You have a fixed pool of workers and a bounded queue of tasks. Producers push tasks into the queue; workers pull tasks and process them. When the queue is full, producers block — this is **backpressure**, and it prevents unbounded memory growth.
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync"
+    "time"
+)
+
+// Task represents a unit of work — self-contained, no shared state needed
+type Task struct {
+    ID      int
+    Payload string
+}
+
+type Result struct {
+    TaskID   int
+    Output   string
+    Duration time.Duration
+}
+
+// worker pulls tasks from the queue, processes them, and sends results.
+// Workers share no mutable state — they only communicate via channels.
+func worker(id int, tasks <-chan Task, results chan<- Result, wg *sync.WaitGroup) {
+    defer wg.Done()
+    for task := range tasks {
+        // Channel range ends when the channel is closed and drained —
+        // this is how we signal workers to shut down gracefully
+        start := time.Now()
+        output := fmt.Sprintf("worker-%d processed: %s", id, task.Payload)
+        results <- Result{
+            TaskID:   task.ID,
+            Output:   output,
+            Duration: time.Since(start),
+        }
+    }
+}
+
+func main() {
+    const numWorkers = 4
+    const numTasks = 20
+
+    // Buffered channel: buffer of 10 means producers can post up to 10 tasks
+    // before blocking — this decouples producer and worker timing
+    tasks := make(chan Task, 10)
+
+    // Unbuffered result channel — we'll read results as they arrive
+    results := make(chan Result, numTasks)
+
+    var wg sync.WaitGroup
+    for i := range numWorkers {
+        wg.Add(1)
+        go worker(i, tasks, results, &wg)
+    }
+
+    // Producer: push tasks into the queue
+    // When the buffer is full, this blocks until a worker pulls a task — backpressure
+    go func() {
+        for i := range numTasks {
+            tasks <- Task{ID: i, Payload: fmt.Sprintf("task-%d", i)}
+        }
+        // Closing the channel signals workers: no more tasks will arrive.
+        // Workers' range loops will exit after processing remaining tasks.
+        close(tasks)
+    }()
+
+    // Wait for all workers to finish, then close results
+    go func() {
+        wg.Wait()
+        close(results)
+    }()
+
+    // Collect results
+    for result := range results {
+        fmt.Printf("Task %d done: %s\n", result.TaskID, result.Output)
+    }
+}
+```
+
+The key insight: no shared mutable state anywhere. Workers only communicate through channels. The channel itself provides the synchronization.
+
+## CSP fan-out / fan-in pipelines
+
+Go's channels are inspired directly by Tony Hoare's **Communicating Sequential Processes** (CSP, 1978). In CSP, processes are independent; they communicate only by sending and receiving on channels. A channel is a typed, first-class value — it can be passed to functions, stored in structs, and used to compose complex pipelines.
+
+A common pattern is fan-out (distribute work across multiple goroutines) and fan-in (merge their output back to one channel):
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync"
+)
+
+// Stage 1: generate a stream of integers
+func generate(nums ...int) <-chan int {
+    out := make(chan int)
+    go func() {
+        for _, n := range nums {
+            out <- n
+        }
+        close(out)
+    }()
+    return out
+}
+
+// Stage 2: square each number — pure transformation, no shared state
+func square(in <-chan int) <-chan int {
+    out := make(chan int)
+    go func() {
+        for n := range in {
+            out <- n * n
+        }
+        close(out)
+    }()
+    return out
+}
+
+// merge fans in multiple channels into one.
+// Each input channel gets its own goroutine; all drain into out.
+func merge(cs ...<-chan int) <-chan int {
+    out := make(chan int)
+    var wg sync.WaitGroup
+
+    output := func(c <-chan int) {
+        defer wg.Done()
+        for n := range c {
+            out <- n
+        }
+    }
+
+    wg.Add(len(cs))
+    for _, c := range cs {
+        go output(c)
+    }
+
+    // Close out once all inputs are drained
+    go func() {
+        wg.Wait()
+        close(out)
+    }()
+    return out
+}
+
+func main() {
+    in := generate(2, 3, 4, 5, 6, 7, 8, 9, 10)
+
+    // Fan out: three squarers in parallel
+    // Each receives a subset of inputs non-deterministically
+    c1 := square(in)
+    c2 := square(in) // These goroutines race to read from 'in' — that's intentional
+    c3 := square(in)
+
+    // Fan in: merge all three output channels into one
+    for result := range merge(c1, c2, c3) {
+        fmt.Println(result)
+    }
+}
+```
+
+The pipeline composes: `generate → [square, square, square] → merge`. Each stage is an independent goroutine that reads from one channel and writes to another. Adding a new transformation stage means inserting a new goroutine between two existing channels — the rest of the pipeline doesn't change.
+
+## Backpressure: preventing memory blowup
+
+Without backpressure, a fast producer and a slow consumer create an ever-growing queue that eventually exhausts memory. Backpressure is the mechanism by which a slow consumer signals to the producer that it should slow down.
+
+```go
+package main
+
+import (
+    "fmt"
+    "time"
+)
+
+func producer(out chan<- int, count int) {
+    for i := range count {
+        // When out's buffer is full, this send blocks.
+        // The producer is automatically throttled to the consumer's speed.
+        // This is backpressure — the channel capacity is the buffer size.
+        out <- i
+        fmt.Printf("Produced: %d\n", i)
+    }
+    close(out)
+}
+
+func consumer(in <-chan int) {
+    for item := range in {
+        // Slow consumer — processes one item per 50ms
+        time.Sleep(50 * time.Millisecond)
+        fmt.Printf("Consumed: %d\n", item)
+    }
+}
+
+func main() {
+    // Buffer of 3: producer can run up to 3 items ahead of consumer.
+    // Beyond that, producer blocks — backpressure in action.
+    // Use an unbuffered channel (make(chan int)) for zero-latency synchronization:
+    // producer blocks until consumer is ready for each item.
+    queue := make(chan int, 3)
+
+    go producer(queue, 10)
+    consumer(queue) // Run consumer on main goroutine
+}
+```
+
+Sizing the buffer is a design decision:
+
+- **Unbuffered** (`make(chan int)`): producer and consumer synchronize on every item — maximum coordination, zero queue memory, maximum latency
+- **Small buffer** (e.g., 10–100): absorbs burst traffic, allows some decoupling, bounded memory
+- **Large buffer**: high throughput, but a slow consumer can still cause memory pressure; consider dropping or blocking at some threshold
+
+## The Actor model
+
+The Actor model takes a different stance: instead of shared channels, each actor has a private **mailbox** (queue). Actors never share state — all communication is messages. An actor processes its mailbox sequentially, so its internal state needs no locking.
+
+Go doesn't have native actors, but the pattern is trivially expressible:
+
+```go
+package main
+
+import "fmt"
+
+// Message types — explicit typed messages instead of shared mutable state
+type Deposit struct{ Amount int }
+type Withdraw struct{ Amount int; Reply chan<- bool }
+type GetBalance struct{ Reply chan<- int }
+
+// BankAccount actor — processes messages from its mailbox sequentially.
+// Its balance field is NEVER accessed by any other goroutine.
+// No mutex needed: the actor is the only thing that reads or writes balance.
+func BankAccountActor(mailbox <-chan any) {
+    balance := 0 // Private state — lives only in this goroutine's stack/closure
+
+    for msg := range mailbox {
+        switch m := msg.(type) {
+        case Deposit:
+            balance += m.Amount
+            fmt.Printf("Deposit %d → balance %d\n", m.Amount, balance)
+
+        case Withdraw:
+            if balance >= m.Amount {
+                balance -= m.Amount
+                fmt.Printf("Withdraw %d → balance %d\n", m.Amount, balance)
+                m.Reply <- true
+            } else {
+                fmt.Printf("Withdraw %d refused (balance %d)\n", m.Amount, balance)
+                m.Reply <- false
+            }
+
+        case GetBalance:
+            m.Reply <- balance
+        }
+    }
+}
+
+func main() {
+    mailbox := make(chan any, 32) // Buffered: sender rarely blocks
+
+    // Start the actor — it owns balance, no other code touches it
+    go BankAccountActor(mailbox)
+
+    // Send messages — never touch 'balance' directly
+    mailbox <- Deposit{Amount: 500}
+    mailbox <- Deposit{Amount: 200}
+
+    // Synchronous request: send a message with a reply channel
+    reply := make(chan bool, 1)
+    mailbox <- Withdraw{Amount: 300, Reply: reply}
+    fmt.Println("Withdrawal approved:", <-reply)
+
+    balanceReply := make(chan int, 1)
+    mailbox <- GetBalance{Reply: balanceReply}
+    fmt.Println("Final balance:", <-balanceReply)
+
+    close(mailbox)
+}
+```
+
+Erlang, Elixir, Akka (JVM), and Swift's `actor` keyword all formalize this pattern at the language or runtime level. Erlang actors ("processes") are so cheap that a single Erlang node can run millions of them — each representing a user session, a socket, or a sensor.
+
+## Choosing the right pattern
+
+| Pattern               | Best when                                                                         | Watch out for                                                       |
+| --------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Work queue            | CPU-bound tasks, homogeneous work, fan-out over identical workers                 | Queue depth growing unbounded under load — add backpressure         |
+| CSP / channels        | Pipeline stages, streaming data transformation, fan-out with typed routing        | Channel leaks — always close channels from the sender side          |
+| Actor                 | Stateful entities (sessions, accounts, devices) where identity matters            | Mailbox overflow if actors are slow to process — dead-letter queues |
+| Shared memory + mutex | Low-contention counters, existing data structures, performance-critical hot paths | Deadlock (use lock ordering), lock granularity too coarse           |
+
+The patterns are composable: a work queue system can use actors internally per task, and CSP pipelines can feed into work queues. Real systems combine all of them.
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// Simulate a Go-style work queue pattern in JavaScript using async/await.
+// This demonstrates the producer/consumer backpressure concept
+// without needing real threads.
+
+// A simple bounded async queue (simulates a buffered Go channel)
+class BoundedQueue {
+constructor(capacity) {
+this.capacity = capacity;
+this.queue = [];
+this.waitingProducers = [];
+this.waitingConsumers = [];
+this.closed = false;
+}
+
+// Send an item — blocks (awaits) if the queue is at capacity
+async send(item) {
+if (this.closed) throw new Error("Cannot send to closed queue");
+
+    if (this.waitingConsumers.length > 0) {
+      // A consumer is waiting — hand off directly
+      const resolve = this.waitingConsumers.shift();
+      resolve({ value: item, done: false });
+      return;
+    }
+
+    if (this.queue.length < this.capacity) {
+      this.queue.push(item);
+      return;
+    }
+
+    // Queue full — wait for a consumer to make room (backpressure)
+    console.log(\`  [BACKPRESSURE] Producer blocked — queue full (\${this.capacity} items)\`);
+    await new Promise(resolve => this.waitingProducers.push(resolve));
+    this.queue.push(item);
+
+}
+
+// Receive an item — blocks (awaits) if the queue is empty
+async recv() {
+if (this.queue.length > 0) {
+const item = this.queue.shift();
+if (this.waitingProducers.length > 0) {
+const resolve = this.waitingProducers.shift();
+resolve(); // Unblock a waiting producer
+}
+return { value: item, done: false };
+}
+
+    if (this.closed) return { value: undefined, done: true };
+
+    // Queue empty — wait for a producer
+    return new Promise(resolve => this.waitingConsumers.push(resolve));
+
+}
+
+close() {
+this.closed = true;
+// Unblock all waiting consumers with done signal
+for (const resolve of this.waitingConsumers) {
+resolve({ value: undefined, done: true });
+}
+this.waitingConsumers = [];
+}
+}
+
+// Worker: processes tasks from the queue
+async function worker(id, taskQueue, resultQueue) {
+while (true) {
+const { value: task, done } = await taskQueue.recv();
+if (done) break; // Channel closed — worker exits
+
+    // Simulate work taking variable time
+    await new Promise(r => setTimeout(r, task.duration));
+    await resultQueue.send({
+      workerId: id,
+      taskId: task.id,
+      result: task.value * task.value,
+    });
+
+}
+console.log(\`Worker \${id} shutting down\`);
+}
+
+// Main: set up work queue with 3 workers and 12 tasks
+async function main() {
+const BUFFER_SIZE = 3; // Small buffer to demonstrate backpressure
+const NUM_WORKERS = 3;
+const tasks = new BoundedQueue(BUFFER_SIZE);
+const results = new BoundedQueue(20);
+
+// Start workers
+const workerPromises = Array.from({ length: NUM*WORKERS }, (*, i) =>
+worker(i, tasks, results)
+);
+
+// Producer: push 12 tasks — will hit backpressure when buffer fills
+const producerPromise = (async () => {
+for (let i = 0; i < 12; i++) {
+await tasks.send({ id: i, value: i + 1, duration: 20 + Math.random() \* 30 });
+console.log(\`Produced task \${i}\`);
+}
+tasks.close(); // Signal workers: no more tasks
+console.log("All tasks produced, queue closed");
+})();
+
+// Collect 12 results then close the results channel
+const collectorPromise = (async () => {
+const allResults = [];
+for (let i = 0; i < 12; i++) {
+const { value } = await results.recv();
+allResults.push(value);
+}
+results.close();
+return allResults;
+})();
+
+await producerPromise;
+await Promise.all(workerPromises);
+const allResults = await collectorPromise;
+
+console.log("\\nAll results:");
+allResults.sort((a, b) => a.taskId - b.taskId).forEach(r => {
+console.log(\` Task \${r.taskId}: \${r.result} (by worker \${r.workerId})\`);
+});
+}
+
+main().catch(console.error);
+`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="In the Actor model, an actor's internal state requires no mutex even though multiple senders can enqueue messages concurrently. Why?"
+  options={[
+    "Actor state is stored in immutable data structures",
+    "The actor's mailbox is lock-free, so state access is inherently safe",
+    "The actor processes its mailbox sequentially — state is only ever read or written by one goroutine at a time, so no concurrent access occurs",
+    "Actors communicate via shared memory with copy-on-write semantics",
+  ]}
+  answer={2}
+  explanation="The actor processes messages from its mailbox one at a time, in sequence. At any moment, exactly one message handler is running. Because state is only accessed inside these sequential message handlers, it is never accessed concurrently. The mailbox itself handles concurrent sends (multiple goroutines can post messages), but the actor's own state access is single-threaded."
+/>
+<Quiz
+  question="A Go program has a producer goroutine writing to an unbuffered channel, and a consumer goroutine reading from it. What happens if the consumer is slower than the producer?"
+  options={[
+    "The producer's data is silently dropped to prevent blocking",
+    "The producer goroutine blocks on each send until the consumer is ready to receive — naturally throttling the producer to the consumer's speed",
+    "The channel automatically buffers items in a heap-allocated queue",
+    "The Go runtime spawns additional consumer goroutines to keep up",
+  ]}
+  answer={1}
+  explanation="An unbuffered channel has no capacity — a send blocks until a receive is ready. This creates a perfect rendezvous: producer and consumer synchronize on every item. If the consumer is slow, the producer blocks waiting for each send to be accepted, automatically matching its rate to the consumer's."
+/>
+<Quiz
+  question="You're building a service that resizes uploaded images. Uploads arrive in bursts, resizing is CPU-bound and takes ~500ms, and you have 8 CPU cores. Which pattern fits best?"
+  options={[
+    "An event loop with async/await — handles high concurrency with minimal overhead",
+    "A work queue with 8 workers — distributes CPU-bound tasks across all cores, absorbs burst traffic in the queue buffer",
+    "The Actor model — each upload gets its own actor that owns the resize operation",
+    "A single mutex-protected queue — simplest to implement and CPU-bound work doesn't benefit from parallelism",
+  ]}
+  answer={1}
+  explanation="Image resizing is CPU-bound — an event loop won't help (it would block the single thread). The work queue pattern with a worker pool sized to the number of CPU cores is ideal: tasks queue up during bursts, 8 workers saturate all 8 cores for maximum throughput, and the bounded queue provides backpressure. Actors are designed for stateful entities with identity, not fungible CPU tasks."
+/>
+<Quiz
+  question="In a Go channel pipeline, which goroutine is responsible for closing a channel?"
+  options={[
+    "The receiver — it closes the channel once it has processed all items it needs",
+    "The sender — only the sender knows when no more values will be sent",
+    "Either goroutine — channels can be safely closed from both sides",
+    "The Go runtime — channels are garbage collected when no goroutines reference them",
+  ]}
+  answer={1}
+  explanation="Only the sender should close a channel. Sending on a closed channel panics. Since the sender knows when it has finished producing values, it's the right party to signal 'no more items' by closing the channel. Receivers use the 'range' or the two-value receive (v, ok := <-ch) to detect channel closure."
+/>
+<FillBlank
+  question="When a producer is forced to slow down or block because the consumer's buffer or channel is full, this mechanism is called ___."
+  answer="backpressure"
+/>
+
+## What you learned
+
+- A **work queue** with a fixed worker pool distributes CPU-bound tasks across cores; a buffered channel provides the queue, and closing the channel signals workers to shut down after draining remaining tasks
+- **Backpressure** occurs naturally with bounded channels — when the buffer fills, senders block, automatically throttling producers to consumer speed and preventing unbounded memory growth
+- A **CSP pipeline** chains goroutines through channels: fan-out distributes work across multiple identical stages, fan-in merges their outputs; each stage is independent and composable
+- The **Actor model** eliminates shared-state races by confining mutable state to a single goroutine that processes its mailbox sequentially — no mutex needed because no concurrent access occurs
+- The choice of pattern depends on the workload: work queues for fungible CPU tasks, CSP for streaming pipelines, actors for stateful entities with identity, and shared memory + locks for low-level hot paths
+
+You've now covered the full arc of concurrency and parallelism: from the process/thread mental model, through the hazards of shared mutable state, through the I/O-efficient event loop model, down to hardware atomics, and back up to the architectural patterns that compose everything into correct concurrent systems. The next module applies these foundations to the distributed systems layer, where threads give way to network partitions and the hazards multiply.

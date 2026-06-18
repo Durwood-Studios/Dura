@@ -1,0 +1,517 @@
+---
+title: "Sleep Modes, Wake Sources, and Stop Mode on STM32"
+description: "Cut microcontroller power consumption by 99% using sleep, stop, and standby modes. Learn how to configure wake sources so your firmware wakes fast and handles context correctly."
+phase: 10
+module: "10-9"
+order: 1
+estimatedMinutes: 20
+difficulty: "intermediate"
+standards:
+  cs2023: ["SF-Foundations", "SDF-3"]
+  swebok: ["Software Design"]
+  bloom: "apply"
+  sfia: 2
+  dreyfus: "competent"
+vocabulary:
+  - sleep-mode
+  - stop-mode
+  - standby-mode
+  - wake-source
+  - wakeup-pin
+  - rtc-alarm
+  - pwr-register
+  - deep-sleep
+  - run-mode
+  - lprun-mode
+  - voltage-regulator
+  - hsi-clock
+  - systick
+learningOutcomes:
+  - "Write C code that puts an STM32 into Stop mode and resumes execution after an interrupt"
+  - "Configure a GPIO pin as an EXTI wake source for Stop mode"
+  - "Explain why clocks must be reconfigured after waking from Stop mode on STM32"
+  - "Distinguish Sleep, Stop, and Standby modes by power consumption, wake latency, and what state survives"
+  - "Identify which peripherals remain active in each low-power mode and explain why that matters for application design"
+prerequisites:
+  - "e-2-bare-metal-c"
+  - "e-3-interrupts-and-dma"
+  - nvic
+  - isr
+  - vector-table
+  - rcc-clock
+  - exti
+  - gpio
+  - cortex-m
+---
+
+## Why this matters
+
+A wearable sensor running a tight polling loop drains its coin cell in hours. The same hardware running 95% of the time in deep sleep, waking only on sensor triggers, runs for months. The code change is under 20 lines. The power difference is the product shipping or not shipping.
+
+Low-power design is not an optimization you add later. A microcontroller running at full power when it has nothing to do is a design defect. On battery-powered products — IoT sensors, medical wearables, wireless remotes, asset trackers — energy budget is the primary constraint before clock speed, flash size, or peripheral count. Engineers who understand the sleep/wake cycle can architect products that are otherwise impossible; engineers who don't write hardware that requires wall power.
+
+## The hotel analogy before the terminology
+
+Imagine a hotel. At 2 AM, most rooms are dark — guests are asleep, lights off, AC off. The front desk still has a night attendant. The fire alarm still works. When a guest calls the front desk, the attendant wakes a specific staff member. That staff member was asleep but is ready to respond within 30 seconds.
+
+A microcontroller in <VocabTooltip slug="stop-mode">Stop mode</VocabTooltip> is that sleeping hotel. The core CPU is off. Most clocks are off. RAM and registers are retained. But a <VocabTooltip slug="wake-source">wake source</VocabTooltip> — a GPIO edge, an RTC alarm, a UART framing event — is the night attendant: always watching, low cost, ready to trigger a full wake in microseconds.
+
+> **Stop mode is just the CPU standing still with a few watchmen on duty.** The instant a watchman sees an event, the CPU resumes exactly where it stopped.
+
+## STM32 low-power mode taxonomy
+
+STM32 devices offer three main low-power modes. They trade off power consumption against wake latency and against which state survives the transition.
+
+| Mode                                                     | CPU | Clocks        | RAM & Registers | Wake Latency | Typical I_dd |
+| -------------------------------------------------------- | --- | ------------- | --------------- | ------------ | ------------ |
+| <VocabTooltip slug="sleep-mode">Sleep</VocabTooltip>     | Off | Running       | Retained        | ~1 µs        | ~1–3 mA      |
+| <VocabTooltip slug="stop-mode">Stop</VocabTooltip>       | Off | Off (HSI/HSE) | Retained        | ~5–50 µs     | ~2–80 µA     |
+| <VocabTooltip slug="standby-mode">Standby</VocabTooltip> | Off | Off           | Lost (SRAM off) | ~50–300 µs   | ~1–5 µA      |
+
+Sleep is the lightest stop — the bus clocks keep running, peripherals keep running, only the core pipeline pauses. Stop goes further: the main oscillators shut down, the <VocabTooltip slug="voltage-regulator">voltage regulator</VocabTooltip> drops to low-power mode, only the LSI/LSE (32 kHz clocks) and a handful of peripherals remain active. Standby cuts almost everything; SRAM loses power, so registers are wiped. You wake from Standby like a reset, with only a few dedicated wake-up pins or RTC alarm triggering it.
+
+The decision tree for choosing a mode:
+
+1. **Latency budget?** If you must respond in < 5 µs: Sleep only. If < 1 ms: Stop works. If you can tolerate a slow wake: Standby.
+2. **State you need to preserve?** If your application state (buffers, running totals, state machines) must survive: Sleep or Stop (RAM retained). If each wake is functionally a reset: Standby.
+3. **How long until next event?** Longer sleep → more aggressive mode is worth its setup cost.
+
+## Entering Sleep mode
+
+The simplest low-power mode: execute `WFI` (Wait For Interrupt) or `WFE` (Wait For Event) with the `SLEEPDEEP` bit in the SCB_SCR register clear.
+
+```c
+#include "stm32f4xx.h"
+
+void enter_sleep_mode(void) {
+    /* SLEEPDEEP = 0 → CPU core stops, clocks and peripherals keep running */
+    SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+
+    /* WFI suspends the pipeline until any enabled interrupt fires */
+    __WFI();
+
+    /* Execution resumes here immediately after the ISR returns */
+}
+```
+
+This is appropriate when your peripheral work is ISR-driven and the main loop has nothing to do. The CPU burns zero dynamic power in the interval. Wake latency is roughly one bus cycle — the processor pipeline restarts within 1–3 µs.
+
+## Stop mode — the workhorse
+
+Stop mode is what most battery-powered embedded products actually use. RAM and core registers are preserved; the high-speed oscillators (HSI, HSE) are gated; the voltage regulator drops to a low-power bias point. Current can fall from milliamps to tens of microamps.
+
+### Step 1: configure a wake source (EXTI on PA0)
+
+Stop mode requires an interrupt source that stays active when the main oscillators are off. GPIO EXTI lines on any pin, the RTC alarm, and a few special-purpose wake-up pins continue to function.
+
+```c
+void exti_pa0_rising_wakeup_init(void) {
+    /* Enable GPIOA and SYSCFG clocks */
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+
+    /* PA0 as input, pull-down so the line is defined when idle */
+    GPIOA->MODER &= ~GPIO_MODER_MODER0_Msk;   /* Input mode = 00 */
+    GPIOA->PUPDR |=  GPIO_PUPDR_PUPDR0_1;      /* Pull-down */
+
+    /* Route PA0 to EXTI line 0 via SYSCFG */
+    SYSCFG->EXTICR[0] = SYSCFG_EXTICR1_EXTI0_PA;
+
+    /* Rising edge triggers EXTI0 */
+    EXTI->RTSR |=  (1U << 0);
+    EXTI->FTSR &= ~(1U << 0);
+
+    /* Unmask EXTI0 interrupt */
+    EXTI->IMR  |= (1U << 0);
+
+    /* Enable EXTI0 in the NVIC at a reasonable priority */
+    NVIC_SetPriority(EXTI0_IRQn, 3);
+    NVIC_EnableIRQ(EXTI0_IRQn);
+}
+
+/* Minimal ISR — the MCU needs this to clear the flag and resume from Stop */
+void EXTI0_IRQHandler(void) {
+    if (EXTI->PR & (1U << 0)) {
+        EXTI->PR = (1U << 0);   /* Writing 1 clears the pending flag */
+    }
+    /* Application event handling goes in main, not here */
+}
+```
+
+### Step 2: set Stop mode and execute WFI
+
+```c
+void enter_stop_mode(void) {
+    /* PDDS = 0 → Stop mode (not Standby) when SLEEPDEEP fires */
+    PWR->CR &= ~PWR_CR_PDDS;
+
+    /* LPDS = 1 → voltage regulator in low-power mode during Stop */
+    /* Saves ~10 µA vs main regulator mode; wake is slightly slower */
+    PWR->CR |= PWR_CR_LPDS;
+
+    /* SLEEPDEEP = 1 tells the Cortex-M core this is a deep sleep entry */
+    SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+
+    /* Ensure all pending memory operations complete before we stop */
+    __DSB();
+    __ISB();
+
+    /* Stop. Execution resumes here after the EXTI0 ISR clears its flag. */
+    __WFI();
+
+    /* CRITICAL: clear SLEEPDEEP so normal Sleep mode works again elsewhere */
+    SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+}
+```
+
+### Step 3: reconfigure clocks after wake
+
+This is the step developers miss. After Stop mode, the STM32 resumes on the HSI RC oscillator at 16 MHz, not the PLL that may have been running before sleep. Every peripheral relying on a specific clock frequency — UART baud rates, SPI clock, timers — is now running at the wrong speed until you reinitialize the clock tree.
+
+```c
+void reclock_after_stop(void) {
+    /* HSI is on after Stop wake — enable and wait for HSE if needed */
+    RCC->CR |= RCC_CR_HSEON;
+    while (!(RCC->CR & RCC_CR_HSERDY)) { }
+
+    /* Re-enable PLL and wait for lock */
+    RCC->CR |= RCC_CR_PLLON;
+    while (!(RCC->CR & RCC_CR_PLLRDY)) { }
+
+    /* Switch SYSCLK back to PLL */
+    RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW_Msk) | RCC_CFGR_SW_PLL;
+    while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != RCC_CFGR_SWS_PLL) { }
+
+    /* SysTick reload may need updating if its source changed */
+    SysTick->LOAD = (SystemCoreClock / 1000U) - 1U;   /* 1 ms tick */
+}
+```
+
+### The complete sleep/wake cycle
+
+```c
+int main(void) {
+    system_clock_init();        /* Configure PLL, flash wait states */
+    exti_pa0_rising_wakeup_init();
+
+    while (1) {
+        /* --- do application work --- */
+        process_pending_events();
+
+        /* When there's nothing to do, sleep until the next event */
+        enter_stop_mode();
+        reclock_after_stop();   /* Restore full-speed clock after waking */
+
+        /* Execution continues here — the event that woke us is pending */
+    }
+}
+```
+
+The pattern is: work → sleep → wake → reclock → work. Each pass through the loop costs microamps during the sleep phase and milliamps only while active work is happening.
+
+## Standby mode — near-reset sleep
+
+Standby mode disconnects SRAM. When the chip wakes, it executes Reset_Handler, not the instruction after `__WFI`. Use it only when each waking is a fresh start.
+
+```c
+void enter_standby_mode(void) {
+    /* PDDS = 1 → Standby (not Stop) on SLEEPDEEP */
+    PWR->CR |= PWR_CR_PDDS;
+
+    /* Clear any prior wakeup flag so the next event is seen cleanly */
+    PWR->CR |= PWR_CR_CWUF;
+
+    /* Enable wakeup pin 1 (PA0 on most STM32F4 devices) */
+    PWR->CSR |= PWR_CSR_EWUP;
+
+    SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+    __DSB();
+    __ISB();
+    __WFI();
+
+    /* Code never reaches here — Standby wake resets the chip */
+}
+```
+
+To detect whether you woke from Standby versus a cold boot, check the `SBF` (Standby Flag) in `PWR->CSR` at the start of `main`:
+
+```c
+void main(void) {
+    if (PWR->CSR & PWR_CSR_SBF) {
+        /* Woke from Standby — restore application state from backup registers or flash */
+        PWR->CR |= PWR_CR_CSBF;   /* Clear the flag */
+        restore_state_from_backup();
+    } else {
+        /* Cold boot */
+        cold_start_init();
+    }
+}
+```
+
+## RTC alarm as a timed wake source
+
+A <VocabTooltip slug="rtc-alarm">RTC alarm</VocabTooltip> works in Stop and Standby because the RTC runs off the <VocabTooltip slug="lprun-mode">LSE</VocabTooltip> (32.768 kHz external crystal) or LSI (internal ~40 kHz RC) — both survive Stop mode. This is how a temperature logger can sample every 60 seconds, sleep the rest of the time, and average microamp consumption over the day.
+
+```c
+void rtc_alarm_wakeup_in_seconds(uint32_t seconds) {
+    /* Enable PWR and RTC backup domain access */
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+    PWR->CR      |= PWR_CR_DBP;          /* Disable backup domain write protection */
+
+    /* Source RTC from LSI (~40 kHz) for simplicity */
+    RCC->BDCR |= RCC_BDCR_LSION;
+    while (!(RCC->BDCR & RCC_BDCR_LSIRDY)) { }
+    RCC->BDCR |= (2U << 8);              /* RTCSEL = LSI */
+    RCC->BDCR |= RCC_BDCR_RTCEN;
+
+    /* Unlock RTC write protection sequence */
+    RTC->WPR = 0xCA;
+    RTC->WPR = 0x53;
+
+    /* Enter init mode to set time/alarm */
+    RTC->ISR |= RTC_ISR_INIT;
+    while (!(RTC->ISR & RTC_ISR_INITF)) { }
+
+    /* Prescalers for 1 Hz calendar (LSI ≈ 40000 Hz)
+       Async = 124, Sync = 319 → 40000/(125*320) ≈ 1 Hz */
+    RTC->PRER = (124U << 16) | 319U;
+
+    /* Set Alarm A to fire `seconds` seconds from now (simplified) */
+    uint32_t alarm_ss = (RTC->TR & 0x7F) + seconds;  /* BCD seconds */
+    RTC->ALRMAR = alarm_ss & 0x7F;
+    RTC->ALRMAR |= RTC_ALRMAR_MSK4 | RTC_ALRMAR_MSK3 | RTC_ALRMAR_MSK2;
+    /* MSK4/3/2 = ignore hours/minutes/weekday, match only seconds */
+
+    RTC->CR |= RTC_CR_ALRAE;   /* Enable Alarm A */
+
+    /* Exit init mode, re-lock write protection */
+    RTC->ISR &= ~RTC_ISR_INIT;
+    RTC->WPR = 0xFF;
+
+    /* Route RTC Alarm to EXTI line 17 so it can wake the CPU */
+    EXTI->IMR  |= (1U << 17);
+    EXTI->RTSR |= (1U << 17);
+    NVIC_EnableIRQ(RTC_Alarm_IRQn);
+}
+
+void RTC_Alarm_IRQHandler(void) {
+    if (RTC->ISR & RTC_ISR_ALRAF) {
+        RTC->ISR &= ~RTC_ISR_ALRAF;    /* Clear alarm flag */
+        EXTI->PR = (1U << 17);          /* Clear EXTI pending */
+    }
+}
+```
+
+## Practice
+
+<SandboxExercise
+  language="c"
+  instructions="A battery-powered sensor node runs on an STM32F4. The mainloop reads a sensor, transmits the data over USART, then has nothing to do for roughly 5 seconds. Your task: (1) Complete the `configure_wakeup` function to set up PA1 as a rising-edge EXTI wake source AND the RTC Alarm A to fire every 5 seconds. (2) Complete `enter_stop_and_wait` to enter Stop mode with LPDS and wake on whichever event fires first. (3) Complete `post_wake_reclock` to reinitialize the HSE+PLL after waking. Check that SLEEPDEEP is cleared at the end."
+  initialCode={`#include "stm32f4xx.h"
+
+/_ Called once at startup _/
+void configure_wakeup(void) {
+/_ --- EXTI on PA1: rising edge wake --- _/
+RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+
+    /* TODO: Set PA1 as input with pull-down */
+
+    /* TODO: Route PA1 to EXTI1 via SYSCFG->EXTICR[0] */
+
+    /* TODO: Configure rising-edge trigger on EXTI line 1 */
+
+    /* TODO: Unmask EXTI1 and enable it in NVIC at priority 3 */
+
+    /* --- RTC Alarm A every 5 seconds --- */
+    /* TODO: Enable RTC on LSI, set prescalers for ~1 Hz,
+             set Alarm A to fire 5 seconds from now,
+             route RTC Alarm to EXTI line 17 */
+
+}
+
+void enter_stop_and_wait(void) {
+/_ TODO: Set LPDS in PWR->CR _/
+/_ TODO: Clear PDDS so this is Stop not Standby _/
+/_ TODO: Set SLEEPDEEP in SCB->SCR _/
+/_ TODO: DSB + ISB barrier instructions _/
+/_ TODO: WFI _/
+/_ TODO: Clear SLEEPDEEP _/
+}
+
+void post_wake_reclock(void) {
+/_ TODO: Start HSE and wait for ready _/
+/_ TODO: Re-enable PLL and wait for lock _/
+/_ TODO: Switch SYSCLK to PLL _/
+/_ TODO: Update SysTick reload for 1 ms at new SystemCoreClock _/
+}
+
+void EXTI1_IRQHandler(void) {
+if (EXTI->PR & (1U << 1)) {
+EXTI->PR = (1U << 1);
+}
+}
+
+void RTC_Alarm_IRQHandler(void) {
+if (RTC->ISR & RTC_ISR_ALRAF) {
+RTC->ISR &= ~RTC_ISR_ALRAF;
+EXTI->PR = (1U << 17);
+}
+}
+
+int main(void) {
+system_clock_init();
+configure_wakeup();
+
+    while (1) {
+        read_sensor_and_transmit();
+        enter_stop_and_wait();
+        post_wake_reclock();
+    }
+
+}`}
+  solution={`#include "stm32f4xx.h"
+
+void configure_wakeup(void) {
+RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+
+    /* PA1 input, pull-down */
+    GPIOA->MODER &= ~GPIO_MODER_MODER1_Msk;
+    GPIOA->PUPDR |=  GPIO_PUPDR_PUPDR1_1;
+
+    /* PA1 → EXTI1 */
+    SYSCFG->EXTICR[0] &= ~SYSCFG_EXTICR1_EXTI1_Msk;
+    SYSCFG->EXTICR[0] |=  SYSCFG_EXTICR1_EXTI1_PA;
+
+    EXTI->RTSR |=  (1U << 1);
+    EXTI->FTSR &= ~(1U << 1);
+    EXTI->IMR  |=  (1U << 1);
+    NVIC_SetPriority(EXTI1_IRQn, 3);
+    NVIC_EnableIRQ(EXTI1_IRQn);
+
+    /* RTC on LSI */
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+    PWR->CR      |= PWR_CR_DBP;
+    RCC->BDCR    |= RCC_BDCR_LSION;
+    while (!(RCC->BDCR & RCC_BDCR_LSIRDY)) {}
+    RCC->BDCR    |= (2U << 8);
+    RCC->BDCR    |= RCC_BDCR_RTCEN;
+
+    RTC->WPR = 0xCA;
+    RTC->WPR = 0x53;
+    RTC->ISR |= RTC_ISR_INIT;
+    while (!(RTC->ISR & RTC_ISR_INITF)) {}
+    RTC->PRER = (124U << 16) | 319U;
+
+    /* Alarm A: match seconds only, fire in 5 s (simplified BCD) */
+    uint32_t alarm_ss = ((RTC->TR >> 0) & 0x7F) + 5U;
+    RTC->ALRMAR = (alarm_ss & 0x7F) |
+                  RTC_ALRMAR_MSK4 | RTC_ALRMAR_MSK3 | RTC_ALRMAR_MSK2;
+    RTC->CR |= RTC_CR_ALRAE | RTC_CR_ALRAIE;
+    RTC->ISR &= ~RTC_ISR_INIT;
+    RTC->WPR = 0xFF;
+
+    EXTI->IMR  |= (1U << 17);
+    EXTI->RTSR |= (1U << 17);
+    NVIC_SetPriority(RTC_Alarm_IRQn, 3);
+    NVIC_EnableIRQ(RTC_Alarm_IRQn);
+
+}
+
+void enter_stop_and_wait(void) {
+PWR->CR |= PWR_CR_LPDS;
+PWR->CR &= ~PWR_CR_PDDS;
+SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+**DSB();
+**ISB();
+\_\_WFI();
+SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+}
+
+void post_wake_reclock(void) {
+RCC->CR |= RCC_CR_HSEON;
+while (!(RCC->CR & RCC_CR_HSERDY)) {}
+RCC->CR |= RCC_CR_PLLON;
+while (!(RCC->CR & RCC_CR_PLLRDY)) {}
+RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW_Msk) | RCC_CFGR_SW_PLL;
+while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != RCC_CFGR_SWS_PLL) {}
+SysTick->LOAD = (SystemCoreClock / 1000U) - 1U;
+}`}
+testCases={[
+"PA1 is configured as input with pull-down before EXTI routing",
+"EXTI1 rises edge trigger is set and NVIC enabled",
+"PWR->CR has LPDS set and PDDS cleared in enter_stop_and_wait",
+"SLEEPDEEP is cleared after WFI returns",
+"post_wake_reclock waits for HSERDY before enabling PLL"
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "After your STM32F4 wakes from Stop mode, the UART baud rate is wrong and SysTick fires at the wrong interval. What is the most likely cause?",
+      options: [
+        "The UART peripheral lost its configuration registers during Stop mode",
+        "Stop mode exits on the HSI RC oscillator at 16 MHz, not on the PLL, so all peripherals clocked from SYSCLK are running at a fraction of the intended frequency until you re-lock the PLL and switch SYSCLK back",
+        "The voltage regulator did not return to normal mode",
+        "SLEEPDEEP was not cleared before re-entering the main loop",
+      ],
+      correct: 1,
+      explanation:
+        "Stop mode gates the HSE and PLL. Wake-up resumes on HSI at 16 MHz. Any peripheral whose baud rate, timer period, or sample rate was configured assuming a higher SYSCLK (e.g. 168 MHz PLL) is now running at 16/168 of its intended rate. The fix is post_wake_reclock: restart HSE, re-lock PLL, switch SYSCLK, update SysTick. This step is the most common Stop mode bug.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "You need a data logger to record temperature once per minute, sleep the rest of the time, and run for one year on two AA batteries. The device must recover its log index across power cycles. Which mode is correct, and what additional mechanism do you need?",
+      options: [
+        "Sleep mode — peripherals stay active so the log is always consistent",
+        "Stop mode with an RTC alarm every 60 seconds; store the log index in the RTC backup registers (which survive Stop and Standby) or in flash on each write",
+        "Standby mode with an RTC alarm; the log index is in SRAM so it survives",
+        "Stop mode with a GPIO wake every 60 seconds using a dedicated timer IC",
+      ],
+      correct: 1,
+      explanation:
+        "Stop mode gives 10–80 µA during sleep (suitable for a one-year target) while retaining SRAM and registers, so the application state is intact on wake. The RTC running from LSE/LSI remains active in Stop mode and can fire an alarm every 60 seconds to trigger the measurement. The log index must survive Stop mode (SRAM is fine) but also an accidental power cycle, which requires non-volatile storage: RTC backup registers (20 × 32-bit on STM32F4) are battery-backed and are ideal for small critical state. Standby would wipe SRAM and require a full re-init each minute — too slow and too complex. Sleep would barely reduce power at all.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Why must `__DSB()` and `__ISB()` be executed before `__WFI()` when entering Stop mode?",
+      options: [
+        "They reset the interrupt pending register before sleep",
+        "The Cortex-M pipeline may have pending write operations or cached instructions that haven't completed. DSB flushes pending memory writes; ISB flushes the instruction pipeline. Without them, the core may enter Stop mode with stale register state or execute a cached instruction after WFI instead of actually sleeping.",
+        "They configure the debug port to remain active during sleep",
+        "They are required only for Standby mode, not Stop mode",
+      ],
+      correct: 1,
+      explanation:
+        "Cortex-M cores can have write buffers and cached instruction prefetch. If you execute `__WFI()` before all writes to peripheral registers (including SCB->SCR) have propagated to their destination, the core may enter a different mode than intended, or the WFI may be treated as a NOP because a stale interrupt pending bit is seen. DSB (Data Synchronization Barrier) ensures all data writes are complete; ISB (Instruction Synchronization Barrier) flushes the pipeline so the next instruction fetch happens fresh. This two-barrier idiom before WFI is in ARM's own application notes for sleep entry.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="After waking from Stop mode on STM32, execution resumes running from the ___ oscillator. To restore full-speed operation, you must re-lock the ___ and switch SYSCLK back. The CPU enters Stop mode when the ___ bit is set in SCB->SCR and __WFI() is executed."
+  answers={["HSI", "PLL", "SLEEPDEEP"]}
+  hints={[
+    "The internal RC oscillator that is always-on",
+    "Phase-locked loop for high-frequency clocking",
+    "The bit that distinguishes deep sleep from regular sleep",
+  ]}
+/>
+
+## What you learned
+
+- Sleep, Stop, and Standby modes trade power consumption against wake latency and state preservation — Stop mode (2–80 µA, RAM retained) is the right choice for most battery-powered applications.
+- Entering Stop mode requires setting `LPDS` and clearing `PDDS` in `PWR->CR`, setting `SLEEPDEEP` in `SCB->SCR`, and issuing `__DSB()` + `__ISB()` + `__WFI()` in sequence.
+- After waking from Stop mode, clocks must be explicitly reconfigured — the MCU resumes on HSI at 16 MHz, and any peripheral relying on PLL-derived clocks is running at the wrong rate until you call your reclock function.
+- GPIO EXTI lines and RTC alarms remain active during Stop mode and are the standard wake sources; Standby mode additionally supports dedicated wakeup pins but wipes SRAM, requiring application state to be saved to non-volatile storage before entry.
+- Clearing the `SLEEPDEEP` bit immediately after `__WFI()` returns prevents accidental deep sleep on the next `WFI` elsewhere in the codebase.
+
+The next module explores watchdog timers and hardware fault recovery — the mechanisms that detect when firmware gets stuck and force a safe restart, including how to handle a watchdog correctly when the application legitimately spends long stretches in Stop mode.

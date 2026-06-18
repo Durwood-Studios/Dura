@@ -1,0 +1,456 @@
+---
+title: "Lock-Free Programming and Atomics"
+description: "Learn how CPU atomic instructions enable synchronization without mutexes, why lock-free data structures outperform locks under high contention, and how the memory model determines what guarantees you actually get."
+phase: 5
+module: "5-5"
+order: 4
+estimatedMinutes: 20
+difficulty: "advanced"
+standards:
+  cs2023: ["OS-2", "OS-3", "PD-2", "AR-1"]
+  swebok: ["Computing Fundamentals", "Software Construction"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "proficient"
+vocabulary:
+  - atomic-operation
+  - compare-and-swap
+  - memory-ordering
+  - memory-barrier
+  - ABA-problem
+  - lock-free
+  - wait-free
+  - false-sharing
+learningOutcomes:
+  - "Explain why a mutex-protected counter is slower than an atomic counter under high thread contention"
+  - "Describe what a compare-and-swap (CAS) operation does and why it can fail spuriously on some architectures"
+  - "Analyze a CAS retry loop and identify the ABA problem it is susceptible to"
+  - "Distinguish between the five C++ memory orderings and explain which is correct for a simple atomic counter vs. a lock-free queue"
+  - "Identify false sharing in a multi-threaded data structure and explain the cache-line alignment fix"
+prerequisites:
+  - "Understanding of threads and shared memory (Lesson 1 of this module)"
+  - "Understanding of race conditions and mutexes (Lesson 2 of this module)"
+  - "Basic familiarity with C, C++, Go, or Rust syntax"
+  - "Conceptual understanding of CPU caches and cache lines (5-1 Operating Systems)"
+---
+
+## Why this matters
+
+Mutexes work. But at high thread counts — dozens of threads hammering a shared counter, a cache, or a work queue — mutexes become a bottleneck. Only one thread runs the critical section at a time, and every other thread is parked waiting. For hot paths in databases, operating system kernels, game engines, and high-frequency trading systems, that serialization is unacceptable.
+
+The alternative is building synchronization directly out of operations the CPU guarantees are atomic — indivisible at the hardware level. Lock-free and wait-free data structures can sustain throughput under contention that would saturate a mutex-based design. They also eliminate the deadlock risk entirely, because you never hold a lock. But the tradeoffs are real: lock-free code is harder to reason about, the correctness proofs are subtle, and the memory model introduces hazards that don't exist in mutex-based code. This lesson gives you the mental model to read, analyze, and write lock-free primitives correctly.
+
+## A voting machine that never blocks
+
+Imagine a voting kiosk at a polling station. The naive design: one ballot box with a padlock. Each voter approaches, unlocks the box, drops their ballot, re-locks it. Under low traffic this is fine. On election day with a hundred voters queued up, everyone waits for the person ahead to finish locking and unlocking.
+
+A better design: each ballot has a unique serial number. Before dropping it in, the voter reads the current count on the display, writes their vote on their ballot, and drops it in. If they collide with another voter, the machine simply says "try again — the count changed while you were writing." Most of the time no one collides, and all voters proceed without waiting. The machine's "try again if it changed" mechanism is compare-and-swap.
+
+> **An atomic operation is one the CPU executes as a single, indivisible step — no other thread can observe it in a partial state.**
+
+## What the CPU actually provides
+
+Modern CPUs guarantee a small set of operations are atomic:
+
+- **Read** of an aligned native-sized integer (4 or 8 bytes on 64-bit CPUs)
+- **Write** of an aligned native-sized integer
+- **Fetch-and-add**: read, add, write as one instruction (`LOCK XADD` on x86)
+- **Compare-and-swap** (CAS): read, compare to expected, conditionally write (`LOCK CMPXCHG` on x86)
+
+The `LOCK` prefix on x86 asserts exclusive ownership of the cache line for the duration of the instruction. On ARM, this is done with `LDREX`/`STREX` pairs (load-exclusive / store-exclusive). The hardware handles the cross-core coordination — you don't need a mutex.
+
+```c
+#include <stdatomic.h>
+#include <stdio.h>
+#include <threads.h>
+
+// _Atomic qualifier: the compiler emits atomic read-modify-write instructions
+atomic_long counter = 0;
+
+int increment_worker(void *arg) {
+    for (int i = 0; i < 1_000_000; i++) {
+        // atomic_fetch_add compiles to a single LOCK XADD instruction on x86.
+        // Unlike counter++, this cannot be interrupted between read and write.
+        atomic_fetch_add_explicit(&counter, 1, memory_order_relaxed);
+    }
+    return 0;
+}
+
+int main(void) {
+    thrd_t t1, t2;
+    thrd_create(&t1, increment_worker, NULL);
+    thrd_create(&t2, increment_worker, NULL);
+    thrd_join(t1, NULL);
+    thrd_join(t2, NULL);
+
+    // Always 2,000,000 — no mutex needed, no blocked threads
+    printf("Counter: %ld\n", counter);
+    return 0;
+}
+```
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync"
+    "sync/atomic"
+)
+
+func main() {
+    var counter int64
+    var wg sync.WaitGroup
+
+    for range 8 {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for range 500_000 {
+                // atomic.AddInt64 compiles to LOCK XADD — no mutex, no park/unpark
+                atomic.AddInt64(&counter, 1)
+            }
+        }()
+    }
+    wg.Wait()
+    fmt.Println("Counter:", counter) // Always 4,000,000
+}
+```
+
+## Compare-and-swap: the universal atomic primitive
+
+Fetch-and-add is limited to arithmetic. For richer lock-free structures, you need **compare-and-swap (CAS)**: "if the current value equals `expected`, set it to `desired` and return true; otherwise leave it unchanged and return false."
+
+```c
+// C11 signature:
+// _Bool atomic_compare_exchange_strong(
+//     atomic_int *obj,  -- the shared variable
+//     int *expected,    -- what you expect it to be (updated on failure)
+//     int desired       -- what to set it to if it matches
+// );
+```
+
+The CAS retry loop is how lock-free updates work for any operation that can't be expressed as a single arithmetic instruction:
+
+```c
+#include <stdatomic.h>
+
+atomic_int version = 0;
+
+// Lock-free update of a value that depends on a complex read-then-compute
+void lock_free_update(int new_value) {
+    int expected = atomic_load_explicit(&version, memory_order_relaxed);
+
+    // Retry loop: keep trying until we win the CAS race
+    while (true) {
+        // "If version is still what we read, set it to new_value"
+        // If another thread changed version between our load and this CAS,
+        // atomic_compare_exchange_strong returns false and updates 'expected'
+        // to the actual current value — so the next iteration reads fresh data.
+        if (atomic_compare_exchange_strong_explicit(
+                &version,
+                &expected,           // updated to actual value on failure
+                new_value,
+                memory_order_release,  // writes before this are visible to readers
+                memory_order_relaxed
+        )) {
+            break; // We won — update committed
+        }
+        // We lost the race — 'expected' now holds the fresh value, retry
+    }
+}
+```
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync/atomic"
+)
+
+// Lock-free max: set a shared max to the larger of its current value and candidate
+func atomicMax(sharedMax *int64, candidate int64) {
+    for {
+        current := atomic.LoadInt64(sharedMax)
+        if candidate <= current {
+            return // candidate isn't larger — nothing to do
+        }
+        // Try to swap. If sharedMax changed since we read it, CompareAndSwapInt64
+        // returns false and we retry with the updated value.
+        if atomic.CompareAndSwapInt64(sharedMax, current, candidate) {
+            return // We won the race
+        }
+        // Lost the race — loop and re-read the current max
+    }
+}
+
+func main() {
+    var max int64
+    atomicMax(&max, 42)
+    atomicMax(&max, 7)
+    atomicMax(&max, 99)
+    atomicMax(&max, 55)
+    fmt.Println("Max:", max) // 99
+}
+```
+
+## The ABA problem
+
+CAS checks that the value equals `expected`. But what if the value was A, then another thread changed it to B, then back to A? CAS sees A and proceeds, incorrectly believing nothing changed.
+
+```
+Thread 1: reads value = 100  (version = "A")
+            [preempted]
+Thread 2: changes value to 200  (version = "B")
+Thread 2: changes value back to 100  (version = "A" again)
+            [Thread 1 resumes]
+Thread 1: CAS(expected=100, desired=150) → succeeds
+-- Thread 1's computation was based on the OLD value, but CAS didn't detect the change --
+```
+
+For counters, this is usually harmless. For lock-free linked lists (where the "value" is a pointer to a node that may have been freed and reallocated), ABA causes use-after-free crashes.
+
+The standard fix is a **stamped reference** (also called a versioned pointer): pack the pointer and a monotonically-incrementing version counter into a single 128-bit value that CAS checks atomically.
+
+```c
+// Tagged pointer — pointer + version counter in a struct
+// The version increments on every modification, so ABA is detectable
+typedef struct {
+    void *ptr;
+    uint64_t version;
+} TaggedPtr;
+
+// Use __int128 CAS or double-word CAS (DCAS / CMPXCHG16B on x86_64)
+// to atomically swap both fields together
+```
+
+## Memory ordering: why `relaxed` is dangerous everywhere else
+
+The C/C++ and Rust memory models define five orderings that control what the compiler and CPU are allowed to reorder around an atomic operation:
+
+| Ordering  | Guarantees                                               | Correct use                                      |
+| --------- | -------------------------------------------------------- | ------------------------------------------------ |
+| `relaxed` | Only atomicity — no ordering constraints                 | Independent counters, statistics                 |
+| `acquire` | All reads/writes after this load are ordered after it    | Lock acquisition, reading a payload after a flag |
+| `release` | All reads/writes before this store are ordered before it | Lock release, writing a payload before a flag    |
+| `acq_rel` | Both acquire and release                                 | CAS in a lock-free structure (read–modify–write) |
+| `seq_cst` | Total global order across all threads                    | Default; use when unsure; slowest on ARM         |
+
+The reason this matters: CPUs reorder memory operations for performance. A store to location A followed by a store to location B might execute in the opposite order from another core's perspective. `acquire`/`release` pairs create a "happens-before" relationship — a guarantee that the stores done before the release are visible to any thread that sees the acquire.
+
+```c
+// Classic producer/consumer flag pattern
+// WRONG: both relaxed — the consumer might read data BEFORE the payload write is visible
+atomic_int ready = 0;
+int payload = 0;
+
+void producer(void) {
+    payload = 42;                                              // Write payload
+    atomic_store_explicit(&ready, 1, memory_order_relaxed);  // WRONG: no release barrier
+}
+
+void consumer(void) {
+    while (!atomic_load_explicit(&ready, memory_order_relaxed)) {} // WRONG: no acquire
+    printf("%d\n", payload);  // May print 0 — saw 'ready' but not the payload write
+}
+
+// CORRECT: release/acquire pair creates happens-before
+void producer_correct(void) {
+    payload = 42;                                              // Write payload first
+    atomic_store_explicit(&ready, 1, memory_order_release);  // release: payload write is visible
+}
+
+void consumer_correct(void) {
+    while (!atomic_load_explicit(&ready, memory_order_acquire)) {} // acquire: see all prior releases
+    printf("%d\n", payload);  // Always prints 42
+}
+```
+
+In Go, all atomic operations use sequential consistency, so this class of bug cannot occur in Go. In Rust, the `Ordering` enum mirrors C++11. In Java, all `volatile` reads and writes are sequentially consistent.
+
+## False sharing: the hidden performance killer
+
+Two threads write to different variables — no sharing, no synchronization needed, should be fast. But if those two variables land on the **same cache line** (typically 64 bytes), every write by one core invalidates the cache line for the other core, forcing expensive cache coherence traffic. The threads aren't logically sharing data, but the hardware acts as if they are.
+
+```c
+#include <stdint.h>
+#include <stdatomic.h>
+
+// BAD: both counters fit in one 64-byte cache line
+// Core 0 writing counter_a causes Core 1's copy of the cache line to be invalidated,
+// even though Core 1 only touches counter_b
+struct BadCounters {
+    atomic_long counter_a;  // offset 0
+    atomic_long counter_b;  // offset 8 — same cache line as counter_a
+};
+
+// GOOD: each counter is on its own cache line
+// Writes to one counter don't invalidate the other core's cache
+struct GoodCounters {
+    atomic_long counter_a;
+    char _pad_a[64 - sizeof(atomic_long)];  // pad to fill the cache line
+    atomic_long counter_b;
+    char _pad_b[64 - sizeof(atomic_long)];
+};
+
+// In C++ and Java: alignas(64) / @Contended annotation
+// In Go: manual padding or sync/atomic.Value per goroutine + reduce at the end
+```
+
+False sharing can cause a 10x–100x slowdown while the code appears logically correct. It shows up in profiling as unusually high L1/L2 cache miss rates on writes.
+
+## Lock-free vs. wait-free vs. obstruction-free
+
+These terms have precise formal definitions, and conflating them is a common mistake:
+
+- **Lock-free**: at least one thread always makes progress, even if individual threads can be starved. A CAS retry loop is lock-free — if one thread keeps losing the race, another keeps winning.
+- **Wait-free**: every thread makes progress in a bounded number of steps, regardless of what other threads do. Much harder to implement. Queues backed by fetch-and-add counters with a pre-allocated ring buffer can be wait-free.
+- **Obstruction-free**: a thread makes progress if it eventually runs alone (no other thread interferes). Weakest guarantee; rarely sufficient in practice.
+
+Most production "lock-free" code (including `java.util.concurrent` and `std::atomic`) is lock-free, not wait-free.
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// Simulate CAS semantics in JavaScript to build intuition.
+// JS doesn't have real atomics for this demo, but we can model
+// the CAS retry loop pattern using closures.
+
+// Simulated shared integer (normally this would be a SharedArrayBuffer + Atomics)
+let sharedValue = 0;
+
+// Simulated CAS: returns true if swap succeeded, false if value changed
+function compareAndSwap(expectedRef, desired) {
+// In real hardware: this entire function executes as one indivisible instruction
+if (sharedValue === expectedRef.value) {
+sharedValue = desired;
+return true;
+}
+// On failure, update the expected ref to the actual current value
+// so the caller can retry with fresh data
+expectedRef.value = sharedValue;
+return false;
+}
+
+// Lock-free increment using CAS retry loop
+function lockFreeIncrement() {
+const expected = { value: sharedValue }; // read current value
+while (true) {
+const desired = expected.value + 1;
+if (compareAndSwap(expected, desired)) {
+return; // Won the race — update committed
+}
+// Lost the race — expected.value was updated to actual value by CAS
+// Retry with the fresh value (desired will be recomputed next iteration)
+}
+}
+
+// Run 1000 "concurrent" increments sequentially (JS is single-threaded,
+// so no real concurrency, but the pattern is identical)
+for (let i = 0; i < 1000; i++) {
+lockFreeIncrement();
+}
+console.log("Final value:", sharedValue); // Should be 1000
+
+// Now model the ABA problem:
+// Reset and simulate a scenario where CAS incorrectly succeeds
+
+sharedValue = 100;
+const myExpected = { value: sharedValue }; // Thread 1 reads 100
+
+// "Thread 2" runs between Thread 1's read and CAS:
+sharedValue = 200; // Thread 2 changes to 200
+sharedValue = 100; // Thread 2 changes back to 100
+
+// Thread 1 resumes — CAS sees 100 and succeeds, even though the value changed!
+const abaResult = compareAndSwap(myExpected, 150);
+console.log("ABA CAS succeeded:", abaResult); // true — but the intermediate change was invisible
+console.log("Final after ABA:", sharedValue); // 150
+
+// The fix: add a version counter
+let versionedValue = { value: 100, version: 0 };
+
+function versionedCAS(expectedVal, expectedVer, desired) {
+if (versionedValue.value === expectedVal && versionedValue.version === expectedVer) {
+versionedValue = { value: desired, version: expectedVer + 1 };
+return true;
+}
+return false;
+}
+
+// Read value AND version atomically
+const readVal = versionedValue.value;
+const readVer = versionedValue.version;
+
+// "Thread 2" changes value A→B→A
+versionedValue = { value: 200, version: 1 };
+versionedValue = { value: 100, version: 2 };
+
+// Thread 1 CAS now fails — version mismatch catches the ABA
+const fixedABAResult = versionedCAS(readVal, readVer, 150);
+console.log("Versioned CAS after ABA:", fixedABAResult); // false — correctly rejected
+`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="An atomic fetch-and-add operation on an x86 CPU uses the LOCK prefix. What does the LOCK prefix guarantee?"
+  options={[
+    "The operation executes in a single CPU clock cycle",
+    "The cache line is owned exclusively by this core for the duration of the read-modify-write, preventing other cores from accessing it simultaneously",
+    "The operating system will not preempt the thread while the instruction executes",
+    "The value is written to main memory before any other instruction runs",
+  ]}
+  answer={1}
+  explanation="The LOCK prefix asserts the LOCK# signal on the bus (or uses cache locking on modern CPUs), which prevents other processors from accessing the addressed memory until the operation completes. This makes the read-modify-write indivisible from all other cores' perspectives."
+/>
+<Quiz
+  question="A CAS loop reads a pointer value of 0x1000, is preempted, another thread changes the pointer to 0x2000 and then back to 0x1000, and the original thread resumes. CAS succeeds. What problem does this illustrate?"
+  options={[
+    "A race condition — the original thread should have used a mutex",
+    "The ABA problem — the pointer appeared unchanged, but it passed through an intermediate state that may have invalidated the original thread's assumptions",
+    "A deadlock — two threads are waiting on each other",
+    "False sharing — the pointer and an unrelated variable are on the same cache line",
+  ]}
+  answer={1}
+  explanation="The ABA problem: CAS only checks the current value against the expected value. It cannot detect that the value changed to something else and back. This is benign for counters but can cause use-after-free bugs in lock-free linked lists, where the pointer address being 'the same' doesn't mean the node is the same object."
+/>
+<Quiz
+  question="Two threads each atomically increment their own separate counter fields in the same struct, with no synchronization needed. Performance is far worse than expected. What is the most likely cause?"
+  options={[
+    "Atomic operations always require OS involvement and are inherently slow",
+    "The two counter fields are on the same 64-byte cache line, causing false sharing — each write invalidates the other core's cache line",
+    "The struct is too large to fit in the L1 cache",
+    "The threads are spinning in a CAS retry loop",
+  ]}
+  answer={1}
+  explanation="False sharing: the hardware cache coherence protocol operates at cache-line granularity (typically 64 bytes). Even though the two threads write to different bytes, those bytes are in the same cache line. Every write by one core causes the other core's copy of that cache line to be invalidated, forcing a cache miss on the next access. The fix is padding each counter to its own cache line."
+/>
+<Quiz
+  question="You need a counter that many threads increment, and you use memory_order_relaxed for all operations. The counter is only read after all threads finish (via join). Is memory_order_relaxed safe for this use case?"
+  options={[
+    "No — relaxed ordering allows threads to miss each other's increments entirely",
+    "Yes — relaxed ordering provides atomicity (no torn reads/writes); the join provides the happens-before relationship needed to read the final value safely",
+    "No — you need seq_cst to ensure the increments are globally ordered",
+    "Yes — but only on x86, which has stronger hardware guarantees than ARM",
+  ]}
+  answer={1}
+  explanation="memory_order_relaxed guarantees atomicity — each fetch-add is an indivisible read-modify-write. The relaxed ordering means no additional ordering constraints are imposed, which is fine when you only care about the total count and the reading thread synchronizes via join() (which provides a happens-before edge that makes all prior writes visible)."
+/>
+<FillBlank
+  question="A data structure where at least one thread always makes progress is called ___ ___, while one where every thread completes in a bounded number of steps regardless of other threads is called ___ ___."
+  answer="lock free, wait free"
+/>
+
+## What you learned
+
+- CPU atomic instructions (`LOCK XADD`, `CMPXCHG`, ARM's `LDREX`/`STREX`) provide indivisible read-modify-write operations that eliminate the lock acquisition cost under high thread contention
+- Compare-and-swap enables lock-free CAS retry loops: read the current value, compute the new value, attempt to swap — retry if another thread changed the value first
+- The **ABA problem** causes CAS to succeed incorrectly when a value changes A → B → A; versioned (stamped) references fix it by pairing a value with a monotonically-increasing version counter
+- Memory orderings (`relaxed`, `acquire`, `release`, `acq_rel`, `seq_cst`) control CPU and compiler reordering; using `relaxed` where `release`/`acquire` is required causes subtle data visibility bugs that only appear on weakly-ordered architectures like ARM
+- **False sharing** occurs when logically-independent variables share a cache line, causing unnecessary cache coherence traffic; padding fields to cache-line size (64 bytes) eliminates it
+
+The next lesson moves from individual primitives to architectural patterns — actors, communicating sequential processes, and work queues — that let you compose lock-free and locking primitives into correct concurrent systems at scale.

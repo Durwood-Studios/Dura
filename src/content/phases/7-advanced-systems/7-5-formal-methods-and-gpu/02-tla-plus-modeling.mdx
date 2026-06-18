@@ -1,0 +1,324 @@
+---
+title: "TLA+ — Modeling System Behavior"
+description: "Write TLA+ specifications that model concurrent systems and use the TLC model checker to automatically find safety and liveness violations."
+phase: 7
+module: "7-5"
+order: 2
+estimatedMinutes: 20
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-2", "SE-4", "OS-3"]
+  swebok: ["Software Quality", "Software Design"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - tla-plus
+  - tlc-model-checker
+  - state-predicate
+  - action
+  - next-state-relation
+  - temporal-logic
+  - invariant
+  - fairness
+  - stuttering
+learningOutcomes:
+  - "Write a TLA+ specification that models state variables, initial conditions, and transitions for a simple concurrent system"
+  - "Express safety invariants in TLA+ and run TLC to verify them against a finite model"
+  - "Interpret a TLC counterexample trace to identify the root cause of a property violation"
+  - "Apply weak fairness constraints to express liveness requirements in TLA+"
+prerequisites:
+  - "Formal methods concepts — safety vs. liveness, state space, invariants (lesson 7-5-01)"
+  - "Predicate logic — quantifiers, logical connectives, implication"
+  - "Concurrent systems — processes, shared state, mutual exclusion"
+  - "Set theory basics — membership, subsets, Cartesian product"
+---
+
+## Why this matters
+
+Most distributed system bugs are not caught in code review because they require reasoning about all possible orderings of concurrent events — something the human brain is poorly equipped to do at scale. TLA+ gives you a language for writing down exactly what your system does, and TLC (the model checker that ships with TLA+) searches every possible interleaving automatically. Amazon's engineering teams have used TLA+ to find bugs in S3, DynamoDB, and EC2 — bugs that would have cost millions of dollars or caused data loss if found in production instead of in a model.
+
+Learning TLA+ reshapes how you design systems even when you are not writing a spec. The discipline of separating _state variables_ from _actions_ from _properties_ — and the habit of asking "what are all the ways this transition can go wrong?" — produces better architecture, better API contracts, and better incident postmortems. Engineers who have learned TLA+ consistently describe it as permanently changing how they think about concurrency.
+
+## From English to Math — a concrete translation
+
+Suppose you are designing a two-process mutual exclusion protocol. The English description might be: "At most one process holds the critical section at a time. Every process that wants to enter will eventually enter."
+
+Before naming any TLA+ syntax, notice the structure: there is _state_ (who is in the critical section, who is waiting), there are _transitions_ (a process enters, a process exits), and there are _properties_ (the safety invariant about mutual exclusion, the liveness guarantee about eventual access). TLA+ makes each of these explicit.
+
+> **A TLA+ specification is just a precise restatement of a design document, in a language that a computer can check.**
+
+## TLA+ structure — the four parts
+
+Every TLA+ module has the same four-part structure:
+
+```
+EXTENDS Naturals, Sequences    (* import standard libraries *)
+
+VARIABLES pc, flag             (* 1. State variables *)
+
+Init ==                        (* 2. Initial state predicate *)
+  /\ pc \in {"idle", "waiting", "critical"}
+  /\ flag \in {FALSE, TRUE}
+
+Next ==                        (* 3. Next-state relation (transitions) *)
+  \/ RequestAccess             (* one of these actions fires each step *)
+  \/ EnterCritical
+  \/ ExitCritical
+
+Spec ==                        (* 4. The temporal formula — the full specification *)
+  Init /\ [][Next]_vars        (* "Start in Init, every step is Next or a stutter" *)
+```
+
+The `/\` and `\/` symbols are logical AND and OR. The `[]` is the temporal operator "always" — `[][Next]_vars` means "every step is either a Next action or a stuttering step (vars unchanged)." Stuttering steps model the fact that other components can take steps without this module changing.
+
+## Building a real mutex model
+
+Here is a complete TLA+ specification for Peterson's mutual exclusion algorithm — a classic two-process protocol:
+
+```tla
+-------------------------------- MODULE Peterson --------------------------------
+(*
+  Peterson's mutual exclusion algorithm for two processes.
+  We verify: at most one process is in the critical section at any time.
+*)
+EXTENDS Naturals
+
+VARIABLES flag,   (* flag[i] = TRUE means process i wants to enter *)
+          turn,   (* turn = i means it is process i's turn when both want in *)
+          pc      (* pc[i] is the program counter for process i: *)
+                  (* "idle" | "wanting" | "critical" | "exiting" *)
+
+vars == << flag, turn, pc >>   (* tuple of all variables, for the temporal formula *)
+
+(* ---- Initial state ---- *)
+Init ==
+  /\ flag = [i \in {0, 1} |-> FALSE]   (* neither process wants in initially *)
+  /\ turn \in {0, 1}                    (* turn can start either way — we check both *)
+  /\ pc   = [i \in {0, 1} |-> "idle"]  (* both processes start idle *)
+
+(* ---- Actions ---- *)
+
+(* Process i decides to enter the critical section *)
+RequestEntry(i) ==
+  /\ pc[i] = "idle"
+  /\ flag' = [flag EXCEPT ![i] = TRUE]   (* announce intent *)
+  /\ turn' = 1 - i                        (* yield priority to the OTHER process *)
+  /\ pc'   = [pc   EXCEPT ![i] = "wanting"]
+  /\ UNCHANGED << >>   (* turn and flag updated above, nothing else changes *)
+
+(* Process i waits until it is safe to enter *)
+(* Safe = other process doesn't want in, OR it's our turn *)
+EnterCritical(i) ==
+  /\ pc[i] = "wanting"
+  /\ \/ flag[1-i] = FALSE    (* the other process is not trying to enter *)
+     \/ turn = i             (* or it is our turn *)
+  /\ pc' = [pc EXCEPT ![i] = "critical"]
+  /\ UNCHANGED << flag, turn >>
+
+(* Process i finishes and exits the critical section *)
+ExitCritical(i) ==
+  /\ pc[i] = "critical"
+  /\ flag' = [flag EXCEPT ![i] = FALSE]   (* withdraw intent *)
+  /\ pc'   = [pc   EXCEPT ![i] = "idle"]
+  /\ UNCHANGED << turn >>
+
+(* The Next relation: any process can take any valid action *)
+Next ==
+  \E i \in {0, 1}:         (* there EXISTS some process i *)
+    \/ RequestEntry(i)
+    \/ EnterCritical(i)
+    \/ ExitCritical(i)
+
+(* ---- Specification ---- *)
+Spec == Init /\ [][Next]_vars
+
+(* ---- Safety property: mutual exclusion ---- *)
+MutualExclusion ==
+  (* It is never the case that BOTH processes are in the critical section *)
+  ~(pc[0] = "critical" /\ pc[1] = "critical")
+
+(* ---- Liveness property: every waiting process eventually enters ---- *)
+(* WF = "weak fairness" — if an action is always enabled, it must eventually fire *)
+EventualEntry ==
+  \A i \in {0, 1}:
+    (pc[i] = "wanting") ~> (pc[i] = "critical")   (* ~> means "leads to" *)
+
+Fairness == \A i \in {0, 1}: WF_vars(EnterCritical(i)) /\ WF_vars(ExitCritical(i))
+
+LiveSpec == Spec /\ Fairness
+
+================================================================================
+```
+
+## Reading TLC output
+
+When you run TLC on this spec, you configure a model by giving the model checker finite bounds (e.g., only check with `turn \in {0, 1}` and both processes). TLC then enumerates every reachable state.
+
+**If the invariant holds**, TLC prints:
+
+```
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 4.4E-18
+  ...
+  36 states generated, 16 distinct states found, 0 states left on queue.
+```
+
+**If TLC finds a violation**, it prints the exact sequence of states:
+
+```
+Invariant MutualExclusion is violated.
+
+The behavior up to this point is:
+State 1: <Initial predicate>
+  flag = [0 |-> FALSE, 1 |-> FALSE]
+  turn = 0
+  pc   = [0 |-> "idle", 1 |-> "idle"]
+
+State 2: <RequestEntry(0)>
+  flag = [0 |-> TRUE,  1 |-> FALSE]
+  turn = 1          (* process 0 yields turn to process 1 *)
+  pc   = [0 |-> "wanting", 1 |-> "idle"]
+
+State 3: <RequestEntry(1)>
+  flag = [0 |-> TRUE, 1 |-> TRUE]
+  turn = 0          (* process 1 yields turn back to process 0 *)
+  pc   = [0 |-> "wanting", 1 |-> "wanting"]
+
+State 4: <EnterCritical(0)>
+  (* turn = 0 and flag[1] = TRUE, but turn = 0 so process 0 enters *)
+  pc   = [0 |-> "critical", 1 |-> "wanting"]
+
+State 5: <EnterCritical(1)>
+  (* BUG: both in critical section if the guard is wrong *)
+  pc   = [0 |-> "critical", 1 |-> "critical"]
+```
+
+This trace is immediately actionable — you know exactly which sequence of events caused the violation. Fix the guard condition in `EnterCritical`, re-run TLC, and verify the fix holds across all states.
+
+## Fairness — making liveness checkable
+
+Without fairness constraints, TLC is allowed to keep deferring any action indefinitely. A scheduler that always picks process 0 and never lets process 1 run is technically valid under the base specification — but it is not a realistic model of a system with eventual CPU access.
+
+<VocabTooltip slug="fairness">Weak fairness</VocabTooltip> (`WF_vars(Action)`) says: if Action is
+*continuously* enabled, it must eventually fire. This rules out the scheduler that starves process 1
+forever while process 1's `EnterCritical` action is enabled.
+
+```tla
+(* Without fairness: TLC can find this "trace" as a liveness violation *)
+(* Process 1 is always in "wanting" but EnterCritical(1) is never scheduled *)
+
+(* With WF_vars(EnterCritical(1)): TLC rules out infinite deferral *)
+(* It only has to verify liveness under fair scheduling *)
+
+Fairness ==
+  \A i \in {0, 1}:
+    /\ WF_vars(EnterCritical(i))   (* if enabled continuously, must fire *)
+    /\ WF_vars(ExitCritical(i))    (* a process in critical must eventually exit *)
+```
+
+## Practice
+
+<SandboxExercise
+  title="Write an invariant for a bounded counter"
+  description="Below is a partial TLA+ specification for a counter that can be incremented and reset. Write the safety invariant that says the counter value always stays between 0 and MAX_VAL (inclusive). Then add an action Increment that is only enabled when the counter is below MAX_VAL."
+  language="tla"
+  starterCode={`-------------------------------- MODULE BoundedCounter --------------------------------
+EXTENDS Naturals
+
+CONSTANT MAX_VAL (_ the maximum allowed value, e.g. 10 _)
+
+VARIABLES counter (_ the current counter value _)
+
+Init == counter = 0
+
+(_ TODO: Write the Increment action _)
+(_ Increment is only enabled when counter < MAX_VAL _)
+(_ When it fires, counter increases by 1 _)
+Increment ==
+/\ counter < MAX_VAL (_ guard: only enabled when room remains _)
+/\ counter' = counter + 1 (_ effect: increment by one _)
+
+Reset ==
+/\ counter' = 0
+/\ UNCHANGED << >> (_ nothing else changes _)
+
+Next == Increment \/ Reset
+
+Spec == Init /\ [][Next]\_counter
+
+(_ TODO: Write the safety invariant _)
+(_ CounterInBounds should be TRUE in every reachable state _)
+CounterInBounds ==
+/\ 0 <= counter (_ counter is at least 0 _)
+/\ counter <= MAX_VAL (_ counter never exceeds MAX_VAL _)
+
+================================================================================`}
+  solution={`CounterInBounds == 0 <= counter /\\ counter <= MAX_VAL
+
+Increment ==
+/\\ counter < MAX_VAL
+/\\ counter' = counter + 1`}
+hints={[
+"An invariant is just a predicate — a TRUE/FALSE expression over the state variables.",
+"Use /\\ (AND) to combine both bounds into one predicate.",
+"The Increment guard should be the negation of the overflow condition."
+]}
+/>
+
+## Check your understanding
+
+<Quiz>
+  {[
+    {
+      question: "In TLA+, what does the temporal formula `[][Next]_vars` mean?",
+      options: [
+        "Next fires in every step, and vars always change",
+        "Every step is either a Next action or a stuttering step where vars are unchanged",
+        "Next eventually fires at least once",
+        "Vars are initialized by Next before the spec begins",
+      ],
+      correctIndex: 1,
+      explanation:
+        "`[][Next]_vars` means 'always (Next \\/ UNCHANGED vars)' — every step either executes a Next action that may change vars, or is a stuttering step where vars don't change. Stuttering steps let other parts of a larger system take actions without invalidating this spec.",
+    },
+    {
+      question:
+        "TLC finishes checking and reports '0 states left on queue, no error found.' What does this mean?",
+      options: [
+        "The program has been proven correct for all possible inputs",
+        "Every reachable state in the model satisfies the invariant",
+        "The liveness properties hold for all infinite executions",
+        "The implementation matches the specification",
+      ],
+      correctIndex: 1,
+      explanation:
+        "TLC has verified the invariant holds in every reachable state of the *model* — the finite abstraction you configured. This does not prove the implementation is correct, nor does it verify liveness (unless you separately check temporal properties). It also only covers the model's parameter bounds, not an infinite state space.",
+    },
+    {
+      question:
+        "You add weak fairness `WF_vars(ExitCritical(i))` to your spec. What does this constraint rule out?",
+      options: [
+        "A process that enters the critical section and stays there forever",
+        "A process that exits before it is ready",
+        "Two processes entering the critical section simultaneously",
+        "A process that requests entry before another process exits",
+      ],
+      correctIndex: 0,
+      explanation:
+        "Weak fairness on ExitCritical(i) says: if ExitCritical(i) is continuously enabled (i.e., process i is in the critical section), it must eventually fire. This rules out a process that enters the critical section and never exits — a liveness violation where other processes are indefinitely blocked.",
+    },
+  ]}
+</Quiz>
+
+## What you learned
+
+- A TLA+ spec has four explicit parts: state variables, initial predicate, next-state relation, and temporal formula — each separation is a design decision that forces precision
+- Safety invariants are plain predicates over state variables; TLC verifies them by exhaustive state-space search and returns concrete violation traces
+- The `\E` (exists) and `\A` (forall) quantifiers let you write properties that range over all processes, messages, or indices without repeating yourself
+- Weak fairness constraints (`WF_vars`) are required to make liveness properties checkable — without them, TLC can defeat any "eventually" property with an unfair scheduler
+- TLC counterexample traces are directly actionable: they show the exact sequence of events that leads to a bug
+
+The next lesson introduces Alloy and compares its relational modeling approach to TLA+'s operational style — giving you two complementary tools for verifying different kinds of system properties.

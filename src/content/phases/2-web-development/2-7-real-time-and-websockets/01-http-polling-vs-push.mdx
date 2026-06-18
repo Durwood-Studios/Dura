@@ -1,0 +1,195 @@
+---
+title: "HTTP Polling vs. Push — The Trade-Off"
+description: "Understand why HTTP's request-response model breaks down for live data, and how polling, long-polling, and server push each address the gap."
+phase: 2
+module: "2-7"
+order: 1
+estimatedMinutes: 8
+difficulty: "beginner"
+standards:
+  cs2023: ["NC-1", "WS-2"]
+  swebok: ["Software Design", "Software Construction"]
+  bloom: "understand"
+  sfia: 2
+  dreyfus: "novice"
+vocabulary:
+  - http-polling
+  - long-polling
+  - server-push
+  - latency
+  - request-response-cycle
+learningOutcomes:
+  - "Explain why HTTP polling produces latency and wasted bandwidth on live data feeds"
+  - "Describe how long-polling differs from regular polling and when each is appropriate"
+  - "Identify which delivery model — polling, long-polling, or server push — fits a given real-time use case"
+prerequisites:
+  - "HTTP request-response cycle"
+  - "fetch API"
+  - "async/await"
+---
+
+## Why this matters
+
+Every app you've built so far has waited for the user to ask before fetching data. Click a button, get a response. That model works perfectly for reading a blog post or submitting a form. It breaks the moment data on the server changes without the user doing anything — a new chat message, a live sports score, a stock price that just moved. Building anything real-time means you first have to understand exactly _why_ HTTP's default model fails and what each alternative actually costs.
+
+Choosing the wrong delivery strategy is one of the most expensive mistakes in production. Polling too aggressively hammers your servers with thousands of unnecessary requests per minute. Polling too lazily makes your "live" app feel like it refreshes every thirty seconds. Understanding this trade-off before you write a line of WebSocket code will make every decision that follows sharper.
+
+## The postal service model
+
+Imagine you're waiting for an important letter. Under HTTP's default model, you don't have a mailbox — you have to walk to the post office and ask "Is there anything for me?" every time you want to check. Walk there, ask, walk back. Walk there, ask, walk back. If the letter hasn't arrived yet, you've wasted the trip entirely.
+
+This is exactly how <VocabTooltip slug="http-polling">HTTP polling</VocabTooltip> works. The client repeatedly asks the server "any new data?" on a fixed interval, regardless of whether anything has changed.
+
+```javascript
+// Poll every 2 seconds — the client asks, the server answers, repeat forever
+async function startPolling(onNewMessages) {
+  // Store the timestamp of the last message we received
+  let lastSeen = new Date().toISOString();
+
+  setInterval(async () => {
+    try {
+      const response = await fetch(`/api/messages?since=${lastSeen}`);
+      const messages = await response.json();
+
+      if (messages.length > 0) {
+        // Update our cursor so we only fetch genuinely new messages next time
+        lastSeen = messages.at(-1).timestamp;
+        onNewMessages(messages);
+      }
+      // If messages.length === 0, this entire round trip accomplished nothing
+    } catch (error) {
+      console.error("Poll failed:", error);
+    }
+  }, 2000);
+}
+```
+
+The problem is visible in that last comment: on quiet servers, the vast majority of requests return empty. You're paying the full cost of a network round trip — DNS lookup, TCP connection, HTTP overhead — for nothing.
+
+## Long-polling: holding the line open
+
+> _<VocabTooltip slug="long-polling">Long-polling</VocabTooltip> is just polling where the server doesn't answer until it has something to say._
+
+Instead of the server immediately replying "nothing new," it holds the connection open and waits. When new data arrives, it sends the response and closes the connection. The client then immediately opens a new request and waits again.
+
+```javascript
+// Client: open a request, wait for the server to respond, then immediately repeat
+async function longPoll(onNewMessages) {
+  // This loop never sleeps — it only waits for the server to respond
+  while (true) {
+    try {
+      const response = await fetch("/api/messages/wait", {
+        // A long timeout: we expect the server to hold this for up to 30 seconds
+        signal: AbortSignal.timeout(35_000),
+      });
+
+      if (response.ok) {
+        const messages = await response.json();
+        onNewMessages(messages);
+      }
+    } catch (error) {
+      // On timeout or network failure, pause briefly before reconnecting
+      // to avoid hammering the server during an outage
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    // No setTimeout here — the delay IS the server's wait time
+  }
+}
+```
+
+```javascript
+// Server (Node.js / Express): hold the request until data arrives
+app.get("/api/messages/wait", (req, res) => {
+  // Subscribe to a simple in-memory event emitter
+  const listener = (messages) => {
+    res.json(messages); // Answer the request now that we have data
+    messageEmitter.off("new", listener); // Clean up — this request is done
+  };
+
+  messageEmitter.on("new", listener);
+
+  // If no message arrives within 30 seconds, respond with an empty array
+  // so the client reconnects rather than timing out with an error
+  setTimeout(() => {
+    messageEmitter.off("new", listener);
+    if (!res.headersSent) res.json([]);
+  }, 30_000);
+});
+```
+
+Long-polling cuts wasted requests dramatically — you get one request per actual message batch, plus the occasional timeout reconnect. The downside: every waiting client is holding an open server connection, which limits how many concurrent clients you can serve.
+
+## Server push: the mailbox model
+
+<VocabTooltip slug="server-push">Server push</VocabTooltip> flips the relationship entirely. Instead
+of clients asking, the server sends data whenever it has something new — like getting a real mailbox
+installed. The client connects once and then listens.
+
+```javascript
+// The client connects once and receives a stream of events
+const eventsource = new EventSource("/api/live-feed");
+
+eventsource.addEventListener("message", (event) => {
+  const data = JSON.parse(event.data);
+  console.log("Server pushed:", data);
+});
+
+eventsource.addEventListener("error", () => {
+  // EventSource auto-reconnects on failure — nothing extra needed here
+  console.log("Connection dropped, browser is reconnecting…");
+});
+```
+
+The server never waits for a question. It just sends when it knows.
+
+## Comparing the three approaches
+
+| Approach                      | Latency               | Server load            | Complexity | Best for                                         |
+| ----------------------------- | --------------------- | ---------------------- | ---------- | ------------------------------------------------ |
+| Polling                       | High (interval-bound) | High (empty responses) | Low        | Simple dashboards, low-frequency updates         |
+| Long-polling                  | Low                   | Medium                 | Medium     | Chat, notifications (< 10k concurrent users)     |
+| Server push (SSE / WebSocket) | Near-zero             | Low                    | Higher     | Live data, collaborative tools, high concurrency |
+
+<VocabTooltip slug="latency">Latency</VocabTooltip> in polling is bounded by the interval. If you
+poll every five seconds, a message sent at second 0 won't be seen until second 5 — worst case.
+Long-polling and server push deliver messages within milliseconds of the server knowing about them.
+
+## Check your understanding
+
+<Quiz
+  question="A polling interval of 5 seconds means a user might wait up to how long to see a new message?"
+  options={[
+    "500ms — polling is near real-time",
+    "5 seconds — the full interval in the worst case",
+    "10 seconds — you have to wait for two rounds",
+    "It depends on the server response time only",
+  ]}
+  answer={1}
+  explanation="Polling is interval-bound. If a message arrives on the server immediately after the client just polled, the client won't see it until the next poll fires — up to 5 seconds later in this case."
+/>
+
+<Quiz
+  question="What makes long-polling more efficient than regular polling when messages are infrequent?"
+  options={[
+    "It uses a faster protocol than HTTP",
+    "The server only responds when it has data, so most connections carry a real payload",
+    "It batches all messages into a single daily request",
+    "It skips the TCP handshake on every request",
+  ]}
+  answer={1}
+  explanation="Regular polling sends an empty response on every cycle when nothing is new. Long-polling holds the connection open until data arrives, so each completed round trip almost always carries a real payload. Empty trips are replaced by patient waiting."
+/>
+
+<FillBlank
+  question="The pattern where a server holds an HTTP request open until new data is available, then responds, is called ______-polling."
+  answer="long"
+/>
+
+## What you learned
+
+- HTTP polling asks the server repeatedly on a fixed schedule — most responses during quiet periods are empty, wasting bandwidth and server CPU
+- Long-polling holds the connection open until the server has data to send, reducing wasted requests at the cost of holding more concurrent connections
+- Server push (SSE or WebSocket) delivers data to the client the moment it's available, achieving near-zero latency and low server load at the cost of additional implementation complexity
+- Choosing the right model depends on update frequency, concurrent user count, and acceptable latency — there is no universally best answer
+
+The next lesson opens the WebSocket protocol and shows you exactly how a browser and server negotiate that persistent, two-way connection.

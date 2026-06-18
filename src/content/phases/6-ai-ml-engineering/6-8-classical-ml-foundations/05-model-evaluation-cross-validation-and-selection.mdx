@@ -1,0 +1,429 @@
+---
+title: "Model Evaluation, Cross-Validation, and Selection"
+description: "A model that scores 99% on training data but fails in production is worthless. Learn to measure generalization honestly and select models that actually work."
+phase: 6
+module: "6-8"
+order: 5
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["AL-1", "DS-2", "SE-2"]
+  swebok: ["Software Testing", "Software Quality", "Mathematical Foundations"]
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - overfitting
+  - cross-validation
+  - bias-variance-tradeoff
+  - precision
+  - recall
+  - f1-score
+  - roc-auc
+  - hyperparameter
+learningOutcomes:
+  - "Implement k-fold cross-validation from scratch and explain why it produces a more reliable accuracy estimate than a single train/test split"
+  - "Calculate precision, recall, and F1 score from a confusion matrix and explain the trade-off between them in a given business context"
+  - "Construct a learning curve for a model and diagnose whether it is underfitting or overfitting based on the gap between training and validation error"
+  - "Select between two models using nested cross-validation and articulate why using the test set for model selection introduces optimistic bias"
+prerequisites:
+  - "Linear and logistic regression (lesson 6-8-02)"
+  - "Decision Trees and Random Forests (lesson 6-8-03)"
+  - "Support Vector Machines (lesson 6-8-04)"
+  - "Python, NumPy, and scikit-learn basics"
+---
+
+## Why this matters
+
+Selecting a model is only half the work — the other half is measuring it correctly. A model that achieves 99% accuracy sounds impressive until you learn that 99% of the examples in the dataset are from one class and the model just predicts that class every single time. Measurement that does not reflect your real goal is not neutral; it is actively misleading, and it causes ML projects to ship models that harm users and erode trust.
+
+Every technique in this lesson exists because someone built something that looked great in development and failed in production. Train/test splits can give you a lucky draw. A held-out test set used to pick between models leaks information. Accuracy on a class-imbalanced dataset conceals a useless model. Learning to evaluate properly is not academic hygiene — it is the difference between a model that works and one that merely reports that it works.
+
+## The problem with a single train/test split
+
+Imagine you train five models and pick the one with the best test accuracy. You have now used the test set to make a decision. That test set is no longer a fair witness — it has influenced your choice, which means your reported accuracy is optimistically biased. The model looks better than it will on genuinely unseen data.
+
+The solution is to separate model selection from final evaluation. But there is a second problem: a single split is a gamble. If the 20% you randomly held out happens to contain easier examples, accuracy is inflated. If it contains harder ones, accuracy is deflated. You need a procedure that averages over many splits.
+
+> **Cross-validation estimates generalization by training and evaluating on multiple different subsets — the result is an average over many data draws, not a single lucky split.**
+
+```python
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import KFold, cross_val_score
+
+X, y = load_breast_cancer(return_X_y=True)
+
+# K-Fold manually: to show what cross_val_score does under the hood
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+fold_scores = []
+for fold_idx, (train_idx, val_idx) in enumerate(kf.split(X)):
+    X_train, X_val = X[train_idx], X[val_idx]
+    y_train, y_val = y[train_idx], y[val_idx]
+
+    model = LogisticRegression(max_iter=5000)
+    model.fit(X_train, y_train)
+
+    # Evaluate on the held-out fold — this fold was never seen during training
+    score = model.score(X_val, y_val)
+    fold_scores.append(score)
+    print(f"Fold {fold_idx + 1}: {score:.4f}")
+
+print(f"\nMean CV accuracy:  {np.mean(fold_scores):.4f}")
+print(f"Std dev:           {np.std(fold_scores):.4f}")
+# A small std dev means the estimate is stable — not dependent on the split
+```
+
+## Beyond accuracy: the confusion matrix
+
+Accuracy tells you how often the model is right. It does not tell you _how_ it is wrong. Consider a cancer-screening model that achieves 98% accuracy on a dataset where 2% of cases are positive. If it predicts negative for every patient, it still scores 98% — and misses every cancer.
+
+The <VocabTooltip slug="confusion matrix">confusion matrix</VocabTooltip> disaggregates predictions into four categories: true positives (TP), true negatives (TN), false positives (FP), and false negatives (FN). From these you can compute metrics that reflect your actual goal.
+
+```python
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, classification_report
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+model = LogisticRegression(max_iter=5000)
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+
+# Confusion matrix: rows = actual, columns = predicted
+cm = confusion_matrix(y_test, y_pred)
+tn, fp, fn, tp = cm.ravel()
+
+print("Confusion matrix:")
+print(f"  True Neg:  {tn}  |  False Pos: {fp}")
+print(f"  False Neg: {fn}  |  True Pos:  {tp}")
+
+# Precision: of everything we called positive, how many were actually positive?
+# High precision matters when false positives are expensive (e.g. spam filtering)
+precision = tp / (tp + fp)
+
+# Recall: of all actual positives, how many did we catch?
+# High recall matters when false negatives are expensive (e.g. cancer screening)
+recall = tp / (tp + fn)
+
+# F1: harmonic mean of precision and recall — useful when you need both
+f1 = 2 * precision * recall / (precision + recall)
+
+print(f"\nPrecision: {precision:.4f}")
+print(f"Recall:    {recall:.4f}")
+print(f"F1 Score:  {f1:.4f}")
+
+# classification_report computes all this at once, per class
+print("\n", classification_report(y_test, y_pred))
+```
+
+## The bias-variance tradeoff
+
+Every model makes two kinds of errors simultaneously:
+
+- **Bias**: how wrong the model is on average, even with unlimited data. High bias means the model is too simple to capture the true pattern (underfitting).
+- **Variance**: how much the model's predictions change when trained on a different sample of the same population. High variance means the model memorized the training data (overfitting).
+
+You cannot eliminate both at once. Making a model more complex reduces bias but increases variance. The sweet spot — the model complexity that minimizes total error on unseen data — is what model selection is trying to find.
+
+> **The <VocabTooltip slug="bias-variance-tradeoff">bias-variance tradeoff</VocabTooltip>: a model that is too simple underfits (high bias), a model that is too complex overfits (high variance). Cross-validation finds the middle.**
+
+```python
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend for running without a display
+import matplotlib.pyplot as plt
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+train_scores, test_scores = [], []
+depths = range(1, 20)
+
+for depth in depths:
+    tree = DecisionTreeClassifier(max_depth=depth, random_state=42)
+    tree.fit(X_train, y_train)
+
+    # As depth grows, training accuracy monotonically increases toward 1.0
+    train_scores.append(tree.score(X_train, y_train))
+
+    # Test accuracy peaks then falls — the model starts memorizing noise
+    test_scores.append(tree.score(X_test, y_test))
+
+best_depth = depths[np.argmax(test_scores)]
+print(f"Best max_depth: {best_depth}")
+print(f"Best test accuracy: {max(test_scores):.4f}")
+print(f"Training accuracy at best depth: {train_scores[best_depth - 1]:.4f}")
+
+# When train_score >> test_score, the model is overfitting
+# When both are low, the model is underfitting (underpowered for this problem)
+gap = train_scores[best_depth - 1] - test_scores[best_depth - 1]
+print(f"Train-test gap at best depth: {gap:.4f}")
+```
+
+## ROC curves and AUC
+
+Classification models do not just produce a class label — they produce a probability (or score). You choose a threshold (e.g., predict positive if P > 0.5) and that threshold determines your precision/recall trade-off. The <VocabTooltip slug="roc-auc">ROC curve</VocabTooltip> shows the full trade-off at every possible threshold.
+
+The Area Under the ROC Curve (AUC) collapses this curve to a single number. AUC = 1.0 is a perfect classifier. AUC = 0.5 is random guessing. AUC is insensitive to class imbalance, making it the preferred summary metric when positive examples are rare.
+
+```python
+from sklearn.datasets import load_breast_cancer
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score, roc_curve
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+lr = LogisticRegression(max_iter=5000).fit(X_train, y_train)
+rf = RandomForestClassifier(n_estimators=100, random_state=42).fit(X_train, y_train)
+
+# predict_proba returns [P(class=0), P(class=1)] for each example
+lr_probs = lr.predict_proba(X_test)[:, 1]   # probability of positive class
+rf_probs = rf.predict_proba(X_test)[:, 1]
+
+lr_auc = roc_auc_score(y_test, lr_probs)
+rf_auc = roc_auc_score(y_test, rf_probs)
+
+print(f"Logistic Regression AUC: {lr_auc:.4f}")
+print(f"Random Forest AUC:       {rf_auc:.4f}")
+
+# AUC interpretation: probability that the model ranks a random positive
+# example higher than a random negative example
+# This is threshold-independent — useful when you haven't chosen a threshold yet
+print(f"\nRF is better by: {rf_auc - lr_auc:.4f} AUC points")
+```
+
+## Nested cross-validation for honest model selection
+
+When you use cross-validation to both tune <VocabTooltip slug="hyperparameter">hyperparameters</VocabTooltip> and report accuracy on the same data, the reported accuracy is optimistically biased — you have implicitly selected the hyperparameters that happened to do well on those folds. Nested cross-validation solves this by separating the two concerns:
+
+- **Inner loop**: uses cross-validation to choose the best hyperparameter setting.
+- **Outer loop**: uses cross-validation to evaluate _the selection procedure itself_ on folds the inner loop never saw.
+
+```python
+from sklearn.datasets import load_breast_cancer
+from sklearn.svm import SVC
+from sklearn.model_selection import cross_val_score, GridSearchCV, KFold
+
+X, y = load_breast_cancer(return_X_y=True)
+
+# Inner cross-validation: GridSearchCV tunes C using 3-fold CV
+# This selects the best C value on the inner folds
+param_grid = {"C": [0.1, 1.0, 10.0]}
+inner_cv = KFold(n_splits=3, shuffle=True, random_state=42)
+outer_cv = KFold(n_splits=5, shuffle=True, random_state=0)
+
+grid_search = GridSearchCV(
+    estimator=SVC(kernel="rbf"),
+    param_grid=param_grid,
+    cv=inner_cv,
+    scoring="roc_auc",
+)
+
+# Outer cross-validation: evaluates the grid-search procedure on unseen folds
+# cross_val_score fits a fresh grid_search on each outer training fold, then
+# evaluates on the outer test fold — the test fold never influenced hyperparameter choice
+outer_scores = cross_val_score(grid_search, X, y, cv=outer_cv, scoring="roc_auc")
+
+print(f"Nested CV AUC scores: {outer_scores.round(4)}")
+print(f"Mean AUC: {outer_scores.mean():.4f} ± {outer_scores.std():.4f}")
+# This estimate is unbiased: tuning decisions and evaluation are fully separated
+```
+
+## Practice
+
+<SandboxExercise
+  language="python"
+  instructions="You have a binary classification task on an imbalanced dataset (90% class 0, 10% class 1). A naive classifier that predicts class 0 for everything achieves 90% accuracy. Your task: (1) Train a LogisticRegression on the training data. (2) Compute precision, recall, and F1 for class 1 (the minority class). (3) Compute the AUC. (4) Explain in a comment why accuracy is a misleading metric here."
+  initialCode={`import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
+
+np.random.seed(42)
+
+# Imbalanced dataset: 900 class-0 examples, 100 class-1 examples
+
+X = np.random.randn(1000, 5)
+y = np.zeros(1000, dtype=int)
+y[:100] = 1 # only 10% positive
+
+X_train, X_test, y_train, y_test = train_test_split(
+X, y, test_size=0.2, stratify=y, random_state=42
+)
+
+# 1. Train a logistic regression
+
+model = None # TODO: create and fit LogisticRegression(max_iter=1000)
+
+# 2. Precision, recall, F1 for class 1 (pos_label=1)
+
+prec = None # TODO
+rec = None # TODO
+f1 = None # TODO
+
+# 3. AUC (use predict_proba)
+
+probs = None # TODO: probability of class 1
+auc = None # TODO
+
+# 4. Why accuracy is misleading here:
+
+# TODO: add a comment
+
+print(f"Precision: {prec:.4f}")
+print(f"Recall: {rec:.4f}")
+print(f"F1: {f1:.4f}")
+print(f"AUC: {auc:.4f}")
+print(f"Naive accuracy: 0.9000 <-- class 0 always wins")`}
+  solution={`import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
+
+np.random.seed(42)
+
+X = np.random.randn(1000, 5)
+y = np.zeros(1000, dtype=int)
+y[:100] = 1
+
+X_train, X_test, y_train, y_test = train_test_split(
+X, y, test_size=0.2, stratify=y, random_state=42
+)
+
+# stratify=y ensures each split preserves the class ratio
+
+model = LogisticRegression(max_iter=1000)
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+
+# pos_label=1: report metrics for the minority class we actually care about
+
+prec = precision_score(y_test, y_pred, pos_label=1)
+rec = recall_score(y_test, y_pred, pos_label=1)
+f1 = f1_score(y_test, y_pred, pos_label=1)
+
+# predict_proba[:, 1] = probability the example is class 1
+
+probs = model.predict_proba(X_test)[:, 1]
+auc = roc_auc_score(y_test, probs)
+
+# Accuracy is misleading because the class distribution is 9:1.
+
+# A model that always predicts 0 gets 90% accuracy without detecting
+
+# any of the positives. Precision/recall/AUC measure performance on
+
+# the rare class that actually matters.
+
+print(f"Precision: {prec:.4f}")
+print(f"Recall: {rec:.4f}")
+print(f"F1: {f1:.4f}")
+print(f"AUC: {auc:.4f}")
+print(f"Naive accuracy: 0.9000 <-- class 0 always wins")`}
+testCases={["model is fitted (not None)", "prec is a float between 0 and 1", "auc is greater than 0.5"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "You train 10 different models and pick the one with the highest test set accuracy. What is the problem with reporting that accuracy as the model's generalization performance?",
+      options: [
+        "Nothing — test accuracy is always a valid estimate of generalization",
+        "The test set has been used to make a selection decision, so the reported accuracy is optimistically biased",
+        "Accuracy is never a valid metric — you should always use AUC",
+        "You need to retrain on the full dataset before reporting accuracy",
+      ],
+      correct: 1,
+      explanation:
+        "When you use the test set to choose between models, information from the test set has influenced your decision. The selected model appears better than it will generalize because you picked it partly because it was lucky on that specific test draw. Nested cross-validation separates selection from evaluation.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A fraud detection model has precision 0.80 and recall 0.40. Your manager says recall must be at least 0.70 to deploy. Which action directly improves recall at the cost of precision?",
+      options: [
+        "Increase the classification threshold from 0.5 to 0.8",
+        "Decrease the classification threshold from 0.5 to 0.2",
+        "Add more features to the model",
+        "Use a more complex model architecture",
+      ],
+      correct: 1,
+      explanation:
+        "Recall = TP / (TP + FN). Lowering the threshold means the model calls more examples positive, which catches more true frauds (fewer FN) but also creates more false alarms (more FP), reducing precision. Raising the threshold does the opposite.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A decision tree scores 0.99 on training data and 0.65 on the validation set. A learning curve shows training accuracy is flat at 0.99 across all training set sizes. What is the diagnosis?",
+      options: [
+        "Underfitting — the model is too simple for this dataset",
+        "Overfitting — the model memorized the training data and does not generalize",
+        "The dataset is too small to draw conclusions",
+        "The train/val split was done incorrectly",
+      ],
+      correct: 1,
+      explanation:
+        "A large gap between training accuracy (0.99) and validation accuracy (0.65) is the hallmark of overfitting. The model learned the training examples by memory rather than the underlying pattern. Solutions: constrain max_depth, prune the tree, use a Random Forest.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "You are comparing a logistic regression model to a random forest on a medical dataset where positive cases are only 3% of the data. Which metric best summarizes the comparison?",
+      options: [
+        "Training accuracy",
+        "Confusion matrix diagonal sum",
+        "AUC (Area Under the ROC Curve)",
+        "Mean squared error",
+      ],
+      correct: 2,
+      explanation:
+        "AUC measures ranking quality across all thresholds and is robust to class imbalance. On a 97/3 split, accuracy is dominated by the majority class and MSE is not defined for classification. The confusion matrix is useful for inspection but does not collapse to a single comparable number.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="Cross-validation estimates generalization by averaging performance across many ___ rather than a single lucky split. When a model scores high on training data but low on validation data, this is called ___. The ___ tradeoff explains why increasing model complexity reduces bias but increases ___. AUC is preferred over accuracy on imbalanced datasets because it measures ___ quality across all possible classification thresholds."
+  answers={["folds", "overfitting", "bias-variance", "variance", "ranking"]}
+  hints={[
+    "The 'K' in K-fold refers to this.",
+    "The model memorized rather than generalized.",
+    "The fundamental tension in model complexity.",
+    "Models that memorize training data have high ___.",
+    "ROC stands for Receiver Operating Characteristic — it is a curve of true positive rate vs false positive rate.",
+  ]}
+/>
+
+## What you learned
+
+- K-fold cross-validation averages generalization estimates across multiple data splits, producing a more reliable and stable accuracy estimate than any single train/test split.
+- Precision, recall, and F1 score expose how a model performs on each class — on imbalanced datasets, accuracy alone conceals a model that learned to ignore the minority class entirely.
+- The bias-variance tradeoff explains why every model has a sweet spot of complexity: too simple underfits (high bias), too complex overfits (high variance), and learning curves diagnose which failure mode you are in.
+- AUC summarizes classifier quality across all possible thresholds in a single number that is robust to class imbalance — the preferred metric when positive examples are rare.
+- Nested cross-validation separates hyperparameter selection from final evaluation, preventing the optimistic bias that occurs when the test set influences model choice.
+
+You now have the complete toolkit for training, evaluating, and selecting classical ML models. The same principles — loss functions, regularization, cross-validation, precision/recall trade-offs — scale directly into deep learning, where the models are larger but the evaluation discipline is identical.

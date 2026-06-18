@@ -1,0 +1,360 @@
+---
+title: "The WebSocket Protocol"
+description: "Learn how WebSockets upgrade an HTTP connection into a persistent, full-duplex channel and write a working real-time connection in the browser."
+phase: 2
+module: "2-7"
+order: 2
+estimatedMinutes: 14
+difficulty: "intermediate"
+standards:
+  cs2023: ["NC-1", "NC-2", "WS-2"]
+  swebok: ["Software Design", "Software Construction"]
+  bloom: "apply"
+  sfia: 2
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - websocket
+  - handshake
+  - full-duplex
+  - frame
+  - heartbeat
+  - connection-state
+learningOutcomes:
+  - "Write browser-side WebSocket code that opens a connection, sends messages, and handles incoming events"
+  - "Explain the HTTP upgrade handshake that establishes a WebSocket connection"
+  - "Implement reconnection logic that handles dropped connections without user intervention"
+  - "Distinguish between WebSocket connection states and write guards that prevent sending on a closed socket"
+prerequisites:
+  - "HTTP polling vs. push (lesson 2-7-1)"
+  - "JavaScript event listeners"
+  - "async/await"
+  - "JSON.stringify and JSON.parse"
+---
+
+## Why this matters
+
+WebSockets are the backbone of nearly every collaborative, real-time application you've used — Figma's multiplayer, Slack's live messages, GitHub's live PR notifications, online games. Once you understand how to open and maintain a WebSocket connection, you can build features that would be impossible or impractical with polling. More importantly, you'll understand why a connection drops and how to recover from it gracefully — which is the skill that separates a production WebSocket implementation from a fragile demo.
+
+The browser's `WebSocket` API is deceptively small. You can open a connection in one line. But the real work is managing what happens when that connection is lost, flooded with messages, or shut down cleanly — and that's what this lesson covers in full.
+
+## A phone call, not a letter
+
+HTTP is like mailing letters: you send a letter (request), you wait, you get a letter back (response), and then the exchange is over. Every new request starts fresh.
+
+<VocabTooltip slug="websocket">WebSockets</VocabTooltip> are like a phone call. Both sides dial in
+once and then either party can talk whenever they want, without waiting for the other to ask a
+question. The connection stays open until one side hangs up.
+
+> _A WebSocket is just an HTTP connection that both parties agreed to repurpose into a persistent, two-way pipe._
+
+## The handshake
+
+The connection starts with a standard HTTP request — but with a special header that says "I'd like to upgrade this to a WebSocket."
+
+```
+GET /chat HTTP/1.1
+Host: example.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+```
+
+The server replies:
+
+```
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+```
+
+That `101 Switching Protocols` status code is the <VocabTooltip slug="handshake">handshake</VocabTooltip> completing. After that single HTTP exchange, the TCP connection is repurposed. HTTP is gone. Both sides now speak the WebSocket framing protocol — small binary <VocabTooltip slug="frame">frames</VocabTooltip> that carry your messages.
+
+You never write any of this manually. The browser handles the handshake entirely when you call `new WebSocket(url)`.
+
+## Opening a connection
+
+```javascript
+// ws:// for unencrypted, wss:// for TLS-encrypted (always use wss:// in production)
+const socket = new WebSocket("wss://example.com/chat");
+
+// The browser fires "open" once the handshake completes
+socket.addEventListener("open", () => {
+  console.log("Connection established");
+
+  // Send a JSON-encoded message — the server receives this as a string
+  socket.send(JSON.stringify({ type: "join", room: "general" }));
+});
+
+// "message" fires every time the server sends a frame
+socket.addEventListener("message", (event) => {
+  // event.data is always a string (or Blob for binary data)
+  const msg = JSON.parse(event.data);
+  console.log("Received:", msg);
+});
+
+// "close" fires when either side closes the connection, or when the network drops
+socket.addEventListener("close", (event) => {
+  // event.code and event.reason explain why it closed
+  console.log(`Closed: code=${event.code} reason=${event.reason}`);
+});
+
+// "error" fires before "close" when something goes wrong
+socket.addEventListener("error", () => {
+  // The error event carries no useful detail by design (security: avoid info leaks)
+  // "close" will fire next with the actual code
+  console.error("WebSocket error — connection will close");
+});
+```
+
+## Connection states
+
+A WebSocket has four states, accessible via `socket.readyState`. Sending a message on a non-open socket throws an error, so always guard before you send.
+
+```javascript
+// readyState values — the WebSocket API exposes these as constants
+// WebSocket.CONNECTING === 0  — handshake in progress
+// WebSocket.OPEN       === 1  — connected, safe to send
+// WebSocket.CLOSING    === 2  — close handshake in progress
+// WebSocket.CLOSED     === 3  — connection is gone
+
+function sendSafely(socket, data) {
+  if (socket.readyState !== WebSocket.OPEN) {
+    // Queuing logic would go here in production
+    console.warn("Cannot send — socket is not open");
+    return false;
+  }
+
+  socket.send(JSON.stringify(data));
+  return true;
+}
+```
+
+The most common mistake beginners make is calling `socket.send()` in an event handler that fires before `"open"` — the `readyState` is still `CONNECTING` (0) and the call throws.
+
+## Reconnection
+
+Networks drop. Phones switch from WiFi to cellular. Servers restart. A production WebSocket client must reconnect automatically, with exponential backoff so it doesn't hammer a struggling server.
+
+```javascript
+class ReconnectingSocket {
+  #url;
+  #socket = null;
+  #retryCount = 0;
+  #maxRetryMs = 30_000; // Cap backoff at 30 seconds
+  #onMessage;
+
+  constructor(url, onMessage) {
+    this.#url = url;
+    this.#onMessage = onMessage;
+    this.#connect();
+  }
+
+  #connect() {
+    this.#socket = new WebSocket(this.#url);
+
+    this.#socket.addEventListener("open", () => {
+      // Reset the retry counter — we have a healthy connection again
+      this.#retryCount = 0;
+      console.log("WebSocket connected");
+    });
+
+    this.#socket.addEventListener("message", (event) => {
+      this.#onMessage(JSON.parse(event.data));
+    });
+
+    this.#socket.addEventListener("close", () => {
+      // Exponential backoff: 1s, 2s, 4s, 8s, … up to 30s
+      // This prevents thundering herd when a server restarts
+      const delay = Math.min(1000 * 2 ** this.#retryCount, this.#maxRetryMs);
+      this.#retryCount++;
+      console.log(`Reconnecting in ${delay}ms (attempt ${this.#retryCount})`);
+      setTimeout(() => this.#connect(), delay);
+    });
+
+    this.#socket.addEventListener("error", () => {
+      // "close" always follows "error" — reconnect logic lives there
+    });
+  }
+
+  send(data) {
+    if (this.#socket?.readyState === WebSocket.OPEN) {
+      this.#socket.send(JSON.stringify(data));
+    }
+  }
+
+  close() {
+    // Remove the close listener before closing so we don't trigger reconnection
+    this.#socket.removeEventListener("close", this.#connect);
+    this.#socket.close(1000, "Client closed intentionally");
+  }
+}
+
+// Usage
+const chat = new ReconnectingSocket("wss://example.com/chat", (msg) => {
+  console.log("New message:", msg);
+});
+
+chat.send({ type: "message", text: "Hello!" });
+```
+
+## Heartbeats
+
+Some proxies and load balancers close idle TCP connections after 60-90 seconds of silence. A <VocabTooltip slug="heartbeat">heartbeat</VocabTooltip> is a lightweight periodic message that keeps the connection alive and also detects silently dropped connections.
+
+```javascript
+// Send a ping every 25 seconds — well within most proxy idle timeouts
+function startHeartbeat(socket) {
+  const interval = setInterval(() => {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "ping" }));
+    } else {
+      // Socket is gone — stop sending heartbeats
+      clearInterval(interval);
+    }
+  }, 25_000);
+
+  // Clean up when the connection closes
+  socket.addEventListener("close", () => clearInterval(interval));
+
+  return interval;
+}
+```
+
+The server should reply with a `{ type: "pong" }` message. If the client doesn't receive a pong within a timeout window, it can assume the connection is silently dead and force a reconnect.
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// Build a mock WebSocket client that connects, handles messages, and reconnects.
+//
+// For this exercise we'll use a MockWebSocket class that simulates
+// connection events without a real server.
+
+class MockWebSocket {
+constructor(url) {
+this.url = url;
+this.readyState = 0; // CONNECTING
+
+    // Simulate a successful connection after 10ms
+    setTimeout(() => {
+      this.readyState = 1; // OPEN
+      if (this._openHandler) this._openHandler();
+    }, 10);
+
+}
+
+addEventListener(event, handler) {
+if (event === "open") this.\_openHandler = handler;
+if (event === "message") this.\_messageHandler = handler;
+if (event === "close") this.\_closeHandler = handler;
+}
+
+send(data) {
+if (this.readyState !== 1) throw new Error("WebSocket is not open");
+console.log("Sent:", data);
+}
+
+// Test helper: simulate an incoming message from the server
+simulateMessage(data) {
+if (this.\_messageHandler) {
+this.\_messageHandler({ data: JSON.stringify(data) });
+}
+}
+
+close() {
+this.readyState = 3; // CLOSED
+if (this.\_closeHandler) this.\_closeHandler({ code: 1000 });
+}
+}
+
+// YOUR TASK:
+// Complete the connect() function below so that it:
+// 1. Creates a new MockWebSocket with the given url
+// 2. On "open", sends { type: "hello", name: "learner" }
+// 3. On "message", parses the JSON and logs the message text
+// 4. On "close", logs "Disconnected — would reconnect here"
+
+const receivedMessages = [];
+
+function connect(url) {
+const socket = new MockWebSocket(url);
+
+socket.addEventListener("open", () => {
+// TODO: send the hello message
+});
+
+socket.addEventListener("message", (event) => {
+// TODO: parse event.data and push the message to receivedMessages
+});
+
+socket.addEventListener("close", () => {
+// TODO: log the disconnect message
+});
+
+return socket;
+}
+
+// Test it
+const socket = connect("wss://example.com/chat");
+
+// Wait for open, then simulate a server message
+setTimeout(() => {
+socket.simulateMessage({ type: "message", text: "Welcome to the chat!" });
+
+// After receiving the message, verify our state
+setTimeout(() => {
+console.log("Messages received:", receivedMessages.length === 1); // true
+console.log("First message:", receivedMessages[0]?.text === "Welcome to the chat!"); // true
+}, 5);
+}, 20);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What does the HTTP status code 101 indicate in a WebSocket handshake?"
+  options={[
+    "The server rejected the WebSocket upgrade request",
+    "The connection switched protocols — HTTP is now a WebSocket pipe",
+    "The client must retry with a different WebSocket version",
+    "Authentication is required before upgrading",
+  ]}
+  answer={1}
+  explanation="101 Switching Protocols is the server's signal that it accepted the Upgrade request. After this response, the TCP connection is repurposed for the WebSocket framing protocol — HTTP is no longer spoken on this connection."
+/>
+
+<Quiz
+  question="Why should you check socket.readyState before calling socket.send()?"
+  options={[
+    "send() is asynchronous and requires a promise",
+    "Sending on a non-OPEN socket throws a runtime error",
+    "The server ignores messages sent during CONNECTING state",
+    "readyState must be checked for authentication purposes",
+  ]}
+  answer={1}
+  explanation="WebSocket.send() throws an InvalidStateError if readyState is not OPEN (1). This commonly happens when code calls send() before the 'open' event fires or after the connection has dropped."
+/>
+
+<Quiz
+  question="What is exponential backoff in a reconnection strategy?"
+  options={[
+    "Retrying faster and faster until the server responds",
+    "Waiting progressively longer between each reconnect attempt",
+    "Sending the same message multiple times until it succeeds",
+    "Using a secondary WebSocket URL after the first fails",
+  ]}
+  answer={1}
+  explanation="Exponential backoff doubles the wait time after each failed attempt (1s, 2s, 4s, 8s…) up to a cap. This prevents many clients from hammering a struggling server simultaneously — a phenomenon called 'thundering herd'."
+/>
+
+## What you learned
+
+- The WebSocket handshake starts as an HTTP request with an `Upgrade` header — the server responds with `101 Switching Protocols` and the TCP connection becomes a persistent two-way pipe
+- The browser's `WebSocket` API has four events (`open`, `message`, `close`, `error`) and four `readyState` values — always guard with `readyState === WebSocket.OPEN` before calling `send()`
+- Production WebSocket clients must reconnect automatically using exponential backoff to avoid hammering a restarting server
+- Heartbeat pings keep connections alive through proxy idle timeouts and reveal silently dropped connections before users notice
+
+The next lesson covers Server-Sent Events — a lighter alternative to WebSockets that works perfectly when data only needs to flow one direction, from server to client.

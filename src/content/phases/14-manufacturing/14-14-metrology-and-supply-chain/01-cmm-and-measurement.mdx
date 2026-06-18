@@ -1,0 +1,503 @@
+---
+title: "CMM Programming and Measurement Uncertainty"
+description: "Write a CMM measurement program, identify the sources of measurement uncertainty that determine whether your inspection results are trustworthy, and apply the GUM framework to calculate a combined uncertainty budget for a dimensional characteristic."
+phase: 14
+module: "14-14"
+order: 1
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1", "SE-2"]
+  swebok: ["Software Testing", "Software Quality"]
+  bloom: "apply"
+  sfia: 2
+  dreyfus: "competent"
+vocabulary:
+  - cmm
+  - measurement-uncertainty
+  - gage-repeatability-and-reproducibility
+  - calibration-traceability
+  - datum-reference-frame
+  - probe-qualification
+  - tolerance-stack-up
+  - coverage-factor
+  - expanded-uncertainty
+  - measurement-system-analysis
+learningOutcomes:
+  - "Write a CMM measurement routine in DMIS-style pseudocode that defines a datum reference frame, qualifies the probe, and reports a dimensional characteristic"
+  - "Identify at least four independent sources of measurement uncertainty in a CMM inspection and classify each as Type A (statistical) or Type B (other means)"
+  - "Calculate a combined standard uncertainty from two uncorrelated uncertainty components using the root-sum-of-squares formula"
+  - "Explain why a measurement result reported without an uncertainty statement is incomplete and potentially misleading for a conformance decision"
+prerequisites:
+  - "GD&T tolerance zones and datum reference frames (ASME Y14.5)"
+  - "Basic statistics: mean, standard deviation, normal distribution"
+  - "What a tolerance is and how it relates to part function"
+---
+
+## Why this matters
+
+A part either conforms to its engineering drawing or it does not — but you can only know which if your measurement is trustworthy. Every measurement result carries inherent uncertainty: the machine has geometric errors, the probe deflects, temperature expands the part, and the operator makes decisions that affect the result. An inspector who reports "diameter = 25.003 mm" without an uncertainty statement has given you a number with no indication of whether 25.003 ± 0.001 mm is the correct interpretation, or 25.003 ± 0.010 mm. Those two readings have completely different consequences when your tolerance is ±0.005 mm.
+
+In modern manufacturing, measurement uncertainty is a professional requirement, not an academic nicety. ISO 14253-1 — the standard for conformance decisions against tolerances — requires you to subtract the expanded measurement uncertainty from the tolerance band before making a pass/fail call. Skipping this step means you're shipping parts that might actually be out of specification, or scrapping parts that are genuinely good. Either mistake costs real money and damages real customer relationships.
+
+## The inspection lab as a data-producing system
+
+Think of a CMM inspection routine like a software integration test. The test has a setup step (fixture the part, define the coordinate system), an execution step (probe the features), and an assertion step (compare measured values to specification). Just as a flaky test that sometimes passes and sometimes fails is worse than no test at all — because it creates false confidence — a measurement system with uncharacterized uncertainty creates false confidence in conformance decisions.
+
+The software analogy extends further: probe paths are programs. A CMM executes them deterministically given the same input (part geometry), but uncertainty enters from the environment (temperature), the tooling (probe tip wear), and the measurement system itself (machine geometric error). Uncertainty analysis is the equivalent of characterizing your test environment to know whether your test results are meaningful.
+
+> **A CMM measurement routine is just a program that queries physical geometry and returns numeric results — and like any program, its outputs are only as trustworthy as its inputs and its known sources of error.**
+
+## CMM programming: structure of a measurement routine
+
+A Coordinate Measuring Machine executes a measurement routine in three stages: coordinate system alignment, probe qualification, and feature measurement. The industry-standard language for CMM programming is **DMIS** (Dimensional Measuring Interface Standard, ANSI/CAM-I 101). Most CMM software vendors (Hexagon PC-DMIS, Zeiss Calypso, Renishaw Modus) compile to DMIS or use a compatible internal language.
+
+```python
+# CMM measurement routine for a cylindrical bore
+# Written as Python pseudocode mirroring the structure of a real DMIS program.
+# On a physical CMM, each function call translates to machine motion and sensor readout.
+
+from dataclasses import dataclass
+from typing import NamedTuple
+import math
+
+@dataclass
+class Point3D:
+    x: float
+    y: float
+    z: float
+
+@dataclass
+class MeasuredFeature:
+    nominal: float       # Drawing value
+    actual: float        # Measured value
+    deviation: float     # actual - nominal
+    upper_tol: float     # Upper tolerance limit
+    lower_tol: float     # Lower tolerance limit
+
+    @property
+    def in_tolerance(self) -> bool:
+        # Conformance check WITHOUT guard banding — this is the naive approach.
+        # ISO 14253-1 requires subtracting measurement uncertainty from the band.
+        return self.lower_tol <= self.deviation <= self.upper_tol
+
+
+class CMMRoutine:
+    """
+    Pseudocode CMM routine for a cylindrical bore (nominal Ø25.000 mm, tolerance ±0.010 mm).
+
+    Real CMM programs are sequential scripts. This class mirrors that structure:
+    one method per stage, called in a fixed order.
+    """
+
+    def __init__(self, part_serial: str):
+        self.part_serial = part_serial
+        self.alignment_rms_error: float | None = None  # Set after alignment
+        self.probe_diameter_actual: float | None = None
+
+    def qualify_probe(self, reference_sphere_nominal_diameter: float) -> float:
+        """
+        Probe qualification measures the probe tip against a certified reference sphere
+        to compute the effective probe diameter. This compensates for tip wear —
+        a worn tip will report features as smaller than they are.
+
+        Returns: effective probe diameter (mm)
+        """
+        # Probe 5 equatorial points + 1 north-pole point on the reference sphere.
+        # The CMM fits a sphere to these points and back-calculates the probe diameter.
+        # In real DMIS: PTMEAS/CART,x,y,z,i,j,k  (point + approach vector)
+        measured_sphere_diameter = self._probe_reference_sphere(reference_sphere_nominal_diameter)
+
+        # Effective probe tip = difference between reference sphere measured and nominal
+        # We store this so the controller applies it as an offset to every subsequent measurement.
+        effective_tip_diameter = reference_sphere_nominal_diameter - (
+            measured_sphere_diameter - reference_sphere_nominal_diameter
+        )
+        self.probe_diameter_actual = effective_tip_diameter
+        return effective_tip_diameter
+
+    def establish_datum_reference_frame(
+        self,
+        datum_a_points: list[Point3D],   # 3+ points for primary datum plane
+        datum_b_points: list[Point3D],   # 2+ points for secondary datum axis
+        datum_c_points: list[Point3D],   # 1+ point for tertiary datum
+    ) -> float:
+        """
+        Establish the part coordinate system from the datum reference frame.
+        Datums are probed in the order specified by the drawing callout (A|B|C).
+
+        Returns: RMS alignment error (mm) — used to assess alignment quality.
+        The CMM fits a plane to datum A, a line to datum B, and a point to datum C.
+        These three constraints fully define the 6-DOF part coordinate system.
+        """
+        # Fit primary datum plane (constrains Z origin and two rotations)
+        plane_normal, plane_origin = self._fit_plane(datum_a_points)
+
+        # Fit secondary datum axis (constrains X origin and one rotation)
+        axis_direction, axis_origin = self._fit_line(datum_b_points)
+
+        # Tertiary datum constrains the remaining rotation (part rotation about B)
+        tertiary_point = datum_c_points[0]
+
+        # RMS fit residuals across all datum points quantify alignment quality.
+        # An RMS > 0.002 mm typically indicates a fixturing or datum contact problem.
+        rms = self._compute_alignment_rms(
+            datum_a_points, plane_normal, plane_origin
+        )
+        self.alignment_rms_error = rms
+        return rms
+
+    def measure_bore_diameter(
+        self,
+        center_nominal: Point3D,
+        nominal_diameter: float,
+        upper_tolerance: float,
+        lower_tolerance: float,
+        num_points: int = 8,
+    ) -> MeasuredFeature:
+        """
+        Measure a cylindrical bore by probing equally-spaced points around its circumference.
+
+        More points reduce the influence of form error (lobing, waviness) on the
+        diameter estimate — but never eliminate it entirely, which is why minimum-zone
+        fitting and uncertainty budgeting still matter.
+        """
+        if num_points < 4:
+            # Fewer than 4 points cannot distinguish a circle from an ellipse.
+            raise ValueError("Bore measurement requires at least 4 equidistant points")
+
+        probed_points: list[Point3D] = []
+        for i in range(num_points):
+            # Approach each point radially from outside to avoid probe dragging.
+            angle_rad = (2 * math.pi * i) / num_points
+            approach_x = center_nominal.x + (nominal_diameter / 2 + 2.0) * math.cos(angle_rad)
+            approach_y = center_nominal.y + (nominal_diameter / 2 + 2.0) * math.sin(angle_rad)
+            pt = self._probe_surface(
+                target=Point3D(
+                    x=center_nominal.x + (nominal_diameter / 2) * math.cos(angle_rad),
+                    y=center_nominal.y + (nominal_diameter / 2) * math.sin(angle_rad),
+                    z=center_nominal.z,
+                ),
+                approach_from=Point3D(approach_x, approach_y, center_nominal.z),
+            )
+            probed_points.append(pt)
+
+        # Fit a minimum-zone circle to the probed points (Chebyshev fitting)
+        actual_diameter, _ = self._fit_circle_minimum_zone(probed_points)
+
+        return MeasuredFeature(
+            nominal=nominal_diameter,
+            actual=actual_diameter,
+            deviation=actual_diameter - nominal_diameter,
+            upper_tol=upper_tolerance,
+            lower_tol=lower_tolerance,
+        )
+
+    # ── Internal helpers (would be machine firmware calls on a real CMM) ──────
+
+    def _probe_reference_sphere(self, nominal_diam: float) -> float:
+        # Placeholder: real CMM issues PTMEAS calls and reads back coordinates
+        return nominal_diam + 0.001  # Simulated 1 µm wear
+
+    def _fit_plane(self, points: list[Point3D]):
+        # Least-squares plane fit; returns (normal_vector, centroid)
+        return (0.0, 0.0, 1.0), Point3D(0, 0, 0)
+
+    def _fit_line(self, points: list[Point3D]):
+        return (1.0, 0.0, 0.0), Point3D(0, 0, 0)
+
+    def _compute_alignment_rms(self, points, normal, origin) -> float:
+        return 0.0008  # Simulated 0.8 µm RMS alignment residual
+
+    def _probe_surface(self, target: Point3D, approach_from: Point3D) -> Point3D:
+        # Simulated surface contact — real CMM reads encoder positions at trigger
+        return Point3D(target.x + 0.0002, target.y - 0.0001, target.z)
+
+    def _fit_circle_minimum_zone(self, points: list[Point3D]) -> tuple[float, Point3D]:
+        # Minimum-zone (Chebyshev) fit minimizes the difference between the
+        # largest and smallest radii — the ISO 1101-correct method for roundness.
+        # Least-squares fit is faster but overestimates diameter for lobed parts.
+        xs = [p.x for p in points]
+        ys = [p.y for p in points]
+        center_x = sum(xs) / len(xs)
+        center_y = sum(ys) / len(ys)
+        radii = [math.sqrt((p.x - center_x)**2 + (p.y - center_y)**2) for p in points]
+        diameter = (max(radii) + min(radii))  # min-zone diameter approximation
+        return diameter, Point3D(center_x, center_y, 0)
+
+
+# ── Run the routine ───────────────────────────────────────────────────────────
+
+routine = CMMRoutine(part_serial="P-2026-0042")
+
+tip_diameter = routine.qualify_probe(reference_sphere_nominal_diameter=25.000)
+print(f"Effective probe tip diameter: {tip_diameter:.4f} mm")
+
+alignment_rms = routine.establish_datum_reference_frame(
+    datum_a_points=[Point3D(0,0,0), Point3D(50,0,0), Point3D(25,50,0)],
+    datum_b_points=[Point3D(0,0,10), Point3D(0,0,40)],
+    datum_c_points=[Point3D(30,0,25)],
+)
+print(f"Datum alignment RMS: {alignment_rms*1000:.1f} µm")
+
+result = routine.measure_bore_diameter(
+    center_nominal=Point3D(0, 0, 25),
+    nominal_diameter=25.000,
+    upper_tolerance=+0.010,
+    lower_tolerance=-0.010,
+    num_points=8,
+)
+print(f"Bore diameter: {result.actual:.4f} mm  (nominal {result.nominal:.3f}, "
+      f"deviation {result.deviation*1000:+.1f} µm)")
+print(f"Naive conformance (no guard band): {'PASS' if result.in_tolerance else 'FAIL'}")
+```
+
+## Measurement uncertainty: the GUM framework
+
+Reporting a measurement without uncertainty is like reporting a software benchmark without the variance — the number is technically true but potentially misleading. The **Guide to the Expression of Uncertainty in Measurement (GUM)**, published by JCGM, is the international standard for characterizing and reporting measurement uncertainty.
+
+The GUM identifies two types of uncertainty evaluation:
+
+- **Type A**: Evaluated by statistical analysis of a series of observations (you measured the same feature 10 times and calculated the standard deviation of the mean).
+- **Type B**: Evaluated by other means — calibration certificates, manufacturer specifications, expert judgment, physical reasoning.
+
+Neither type is more "real" than the other. A calibration certificate's stated uncertainty for a gage block is a Type B input to your uncertainty budget, but it is based on Type A evaluations done at the national metrology lab.
+
+```python
+import math
+from dataclasses import dataclass
+
+@dataclass
+class UncertaintyComponent:
+    """A single contribution to the total measurement uncertainty."""
+    name: str
+    standard_uncertainty: float   # u_i — standard uncertainty (k=1, 68% confidence)
+    uncertainty_type: str         # "A" or "B"
+    source_description: str
+
+    @property
+    def variance(self) -> float:
+        # Each component contributes its variance (u²) to the combined budget.
+        # Components are combined in quadrature because we assume independence.
+        return self.standard_uncertainty ** 2
+
+
+def combined_standard_uncertainty(components: list[UncertaintyComponent]) -> float:
+    """
+    Root-sum-of-squares combination of uncorrelated uncertainty components.
+    GUM equation 13: u_c = sqrt(sum(u_i²))
+
+    This formula is valid when components are uncorrelated (independent sources).
+    Correlated sources (e.g., two measurements both affected by the same reference standard)
+    require cross-product terms — the full GUM covariance model.
+    """
+    return math.sqrt(sum(c.variance for c in components))
+
+
+def expanded_uncertainty(u_c: float, coverage_factor: float = 2.0) -> float:
+    """
+    Expanded uncertainty U = k * u_c
+    Coverage factor k=2 gives approximately 95% confidence for a normal distribution.
+    k=3 gives approximately 99.7% confidence.
+
+    The expanded uncertainty is what you report: "diameter = 25.003 ± 0.006 mm (k=2)"
+    """
+    return coverage_factor * u_c
+
+
+# ── Uncertainty budget for the bore diameter measurement ─────────────────────
+
+components = [
+    UncertaintyComponent(
+        name="Machine geometric error",
+        # CMM calibration certificate states 2.5 µm (k=2) volumetric accuracy.
+        # We convert to standard uncertainty: 2.5 µm / 2 = 1.25 µm
+        standard_uncertainty=0.00125,
+        uncertainty_type="B",
+        source_description="CMM calibration certificate, 2.5 µm U95, k=2",
+    ),
+    UncertaintyComponent(
+        name="Probe tip qualification",
+        # Probe qualification scatter: 10 repetitions of reference sphere, σ = 0.4 µm.
+        # Standard uncertainty of the mean = σ / sqrt(n) = 0.4 / sqrt(10) = 0.13 µm
+        standard_uncertainty=0.00013,
+        uncertainty_type="A",
+        source_description="10 repeat qualifications, σ=0.4 µm, u = σ/√10",
+    ),
+    UncertaintyComponent(
+        name="Thermal expansion",
+        # Part temperature measured as 20.5 ± 0.5°C. Aluminum CTE ≈ 23 µm/(m·°C).
+        # Feature size ≈ 25 mm. Uncertainty = CTE × size × δT = 23e-6 × 0.025 × 0.5 = 0.29 µm
+        standard_uncertainty=0.00029,
+        uncertainty_type="B",
+        source_description="Temperature uncertainty 0.5°C, aluminum CTE 23 µm/(m·°C), 25 mm feature",
+    ),
+    UncertaintyComponent(
+        name="Repeatability (measurement noise)",
+        # 20 repeat measurements of the bore: σ = 0.6 µm.
+        # u = σ / sqrt(n=20) = 0.6 / 4.47 = 0.13 µm
+        standard_uncertainty=0.00013,
+        uncertainty_type="A",
+        source_description="20 repeated bore measurements, σ=0.6 µm",
+    ),
+    UncertaintyComponent(
+        name="Form error (lobing, waviness)",
+        # Roundness of the bore measured as 1.2 µm peak-to-valley.
+        # Treated as rectangular distribution: u = 1.2 µm / (2 * sqrt(3)) = 0.35 µm
+        standard_uncertainty=0.00035,
+        uncertainty_type="B",
+        source_description="Roundness 1.2 µm P-V, rectangular distribution assumed",
+    ),
+    UncertaintyComponent(
+        name="Calibration traceability (gage blocks)",
+        # Reference gage block calibration: 0.5 µm (k=2). u = 0.25 µm.
+        standard_uncertainty=0.00025,
+        uncertainty_type="B",
+        source_description="NIST-traceable gage block calibration certificate",
+    ),
+]
+
+u_c = combined_standard_uncertainty(components)
+U95 = expanded_uncertainty(u_c, coverage_factor=2.0)
+
+print("Measurement Uncertainty Budget — Bore Diameter Ø25.000 mm")
+print("-" * 65)
+for c in components:
+    print(f"  [{c.uncertainty_type}] {c.name:<35} {c.standard_uncertainty*1000:5.2f} µm")
+print("-" * 65)
+print(f"  Combined standard uncertainty u_c:       {u_c*1000:5.2f} µm")
+print(f"  Expanded uncertainty U (k=2, 95%):       {U95*1000:5.2f} µm")
+print()
+print(f"Result: Ø25.003 ± {U95*1000:.2f} µm (k=2)")
+print()
+
+# ISO 14253-1 guard-banded conformance decision:
+# Nominal tolerance band: ±10 µm (drawing calls ±0.010 mm)
+# Guard band: subtract U95 from each side of the tolerance
+tolerance_half_band = 0.010  # mm
+guard_banded_limit = tolerance_half_band - U95
+deviation_measured = 0.003   # mm  (the 25.003 actual reading)
+
+print("ISO 14253-1 Conformance Decision (guard-banded):")
+print(f"  Tolerance half-band:         ±{tolerance_half_band*1000:.1f} µm")
+print(f"  Measurement uncertainty U:    {U95*1000:.2f} µm")
+print(f"  Guard-banded conformance limit: ±{guard_banded_limit*1000:.2f} µm")
+print(f"  Measured deviation:           +{deviation_measured*1000:.1f} µm")
+print(f"  Decision: {'CONFORMING' if abs(deviation_measured) <= guard_banded_limit else 'NON-CONFORMING (uncertainty-adjusted)'}")
+```
+
+## Practice
+
+<SandboxExercise
+  title="Build a uncertainty budget"
+  description="You have a CMM with a calibration certificate stating 3.0 µm U95 (k=2) volumetric accuracy. A repeat-measurement study of 15 measurements gives a standard deviation of 0.8 µm. Temperature is controlled to 20 ± 1°C; the part is steel (CTE = 11.7 µm/(m·°C)) and the feature is 50 mm in size. Calculate the combined standard uncertainty and the expanded uncertainty (k=2). Then determine whether a measured deviation of +0.008 mm conforms to a ±0.010 mm tolerance after guard banding."
+  starterCode={`import math
+
+# Type B: CMM geometric error from calibration certificate
+
+# Certificate states U95 = 3.0 µm, k=2 → standard uncertainty = ?
+
+u_cmm = None # Replace with calculation
+
+# Type A: Repeatability from 15 repeat measurements, σ = 0.8 µm
+
+# Standard uncertainty of the mean = σ / sqrt(n)
+
+n = 15
+sigma_repeat = 0.0008 # 0.8 µm in mm
+u_repeat = None # Replace with calculation
+
+# Type B: Thermal expansion
+
+# Steel CTE = 11.7 µm/(m·°C), feature = 50 mm = 0.050 m, δT = 1°C
+
+cte_steel = 11.7e-6 # m/(m·°C)
+feature_size = 0.050 # meters
+delta_T = 1.0 # °C
+u_thermal = None # Replace with calculation
+
+# Combined standard uncertainty (root-sum-of-squares)
+
+u_c = None # Replace with calculation
+
+# Expanded uncertainty k=2
+
+U95 = None # Replace with calculation
+
+# Guard-banded conformance decision
+
+tolerance_half = 0.010 # ±10 µm = ±0.010 mm
+deviation = 0.008 # mm
+
+guard_band_limit = None # Replace with calculation
+conforms = None # Replace with boolean
+
+print(f"u_cmm = {u_cmm*1000:.3f} µm" if u_cmm else "u_cmm = (not calculated)")
+print(f"u_repeat = {u_repeat*1000:.3f} µm" if u_repeat else "u_repeat = (not calculated)")
+print(f"u_thermal = {u_thermal*1000:.3f} µm" if u_thermal else "u_thermal = (not calculated)")
+print(f"u_c = {u_c*1000:.3f} µm" if u_c else "u_c = (not calculated)")
+print(f"U95 = {U95*1000:.3f} µm" if U95 else "U95 = (not calculated)")
+print(f"Guard band limit: ±{guard_band_limit*1000:.3f} µm" if guard_band_limit else "Guard band limit: (not calculated)")
+print(f"Conforms: {conforms}" if conforms is not None else "Conforms: (not calculated)")
+`}
+  solution={`import math
+
+u_cmm = 3.0e-3 / 2.0 # 3.0 µm / k=2
+u_repeat = 0.0008 / math.sqrt(15)
+u_thermal = 11.7e-6 _ 0.050 _ 1.0 # CTE × size × δT
+
+u_c = math.sqrt(u_cmm**2 + u_repeat**2 + u_thermal\*_2)
+U95 = 2.0 _ u_c
+
+guard_band_limit = 0.010 - U95
+conforms = abs(0.008) <= guard_band_limit
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A CMM calibration certificate states the machine has a volumetric accuracy of 4.0 µm (U95, k=2). When you include this in your uncertainty budget, what standard uncertainty value should you enter?"
+  choices={[
+    "4.0 µm — use the certificate value directly",
+    "2.0 µm — divide by the coverage factor k=2 to recover the standard uncertainty",
+    "8.0 µm — multiply by 2 to be conservative",
+    "1.0 µm — divide by 4 because the certificate covers a 4-sigma interval",
+  ]}
+  correct={1}
+  explanation="Calibration certificates report expanded uncertainty U at a stated coverage factor k. The standard uncertainty is u = U/k. Here: u = 4.0 µm / 2 = 2.0 µm. You always need the standard uncertainty (k=1 equivalent) to combine components in quadrature via the GUM formula."
+/>
+
+<Quiz
+  question="Your bore diameter measurement gives 25.008 mm against a nominal of 25.000 mm with a tolerance of ±0.010 mm. Your expanded uncertainty U95 is 3.5 µm. Using ISO 14253-1 guard banding, does the part conform?"
+  choices={[
+    "Yes — 8 µm deviation is within the ±10 µm tolerance",
+    "No — after subtracting U95 from each side, the guard-banded limit is ±6.5 µm, and the 8 µm deviation exceeds it",
+    "Yes — guard banding only applies when the deviation is outside tolerance",
+    "Cannot determine — need the Type A vs. Type B breakdown to apply guard banding",
+  ]}
+  correct={1}
+  explanation="ISO 14253-1 conformance zone = tolerance half-band minus U95: 10 µm − 3.5 µm = 6.5 µm. The measured deviation of +8 µm exceeds ±6.5 µm, so the part is classified as non-conforming. The guard band accounts for the probability that the true value is actually outside tolerance even though the measured value appears inside it."
+/>
+
+<Quiz
+  question="A measurement has four independent uncertainty components: 1.5 µm, 0.8 µm, 2.0 µm, and 0.5 µm (all standard uncertainties). What is the combined standard uncertainty?"
+  choices={[
+    "4.8 µm — sum all components",
+    "1.2 µm — take the arithmetic average",
+    "2.6 µm — root-sum-of-squares: √(1.5² + 0.8² + 2.0² + 0.5²)",
+    "2.0 µm — use only the largest component",
+  ]}
+  correct={2}
+  explanation="Independent uncertainty components combine in quadrature: u_c = √(1.5² + 0.8² + 2.0² + 0.5²) = √(2.25 + 0.64 + 4.00 + 0.25) = √7.14 ≈ 2.67 µm. Simple summation overestimates the combined uncertainty; taking only the largest component underestimates it."
+/>
+
+## What you learned
+
+- A CMM measurement routine follows three mandatory stages: probe qualification (calibrates the effective tip diameter against a reference sphere), datum reference frame establishment (places the part in a known coordinate system), and feature measurement (probes geometric features and reports deviations against drawing nominal).
+- Every CMM measurement result has at least four independent uncertainty sources: machine geometric error, probe qualification scatter, thermal expansion, and measurement repeatability — and each must be budgeted.
+- Type A uncertainty is evaluated from repeated measurements (standard deviation of the mean); Type B is evaluated from calibration certificates, manufacturer specs, or physical reasoning — both are equally valid GUM inputs.
+- Combined standard uncertainty is the root-sum-of-squares of all component standard uncertainties, valid when components are independent (uncorrelated).
+- ISO 14253-1 requires guard banding: subtract the expanded uncertainty from each side of the tolerance before making a pass/fail conformance decision, because reporting a number without its uncertainty creates false confidence.
+
+The next lesson widens the scope from individual part inspection to the system that delivers those parts: how supply chains are modeled, how ERP systems coordinate procurement and production, and how measurement data flows into quality management systems to close the conformance loop across suppliers.

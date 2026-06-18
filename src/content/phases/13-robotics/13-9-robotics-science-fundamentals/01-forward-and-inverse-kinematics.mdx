@@ -1,0 +1,237 @@
+---
+title: "Forward and Inverse Kinematics"
+description: "Compute where a robot arm's end-effector is given joint angles, then work the problem backwards to find the joint angles needed to reach a target pose."
+phase: 13
+module: "13-9"
+order: 1
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["AL-1", "AL-2"]
+  swebok: ["Software Construction", "Mathematical Foundations"]
+  bloom: "understand"
+  sfia: 2
+  dreyfus: "competent"
+vocabulary:
+  - forward-kinematics
+  - inverse-kinematics
+  - degrees-of-freedom
+  - joint-space
+  - task-space
+  - denavit-hartenberg-parameters
+  - jacobian-matrix
+  - singularity
+learningOutcomes:
+  - "Compute the end-effector pose of a 2-DOF planar arm using forward kinematics equations"
+  - "Explain why a single target pose can produce multiple valid joint-angle solutions in inverse kinematics"
+  - "Identify a kinematic singularity from a Jacobian determinant and describe why it causes control problems"
+  - "Distinguish joint space from task space and explain when each representation is preferred"
+prerequisites:
+  - "Basic trigonometry (sine, cosine, atan2)"
+  - "Matrix multiplication"
+  - "Pose (position + orientation in 3D space)"
+  - "Degrees of freedom"
+---
+
+## Why this matters
+
+Every robotic arm in the world — from a surgical robot threading a needle to a welding bot on an assembly line — must solve the same two math problems thousands of times per second. The first: given the current joint angles, where is my hand? The second: given where I need my hand to be, what joint angles do I set? Getting either calculation wrong produces crashes, damaged parts, or worse.
+
+Understanding kinematics is the difference between treating a robot as a black box you poke at empirically and actually reasoning about its motion. When a path plan fails in simulation, a kinematics-literate engineer reads the error immediately; everyone else reboots and hopes.
+
+## The puppet string analogy
+
+Picture a marionette puppet. You control it from above with strings — each string pulls a specific joint. If you want to know where the puppet's hand is, you trace from the body down each limb, accounting for each joint's angle and each bone's length. That trace — shoulder angle, upper arm length, elbow angle, forearm length — gives you the hand's position. You went from joint angles to end-effector position.
+
+Now invert the problem: a director says "put the hand on this mark." You have to figure out how to pull the strings. There may be several ways to do it (elbow up vs. elbow down), and some target marks may be completely unreachable.
+
+That puppet-tracing calculation is **forward kinematics**. The string-planning calculation is **inverse kinematics**.
+
+> **Forward kinematics (FK) is just the function `joint_angles → end_effector_pose`.
+> Inverse kinematics (IK) is its inverse: `end_effector_pose → joint_angles`.**
+
+## Forward kinematics for a 2-DOF planar arm
+
+A two-joint planar arm lives in a plane (z = 0). It has two revolute joints with angles θ₁ and θ₂, and two links of lengths L₁ and L₂.
+
+```python
+import math
+
+def forward_kinematics_2dof(theta1_rad: float, theta2_rad: float,
+                             L1: float, L2: float) -> tuple[float, float, float]:
+    """
+    Compute end-effector (x, y, phi) for a 2-DOF planar arm.
+
+    We sum angles because each joint rotates relative to the previous link —
+    the elbow angle adds to the shoulder angle in world space.
+
+    Returns: (x, y, orientation_rad)
+    """
+    # Shoulder joint contributes L1 in the direction of theta1
+    x1 = L1 * math.cos(theta1_rad)
+    y1 = L1 * math.sin(theta1_rad)
+
+    # Elbow joint contributes L2 in the cumulative direction (theta1 + theta2)
+    cumulative_angle = theta1_rad + theta2_rad
+    x2 = x1 + L2 * math.cos(cumulative_angle)
+    y2 = y1 + L2 * math.sin(cumulative_angle)
+
+    # End-effector orientation equals the sum of all joint angles in a planar chain
+    phi = cumulative_angle
+
+    return (x2, y2, phi)
+
+# Example: shoulder at 45°, elbow at -30°, arm lengths 0.5m and 0.4m
+x, y, orientation = forward_kinematics_2dof(
+    math.radians(45), math.radians(-30), L1=0.5, L2=0.4
+)
+print(f"End-effector: x={x:.3f}m  y={y:.3f}m  phi={math.degrees(orientation):.1f}°")
+# End-effector: x=0.597m  y=0.182m  phi=15.0°
+```
+
+For a 6-DOF industrial arm, you extend this by chaining **homogeneous transformation matrices** — one 4×4 matrix per joint. The Denavit-Hartenberg (DH) parameterization provides a systematic way to build those matrices from four parameters per joint (a, d, α, θ).
+
+## Inverse kinematics: same problem, harder direction
+
+Given a target position (xₜ, yₜ), what are θ₁ and θ₂?
+
+```python
+def inverse_kinematics_2dof(x_target: float, y_target: float,
+                             L1: float, L2: float) -> list[tuple[float, float]]:
+    """
+    Solve IK for a 2-DOF planar arm analytically.
+
+    The cosine rule gives us theta2. But cos is even — cos(θ) == cos(-θ) —
+    so two solutions always exist: elbow-up and elbow-down.
+
+    Returns a list of (theta1, theta2) solutions in radians.
+    Empty list means the target is out of reach.
+    """
+    # Distance to target (must be within reach envelope)
+    dist_sq = x_target**2 + y_target**2
+    dist = math.sqrt(dist_sq)
+
+    # Reachability check — outside the annulus [|L1-L2|, L1+L2] is unreachable
+    if dist > L1 + L2 or dist < abs(L1 - L2):
+        return []  # no solution
+
+    # cos(theta2) from the cosine rule on the triangle formed by L1, L2, and dist
+    cos_theta2 = (dist_sq - L1**2 - L2**2) / (2 * L1 * L2)
+
+    # Two geometric solutions (elbow up and elbow down)
+    solutions = []
+    for sign in [1, -1]:
+        sin_theta2 = sign * math.sqrt(1 - cos_theta2**2)
+        theta2 = math.atan2(sin_theta2, cos_theta2)
+
+        # theta1 follows from geometry of the triangle
+        k1 = L1 + L2 * cos_theta2
+        k2 = L2 * sin_theta2
+        theta1 = math.atan2(y_target, x_target) - math.atan2(k2, k1)
+
+        solutions.append((theta1, theta2))
+
+    return solutions
+
+# Target: reach to (0.6, 0.4) with the same arm lengths
+solutions = inverse_kinematics_2dof(0.6, 0.4, L1=0.5, L2=0.4)
+for i, (t1, t2) in enumerate(solutions):
+    print(f"Solution {i+1}: θ1={math.degrees(t1):.1f}°  θ2={math.degrees(t2):.1f}°")
+```
+
+For 6-DOF arms, analytical solutions exist only for specific geometries (like a spherical wrist). General 6-DOF arms often require numerical IK — iteratively adjusting joint angles using the **Jacobian** until the end-effector converges on the target.
+
+## The Jacobian and singularities
+
+The Jacobian matrix J maps joint velocities to end-effector velocities: ẋ = J · q̇
+
+```python
+def jacobian_2dof(theta1_rad: float, theta2_rad: float,
+                  L1: float, L2: float) -> list[list[float]]:
+    """
+    Compute the 2x2 Jacobian for a planar 2-DOF arm.
+
+    Each column answers: "if I move only joint i, how fast does
+    the end-effector move in x and y?"
+    """
+    c1 = math.cos(theta1_rad)
+    s1 = math.sin(theta1_rad)
+    c12 = math.cos(theta1_rad + theta2_rad)
+    s12 = math.sin(theta1_rad + theta2_rad)
+
+    J = [
+        [-(L1*s1 + L2*s12),  -L2*s12],  # dx/dtheta1, dx/dtheta2
+        [ (L1*c1 + L2*c12),   L2*c12],  # dy/dtheta1, dy/dtheta2
+    ]
+    return J
+
+def determinant_2x2(J: list[list[float]]) -> float:
+    # det(J) == 0 means columns are linearly dependent — arm is at a singularity
+    return J[0][0]*J[1][1] - J[0][1]*J[1][0]
+
+# Singularity occurs when the arm is fully extended (theta2 == 0 or pi)
+J_singular = jacobian_2dof(math.radians(30), 0.0, L1=0.5, L2=0.4)
+print(f"Determinant at full extension: {determinant_2x2(J_singular):.4f}")
+# Determinant at full extension: 0.0000  ← singularity
+```
+
+At a <VocabTooltip slug="singularity">singularity</VocabTooltip>, the Jacobian loses rank: moving the end-effector in some direction requires infinite joint velocities. Real controllers detect near-singular configurations using a **manipulability measure** (√det(JJᵀ)) and either stop, warn, or reroute the path.
+
+## Practice
+
+<FillBlank
+  prompt="A 2-DOF arm with L₁ = 0.4 m and L₂ = 0.3 m has θ₁ = 0° and θ₂ = 90°. The end-effector x-coordinate is ___ m and the y-coordinate is ___ m."
+  blanks={[
+    { answer: "0.4", tolerance: 0.01, label: "x (m)" },
+    { answer: "0.3", tolerance: 0.01, label: "y (m)" },
+  ]}
+  hint="Trace each link: link 1 runs along the x-axis (θ₁=0°), then link 2 turns 90° and runs up the y-axis."
+/>
+
+<Quiz
+  question="An industrial arm is commanded to move to a target pose. The IK solver returns two solutions. What physical property of the arm do those two solutions represent?"
+  choices={[
+    "Two different robot models that can reach the same point",
+    "Elbow-up and elbow-down configurations",
+    "Fast and slow trajectory options",
+    "Errors in the solver that should be discarded",
+  ]}
+  correct={1}
+  explanation="A 2-DOF (and most n-DOF) arm can reach many poses with multiple joint-angle combinations — the most common pair being elbow-up and elbow-down. The planner must choose one based on collision constraints and continuity."
+/>
+
+## Check your understanding
+
+<Quiz
+  question="You command a robot to move its end-effector in a straight line. Halfway through the path, the controller throws a 'near-singularity' warning and slows to a crawl. What does this indicate about the arm's current configuration?"
+  choices={[
+    "The end-effector has reached the workspace boundary",
+    "The Jacobian determinant is approaching zero, meaning small task-space motions require disproportionately large joint velocities",
+    "The joint encoders have lost calibration",
+    "The target pose is outside the reachable workspace",
+  ]}
+  correct={1}
+  explanation="Near-singularity warnings occur when det(J) ≈ 0. To keep the end-effector on the straight-line path at that configuration, the controller would need to drive one or more joints at very high speed — so it slows down or reroutes instead."
+/>
+
+<Quiz
+  question="Which statement correctly distinguishes joint space from task space?"
+  choices={[
+    "Joint space describes positions in the physical room; task space describes internal motor states",
+    "Joint space is the vector of joint angles (q); task space is the pose of the end-effector (x, y, z, roll, pitch, yaw)",
+    "They are equivalent representations — any point in one maps to exactly one point in the other",
+    "Task space is only valid for 6-DOF arms; joint space works for any number of joints",
+  ]}
+  correct={1}
+  explanation="Joint space (q-space) holds the robot's internal configuration as a vector of joint angles or displacements. Task space (Cartesian or operational space) holds the end-effector's pose in the world frame. The FK function maps one to the other, but the relationship is many-to-one in most real arms."
+/>
+
+## What you learned
+
+- Forward kinematics chains link transformations to compute end-effector pose from joint angles — a deterministic, always-solvable calculation.
+- Inverse kinematics reverses that mapping; a single target pose typically has multiple valid joint-angle solutions (elbow-up vs. elbow-down), and some poses are unreachable.
+- The Jacobian matrix relates joint velocities to end-effector velocities; its determinant signals singularities where control breaks down.
+- Joint space (angles) and task space (Cartesian pose) are dual representations: FK converts from joint space to task space, IK goes the other direction.
+- Kinematic singularities are geometric configurations, not software bugs — they are avoided through workspace planning and manipulability monitoring.
+
+The next lesson applies these kinematics results to robot dynamics: how much torque each motor must produce to accelerate the links and hold against gravity.

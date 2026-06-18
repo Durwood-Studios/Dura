@@ -1,0 +1,358 @@
+---
+title: "Trade-Offs — Consistency, Availability, Latency"
+description: "Evaluate the fundamental tensions in distributed system design: CAP theorem, the PACELC extension, and how to make principled consistency choices for real systems."
+phase: 8
+module: "8-6"
+order: 5
+estimatedMinutes: 20
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-2", "SF-3", "SF-4"]
+  swebok: ["Software Design", "Software Maintenance"]
+  bloom: "evaluate"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - cap-theorem
+  - pacelc
+  - strong-consistency
+  - eventual-consistency
+  - linearizability
+  - causal-consistency
+  - read-your-own-writes
+  - monotonic-reads
+  - network-partition
+  - quorum
+learningOutcomes:
+  - "State the CAP theorem and explain why no distributed system can simultaneously guarantee consistency, availability, and partition tolerance"
+  - "Evaluate a given system requirement and justify a consistency model choice with reference to the business impact of stale reads"
+  - "Distinguish linearizability from eventual consistency and identify one real-world system that uses each"
+  - "Explain the PACELC extension to CAP and why it is more useful for designing systems that are rarely partitioned"
+  - "Apply the consistency-latency trade-off to a concrete scenario by choosing between quorum reads and eventual reads"
+prerequisites:
+  - "Replication and replication lag (lesson 2)"
+  - "Database reads and writes"
+  - "Client-server model"
+  - "Case studies — URL shortener and notification system (lessons 3 and 4)"
+---
+
+## Why this matters
+
+Every architectural decision in the previous lessons rested on an implicit consistency choice. The URL shortener served redirects from a replica that might be 200ms behind the primary. The notification system delivered inbox reads from a cache that could be 30 seconds stale. The caching lesson introduced TTLs that let user profiles drift from the source of truth.
+
+None of those choices were mistakes — they were correct trade-offs for the requirements. But making them correctly requires understanding the underlying theorem that makes trade-offs unavoidable: the CAP theorem and its more practical successor, PACELC. Understanding these frameworks turns ad-hoc guessing into principled decision-making, and it is the theoretical foundation that interviewers test when they ask "why did you choose eventual consistency here?"
+
+## The CAP theorem — why you can only pick two
+
+Imagine three friends who each have a copy of a shared bank balance: Alice, Bob, and Carol. They each live in a different city. When the internet goes down between cities (a network partition), what happens?
+
+- If they must always agree on the exact balance (consistency), they cannot process transactions while disconnected — they would have to wait until the network is back.
+- If they must always process transactions (availability), they will end up with different balances when the network is restored.
+- If they must be reachable at all times (partition tolerance), the network going down is assumed — so they must pick between consistency and availability.
+
+The network partition is not optional. Networks fail. This is why the CAP theorem reduces to: **when a partition occurs, choose consistency or availability — not both.**
+
+> **CAP theorem: A distributed system can guarantee at most two of Consistency, Availability, and Partition tolerance. Since partitions are inevitable, the real choice is between consistency (CP) and availability (AP) during a partition.**
+
+```
+                    Consistency
+                         │
+                         │
+                    CP   │   CA
+                 (HBase, │  (single-node
+                 Zookeeper│  RDBMS — not
+                  etcd)  │  distributed)
+                         │
+─────────────────────────┼─────────────────────────
+                         │
+                    AP   │
+               (Cassandra│
+               DynamoDB  │
+               CouchDB)  │
+                         │
+          Availability ──┴──── Partition Tolerance
+```
+
+**CP systems** reject writes or reads during a partition to prevent returning stale data. HBase and ZooKeeper are CP: a cluster split into two halves will stop serving the minority half rather than risk inconsistency.
+
+**AP systems** continue serving reads and accepting writes during a partition, accepting that different nodes may diverge. Cassandra and DynamoDB are AP: they keep serving clients even when nodes cannot communicate, and reconcile divergence after the partition heals.
+
+The "CA" quadrant (consistent and available, no partition tolerance) only describes single-node systems — which is why classic PostgreSQL is not in the CAP theorem's domain: it is a single node that cannot partition.
+
+## The PACELC extension — the tradeoff that matters every day
+
+CAP only describes behavior during a partition. But partitions are rare — a typical production system experiences a network partition perhaps a few times per year. The tradeoff you face on every single request is between **latency and consistency under normal conditions**.
+
+PACELC (pronounced "pass-elk") extends CAP with this daily reality:
+
+```
+PACELC:
+  During a Partition (P), choose:
+    Availability (A) or Consistency (C)
+  Else (E), during normal operation, choose:
+    Latency (L) or Consistency (C)
+```
+
+| System             | Partition: A or C? | Else: L or C? | Example                                          |
+| ------------------ | ------------------ | ------------- | ------------------------------------------------ |
+| DynamoDB (default) | A                  | L             | User shopping cart — tolerate stale stock counts |
+| DynamoDB (strong)  | A                  | C             | Financial ledger — must read latest balance      |
+| Cassandra (ONE)    | A                  | L             | Event logging — throughput over correctness      |
+| Cassandra (QUORUM) | A                  | C             | User profiles — stale reads are user-visible     |
+| HBase              | C                  | C             | Metadata store — correctness required always     |
+| MySQL (single)     | C                  | C             | Order processing — no partitions possible        |
+
+The PACELC framing is more actionable for most engineers because it names the latency cost of consistency explicitly. Every strongly consistent read requires waiting for confirmation from a quorum of nodes — that is latency you pay on every request, not just during failures.
+
+## Consistency models — a spectrum
+
+Strong consistency is not the only alternative to eventual consistency. There is a spectrum:
+
+```
+STRONGEST                                                   WEAKEST
+    │                                                           │
+    ▼                                                           ▼
+Linearizability  →  Sequential  →  Causal  →  Read-Your-  →  Eventual
+                    Consistency     Consistency  Own-Writes    Consistency
+    │                   │              │            │              │
+Single "true"      All nodes      Causally        You read    Replicas
+timeline of        see ops in     related ops     your own    converge
+ops across         same order     seen in order   writes      eventually
+all nodes          (not real-     across nodes    (weakest    (no timing
+                   time though)                   useful      guarantee)
+                                                  guarantee)
+```
+
+### Linearizability (the strongest guarantee)
+
+Every operation appears to take effect instantaneously at some point between its start and its completion. The system looks like a single shared register to all clients.
+
+```python
+# Linearizable example: distributed counter
+# Two clients increment simultaneously from value 5.
+# Result must be 7 — both increments are visible.
+# A non-linearizable system might show client A reading 6
+# while client B also reads 6 (each only seeing their own increment).
+
+# Implemented with a Redis INCR — Redis is single-threaded so INCR is
+# linearizable within a single Redis instance.
+import redis
+
+r = redis.Redis()
+
+# Client A and Client B both run this — only one can see 7 first
+new_value = r.incr("global_counter")
+# One client gets 6, the other gets 7. No client sees 5 or 8.
+# This is linearizable: there is a single total order of increments.
+```
+
+**Used by:** etcd (Raft consensus), ZooKeeper (ZAB protocol), Google Spanner (TrueTime + Paxos).
+
+**Cost:** Every write must be confirmed by a quorum before returning to the client. Typical p99 latency: 5-50ms in a single datacenter, 50-200ms across datacenters.
+
+### Eventual consistency (the weakest useful guarantee)
+
+All replicas will eventually converge to the same value — given enough time and no new updates. There is no bound on how long "eventually" takes.
+
+```python
+# Eventual consistency example: DNS propagation
+# You update your domain's DNS record. Different resolvers around the
+# world cache old values for their TTL (minutes to 48 hours).
+# The system is eventually consistent: all resolvers WILL converge —
+# but not immediately, and not in a predictable order.
+
+# Application code that handles eventual consistency:
+def get_user_profile(user_id: int) -> dict:
+    """
+    Reads from a replica. May return a profile that is seconds or
+    minutes behind the primary — this is acceptable because:
+    1. Profile data rarely changes.
+    2. The cost of stale profile data is low (user sees old avatar briefly).
+    3. Querying the primary for every profile read would saturate it.
+    """
+    return read_replica.query(
+        "SELECT * FROM users WHERE id = %s", [user_id]
+    )
+```
+
+**Used by:** Cassandra, DynamoDB (default), Amazon S3, DNS.
+
+### Read-your-own-writes (a practical middle ground)
+
+A user always sees their own updates, even if other users still see stale data. This is the minimal consistency guarantee that prevents users from thinking their writes "didn't work."
+
+```python
+def get_profile_after_update(user_id: int, just_wrote: bool) -> dict:
+    """
+    If the current user just updated their profile, route to the primary
+    to guarantee they see the update. Everyone else can read from a replica.
+
+    This provides read-your-own-writes consistency without paying the
+    full cost of linearizable reads for every user.
+    """
+    if just_wrote:
+        # Route to primary — guaranteed to have the latest write
+        return db_primary.query("SELECT * FROM users WHERE id = %s", [user_id])
+    else:
+        # Read from replica — slightly stale but cheaper
+        return db_replica.query("SELECT * FROM users WHERE id = %s", [user_id])
+```
+
+## Quorums — the mechanism behind tunable consistency
+
+In a replicated system with N nodes, a quorum read requires hearing from R nodes; a quorum write requires confirmation from W nodes. The relationship that guarantees strong consistency is:
+
+```
+R + W > N   →   Strongly consistent (quorum overlap guaranteed)
+R + W ≤ N   →   Eventually consistent (possible to read without seeing latest write)
+```
+
+```python
+# Cassandra consistency level examples
+
+# N = 3 replicas (replication factor 3)
+#
+# ONE: R=1, W=1. R+W=2 ≤ 3. Eventually consistent.
+#   → Fastest, but reads might return stale data if a replica is behind.
+#   → Use for: logging, event tracking, append-only writes.
+#
+# QUORUM: R=2, W=2. R+W=4 > 3. Strongly consistent.
+#   → At least one replica in any read must have seen the latest write.
+#   → Use for: user profiles, financial balances, anything where stale reads
+#      have visible consequences.
+#
+# ALL: R=3, W=3. Strongest, but availability drops if any replica is down.
+#   → Use for: configuration data that changes rarely but must be exact.
+
+from cassandra.cluster import Cluster, ConsistencyLevel
+
+cluster = Cluster(['cassandra-1', 'cassandra-2', 'cassandra-3'])
+session = cluster.connect('my_keyspace')
+
+# Read a user's balance — must be consistent (quorum)
+from cassandra.query import SimpleStatement
+stmt = SimpleStatement(
+    "SELECT balance FROM accounts WHERE user_id = %s",
+    consistency_level=ConsistencyLevel.QUORUM  # R=2 of 3 must agree
+)
+result = session.execute(stmt, [user_id])
+
+# Append a log event — eventual consistency is fine (ONE)
+log_stmt = SimpleStatement(
+    "INSERT INTO event_log (id, event_type, user_id, ts) VALUES (%s, %s, %s, %s)",
+    consistency_level=ConsistencyLevel.ONE  # Write to 1 of 3, fast
+)
+session.execute(log_stmt, [event_id, event_type, user_id, timestamp])
+```
+
+**Quorum cost:** A QUORUM read with N=3 must wait for 2 nodes to respond. If one node is slow, the read latency is bounded by the 2nd-slowest response. This is why strong consistency costs latency even when no partition is occurring — which is exactly what PACELC captures.
+
+## Applying the framework — decision guide
+
+```
+Question 1: What is the cost of serving stale data?
+  Low cost (social feed, analytics dashboard, DNS):
+    → Eventual consistency. Use replicas, caches, CDN without strong guarantees.
+  Medium cost (user profile visible to self, notification unread count):
+    → Read-your-own-writes or causal consistency. Route post-write reads to primary.
+  High cost (bank balance, inventory count, seat reservation):
+    → Linearizable or strong consistency. Pay the quorum latency.
+    → Consider: is this actually high-cost, or does it just feel that way?
+
+Question 2: What happens during a partition?
+  Business keeps running is more important than correctness:
+    → AP system. Accept divergence, reconcile after healing.
+    → Example: shopping cart. Better to let users add items than refuse service.
+  Correctness is more important than availability:
+    → CP system. Stop serving the minority partition.
+    → Example: distributed lock. Better to reject than grant the lock twice.
+
+Question 3: What is the acceptable latency budget?
+  < 10ms p99:
+    → Avoid quorum reads. Use cache + eventual consistency.
+  10-50ms p99:
+    → Quorum reads within a single datacenter are feasible.
+  50-200ms p99:
+    → Cross-datacenter quorum reads are feasible.
+    → Google Spanner with TrueTime operates here.
+```
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "You are designing a distributed counter that tracks the number of 'likes' on a post. Two users simultaneously like the same post when the counter is at 1,000. Which consistency model correctly results in a final count of 1,002?",
+      options: [
+        "Eventual consistency — both increments will converge to 1,002 eventually",
+        "Linearizability — each increment sees the result of the previous one, guaranteeing 1,002",
+        "Read-your-own-writes — each user sees their own like immediately",
+        "Causal consistency — the likes are not causally related so order doesn't matter",
+      ],
+      correct: 1,
+      explanation:
+        "Linearizability guarantees that both increments appear to execute atomically in some serial order. The result is deterministically 1,002 regardless of which increment executed 'first.' Eventual consistency might temporarily show 1,001 on different replicas before converging — and with naive (non-CRDT) counters might even lose an increment.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A Cassandra cluster has a replication factor of 5. You configure reads at consistency level QUORUM (3 of 5). A write also used QUORUM (3 of 5). What does R + W > N guarantee in this configuration?",
+      options: [
+        "The system will never experience a network partition",
+        "At least one node in any read quorum has seen the most recent write",
+        "All 5 nodes will always agree within 100 milliseconds",
+        "The cluster can tolerate 3 simultaneous node failures",
+      ],
+      correct: 1,
+      explanation:
+        "With N=5, W=3, R=3: W+R=6 > 5. The write quorum (3 nodes) and the read quorum (3 nodes) must overlap by at least 1 node (6-5=1). That overlap node has the latest write, so the read is guaranteed to see it — this is the quorum overlap theorem.",
+    },
+    {
+      type: "multiple-choice",
+      question: "PACELC extends CAP by addressing a limitation. Which limitation does it address?",
+      options: [
+        "CAP only applies to NoSQL databases; PACELC extends it to SQL",
+        "CAP only describes behavior during network partitions; PACELC also captures the latency vs. consistency trade-off during normal operation",
+        "CAP requires three nodes minimum; PACELC works for two-node systems",
+        "CAP does not describe write operations; PACELC adds write consistency guarantees",
+      ],
+      correct: 1,
+      explanation:
+        "CAP describes what happens during a partition (a relatively rare event). PACELC adds the 'Else' branch: even when there is no partition, you must still choose between lower latency (skip waiting for quorum) and stronger consistency (wait for quorum confirmation). This is the trade-off that affects every request, not just partition events.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "An e-commerce site's shopping cart uses eventual consistency. During a network partition, a user in partition A adds three items. A user in partition B removes one item from the same cart. When the partition heals, what strategy prevents data loss?",
+      options: [
+        "Last-write-wins: keep the version with the higher timestamp",
+        "A Conflict-free Replicated Data Type (CRDT) that merges both sets of operations",
+        "Reject all writes from the minority partition during the partition",
+        "Require a quorum before any cart update is accepted",
+      ],
+      correct: 1,
+      explanation:
+        "A CRDT (specifically a G-Set or OR-Set for a cart) allows both sides' operations to be merged without data loss — the adds from partition A and the remove from partition B are all preserved in the merged state. Last-write-wins would silently discard one side's changes.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The PACELC theorem states that during a Partition you choose between ___ and ___; Else during normal operation you choose between ___ and ___."
+  answers={["Availability", "Consistency", "Latency", "Consistency"]}
+  hints={[
+    "A and C",
+    "L and C",
+    "Think about the partition choice first, then the normal-operation choice",
+  ]}
+/>
+
+## What you learned
+
+- The CAP theorem proves that no distributed system can simultaneously guarantee consistency, availability, and partition tolerance — since partitions are inevitable, the real choice is between C and A during a partition.
+- PACELC extends CAP by naming the daily trade-off: even without a partition, strong consistency costs latency because quorum confirmation is required on every operation.
+- Consistency exists on a spectrum from linearizability (single timeline, most expensive) through causal and read-your-own-writes guarantees down to eventual consistency (cheapest, weakest).
+- Quorum math (R + W > N) is the mechanism that determines when a distributed system provides strong consistency; tuning R and W lets you trade latency for guarantees per operation.
+- Choosing a consistency model requires evaluating the business cost of stale data, the availability requirement during partitions, and the acceptable latency budget — not just picking a default.

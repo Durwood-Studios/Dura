@@ -1,0 +1,373 @@
+---
+title: "Incident Response — Triage, Mitigation, Comms"
+description: "Execute a structured incident response: declare severity, triage the blast radius, mitigate quickly, and keep stakeholders informed throughout."
+phase: 8
+module: "8-7"
+order: 3
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-4", "SE-5"]
+  swebok: ["Software Engineering Management", "Software Quality"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - incident-commander
+  - blast-radius
+  - severity-level
+  - incident-channel
+  - status-page
+  - mitigation-vs-remediation
+  - rollback
+learningOutcomes:
+  - "Assign a severity level to a described incident using a defined severity matrix"
+  - "Execute the first-response checklist for a production incident: declare, assemble, triage, mitigate, communicate"
+  - "Write a stakeholder update that follows the what/impact/action/eta structure without exposing internal system details"
+  - "Distinguish between mitigation (stopping the bleeding) and remediation (fixing the root cause)"
+prerequisites:
+  - on-call-rotation
+  - runbook
+  - slo
+  - error-budget
+  - blast-radius
+---
+
+## Why this matters
+
+Production is down. The pager fired at 3:47 AM. You have no time to think about process — you execute the process you designed in advance. Teams that define their incident response procedure before an incident use it instinctively under pressure. Teams that improvise in the moment argue about whose job it is to notify customers while the outage clock runs.
+
+The financial cost of an incident is roughly linear with duration. A major e-commerce outage can cost thousands of dollars per minute. The reputation cost of a poorly communicated incident — where customers discover the problem from social media rather than from you — can outlast the technical issue by weeks. Structured incident response compresses both costs.
+
+## Incidents are not emergencies — they are procedures
+
+The word "incident" sounds alarming. Reframe it: an incident is a practiced procedure, triggered by observable conditions, executed by assigned roles. The drama goes away when everyone knows their job.
+
+A production incident has three phases that always happen in this order:
+
+1. **Triage** — understand what is broken and who is affected
+2. **Mitigation** — stop the user impact as fast as possible
+3. **Communication** — keep everyone who needs to know informed
+
+> _An incident is just a procedure with a timer. The timer is MTTR._
+
+## Severity levels: the first decision
+
+The first decision in any incident is severity. Severity determines urgency, who gets paged, how often you communicate, and whether leadership is involved. Every team's definitions differ slightly, but the structure is universal.
+
+```yaml
+# Severity matrix — define this BEFORE incidents happen
+severity_levels:
+  SEV-1:
+    description: "Complete service outage or critical data loss"
+    examples:
+      - "Checkout service returning 100% errors"
+      - "Database is unavailable"
+      - "User data is being deleted or corrupted"
+    response:
+      page: ["primary-oncall", "engineering-manager", "vp-engineering"]
+      status_page_update: "within 10 minutes"
+      stakeholder_update: "every 30 minutes"
+      max_ttm: "5 minutes" # Time to mobilize
+
+  SEV-2:
+    description: "Significant degradation affecting many users"
+    examples:
+      - "Error rate > 5% on primary user flows"
+      - "p99 latency > 5s"
+      - "Core feature unavailable for subset of users"
+    response:
+      page: ["primary-oncall"]
+      status_page_update: "within 30 minutes"
+      stakeholder_update: "every 60 minutes"
+      max_ttm: "15 minutes"
+
+  SEV-3:
+    description: "Minor degradation, workaround available"
+    examples:
+      - "Non-critical feature degraded"
+      - "Error rate 1-5%"
+      - "Slow but functional"
+    response:
+      page: [] # Ticket only — no 3 AM wake-up
+      status_page_update: "optional"
+      stakeholder_update: "end of business"
+      max_ttm: "next business hour"
+```
+
+## The incident response sequence
+
+Once severity is declared, every role executes a defined sequence. The most important role is the **Incident Commander**: one person responsible for coordinating the response — not necessarily fixing it, but ensuring the right people are working and information is flowing.
+
+```javascript
+// The five steps every incident follows, in order
+const INCIDENT_RESPONSE_PLAYBOOK = [
+  {
+    step: 1,
+    name: "Declare",
+    timeboxMinutes: 2,
+    actions: [
+      "Assign severity level using the matrix",
+      "Open an incident channel: #inc-YYYYMMDD-<short-description>",
+      "Post initial incident message using the template below",
+      "Assign Incident Commander role (IC) — usually the first responder",
+    ],
+  },
+  {
+    step: 2,
+    name: "Assemble",
+    timeboxMinutes: 5,
+    actions: [
+      "IC pages additional responders if needed per severity",
+      "Page subject-matter experts for affected services",
+      "IC stays in the incident channel — does NOT go heads-down debugging",
+    ],
+  },
+  {
+    step: 3,
+    name: "Triage",
+    timeboxMinutes: 10,
+    actions: [
+      "Establish blast radius: how many users affected, which features broken",
+      "Establish timeline: when did it start, what changed just before",
+      "Prioritize: is there a quick mitigation (rollback, feature flag off)?",
+      "Assign explicit owners: 'Alice owns DB investigation, Bob owns recent deploys'",
+    ],
+  },
+  {
+    step: 4,
+    name: "Mitigate",
+    // No timebox — this varies by incident
+    actions: [
+      "Execute the fastest mitigation first, even if it's not the root fix",
+      "Rollback > hotfix (rollback is proven, hotfix introduces new risk)",
+      "Feature flag off > rollback (if available and faster)",
+      "Document every action taken in the incident channel with timestamps",
+    ],
+  },
+  {
+    step: 5,
+    name: "Communicate",
+    ongoing: true,
+    actions: [
+      "Update status page at the cadence defined by severity",
+      "Post internal stakeholder updates on the same cadence",
+      "Never go silent — 'We are investigating' is better than no update",
+      "Announce resolution clearly: who confirmed it, what was done",
+    ],
+  },
+];
+```
+
+## Blast radius assessment
+
+Before you mitigate, you need to know what is broken. "The site is down" is not a blast radius. A blast radius is a specific, measurable scope.
+
+```javascript
+// Template for blast radius assessment
+function assessBlastRadius(signals) {
+  return {
+    // What percentage of users are seeing errors?
+    affectedUsers: signals.errorRate * signals.activeUsers,
+    affectedUserPercent: `${(signals.errorRate * 100).toFixed(1)}%`,
+
+    // Which user flows are broken?
+    brokenFlows: signals.failingEndpoints.map((endpoint) => ({
+      endpoint,
+      // Is this on the critical path (checkout, login, core feature)?
+      isCriticalPath: signals.criticalPaths.includes(endpoint),
+    })),
+
+    // Is data at risk?
+    dataAtRisk: signals.hasDataCorruptionSignals,
+
+    // Geographic scope — helps with CDN/DNS issues
+    affectedRegions: signals.errorsByRegion.filter((r) => r.errorRate > 0.01).map((r) => r.region),
+
+    // When did it start? Look for the change that correlates
+    estimatedStartTime: signals.firstErrorTimestamp,
+    changesSinceStart: signals.deploysAfter(signals.firstErrorTimestamp),
+  };
+}
+```
+
+## Communication templates
+
+Bad communication during an incident destroys trust faster than the incident itself. Use a consistent structure so readers always know where to look for each piece of information.
+
+```markdown
+## Initial incident declaration (post to #inc-channel within 2 minutes)
+
+**SEV-2 Incident Declared** | 14:32 UTC
+**IC**: @alice
+**Status**: Investigating
+
+**What**: Elevated error rate on checkout service (~8% errors)
+**Impact**: Estimated 3,200 users/hour unable to complete checkout
+**Start time**: ~14:25 UTC (correlates with deploy payment-service v2.4.1)
+**Current action**: Rolling back payment-service to v2.4.0
+
+Next update: 15:00 UTC
+
+---
+
+## Stakeholder update (external or to leadership)
+
+Subject: [SEV-2 IN PROGRESS] Checkout degradation — 14:32 UTC
+
+We are currently investigating elevated checkout failures affecting
+approximately 8% of checkout attempts. Our team has identified
+a likely cause and is executing a remediation.
+
+**User-visible impact**: Some users may encounter errors at checkout.
+No data has been lost or compromised.
+
+**Current status**: Mitigation in progress
+**Next update**: 15:00 UTC or sooner if resolved
+
+---
+
+## Resolution announcement
+
+**RESOLVED** | 14:47 UTC (15 minutes total duration)
+
+**What happened**: Deploy payment-service v2.4.1 introduced a
+configuration error causing payment validation failures.
+
+**How it was fixed**: Rolled back to v2.4.0 at 14:41 UTC.
+Error rate returned to baseline by 14:45 UTC.
+
+**Next steps**: Post-mortem scheduled for 2026-06-20 10:00 UTC.
+v2.4.1 will not be re-deployed until root cause is confirmed.
+```
+
+## Mitigation vs. remediation
+
+A critical distinction that many engineers conflate:
+
+```
+Mitigation:   Stop the bleeding NOW. Root cause can wait.
+Remediation:  Fix the actual cause. Scheduled for after the incident.
+
+Example:
+  Mitigation → rollback the bad deploy (10 minutes, proven safe)
+  Remediation → find the specific config error, fix it, add a test (next day)
+
+Never delay mitigation to find the perfect fix.
+A rollback that restores service in 10 minutes beats a 2-hour hotfix.
+The root cause investigation happens AFTER users are unblocked.
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// You receive the following signals at 09:12 UTC.
+// Complete the incidentTriage() function to:
+// 1. Determine severity (SEV-1 / SEV-2 / SEV-3) using the matrix below
+// 2. Identify the likely cause from the signals
+// 3. Recommend the fastest mitigation action
+// 4. Write the first-response incident channel message (as a string)
+
+const signals = {
+errorRate: 0.12, // 12% of requests failing
+affectedService: "user-auth",
+isCriticalPath: true, // Auth is required for all features
+lastDeploy: {
+service: "user-auth",
+version: "v3.1.2",
+deployedAt: "09:05 UTC", // 7 minutes ago
+previousVersion: "v3.1.1",
+},
+activeUsers: 45000,
+dataAtRisk: false,
+totalOutage: false,
+};
+
+// Severity matrix (simplified)
+// SEV-1: totalOutage=true OR dataAtRisk=true OR errorRate > 0.5
+// SEV-2: isCriticalPath=true AND errorRate > 0.05
+// SEV-3: everything else
+
+function incidentTriage(signals) {
+// TODO: determine severity
+let severity = "SEV-3";
+
+// TODO: identify likely cause (hint: check timing of lastDeploy)
+let likelyCause = "";
+
+// TODO: recommend fastest mitigation
+let recommendedAction = "";
+
+// TODO: write the initial incident channel message
+// Include: severity, IC placeholder, what/impact/start-time/current-action
+let channelMessage = "";
+
+return {
+severity,
+likelyCause,
+recommendedAction,
+channelMessage,
+};
+}
+
+const result = incidentTriage(signals);
+console.log("Severity:", result.severity);
+console.log("Likely cause:", result.likelyCause);
+console.log("Recommended action:", result.recommendedAction);
+console.log("\\n--- Incident Channel Message ---");
+console.log(result.channelMessage);`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="It's 2 AM. You're the Incident Commander on a SEV-2. Your instinct is to dig into logs and debug the root cause yourself. Why is this the wrong move?"
+  options={[
+    "The IC should delegate debugging to SMEs and focus on coordination — if the IC goes heads-down, nobody is managing communication, escalation, or stakeholder updates",
+    "The IC is not allowed to look at logs per most incident policies",
+    "Debugging at 2 AM is unreliable — you should wait until morning",
+    "The IC role should only be assigned to senior engineers who already know the root cause",
+  ]}
+  answer={0}
+  explanation="The IC's job is to coordinate, not to debug. When the IC goes heads-down, communication stops, stakeholders get no updates, and the incident becomes reactive chaos. Assign debugging to subject-matter experts while the IC keeps the response structured."
+/>
+
+<Quiz
+  question="A SEV-1 is in progress. An engineer proposes a targeted hotfix that will take 2 hours to build and deploy. Another engineer suggests rolling back the last deploy, which takes 10 minutes but means losing the last 3 hours of feature work. Which do you choose?"
+  options={[
+    "Hotfix — a targeted fix is always better than a rollback",
+    "Rollback — mitigate first, preserve feature work second; you can re-deploy the feature after the incident",
+    "Neither — wait for the root cause analysis before taking action",
+    "Hotfix — rollbacks introduce their own risk and could make things worse",
+  ]}
+  answer={1}
+  explanation="During an active incident, mitigation speed beats solution elegance. A 10-minute rollback that stops user pain is always preferred over a 2-hour hotfix, even if it means temporary feature regression. The feature gets re-deployed after the incident and root-cause fix."
+/>
+
+<FillBlank
+  question="______ stops the user impact immediately (e.g., rollback); ______ addresses the root cause (e.g., fixing the bug and re-deploying with a test)."
+  answer="Mitigation / Remediation"
+/>
+
+<Quiz
+  question="Your status page was last updated 90 minutes ago during an ongoing SEV-2. You have no new information. What should you post?"
+  options={[
+    "Nothing — don't post if you have nothing new to report",
+    "'We are still investigating. No new information at this time. Next update in 30 minutes.'",
+    "Only post when you have a resolution to announce",
+    "Ask leadership whether to post an update first",
+  ]}
+  answer={1}
+  explanation="Silence during an incident is worse than 'no news.' Users and stakeholders interpret silence as abandonment. A brief 'still investigating, next update at X' maintains trust and sets expectations, even when there is nothing new to report technically."
+/>
+
+## What you learned
+
+- Severity levels determine urgency, who gets paged, and communication cadence — assigning severity is always the first step in incident response
+- The IC coordinates the response without going heads-down; their job is information flow, not debugging
+- Blast radius quantifies user impact precisely: how many users, which flows, which regions — this drives prioritization
+- Mitigation (stop the bleeding now) always precedes remediation (fix the root cause) — a rollback beats a two-hour hotfix during an active outage
+- Stakeholder communication follows a consistent what/impact/action/eta structure and never goes silent, even with no new technical information
+
+After the incident resolves, the work is not done. The next lesson covers the blameless post-mortem: how to learn from what happened so it cannot happen again.

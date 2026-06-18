@@ -1,0 +1,597 @@
+---
+title: "Capstone — Live Chat App"
+description: "Build a complete real-time chat application with a Node.js WebSocket server, a browser client with reconnection, and room-based message routing."
+phase: 2
+module: "2-7"
+order: 4
+estimatedMinutes: 25
+difficulty: "advanced"
+standards:
+  cs2023: ["NC-1", "NC-2", "WS-2", "SE-1"]
+  swebok: ["Software Design", "Software Construction", "Software Testing"]
+  bloom: "create"
+  sfia: 2
+  dreyfus: "competent"
+vocabulary:
+  - broadcast
+  - message-envelope
+  - room
+  - connection-registry
+  - graceful-shutdown
+learningOutcomes:
+  - "Build a Node.js WebSocket server that maintains a registry of active connections and routes messages to the correct room"
+  - "Write a browser WebSocket client with reconnection, message queuing, and optimistic UI updates"
+  - "Design a typed message envelope protocol that distinguishes join, leave, chat, and system event types"
+  - "Implement graceful cleanup that removes closed connections from the registry without leaking memory"
+prerequisites:
+  - "HTTP polling vs. push (lesson 2-7-1)"
+  - "The WebSocket protocol (lesson 2-7-2)"
+  - "Server-Sent Events (lesson 2-7-3)"
+  - "Node.js fundamentals"
+  - "Express or basic HTTP server in Node.js"
+  - "JavaScript classes and closures"
+---
+
+## Why this matters
+
+You've learned the theory: why polling fails, how WebSockets work, when to choose SSE. Now you build something real. A live chat app is the canonical real-time project for good reason — it touches every challenge that makes real-time hard: concurrent connections, message routing, dropped connections, system events, and the gap between what the user sees and what the server knows. Solving these problems in a concrete application is what moves knowledge from "I read about this" to "I know how to do this."
+
+This capstone is intentionally more complete than a tutorial snippet. The code you write here is architecturally similar to what powers production chat systems — the scale differs, but the structure does not. Every decision is annotated with the why, not just the what, so you can apply the same reasoning to your own projects.
+
+## What you'll build
+
+A chat app with:
+
+- A Node.js WebSocket server with room-based message routing
+- A typed <VocabTooltip slug="message-envelope">message envelope</VocabTooltip> protocol shared between client and server
+- A browser client with reconnection and optimistic UI
+- A <VocabTooltip slug="connection-registry">connection registry</VocabTooltip> that cleans up closed connections without leaking memory
+- System messages for join/leave events
+- Graceful server shutdown
+
+## The message envelope protocol
+
+Before writing any connection code, define your message format. Every message in the system is a JSON object with a `type` field. This is the contract both sides honor.
+
+```typescript
+// Shared types (client and server both use these shapes)
+type MessageType =
+  | "join" // Client → Server: join a room
+  | "leave" // Client → Server: leave a room
+  | "chat" // Client → Server: send a message
+  | "chat-received" // Server → Client: deliver a message
+  | "user-joined" // Server → Client: notify room that someone arrived
+  | "user-left" // Server → Client: notify room that someone left
+  | "error" // Server → Client: something went wrong
+  | "ping" // Client → Server: heartbeat
+  | "pong"; // Server → Client: heartbeat response
+
+interface BaseMessage {
+  type: MessageType;
+}
+
+interface JoinMessage extends BaseMessage {
+  type: "join";
+  room: string;
+  username: string;
+}
+
+interface ChatMessage extends BaseMessage {
+  type: "chat";
+  room: string;
+  text: string;
+}
+
+interface ChatReceivedMessage extends BaseMessage {
+  type: "chat-received";
+  room: string;
+  username: string;
+  text: string;
+  timestamp: number;
+}
+
+interface SystemMessage extends BaseMessage {
+  type: "user-joined" | "user-left";
+  room: string;
+  username: string;
+}
+
+type ClientMessage = JoinMessage | ChatMessage | { type: "ping" } | { type: "leave"; room: string };
+type ServerMessage =
+  | ChatReceivedMessage
+  | SystemMessage
+  | { type: "pong" }
+  | { type: "error"; reason: string };
+```
+
+Defining the protocol as types first prevents the most common bug in real-time systems: server and client silently disagreeing on field names.
+
+## Server: connection registry
+
+```javascript
+// server.js — Node.js WebSocket server using the "ws" package
+// Install: npm install ws
+
+import { WebSocketServer, WebSocket } from "ws";
+import { createServer } from "http";
+
+// Each connected client gets a record in this map.
+// Key: the WebSocket instance itself (identity by reference)
+// Value: client metadata
+const clients = new Map(); // Map<WebSocket, { username, room }>
+
+// Room registry: roomName → Set<WebSocket>
+// We use a Set because order doesn't matter, and membership checks are O(1)
+const rooms = new Map(); // Map<string, Set<WebSocket>>
+
+function getOrCreateRoom(name) {
+  if (!rooms.has(name)) rooms.set(name, new Set());
+  return rooms.get(name);
+}
+
+// Send a well-typed message to a single client
+function send(ws, message) {
+  // Check readyState before every send — the connection may have dropped
+  // between when we queued the send and when we execute it
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(message));
+  }
+}
+
+// <VocabTooltip slug="broadcast">Broadcast</VocabTooltip> to everyone in a room, optionally excluding the sender
+function broadcast(room, message, exclude = null) {
+  const members = rooms.get(room);
+  if (!members) return;
+
+  for (const member of members) {
+    if (member !== exclude) {
+      send(member, message);
+    }
+  }
+}
+
+// Remove a client from all registries — called on disconnect
+function cleanup(ws) {
+  const client = clients.get(ws);
+  if (!client) return; // Already cleaned up — idempotent
+
+  const { username, room } = client;
+
+  // Remove from room
+  const members = rooms.get(room);
+  if (members) {
+    members.delete(ws);
+    // Delete empty rooms so we don't accumulate keys indefinitely
+    if (members.size === 0) rooms.delete(room);
+  }
+
+  // Remove from global client registry
+  clients.delete(ws);
+
+  // Notify remaining room members
+  broadcast(room, { type: "user-left", room, username });
+
+  console.log(`${username} disconnected from #${room}`);
+}
+```
+
+## Server: message routing
+
+```javascript
+const httpServer = createServer();
+const wss = new WebSocketServer({ server: httpServer });
+
+wss.on("connection", (ws) => {
+  // New connection — not yet in any room; wait for a "join" message
+  console.log("New connection established");
+
+  ws.on("message", (rawData) => {
+    let message;
+    try {
+      message = JSON.parse(rawData.toString());
+    } catch {
+      // Malformed JSON — reject and continue; don't crash the server
+      send(ws, { type: "error", reason: "Invalid JSON" });
+      return;
+    }
+
+    switch (message.type) {
+      case "join": {
+        const { username, room } = message;
+
+        // Store client metadata
+        clients.set(ws, { username, room });
+
+        // Register in the room
+        const members = getOrCreateRoom(room);
+        members.add(ws);
+
+        // Notify everyone else in the room
+        broadcast(room, { type: "user-joined", room, username }, ws);
+
+        console.log(`${username} joined #${room} (${members.size} members)`);
+        break;
+      }
+
+      case "chat": {
+        const client = clients.get(ws);
+        if (!client) {
+          // Client sent a chat before joining a room — reject
+          send(ws, { type: "error", reason: "Must join a room first" });
+          return;
+        }
+
+        const { room, text } = message;
+
+        // Validate: prevent empty messages from being broadcast
+        if (!text?.trim()) return;
+
+        const envelope = {
+          type: "chat-received",
+          room,
+          username: client.username,
+          text: text.trim(),
+          timestamp: Date.now(),
+        };
+
+        // Broadcast to everyone in the room INCLUDING the sender
+        // so the sender's message is confirmed and timestamped by the server
+        broadcast(room, envelope);
+        break;
+      }
+
+      case "ping":
+        // Respond immediately — the client uses this to detect silent drops
+        send(ws, { type: "pong" });
+        break;
+
+      case "leave": {
+        cleanup(ws);
+        break;
+      }
+
+      default:
+        send(ws, { type: "error", reason: `Unknown message type: ${message.type}` });
+    }
+  });
+
+  ws.on("close", () => {
+    // Clean up regardless of whether we received a "leave" message
+    // Networks drop without warning — always handle this event
+    cleanup(ws);
+  });
+
+  ws.on("error", (error) => {
+    console.error("WebSocket error:", error.message);
+    // "close" always follows "error" — cleanup happens there
+  });
+});
+
+// Graceful shutdown: close all connections before the process exits
+// so clients receive the proper close frame and can reconnect cleanly
+process.on("SIGTERM", () => {
+  console.log("Shutting down — closing all connections");
+  wss.clients.forEach((ws) => {
+    ws.close(1001, "Server shutting down");
+  });
+  httpServer.close(() => process.exit(0));
+});
+
+httpServer.listen(8080, () => {
+  console.log("WebSocket server listening on ws://localhost:8080");
+});
+```
+
+## Client: full implementation
+
+```javascript
+// chat-client.js — runs in the browser
+
+class ChatClient {
+  #url;
+  #username;
+  #room;
+  #socket = null;
+  #retryCount = 0;
+  #messageQueue = []; // Messages queued while disconnected
+  #connected = false;
+  #onMessage; // Callback for incoming messages
+
+  constructor({ url, username, room, onMessage }) {
+    this.#url = url;
+    this.#username = username;
+    this.#room = room;
+    this.#onMessage = onMessage;
+    this.#connect();
+  }
+
+  #connect() {
+    this.#socket = new WebSocket(this.#url);
+
+    this.#socket.addEventListener("open", () => {
+      this.#connected = true;
+      this.#retryCount = 0; // Healthy connection — reset backoff
+
+      // Announce ourselves to the server
+      this.#send({ type: "join", username: this.#username, room: this.#room });
+
+      // Drain any messages that queued up while we were disconnected
+      // Important: drain AFTER joining — the server rejects chats before join
+      while (this.#messageQueue.length > 0) {
+        const queued = this.#messageQueue.shift();
+        this.#send(queued);
+      }
+    });
+
+    this.#socket.addEventListener("message", (event) => {
+      const message = JSON.parse(event.data);
+      this.#onMessage(message);
+    });
+
+    this.#socket.addEventListener("close", () => {
+      this.#connected = false;
+
+      // Exponential backoff with jitter — jitter prevents thundering herd
+      // when many clients reconnect simultaneously after a server restart
+      const base = Math.min(1000 * 2 ** this.#retryCount, 30_000);
+      const jitter = Math.random() * 1000; // Up to 1s of random delay
+      const delay = base + jitter;
+
+      this.#retryCount++;
+      console.log(`Reconnecting in ${Math.round(delay)}ms…`);
+      setTimeout(() => this.#connect(), delay);
+    });
+  }
+
+  // Internal send — assumes the socket is open
+  #send(message) {
+    if (this.#socket?.readyState === WebSocket.OPEN) {
+      this.#socket.send(JSON.stringify(message));
+    }
+  }
+
+  // Public send — queues if disconnected
+  sendMessage(text) {
+    const message = { type: "chat", room: this.#room, text };
+
+    if (!this.#connected) {
+      // Queue it — it'll be sent once we reconnect and rejoin
+      this.#messageQueue.push(message);
+      return;
+    }
+
+    this.#send(message);
+  }
+
+  disconnect() {
+    // Remove the close listener first — we don't want to auto-reconnect on intentional close
+    this.#socket.removeEventListener("close", this.#connect);
+    this.#socket.close(1000, "User left");
+    this.#connected = false;
+  }
+}
+```
+
+## Client: UI wiring
+
+```html
+<!-- index.html — minimal chat UI -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Live Chat</title>
+  </head>
+  <body>
+    <div id="messages"></div>
+    <form id="form">
+      <input id="input" type="text" placeholder="Type a message…" autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+
+    <script>
+      const messagesEl = document.querySelector("#messages");
+      const formEl = document.querySelector("#form");
+      const inputEl = document.querySelector("#input");
+
+      function appendMessage(text, type = "chat") {
+        const el = document.createElement("p");
+        el.textContent = text;
+        // System messages (join/leave) get different styling
+        el.dataset.type = type;
+        messagesEl.appendChild(el);
+        // Scroll to bottom — new messages should always be visible
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      const client = new ChatClient({
+        url: "ws://localhost:8080",
+        username: prompt("Enter your username:") || "Anonymous",
+        room: "general",
+        onMessage(message) {
+          switch (message.type) {
+            case "chat-received":
+              // Show an optimistic message that the server confirmed
+              appendMessage(`${message.username}: ${message.text}`, "chat");
+              break;
+            case "user-joined":
+              appendMessage(`${message.username} joined the room`, "system");
+              break;
+            case "user-left":
+              appendMessage(`${message.username} left the room`, "system");
+              break;
+            case "error":
+              appendMessage(`Error: ${message.reason}`, "error");
+              break;
+          }
+        },
+      });
+
+      formEl.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const text = inputEl.value.trim();
+        if (!text) return;
+
+        // Optimistic update: show the message immediately, don't wait for the server echo
+        // The server will broadcast it back to everyone including us — we de-duplicate by
+        // username to avoid showing our own message twice
+        // (A full implementation would use message IDs for deduplication)
+        client.sendMessage(text);
+        inputEl.value = "";
+      });
+    </script>
+  </body>
+</html>
+```
+
+## The full data flow
+
+```
+User types "Hello" and presses Enter
+        │
+        ▼
+ChatClient.sendMessage("Hello")
+  └─ socket.send({ type:"chat", room:"general", text:"Hello" })
+        │
+        ▼  (over WebSocket)
+Server receives message
+  └─ Validates: client is in the room
+  └─ Adds timestamp and username to envelope
+  └─ broadcast(room, { type:"chat-received", username:"Alice", text:"Hello", timestamp:… })
+        │
+        ▼  (to every client in #general)
+All browsers receive "chat-received"
+  └─ onMessage callback fires
+  └─ appendMessage("Alice: Hello") runs
+  └─ Message appears in the UI
+```
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// Test the core message routing logic from the server in isolation.
+//
+// You have a simplified version of the server's data structures.
+// Implement the broadcastToRoom function and the cleanup function.
+
+const clients = new Map(); // WebSocket → { username, room }
+const rooms = new Map(); // roomName → Set<WebSocket>
+
+// Mock WebSocket — tracks what was sent to it
+class MockSocket {
+constructor(name) {
+this.name = name;
+this.readyState = 1; // OPEN
+this.sent = [];
+}
+send(data) {
+this.sent.push(JSON.parse(data));
+}
+}
+
+function getOrCreateRoom(name) {
+if (!rooms.has(name)) rooms.set(name, new Set());
+return rooms.get(name);
+}
+
+// Register a client as if they sent a "join" message
+function joinRoom(ws, username, room) {
+clients.set(ws, { username, room });
+getOrCreateRoom(room).add(ws);
+}
+
+// YOUR TASK 1: Implement broadcastToRoom
+// Send a message to everyone in the room, optionally excluding one socket
+function broadcastToRoom(roomName, message, exclude = null) {
+// TODO: get the room's members
+// TODO: for each member (except exclude), send JSON.stringify(message)
+}
+
+// YOUR TASK 2: Implement cleanupClient
+// Remove the client from all registries and notify the room
+function cleanupClient(ws) {
+// TODO: get the client record
+// TODO: remove from the room Set
+// TODO: if room is empty, delete it from the rooms Map
+// TODO: remove from clients Map
+// TODO: broadcast user-left to remaining room members
+}
+
+// Tests
+const alice = new MockSocket("alice");
+const bob = new MockSocket("bob");
+const carol = new MockSocket("carol");
+
+joinRoom(alice, "Alice", "general");
+joinRoom(bob, "Bob", "general");
+joinRoom(carol, "Carol", "general");
+
+// Test 1: broadcast to all members
+broadcastToRoom("general", { type: "chat-received", text: "Hi!" });
+console.log(alice.sent.length === 1); // true
+console.log(bob.sent.length === 1); // true
+console.log(carol.sent.length === 1); // true
+
+// Test 2: broadcast excluding sender
+const prevAliceSent = alice.sent.length;
+broadcastToRoom("general", { type: "chat-received", text: "Reply" }, alice);
+console.log(alice.sent.length === prevAliceSent); // true — alice excluded
+console.log(bob.sent.length === 2); // true
+console.log(carol.sent.length === 2); // true
+
+// Test 3: cleanup removes client and notifies room
+cleanupClient(alice);
+console.log(clients.has(alice) === false); // true
+console.log(rooms.get("general")?.has(alice) === false); // true
+// Bob and Carol should have received user-left
+console.log(bob.sent.at(-1)?.type === "user-left"); // true
+console.log(carol.sent.at(-1)?.type === "user-left"); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why should cleanup() be called on both the 'close' event AND when a 'leave' message is received?"
+  options={[
+    "To double-register the cleanup in case one path fails",
+    "Because networks drop without sending a 'leave' message — the 'close' event catches ungraceful disconnects",
+    "The 'leave' message is optional and only used in newer WebSocket versions",
+    "Running cleanup twice is harmless because the client Map is cleared each time",
+  ]}
+  answer={1}
+  explanation="A client that loses their network connection cannot send a 'leave' message — the TCP connection just drops. The 'close' event fires on the server when this happens, even without a client-initiated close handshake. If you only cleaned up on 'leave', dropped connections would fill your registry with dead entries."
+/>
+
+<Quiz
+  question="What purpose does the message queue (this.#messageQueue) serve in the ChatClient?"
+  options={[
+    "It stores the last 100 messages for display in the chat history",
+    "It holds messages sent while disconnected so they are delivered once the connection restores",
+    "It deduplicates messages to prevent the same message appearing twice",
+    "It throttles messages so the server is not overwhelmed",
+  ]}
+  answer={1}
+  explanation="When a connection drops, the client may queue messages that the user typed during the outage. Once reconnected and rejoined, the client drains the queue in order. Without this, messages typed during a brief disconnect would be silently lost."
+/>
+
+<Quiz
+  question="Why does the server broadcast the sender's own 'chat' message back to them as 'chat-received' rather than letting the client display it directly?"
+  options={[
+    "WebSockets require every message to make a round trip",
+    "The server adds a timestamp and authoritative username — the confirmed envelope is the source of truth",
+    "Clients cannot render messages they sent themselves",
+    "This prevents the sender from seeing their own messages twice",
+  ]}
+  answer={1}
+  explanation="The server's broadcast adds the timestamp and the canonical username. By receiving the server-confirmed envelope, the client knows the message was processed successfully and can display it with accurate metadata. Optimistic UIs often display a pending version immediately and replace it with the server-confirmed version on receipt."
+/>
+
+## What you learned
+
+- A production WebSocket server maintains a connection registry (client Map) and room registry (room Map) — every connection change must be reflected in both, or data integrity breaks
+- A typed <VocabTooltip slug="message-envelope">message envelope</VocabTooltip> protocol — with a `type` field as a discriminant — is the foundation that makes routing, validation, and debugging tractable as a chat app grows
+- Cleanup must handle both graceful disconnects ("leave" message) and ungraceful drops ("close" event) — the `cleanup` function should be idempotent so running it twice causes no harm
+- Message queuing on the client preserves messages sent during brief disconnects, and exponential backoff with jitter prevents many reconnecting clients from thundering a restarting server simultaneously
+
+You now have the full real-time toolkit: you understand the trade-offs between polling, SSE, and WebSockets, you can implement the WebSocket protocol on both sides, and you've built a complete system that handles the hard parts — reconnection, room routing, cleanup, and graceful shutdown.

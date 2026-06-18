@@ -1,0 +1,367 @@
+---
+title: "On-Call Mechanics and Runbooks"
+description: "Build sustainable on-call rotations and write runbooks that let any engineer resolve incidents confidently, even at 3 AM."
+phase: 8
+module: "8-7"
+order: 2
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-4", "SE-5"]
+  swebok: ["Software Engineering Management", "Software Configuration Management"]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "competent"
+vocabulary:
+  - on-call-rotation
+  - runbook
+  - escalation-policy
+  - alert-fatigue
+  - mean-time-to-detect
+  - mean-time-to-resolve
+  - pagerduty-schedule
+learningOutcomes:
+  - "Write a runbook for a specific alert that includes detection criteria, diagnostic steps, mitigation actions, and escalation triggers"
+  - "Design an on-call rotation structure that distributes burden fairly and maintains a healthy escalation path"
+  - "Distinguish between an alert that is actionable and one that causes alert fatigue, and rewrite the non-actionable one"
+  - "Calculate MTTD and MTTR from an incident timeline and explain what each metric reveals"
+prerequisites:
+  - slo
+  - sli
+  - error-budget
+  - monitoring-and-alerting-basics
+---
+
+## Why this matters
+
+On-call engineering is not about heroics — it is about systems. A team with good on-call infrastructure wakes up with a clear checklist, resolves the incident, and goes back to sleep. A team without it spirals through dashboards, Slack messages, and guesswork for two hours while users suffer. The difference is preparation: runbooks written before the incident, rotations structured before the pager fires.
+
+Poor on-call practices are a talent retention problem, not just an operational one. Engineers leave teams where the pager is unpredictable, alerts are noisy, and incidents are heroic all-nighters rather than practiced responses. Getting on-call right is table stakes for a sustainable engineering org.
+
+## What a runbook actually is
+
+Every kitchen in a professional restaurant has a station guide: exactly what to do when an order comes in, what to do when equipment fails, who to call when you're stuck. Nobody improvises; everyone executes. A runbook is that station guide for your service.
+
+A **runbook** is a document that gives a responder — who may have never touched this service — exactly enough information to diagnose a specific alert and take effective action. It is not a design document. It is not a tutorial. It is a decision tree for midnight.
+
+> _A runbook is just a pre-written answer to: "What do I do when this alert fires?"_
+
+## The anatomy of a runbook
+
+A runbook has five sections:
+
+````markdown
+# Alert: PaymentService High Error Rate
+
+## What this alert means
+
+The payment-processor service is returning >= 1% error responses
+over the last 5 minutes. This SLO threshold triggers when we're
+burning error budget at > 10× the sustainable rate.
+
+**User impact**: Checkout failures. Users cannot complete purchases.
+
+## How to diagnose
+
+### Step 1: Check if it's a downstream dependency
+
+```bash
+# Check Stripe API status (our payment provider)
+curl -s https://status.stripe.com/api/v2/status.json | jq '.status.description'
+
+# Check database connection pool
+kubectl exec -n payments deploy/payment-processor -- \
+  node -e "require('./scripts/check-db.js')"
+```
+````
+
+### Step 2: Check recent deploys
+
+```bash
+# Was there a deploy in the last 30 minutes?
+kubectl rollout history deploy/payment-processor -n payments | tail -5
+```
+
+### Step 3: Look at error logs
+
+```bash
+# Get error rate by type in the last 10 minutes
+kubectl logs -n payments -l app=payment-processor --since=10m \
+  | grep '"level":"error"' \
+  | jq -r '.error_type' \
+  | sort | uniq -c | sort -rn
+```
+
+## Mitigation actions
+
+### If it's a Stripe outage
+
+- Nothing to do on our end — monitor and communicate to stakeholders
+- Update the incident channel: "Root cause: Stripe API degraded, tracking their status page"
+- Escalate to your manager if outage exceeds 30 minutes
+
+### If it's a bad deploy
+
+```bash
+# Roll back the deployment
+kubectl rollout undo deploy/payment-processor -n payments
+
+# Verify rollback succeeded and errors are clearing
+kubectl rollout status deploy/payment-processor -n payments
+```
+
+### If it's database connections
+
+```bash
+# Restart connection pool (non-destructive)
+kubectl rollout restart deploy/payment-processor -n payments
+```
+
+## Escalate when
+
+- You cannot identify the root cause within 15 minutes
+- Error rate exceeds 5% for more than 5 minutes
+- Any mitigation action fails or makes things worse
+
+**Escalation path**: @payments-oncall-lead → @payments-engineering-manager
+
+````
+
+## Alert design: the actionability test
+
+Before a runbook can work, the alert must be worth waking someone up. Many teams accumulate dozens of alerts that trigger constantly but never lead to a meaningful action. This is alert fatigue — and it is how on-call engineers learn to ignore pagers.
+
+```javascript
+// Evaluating alert quality
+function evaluateAlert(alert) {
+  const criteria = [
+    {
+      name: "user-impacting",
+      question: "Does this alert indicate real user harm?",
+      // An alert on CPU usage above 70% probably doesn't; a spike in error rates does
+      check: alert.tracesDirectlyToUserPain,
+    },
+    {
+      name: "actionable",
+      question: "Is there a specific action the responder takes?",
+      // "High memory usage" with no runbook step = noise
+      // "Memory usage > 85% — likely leak, roll back deploy X" = signal
+      check: alert.hasRunbookWithClearAction,
+    },
+    {
+      name: "appropriate-urgency",
+      question: "Does the urgency match the severity?",
+      // Not everything warrants a 3 AM page — use ticket/email for low-severity
+      check: alert.urgencyMatchesSeverity,
+    },
+    {
+      name: "not-redundant",
+      question: "Would fixing this silence other alerts too?",
+      // If 5 alerts fire for the same root cause, you want 1 page, not 5
+      check: !alert.isDuplicateOfHigherAlert,
+    },
+  ];
+
+  const failingCriteria = criteria.filter((c) => !c.check);
+  return {
+    quality: failingCriteria.length === 0 ? "good" : "needs-work",
+    issues: failingCriteria.map((c) => c.question),
+  };
+}
+````
+
+## On-call rotation structure
+
+A rotation is a schedule that distributes the on-call burden across the team. Basic principle: every engineer who owns a service is on-call for it. Nobody is on-call for a service they don't understand.
+
+```yaml
+# Example PagerDuty-style rotation config
+rotation:
+  name: "payments-primary"
+  type: "weekly" # Each person holds the pager for a full week
+  handoff_time: "09:00" # Monday morning — not Sunday night, not 3 AM
+
+  participants:
+    - alice # Rotates through in order
+    - bob
+    - carol
+    - dave
+    # With 4 engineers: each person is on-call 1 week out of 4
+
+  restrictions:
+    - type: "no-back-to-back"
+      # Same person cannot hold the pager two consecutive weeks
+    - type: "respect-pto"
+      # Swap participants around vacation, don't just leave gaps
+
+escalation_policy:
+  level_1:
+    target: "primary-oncall"
+    timeout_minutes: 5 # If no ack in 5 min, escalate
+
+  level_2:
+    target: "secondary-oncall"
+    timeout_minutes: 10
+
+  level_3:
+    target: "engineering-manager"
+    timeout_minutes: 20
+    # Managers aren't debugging code at 3 AM — they're managing comms
+    # and making business decisions if the outage is severe
+```
+
+## MTTD and MTTR: measuring response health
+
+Two metrics reveal whether your on-call process is working:
+
+```javascript
+// Mean Time to Detect (MTTD): how long until the team knows something is wrong
+// Mean Time to Resolve (MTTR): how long from detection to resolution
+
+function calculateIncidentMetrics(incidents) {
+  const metrics = incidents.map((incident) => {
+    // MTTD: time from incident start to first alert/detection
+    const mttd = (new Date(incident.detectedAt) - new Date(incident.startedAt)) / 60000; // minutes
+
+    // MTTR: time from detection to full resolution
+    const mttr = (new Date(incident.resolvedAt) - new Date(incident.detectedAt)) / 60000;
+
+    return { id: incident.id, mttdMinutes: mttd, mttrMinutes: mttr };
+  });
+
+  const avgMttd = metrics.reduce((sum, m) => sum + m.mttdMinutes, 0) / metrics.length;
+  const avgMttr = metrics.reduce((sum, m) => sum + m.mttrMinutes, 0) / metrics.length;
+
+  return {
+    incidents: metrics,
+    // Low MTTD = good monitoring (you find problems before users report them)
+    avgMttdMinutes: avgMttd.toFixed(1),
+    // Low MTTR = good runbooks + practiced response
+    avgMttrMinutes: avgMttr.toFixed(1),
+  };
+}
+
+const incidents = [
+  {
+    id: "INC-001",
+    startedAt: "2026-06-10T02:00:00Z",
+    detectedAt: "2026-06-10T02:04:00Z", // 4 min MTTD
+    resolvedAt: "2026-06-10T02:22:00Z", // 18 min MTTR
+  },
+  {
+    id: "INC-002",
+    startedAt: "2026-06-12T14:00:00Z",
+    detectedAt: "2026-06-12T14:11:00Z", // 11 min MTTD
+    resolvedAt: "2026-06-12T15:05:00Z", // 54 min MTTR
+  },
+];
+
+console.log(JSON.stringify(calculateIncidentMetrics(incidents), null, 2));
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// You're designing alerts for an e-commerce checkout service.
+// Each alert below needs to be evaluated for quality.
+// Implement evaluateAlerts() to classify each as "actionable" or "noisy",
+// then rewrite the noisy ones with a suggested fix.
+//
+// An alert is NOISY if:
+//   - severity is "page" but userImpact is false, OR
+//   - hasRunbook is false, OR
+//   - description includes vague terms: "high", "elevated", "slow"
+//     without a specific threshold number
+//
+// An alert is ACTIONABLE if none of the above are true.
+
+const alerts = [
+{
+name: "checkout-error-rate-high",
+description: "Error rate is elevated on checkout",
+severity: "page",
+userImpact: true,
+hasRunbook: false,
+},
+{
+name: "payment-latency-p99-exceeded",
+description: "p99 latency > 800ms for payment-service over 5 min window",
+severity: "page",
+userImpact: true,
+hasRunbook: true,
+},
+{
+name: "cpu-usage-warning",
+description: "CPU usage above 70% on web-server-3",
+severity: "page",
+userImpact: false,
+hasRunbook: false,
+},
+{
+name: "db-connection-pool-saturation",
+description: "Connection pool > 90% utilized for 3+ minutes",
+severity: "page",
+userImpact: true,
+hasRunbook: true,
+},
+];
+
+function evaluateAlerts(alerts) {
+return alerts.map((alert) => {
+// TODO: determine if alert is "actionable" or "noisy"
+// TODO: if noisy, provide a suggestedFix string explaining what to change
+return {
+name: alert.name,
+classification: "actionable", // or "noisy"
+suggestedFix: null, // only needed for noisy alerts
+};
+});
+}
+
+const results = evaluateAlerts(alerts);
+results.forEach(r => {
+console.log(\`\${r.name}: \${r.classification}\`);
+if (r.suggestedFix) console.log(\` Fix: \${r.suggestedFix}\`);
+});`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="An alert fires 50 times per day but the team only acts on it twice. What is this phenomenon called, and what should you do?"
+  options={[
+    "High MTTD — you need better monitoring to detect issues faster",
+    "Alert fatigue — audit the alert for actionability and either raise the threshold, add a runbook, or delete it",
+    "Escalation failure — the rotation schedule needs more participants",
+    "SLO violation — the error budget policy should pause releases",
+  ]}
+  answer={1}
+  explanation="An alert that fires constantly but is rarely actionable trains engineers to ignore it. This is alert fatigue. Fix it by applying the actionability test: if there is no specific action to take, the alert should not be a page. Raise the threshold, convert it to a ticket, or remove it entirely."
+/>
+
+<Quiz
+  question="Which MTTR improvement strategy addresses the root cause most directly?"
+  options={[
+    "Adding more engineers to the on-call rotation",
+    "Writing detailed runbooks with specific diagnostic and mitigation steps",
+    "Reducing the escalation timeout from 10 minutes to 5 minutes",
+    "Switching to a different monitoring platform",
+  ]}
+  answer={1}
+  explanation="MTTR measures how long it takes to go from 'we know there is a problem' to 'problem solved.' Runbooks directly attack this by giving responders pre-written diagnostic steps and known mitigations. More engineers or faster escalation helps coverage but doesn't reduce individual incident resolution time."
+/>
+
+<FillBlank
+  question="MTTD measures how quickly a team ______ a problem; MTTR measures how quickly they ______ it."
+  answer="detects / resolves"
+/>
+
+## What you learned
+
+- A runbook is a pre-written decision tree for a specific alert — it gives any responder the diagnostic steps and mitigation actions they need without requiring deep service knowledge
+- Actionable alerts have a specific user impact, a runbook with a clear action, appropriate urgency, and no redundancy with higher-level alerts
+- On-call rotations distribute burden fairly through weekly schedules with defined escalation paths — the goal is predictability, not heroics
+- MTTD measures monitoring quality (how fast you detect problems); MTTR measures response quality (how fast you resolve them once detected)
+
+With your on-call foundation in place, the next lesson covers what to do during the incident itself — the structured sequence of triage, mitigation, and communication that separates a well-run incident from a chaotic one.

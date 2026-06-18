@@ -1,0 +1,304 @@
+---
+title: "PID Control — Tuning and Implementation"
+description: "Implement a PID controller in discrete time, tune its gains using the Ziegler–Nichols method, and apply it to joint position control on a simulated robot arm."
+phase: 13
+module: "13-9"
+order: 3
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["AL-2", "SF-1"]
+  swebok: ["Software Construction", "Software Testing"]
+  bloom: "apply"
+  sfia: 2
+  dreyfus: "competent"
+vocabulary:
+  - pid-controller
+  - proportional-gain
+  - integral-gain
+  - derivative-gain
+  - setpoint
+  - error-signal
+  - integral-windup
+  - ziegler-nichols-method
+  - steady-state-error
+learningOutcomes:
+  - "Write a discrete-time PID controller with anti-windup and derivative filtering"
+  - "Apply Ziegler–Nichols tuning rules to compute initial P, I, and D gains from a step-response measurement"
+  - "Diagnose oscillation, steady-state error, and derivative kick from a controller output trace"
+  - "Explain why integral windup occurs and implement clamping to prevent it"
+prerequisites:
+  - "Robot dynamics and torque (Lesson 13-9-2)"
+  - "Control loop concept (setpoint, measurement, actuator)"
+  - "Discrete-time sampling (dt, sample rate)"
+  - "Basic Python or equivalent programming language"
+---
+
+## Why this matters
+
+PID (Proportional-Integral-Derivative) control is the algorithm running inside the motor driver of virtually every industrial robot on earth. Correctly tuned, it holds a joint at its commanded position against gravity, disturbances, and changing loads. Incorrectly tuned, it oscillates, overshoots, or drifts — each failure mode visibly corrupting the robot's motion.
+
+Tuning PID gains from first principles — not by random knob-twisting but by reading system behavior — is a skill that directly transfers to every actuated system: servo motors, CNC axes, temperature controllers, and drone attitude loops.
+
+## The thermostat mental model
+
+A thermostat is a P-only controller: if the room is 5°C below setpoint, it blasts heat. If it's 0.1°C below, it barely runs. The error drives the output. But a pure P controller can never fully close the gap — at equilibrium, it needs a non-zero error to produce any output at all.
+
+Adding **I** (integral) accumulates the error over time: even a small persistent error will eventually ramp up the output until it closes. Adding **D** (derivative) anticipates: if the temperature is rising fast, back off before overshooting.
+
+> **PID is just three weighted views of error — current, accumulated, and rate-of-change — summed into a single output.**
+
+## Discrete-time PID implementation
+
+Real controllers run in discrete time: every `dt` seconds, read the sensor, compute the error, update the output. Here is a production-quality discrete PID with anti-windup and derivative filtering:
+
+```python
+class PIDController:
+    """
+    Discrete-time PID controller with:
+    - Anti-windup via integrator clamping (prevents runaway when output saturates)
+    - Derivative-on-measurement (avoids derivative kick on setpoint changes)
+    - First-order low-pass filter on the derivative term (reduces noise amplification)
+    """
+
+    def __init__(
+        self,
+        kp: float,
+        ki: float,
+        kd: float,
+        dt: float,
+        output_min: float = -float("inf"),
+        output_max: float = float("inf"),
+        derivative_filter_coeff: float = 0.1,
+    ) -> None:
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.dt = dt
+        self.output_min = output_min
+        self.output_max = output_max
+        self.alpha = derivative_filter_coeff  # lower = more filtering
+
+        self._integral: float = 0.0
+        self._prev_measurement: float = 0.0
+        self._filtered_derivative: float = 0.0
+
+    def reset(self) -> None:
+        """Call when re-engaging after a stop to avoid windup from accumulated error."""
+        self._integral = 0.0
+        self._prev_measurement = 0.0
+        self._filtered_derivative = 0.0
+
+    def compute(self, setpoint: float, measurement: float) -> float:
+        """
+        Compute the control output for one timestep.
+
+        We differentiate the measurement, not the error — this prevents
+        the 'derivative kick' spike that occurs when the setpoint changes suddenly.
+        """
+        error = setpoint - measurement
+
+        # Proportional term: immediate response proportional to error
+        p_term = self.kp * error
+
+        # Integral term: accumulate error over time to eliminate steady-state offset
+        self._integral += error * self.dt
+        i_term = self.ki * self._integral
+
+        # Derivative term: low-pass filter reduces encoder noise amplification
+        raw_derivative = -(measurement - self._prev_measurement) / self.dt
+        self._filtered_derivative = (
+            self.alpha * raw_derivative
+            + (1.0 - self.alpha) * self._filtered_derivative
+        )
+        d_term = self.kd * self._filtered_derivative
+        self._prev_measurement = measurement
+
+        # Compute unclamped output
+        output = p_term + i_term + d_term
+
+        # Clamp output to actuator limits
+        clamped_output = max(self.output_min, min(self.output_max, output))
+
+        # Anti-windup: if output is saturated, stop integrating in the saturating direction
+        # Without this, the integrator winds up to large values during e.g. a stall,
+        # causing a long overshoot when the obstruction clears.
+        if output != clamped_output:
+            self._integral -= error * self.dt  # undo this step's integration
+
+        return clamped_output
+```
+
+## Simulating joint position control
+
+Apply the controller to a simulated single-joint arm, second-order plant (J·q̈ + b·q̇ = τ):
+
+```python
+import math
+
+def simulate_joint_pid(
+    kp: float, ki: float, kd: float,
+    setpoint_rad: float,
+    duration_s: float = 3.0,
+    dt: float = 0.01,
+) -> list[dict]:
+    """
+    Simulate a single revolute joint with PID position control.
+
+    Joint model: J * d2q/dt2 + b * dq/dt = tau
+    where J = 0.05 kg·m² (inertia) and b = 0.2 N·m·s/rad (damping).
+    """
+    J = 0.05   # moment of inertia (kg·m²)
+    b = 0.2    # viscous damping (N·m·s/rad)
+
+    pid = PIDController(
+        kp=kp, ki=ki, kd=kd, dt=dt,
+        output_min=-5.0, output_max=5.0  # motor torque limits (N·m)
+    )
+
+    q = 0.0      # joint position (rad)
+    dq = 0.0     # joint velocity (rad/s)
+    t = 0.0
+    history = []
+
+    while t <= duration_s:
+        tau = pid.compute(setpoint_rad, q)
+
+        # Euler integration of the plant dynamics
+        d2q = (tau - b * dq) / J
+        dq += d2q * dt
+        q  += dq  * dt
+        t  += dt
+
+        history.append({"t": t, "q_rad": q, "setpoint_rad": setpoint_rad, "tau_nm": tau})
+
+    return history
+
+# Well-tuned response
+history_good = simulate_joint_pid(kp=8.0, ki=2.0, kd=0.5,
+                                   setpoint_rad=math.radians(90))
+final = history_good[-1]
+print(f"Final position: {math.degrees(final['q_rad']):.2f}° "
+      f"(error: {math.degrees(final['setpoint_rad'] - final['q_rad']):.3f}°)")
+
+# Under-damped (oscillating)
+history_osc = simulate_joint_pid(kp=50.0, ki=0.0, kd=0.0,
+                                  setpoint_rad=math.radians(90))
+```
+
+## Ziegler–Nichols tuning
+
+The Ziegler–Nichols ultimate-gain method gives starting gains from two measurements: the ultimate gain Kᵤ (the P-only gain that produces sustained oscillation) and the ultimate period Tᵤ (the oscillation period in seconds).
+
+```python
+def ziegler_nichols_pid(K_ultimate: float, T_ultimate_s: float) -> dict[str, float]:
+    """
+    Compute PID gains from Ziegler-Nichols ultimate-gain method.
+
+    These are aggressive starting points — expect some overshoot.
+    Back off Kp by 20-30% for a more conservative response on real hardware.
+    """
+    kp = 0.6  * K_ultimate
+    ti = 0.5  * T_ultimate_s          # integral time constant
+    td = 0.125 * T_ultimate_s          # derivative time constant
+
+    ki = kp / ti                       # convert time constants to gains
+    kd = kp * td
+
+    return {"kp": kp, "ki": ki, "kd": kd}
+
+# Example: measured Ku=12.0, Tu=0.4s on a shoulder joint
+gains = ziegler_nichols_pid(K_ultimate=12.0, T_ultimate_s=0.4)
+print(f"Kp={gains['kp']:.2f}  Ki={gains['ki']:.2f}  Kd={gains['kd']:.3f}")
+# Kp=7.20  Ki=36.00  Kd=0.180
+```
+
+## Practice
+
+<SandboxExercise
+  title="Diagnose a PID controller"
+  description="The controller below is producing one of three failure modes. Read the symptoms in the comments, fix the single gain causing the problem, and verify the response converges cleanly to the setpoint."
+  initialCode={`import math
+
+class PIDController:
+def **init**(self, kp, ki, kd, dt, output_min=-5.0, output_max=5.0):
+self.kp, self.ki, self.kd, self.dt = kp, ki, kd, dt
+self.output_min, self.output_max = output_min, output_max
+self.\_integral = 0.0
+self.\_prev_measurement = 0.0
+
+    def compute(self, setpoint, measurement):
+        error = setpoint - measurement
+        self._integral += error * self.dt
+        self._integral = max(-10, min(10, self._integral))  # anti-windup clamp
+        derivative = -(measurement - self._prev_measurement) / self.dt
+        self._prev_measurement = measurement
+        output = self.kp * error + self.ki * self._integral + self.kd * derivative
+        return max(self.output_min, min(self.output_max, output))
+
+def simulate(kp, ki, kd, setpoint_rad=math.radians(90)):
+J, b, dt = 0.05, 0.2, 0.01
+pid = PIDController(kp, ki, kd, dt)
+q, dq, t = 0.0, 0.0, 0.0
+errors = []
+while t <= 4.0:
+tau = pid.compute(setpoint_rad, q)
+d2q = (tau - b _ dq) / J
+dq += d2q _ dt
+q += dq \* dt
+t += dt
+errors.append(setpoint_rad - q)
+final_err_deg = math.degrees(errors[-1])
+max_overshoot_deg = math.degrees(max(q - setpoint_rad for q in
+[setpoint_rad - e for e in errors]))
+print(f"Final error: {final_err_deg:.3f}°")
+print(f"Peak overshoot: {max_overshoot_deg:.3f}°")
+
+# SYMPTOM: Final error is ~8° — the joint never reaches the target.
+
+# DIAGNOSIS: Missing integral action; the P term alone cannot overcome steady-state offset.
+
+# FIX: Increase ki from 0 to an appropriate value (try 1.5–3.0).
+
+simulate(kp=6.0, ki=0.0, kd=0.4)
+`}
+language="python"
+expectedOutput="Final error: 0.0"
+hint="A non-zero steady-state error means the proportional term alone cannot overcome the load. The integral term was designed exactly for this — set ki > 0."
+/>
+
+## Check your understanding
+
+<Quiz
+  question="During a tuning session you observe the joint overshooting the setpoint by 40% and oscillating for several seconds before settling. Which gain adjustment is most likely to reduce the overshoot?"
+  choices={[
+    "Increase Kp to respond faster",
+    "Increase Ki to eliminate the remaining error faster",
+    "Increase Kd to add damping that counteracts the overshoot velocity",
+    "Decrease the sample rate (larger dt) to smooth the response",
+  ]}
+  correct={2}
+  explanation="Overshoot and oscillation indicate the system is underdamped. The derivative term adds damping by counteracting the rate of approach to the setpoint — increasing Kd reduces overshoot. Increasing Kp or Ki would worsen the oscillation."
+/>
+
+<Quiz
+  question="A robot arm's gripper is instructed to move from 0° to 90°. At the moment the setpoint jumps to 90°, the controller output spikes sharply before settling. This is called derivative kick. Which implementation change eliminates it?"
+  choices={[
+    "Set Kd to zero permanently",
+    "Differentiate the measurement rather than the error, so setpoint changes do not appear in the derivative term",
+    "Add a low-pass filter to the setpoint signal",
+    "Increase the sample rate to capture the spike better",
+  ]}
+  correct={1}
+  explanation="Derivative kick occurs because d(error)/dt = d(setpoint - measurement)/dt includes the sudden setpoint jump. If you instead differentiate -measurement, setpoint changes contribute nothing to the derivative term — only the smooth sensor signal does."
+/>
+
+## What you learned
+
+- A discrete-time PID controller computes three terms each cycle: proportional (current error), integral (accumulated error), and derivative (rate of change of measurement).
+- Integral windup occurs when the integrator accumulates during output saturation; clamping the integral when the output is saturated prevents post-saturation overshoot.
+- Differentiating the measurement (not the error) eliminates derivative kick on setpoint steps.
+- The Ziegler–Nichols ultimate-gain method provides systematic starting gains from two measurable system parameters.
+- Oscillation signals too much P or too little D; steady-state error signals missing I; slow sluggish response signals too little P.
+
+The next lesson takes PID-stabilized joints as a foundation and asks a harder question: how does a robot know where it is in the world when its own sensors are noisy and the map keeps changing?

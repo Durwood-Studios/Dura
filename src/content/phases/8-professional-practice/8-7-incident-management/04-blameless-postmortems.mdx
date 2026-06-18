@@ -1,0 +1,419 @@
+---
+title: "Blameless Post-Mortems"
+description: "Write post-mortems that find systemic causes instead of scapegoats, produce action items that actually prevent recurrence, and build team trust."
+phase: 8
+module: "8-7"
+order: 4
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-4", "SE-5"]
+  swebok: ["Software Engineering Management", "Software Quality"]
+  bloom: "evaluate"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - post-mortem
+  - contributing-factor
+  - five-whys
+  - systems-thinking
+  - action-item
+  - detection-gap
+  - prevention-gap
+learningOutcomes:
+  - "Apply the Five Whys technique to trace an incident from its surface symptom to a systemic root cause"
+  - "Evaluate a draft post-mortem and identify whether its action items address root causes or merely symptoms"
+  - "Write an incident timeline that distinguishes between contributing factors and root causes"
+  - "Explain why individual blame undermines the goal of a post-mortem and what systemic framing achieves instead"
+prerequisites:
+  - incident-commander
+  - blast-radius
+  - severity-level
+  - mitigation-vs-remediation
+  - systems-thinking
+---
+
+## Why this matters
+
+Every incident is expensive twice. First, during the outage itself — lost revenue, engineering time, user trust eroded. Second, after the outage, if nothing changes and the same failure recurs. The post-mortem is what determines whether the second cost is zero or compounding. A post-mortem that assigns blame and moves on produces zero learning. A post-mortem that identifies systemic weaknesses and ships action items converts a painful incident into permanent improvement.
+
+Blameless culture is not about ignoring responsibility — it is about recognizing that humans in complex systems will always make errors, and that the system is responsible for making those errors survivable. When blame is removed from the equation, engineers report incidents honestly, participate in post-mortems openly, and propose improvements without fear of career consequences. Blame-heavy cultures produce hidden incidents, underreporting, and the same failures recurring for years.
+
+## Why "the engineer made a mistake" is never the root cause
+
+Imagine a surgeon who leaves a sponge inside a patient. The hospital could fire the surgeon ("they were careless") and move on. Or it could ask: why doesn't our surgical checklist require a sponge count before closure? Why doesn't our equipment have RFID tags that alert if something is left behind? Why was this surgeon on their 14th consecutive hour when the error occurred?
+
+The surgeon's mistake is real. It is also the last link in a chain of systemic failures that made the mistake possible, probable, and uncaught. Firing the surgeon doesn't shorten the chain.
+
+> _A blameless post-mortem asks: "What made this failure possible?" — not "Who caused this failure?"_
+
+## The post-mortem document structure
+
+A post-mortem is not a bug report. It is a structured artifact that captures what happened, why it happened (at the systemic level), and what the organization will do to prevent recurrence.
+
+```markdown
+# Post-Mortem: Checkout Service Outage — 2026-06-15
+
+**Severity**: SEV-2
+**Duration**: 15 minutes (14:32–14:47 UTC)
+**Incident Commander**: Alice Chen
+**Authors**: Alice Chen, Bob Torres
+**Status**: Action items in progress
+
+---
+
+## Impact Summary
+
+- **Duration**: 15 minutes
+- **Users affected**: ~800 checkout attempts (8% error rate × ~10,000/hr baseline)
+- **Revenue impact**: ~$12,000 estimated (based on avg order value)
+- **SLO impact**: 15 min consumed from 43.2-min monthly error budget (35% of budget in one incident)
+
+---
+
+## Timeline
+
+| Time (UTC) | Event                                                                  |
+| ---------- | ---------------------------------------------------------------------- |
+| 14:05      | payment-service v2.4.1 deployed to production by automated CD pipeline |
+| 14:25      | First elevated error responses observed in checkout flow               |
+| 14:32      | Alert fires: checkout error rate > 5% for 3 consecutive minutes        |
+| 14:32      | Alice declared SEV-2, opened #inc-20260615-checkout                    |
+| 14:35      | Bob identified correlation with 14:05 deploy via git log comparison    |
+| 14:38      | Rollback of payment-service to v2.4.1 initiated                        |
+| 14:41      | Rollback completed; errors begin declining                             |
+| 14:45      | Error rate returns to baseline                                         |
+| 14:47      | Incident resolved; Alice declared resolution                           |
+
+---
+
+## Root Cause Analysis
+
+### What happened (surface level)
+
+A configuration variable `PAYMENT_TIMEOUT_MS` was renamed to
+`PAYMENT_REQUEST_TIMEOUT` in v2.4.1. The old variable name was still
+referenced in the request handler. Node.js read `undefined` for the
+timeout, which defaulted to 0ms — causing every payment validation
+request to immediately time out.
+
+### Five Whys
+
+**Why** did checkout fail?
+→ Payment validation requests timed out immediately.
+
+**Why** did they time out?
+→ The timeout was read as `undefined`, which evaluated to 0ms.
+
+**Why** was it `undefined`?
+→ The config variable was renamed in the new version but the read path
+still referenced the old name.
+
+**Why** wasn't this caught before deploy?
+→ The integration test suite uses mocked payment responses and does not
+test against real config variable names.
+
+**Why** doesn't the integration test use real config?
+→ The test environment was set up 18 months ago with hardcoded values
+for speed; config validation was never added to CI.
+
+**Root cause**: No CI step validates that all required configuration
+variables are present and non-undefined at startup. A renamed variable
+cannot fail fast during testing.
+
+---
+
+## Contributing Factors (not root cause, but made this worse)
+
+1. **20-minute MTTD**: The error rate exceeded threshold at 14:25 but the
+   alert didn't fire until 14:32. Our alert requires 3 consecutive minutes
+   above threshold — this is tuned for noise reduction but delayed detection
+   by 7 minutes.
+
+2. **No canary deployment**: v2.4.1 was deployed to 100% of traffic
+   immediately. A 5% canary would have limited blast radius while detection occurred.
+
+3. **No startup config validation**: The service starts successfully even
+   with critical config variables missing — it only fails at request time.
+
+---
+
+## Action Items
+
+| Priority | Action                                                                                                                | Owner | Due        |
+| -------- | --------------------------------------------------------------------------------------------------------------------- | ----- | ---------- |
+| P0       | Add startup config validation to payment-service that throws on undefined required vars                               | Bob   | 2026-06-17 |
+| P1       | Add integration test that boots the service with production config schema and validates all required vars are present | Carol | 2026-06-20 |
+| P1       | Enable canary deployments for payment-service (5% for 10 min before full rollout)                                     | Dave  | 2026-06-22 |
+| P2       | Reduce MTTD by changing alert to 1-minute window with higher threshold (tune for faster detection without more noise) | Alice | 2026-06-24 |
+
+---
+
+## What went well
+
+- IC declared incident and opened channel within 2 minutes of alert
+- Rollback decision was made quickly — 6 minutes from alert to rollback start
+- All stakeholder updates followed the established template
+- Resolution was communicated clearly with a timeline for next steps
+```
+
+## The Five Whys in practice
+
+The Five Whys is a technique for following the causal chain from symptom to system. The rule: keep asking "why" until you reach something the organization can actually fix. If your final "why" is "the engineer made a mistake," you stopped too early.
+
+```javascript
+// Modeling a Five Whys analysis as a chain
+function fiveWhys(symptom, chain) {
+  // Each item in the chain: { observation, why }
+  // The final item's "why" should be a systemic root cause the org can fix
+
+  const analysis = chain.reduce(
+    (acc, step, index) => {
+      acc.push({
+        level: index + 1,
+        observation: step.observation,
+        why: step.why,
+        // Is this a human error or a system property?
+        isSystemic:
+          !step.observation.toLowerCase().includes("engineer forgot") &&
+          !step.observation.toLowerCase().includes("developer made"),
+      });
+      return acc;
+    },
+    [{ level: 0, observation: symptom, why: "See chain below" }]
+  );
+
+  const rootCause = chain[chain.length - 1];
+  const stoppedAtBlame = chain.some(
+    (step) =>
+      step.observation.toLowerCase().includes("forgot") ||
+      step.observation.toLowerCase().includes("mistake") ||
+      step.observation.toLowerCase().includes("didn't know")
+  );
+
+  return {
+    chain: analysis,
+    rootCause: rootCause.why,
+    // A good Five Whys analysis never stops at blame
+    warning: stoppedAtBlame
+      ? "⚠️ Analysis may have stopped at human error — dig deeper for system cause"
+      : null,
+  };
+}
+
+const analysis = fiveWhys("Payment service is returning 100% errors", [
+  {
+    observation: "Payment validation requests are timing out",
+    why: "Timeout config variable is undefined",
+  },
+  {
+    observation: "Config variable is undefined at runtime",
+    why: "Variable was renamed but read path was not updated",
+  },
+  {
+    observation: "Rename was not caught in testing",
+    why: "Tests use hardcoded values, not real config variables",
+  },
+  {
+    observation: "Tests don't validate config",
+    why: "No CI requirement to test config completeness at startup",
+  },
+]);
+
+console.log("Root cause:", analysis.rootCause);
+console.log("Warning:", analysis.warning ?? "None — systemic root cause found");
+```
+
+## Evaluating action items
+
+The quality of a post-mortem is measured by the quality of its action items. A good action item is specific, owned, time-boxed, and addresses a contributing factor or root cause — not a symptom.
+
+```javascript
+// Framework for evaluating post-mortem action items
+function evaluateActionItem(item) {
+  const checks = [
+    {
+      name: "specific",
+      pass: !item.description.includes("improve") && !item.description.includes("better"),
+      // "Improve monitoring" is not specific. "Add alert for config variable undefined at startup" is.
+    },
+    {
+      name: "has-owner",
+      pass: item.owner && item.owner !== "team",
+      // "Team" is not an owner. One named person is.
+    },
+    {
+      name: "has-due-date",
+      pass: !!item.dueDate,
+      // Without a date, action items are wishes.
+    },
+    {
+      name: "addresses-cause",
+      pass: item.addressedFactor !== "symptom",
+      // Fixing the immediate symptom without fixing what made it possible = recurrence
+    },
+    {
+      name: "preventive-not-reactive",
+      // "Write a runbook for this failure" = reactive. Good.
+      // "Add test that prevents this class of failure" = preventive. Better.
+      pass: item.type !== "purely-reactive",
+    },
+  ];
+
+  const failingChecks = checks.filter((c) => !c.pass);
+  return {
+    quality:
+      failingChecks.length === 0 ? "good" : failingChecks.length <= 1 ? "acceptable" : "weak",
+    issues: failingChecks.map((c) => c.name),
+  };
+}
+
+// Example: weak action item
+console.log(
+  evaluateActionItem({
+    description: "Improve our deployment process to be safer",
+    owner: "team",
+    dueDate: null,
+    addressedFactor: "symptom",
+    type: "purely-reactive",
+  })
+);
+// { quality: "weak", issues: ["specific", "has-owner", "has-due-date", "preventive-not-reactive"] }
+
+// Example: good action item
+console.log(
+  evaluateActionItem({
+    description:
+      "Add startup validation to payment-service that throws ConfigError if PAYMENT_REQUEST_TIMEOUT is undefined",
+    owner: "bob-torres",
+    dueDate: "2026-06-17",
+    addressedFactor: "root-cause",
+    type: "preventive",
+  })
+);
+// { quality: "good", issues: [] }
+```
+
+## Try it
+
+<SandboxExercise language="javascript">
+{`// A junior engineer wrote the following post-mortem action items
+// after a database outage. Evaluate each one for quality.
+//
+// An action item is WEAK if ANY of these are true:
+//   - description contains "improve", "better", "ensure", or "more" without specifics
+//   - owner is null, "team", or "engineering"
+//   - dueDate is null
+//   - it only addresses the symptom (not a contributing factor or root cause)
+//
+// An action item is STRONG if none of the above are true.
+//
+// For each WEAK item, write a rewritten version that is STRONG.
+
+const actionItems = [
+{
+id: 1,
+description: "Ensure engineers are more careful with database migrations",
+owner: "engineering",
+dueDate: null,
+addressesCause: "human-error",
+},
+{
+id: 2,
+description: "Add a migration dry-run step to CI that validates syntax before deploying to production",
+owner: "alice-chen",
+dueDate: "2026-06-20",
+addressesCause: "root-cause",
+},
+{
+id: 3,
+description: "Improve our database monitoring",
+owner: "bob-torres",
+dueDate: "2026-06-25",
+addressesCause: "detection-gap",
+},
+{
+id: 4,
+description: "Add automated rollback: if error rate exceeds 10% within 5 minutes of migration, auto-revert",
+owner: "carol-smith",
+dueDate: "2026-06-28",
+addressesCause: "prevention-gap",
+},
+];
+
+function evaluateActionItems(items) {
+return items.map((item) => {
+// TODO: classify as "strong" or "weak"
+// TODO: if weak, provide a rewrite suggestion (string)
+
+    return {
+      id: item.id,
+      classification: "strong", // or "weak"
+      issues: [],               // array of issue names for weak items
+      rewrite: null,            // improved description string for weak items
+    };
+
+});
+}
+
+const results = evaluateActionItems(actionItems);
+results.forEach((r) => {
+console.log(\`Item \${r.id}: \${r.classification}\`);
+if (r.issues.length > 0) console.log(\` Issues: \${r.issues.join(", ")}\`);
+if (r.rewrite) console.log(\` Rewrite: \${r.rewrite}\`);
+});`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="A post-mortem concludes with: 'Root cause: Engineer Dave deleted the wrong database table.' The action item is: 'Dave will be more careful in future.' What is wrong with this analysis?"
+  options={[
+    "Nothing — identifying the responsible person is the whole point of a post-mortem",
+    "The analysis stopped at human error instead of asking why the system allowed a destructive operation without a safeguard",
+    "Post-mortems should never mention specific engineers",
+    "The action item should be more time-bound",
+  ]}
+  answer={1}
+  explanation="Stopping at 'Dave made a mistake' is where blameless post-mortems diverge from blame-oriented ones. The systemic question is: why did the system allow an irreversible destructive operation without a confirmation step, a soft-delete option, or automated backups that make recovery trivial? Dave's mistake is real, but it is the symptom — not the root cause."
+/>
+
+<Quiz
+  question="Your Five Whys analysis reaches: 'Why did we not have a canary deployment? Because it was never required.' A teammate says 'that is enough, we have our root cause.' Should you accept this conclusion?"
+  options={[
+    "Yes — identifying the missing process is sufficient for a root cause",
+    "No — dig one more level: why was it never required? Was there no deployment standard, no review gate, no on-call policy that mandated it? The action item should address that gap.",
+    "Yes — any answer that involves process rather than a person is systemic enough",
+    "No — you must always do exactly five whys, not four",
+  ]}
+  answer={1}
+  explanation="'It was never required' is an observation, not a root cause. The next why reveals where the organizational gap lives: was there no deployment standard? No review that checks for canary config? No policy that mandates it for high-risk services? The action item that prevents recurrence targets that missing requirement, not just the symptom."
+/>
+
+<FillBlank
+  question="A ______ post-mortem removes individual blame and instead asks what properties of the system made the failure possible."
+  answer="blameless"
+/>
+
+<Quiz
+  question="You are reviewing a post-mortem action item: 'Monitor the database more closely.' What makes this a weak action item, and how would you improve it?"
+  options={[
+    "It is too technical — action items should be in business language",
+    "It is vague: no specific metric, threshold, or alert is named; no owner; no due date. A strong version: 'Add alert: page primary on-call if replication lag > 30s for 2 consecutive minutes (owner: @dave, due: 2026-06-22)'",
+    "Monitoring action items should always be assigned to the infrastructure team, not a named person",
+    "It is fine as written — the intent is clear enough",
+  ]}
+  answer={1}
+  explanation="Vague action items disappear. 'Monitor more closely' has no measurable completion condition, no owner, and no threshold to aim for. A good action item names exactly what to build, who will build it, and when it will be done — so at the next post-mortem review, you can verify it shipped."
+/>
+
+## What you learned
+
+- Blameless post-mortems trace failures to systemic causes — missing safeguards, absent tests, insufficient monitoring — rather than individual errors, because fixing systems prevents recurrence while assigning blame does not
+- The Five Whys technique follows the causal chain until it reaches something the organization can change; stopping at "human error" leaves the chain incomplete
+- An incident timeline distinguishes events (what happened) from contributing factors (what made it worse) from root cause (what made it possible)
+- Strong action items are specific, owned by one person, time-boxed, and address a contributing factor or root cause — not the surface symptom
+- Post-mortem quality is measured by whether action items actually ship and prevent the same class of failure from recurring
+
+You now have the full incident management stack: from defining reliability targets through SLOs and error budgets, to running on-call rotations with quality runbooks, to executing structured incident response, to learning from failures through blameless post-mortems. These practices together define what it means to operate production software responsibly.

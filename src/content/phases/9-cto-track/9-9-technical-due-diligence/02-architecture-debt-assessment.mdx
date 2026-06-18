@@ -1,0 +1,347 @@
+---
+title: "Architecture and Technical Debt Assessment"
+description: "How to evaluate a target company's codebase health, architectural soundness, and accumulated technical debt — including how to form defensible estimates when access is limited."
+phase: 9
+module: "9-9"
+order: 2
+estimatedMinutes: 18
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-5", "SE-6"]
+  swebok: ["Software Design", "Software Construction", "Software Maintenance"]
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - technical-debt-ratio
+  - cyclomatic-complexity
+  - dependency-graph
+  - blast-radius
+  - strangler-fig-pattern
+  - coupling
+  - cohesion
+  - dead-code
+learningOutcomes:
+  - "Apply a structured codebase walkthrough protocol to identify architectural risk signals within a limited time window"
+  - "Estimate the technical debt ratio from static analysis metrics, test coverage data, and engineering team interviews"
+  - "Distinguish between debt that is economically rational to service and debt that is structural and path-dependent"
+  - "Produce a written architecture risk assessment that quantifies remediation cost in engineering-months"
+  - "Identify which architectural patterns create acquisition integration risk versus which patterns are neutral"
+prerequisites:
+  - "technical-due-diligence"
+  - "software-architecture-patterns"
+  - "technical-debt"
+  - "cyclomatic-complexity"
+---
+
+## Why this matters
+
+Architecture and technical debt are where acquisitions quietly die. Not at the letter of intent stage — the target looks healthy from the outside. Not at the board presentation stage — everyone is excited about the strategic fit. The destruction of value happens 18 months post-close, when the acquiring engineering team discovers that the migration they estimated at six months is actually two years, or that the codebase is so tightly coupled to a deprecated cloud provider's proprietary services that every feature requires custom shim work to port.
+
+Your job in the architecture and debt assessment is not to produce a clean code review. It is to answer a specific business question: what will it cost, in engineering time and calendar time, to get this codebase to the point where it can be maintained, extended, and integrated with the acquirer's platform? That number directly affects what the deal is worth.
+
+## Reading a codebase like a doctor reading an X-ray
+
+A radiologist does not study every pixel of an X-ray. They know what healthy bone looks like, so they look for deviations — density changes, unexpected shadows, structural asymmetries. They have seen enough X-rays that the abnormal stands out without a exhaustive scan of the normal.
+
+Reading a codebase for a due diligence is the same skill. You do not need to read every file. You need to know the signals of health and pathology well enough that the pathological surfaces quickly.
+
+> **Architecture assessment is pattern recognition under time pressure, not comprehensive code review. You are looking for signals, not certainties.**
+
+## The four health signals
+
+### Signal 1: Coupling and blast radius
+
+**Coupling** is the degree to which one component must change when another component changes. High coupling is the primary predictor of maintenance cost. Low coupling means changes are local; a team can modify one service without understanding the entire system. High coupling means changes ripple — a bug fix in the payment service requires coordinating with the notification service, the user service, and the reporting pipeline.
+
+The practical test for coupling: ask the engineering team to describe the last time they had to touch more than three services to ship a single feature. If the answer is "that's just how it is," coupling is a structural problem.
+
+**Blast radius** is the corollary: if a component fails or is changed incorrectly, how much of the system is affected? A tightly coupled monolith has a blast radius of the entire product. A well-decomposed system has blast radii measured in features, not products.
+
+```python
+# This is what HIGH coupling looks like in practice.
+# The OrderService directly imports and calls into 7 different services.
+# A change to any of those services may require changes here.
+# This is NOT a service boundary — it's a monolith with extra network hops.
+
+class OrderService:
+    def create_order(self, user_id, items):
+        # Directly calls UserService — tightly coupled
+        user = UserService.get_user(user_id)
+
+        # Directly calls InventoryService — tightly coupled
+        for item in items:
+            InventoryService.reserve(item.id, item.quantity)
+
+        # Directly calls PricingService — tightly coupled
+        total = PricingService.calculate(items, user.tier)
+
+        # Directly calls PaymentService — tightly coupled
+        payment = PaymentService.charge(user.payment_method, total)
+
+        # Directly calls NotificationService — tightly coupled
+        NotificationService.send_confirmation(user.email, order_id)
+
+        # Directly calls AnalyticsService — tightly coupled
+        AnalyticsService.record_purchase(user_id, items, total)
+
+        # Directly calls FulfillmentService — tightly coupled
+        FulfillmentService.queue_shipment(order_id, items)
+```
+
+```python
+# This is what LOW coupling looks like.
+# OrderService publishes an event. Other services react independently.
+# A change to NotificationService does not touch OrderService at all.
+
+class OrderService:
+    def create_order(self, user_id, items):
+        order = self._create_order_record(user_id, items)
+
+        # Publish an event — OrderService does not know who listens.
+        # Adding a new downstream behavior requires zero changes here.
+        self.event_bus.publish("order.created", {
+            "order_id": order.id,
+            "user_id": user_id,
+            "items": items,
+            "total": order.total,
+        })
+
+        return order
+```
+
+When reviewing a target's codebase, map the dependency graph of the top five to ten core services. The shape of that graph — how many edges, how bidirectional they are, whether there are circular dependencies — tells you more about architectural health than any code quality metric.
+
+### Signal 2: Test coverage quality (not just quantity)
+
+Coverage percentage is a lagging indicator and a gameable metric. A codebase can have 85% line coverage with tests that assert nothing meaningful. What you want to assess is **test quality**, which requires reading tests, not just reading coverage reports.
+
+Signals of high-quality tests:
+
+- Tests are named for behavior, not implementation (`test_order_total_includes_tax` not `test_calculate_method`)
+- Tests fail for the right reasons — when you break the behavior, not when you refactor the internals
+- Tests cover the unhappy path (what happens when payment fails? when inventory is unavailable?)
+- Tests run in isolation — no shared state, no dependency on external services in unit tests
+
+Signals of low-quality tests:
+
+- Tests assert on internal state that could change without breaking behavior
+- Integration tests that require a running database to do unit-level assertions
+- Tests that all pass but nobody trusts ("we always skip those in CI because they flake")
+- No tests at all for the components that everyone describes as "the scary part"
+
+During the due diligence interview, ask engineers: "What part of the codebase are you most afraid to change?" The answer to that question almost always describes the highest-risk component. Then find the tests for that component and read them.
+
+### Signal 3: Dependency age and supply chain health
+
+Modern software sits on hundreds of open-source dependencies. Each dependency is a maintenance obligation — it requires updates as security vulnerabilities are discovered, as APIs change, and as the ecosystem evolves. A codebase that has not updated its dependencies in 18 months has an invisible backlog.
+
+```bash
+# Run this in the target's repository during access window.
+# The output tells you three things:
+# 1. How far behind are they on each dependency?
+# 2. Are any dependencies on EOL versions?
+# 3. Are there known CVEs in current versions?
+
+# For Node.js projects:
+npm audit                    # Shows known vulnerabilities
+npm outdated                 # Shows what is behind and by how much
+
+# For Python projects:
+pip-audit                    # CVE scan
+pip list --outdated          # Version lag
+
+# Sample output interpretation:
+# "34 packages outdated, 7 with HIGH severity CVEs" is a valuation adjuster.
+# "2 packages outdated, 0 CVEs" is a clean bill of health.
+# "134 packages, 23 HIGH CVEs, 3 CRITICAL" is potentially a deal-breaker
+# depending on whether those vulnerabilities are exposed to the internet.
+```
+
+Pay particular attention to:
+
+- **Major version lag**: a dependency that is 2+ major versions behind often signals a migration that will break API contracts and require significant rework
+- **Unmaintained packages**: dependencies whose last release was 3+ years ago and whose maintainer has abandoned them
+- **Proprietary or commercial dependencies**: licenses that do not transfer or require renegotiation at acquisition
+
+### Signal 4: Deployment and operational maturity
+
+How a team ships code is as diagnostic as the code itself. A team that ships to production daily with automated rollback capability is operationally mature. A team that ships once a month with a six-hour manual deployment process has a different risk profile.
+
+Ask for the following:
+
+- Deployment frequency (how often does code reach production?)
+- Lead time (time from code commit to production deployment)
+- Change failure rate (what percentage of deployments require a rollback or hotfix?)
+- Mean time to recovery (when something breaks in production, how long to restore service?)
+
+These are the four DORA metrics, and they are reliable proxies for engineering culture and organizational effectiveness. High performers deploy multiple times per day with MTTR under an hour. Low performers deploy monthly with MTTR measured in days.
+
+## Estimating the technical debt ratio
+
+You will rarely have enough access to produce a precise technical debt estimate. Your job is to produce a defensible range that the deal team can use.
+
+A practical approach:
+
+**Step 1: Interview the engineering team directly.**
+
+Ask three questions:
+
+1. "If you could change one thing about the codebase to make your team faster, what would it be?"
+2. "What would it take to double your team's shipping velocity?"
+3. "What do you avoid touching because it is too risky?"
+
+The answers cluster around the highest-debt areas without you needing to read millions of lines of code.
+
+**Step 2: Run static analysis.**
+
+```bash
+# For a quick architecture health snapshot on most languages:
+# Tools like SonarQube, CodeClimate, or even basic complexity tools
+# give you signal in minutes.
+
+# Cyclomatic complexity: measures how many independent paths exist
+# through a function. High complexity = harder to test, harder to change.
+# Target: average < 10. Anything > 30 in a single function is a red flag.
+
+# For JavaScript/TypeScript:
+npx complexity-report --format json src/ > complexity-report.json
+
+# For Python:
+radon cc src/ -s -a   # -s: show complexity score, -a: show average
+
+# What you are looking for:
+# - Average complexity across the codebase (> 15 is elevated)
+# - How many functions are above 30 (each one is a debt item)
+# - Distribution: a few very complex functions surrounded by simple ones
+#   is different from uniformly elevated complexity everywhere
+```
+
+**Step 3: Estimate remediation scope.**
+
+Once you have identified the high-debt areas, estimate what it would cost to remediate them to a sustainable level. Express this in engineering-months, not dollars, so the deal team can apply their own labor cost assumptions.
+
+```markdown
+## Debt Estimate Summary
+
+**High-priority debt (block post-acquisition velocity):**
+
+- Decompose OrderService god-object: ~3 eng-months
+- Replace deprecated auth library (EOL Jan 2025): ~2 eng-months
+- Eliminate circular dependencies between billing and user modules: ~2 eng-months
+- Subtotal: ~7 eng-months
+
+**Medium-priority debt (addressable over 12 months):**
+
+- Upgrade remaining major-version-lagged dependencies: ~4 eng-months
+- Increase test coverage on payment flow from 34% to 80%: ~3 eng-months
+- Document 6 undocumented core modules: ~2 eng-months
+- Subtotal: ~9 eng-months
+
+**Low-priority debt (cosmetic, does not block velocity):**
+
+- Standardize error handling patterns: ~2 eng-months
+- Remove dead code: ~1 eng-month
+- Subtotal: ~3 eng-months
+
+**Total estimated remediation:** ~19 engineer-months
+**Estimated velocity impact while unaddressed:** 25-35% of post-acquisition engineering capacity
+```
+
+## Architectural patterns and acquisition integration risk
+
+Some architectural patterns make integration substantially harder. Recognize these during diligence:
+
+| Pattern                                     | Integration Risk | Why                                                              |
+| ------------------------------------------- | ---------------- | ---------------------------------------------------------------- |
+| Event-driven / pub-sub                      | Low              | Services are already decoupled; integration adds subscribers     |
+| REST APIs with versioning                   | Low              | Acquirer can consume APIs without touching internals             |
+| Monolith with clean module boundaries       | Medium           | Extractable, but requires careful decomposition planning         |
+| Big ball of mud                             | High             | No natural seams; integration requires internal surgery          |
+| Vendor lock-in (proprietary cloud services) | High             | Every feature depends on services that may not transfer          |
+| Hardcoded infrastructure assumptions        | High             | Deployment requires specific environment; migration is a rebuild |
+
+The strangler fig pattern is the most common integration approach for a monolith: rather than rewriting the target's application, the acquirer incrementally routes traffic through new components that implement the same behavior, "strangling" the legacy system one capability at a time. Whether this is viable depends on whether the monolith exposes clean API boundaries.
+
+## Practice
+
+<SandboxExercise
+  language="markdown"
+  instructions={`You have been given two hours of access to a target company's codebase and engineering team before an acquisition decision. The deal thesis is 'buy vs. build' — the acquirer wants the product, not specifically the team.
+
+Write a structured assessment covering:
+
+1. What are the three most important questions you will ask the engineering team in the first 30 minutes?
+2. What are the three most important files or directories you will examine first in the codebase?
+3. Draft a finding for a specific architectural problem you are likely to discover, following the finding format: What we found / Why it matters / Deal implication.
+4. What is the single biggest risk in a 'buy vs. build' due diligence, and how do you surface it quickly?`}
+initialCode={`# Architecture Assessment — 2-Hour Protocol
+
+## Engineering Team Questions (first 30 minutes)
+
+1.
+
+2.
+
+3.
+
+## Priority Codebase Areas (what I examine first)
+
+1.
+
+2.
+
+3.
+
+## Sample Finding
+
+**Finding Title:**
+**Domain:**
+**Severity:**
+
+**What we found:**
+
+**Why it matters:**
+
+**Deal implication:**
+
+## Biggest 'Buy vs. Build' Risk and How to Surface It
+
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="You run a cyclomatic complexity analysis on a target's codebase and find an average complexity of 22 across the codebase, with 47 functions exceeding a complexity of 50. What is the most accurate interpretation for the deal team?"
+  options={[
+    "The codebase is well-structured; complexity scores above 15 indicate sophisticated business logic",
+    "The codebase has elevated complexity that will slow future development; the 47 high-complexity functions represent concentrated risk and will each require careful testing before modification",
+    "Cyclomatic complexity is not a useful metric; only test coverage percentages matter for acquisition decisions",
+    "The codebase needs to be rewritten before the acquisition closes",
+  ]}
+  correctIndex={1}
+  explanation="An average complexity of 22 is elevated (target is under 10) and signals code that is harder to test and modify safely. The 47 functions above complexity 50 are specific debt items — each one is a location where changes are high-risk and testing is difficult. This is a valuation adjuster, not a deal-breaker, and should be quantified in remediation engineering-months."
+/>
+
+<Quiz
+  question="During a codebase review, you find that the target's core product is built as a monolith that has no internal module boundaries — functions in the payment module directly call database queries written in the user module, and vice versa. The deal thesis is to integrate this product's features into the acquirer's microservices platform. How do you categorize this finding?"
+  options={[
+    "Integration note — all monoliths can be integrated eventually with enough engineering time",
+    "Valuation adjuster — decomposing the monolith will cost significant engineering time that reduces the product's near-term value to the acquirer",
+    "Deal-breaker — monoliths cannot be integrated with microservices platforms",
+    "Not a finding — the target will continue operating the monolith; integration is not required immediately",
+  ]}
+  correctIndex={1}
+  explanation="A monolith with no internal module boundaries (sometimes called a 'big ball of mud') is an integration challenge, not an impossibility. The acquirer can use the strangler fig pattern or build adapter layers, but both approaches require significant engineering investment. This is a valuation adjuster: quantify the integration cost in engineering-months and reduce the offer accordingly, or structure the deal with integration milestones."
+/>
+
+## What you learned
+
+- Architecture assessment is pattern recognition under time pressure: you read for signals, not for comprehensiveness.
+- The four health signals are coupling and blast radius, test coverage quality, dependency age, and deployment maturity — each gives you a distinct dimension of architectural risk.
+- Technical debt estimates should be expressed as engineering-months of remediation, with high/medium/low priority categorization so the deal team can apply their own cost assumptions.
+- Specific architectural patterns (event-driven, monolith with clean modules, vendor lock-in, big ball of mud) carry predictable integration risk profiles.
+- The most diagnostic question you can ask an engineering team is: "What part of the codebase are you most afraid to change?"
+
+The next lesson shifts from the codebase to the people who built it — how to assess the engineering team's quality, organization, and retention risk in the context of an acquisition.

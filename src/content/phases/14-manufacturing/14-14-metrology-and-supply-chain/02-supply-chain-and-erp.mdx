@@ -1,0 +1,478 @@
+---
+title: "Supply Chain Management and ERP Integration"
+description: "Trace how a customer order becomes a purchase order, how ERP systems coordinate material requirements across a manufacturing network, and how quality data from inspection flows back into supplier performance records."
+phase: 14
+module: "14-14"
+order: 2
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-3", "SE-4"]
+  swebok: ["Software Engineering Management", "Software Engineering Process"]
+  bloom: "understand"
+  sfia: 2
+  dreyfus: "competent"
+vocabulary:
+  - erp
+  - mrp
+  - bill-of-materials
+  - demand-signal
+  - purchase-order
+  - supplier-quality-management
+  - incoming-inspection
+  - certificate-of-conformance
+  - first-article-inspection
+  - isa-95
+learningOutcomes:
+  - "Trace the path from a customer demand signal to a supplier purchase order using MRP logic and a bill-of-materials explosion"
+  - "Explain the role of ISA-95 in defining how ERP systems exchange data with manufacturing execution systems"
+  - "Describe how first article inspection and certificate of conformance records are used to qualify new supplier parts before full production quantities are accepted"
+  - "Identify at least three data fields that connect a CMM inspection result to a supplier quality record in a typical ERP quality module"
+prerequisites:
+  - "Manufacturing phase overview (what an assembly line produces and why tolerances matter)"
+  - "CMM measurement and measurement uncertainty (lesson 1 of this module)"
+  - "Basic understanding of databases and structured data"
+---
+
+## Why this matters
+
+A single aircraft has roughly 6 million individual parts. No single company makes all of them. The supply chain that delivers them — on time, to specification, with traceability back to the raw material — is itself a mission-critical system. When a supplier ships parts that are out of tolerance and the problem is not caught before assembly, the cost is not just the price of the parts: it is teardown labor, rescheduled production, airworthiness investigation, and sometimes a grounded fleet.
+
+The software that coordinates this system — Enterprise Resource Planning (ERP) — is one of the largest categories of enterprise software on Earth. As a manufacturing engineer, you will interact with ERP data constantly: reading work orders, entering inspection results, tracking non-conformances, and investigating why the system says a part is available when the shop floor says it is not. Understanding the data model behind ERP is the difference between being a passive user who does what the system tells them and an engineer who can audit the system, spot bad data, and improve it.
+
+## The supply chain as a distributed state machine
+
+Think of a supply chain as a distributed state machine where each node (your factory, a tier-1 supplier, a tier-2 raw-material supplier) maintains local state and communicates state changes by message. A customer places an order — that is an event. The event triggers a state transition in your production schedule. That schedule change triggers a materials requirements calculation. That calculation produces outbound messages (purchase orders) to your suppliers. Each supplier processes those messages and produces their own downstream messages.
+
+The coordination of this distributed system is what <VocabTooltip slug="erp">ERP</VocabTooltip> does. ERP is not magic — it is a very large relational database with business logic layered on top. The business logic implements the state machine rules. When the state machine is configured correctly and fed accurate data, it coordinates thousands of transactions per day without human intervention. When it is fed bad data — wrong lead times, incorrect inventory counts, outdated bills of materials — it produces garbage output with high confidence.
+
+> **An ERP system is a distributed state machine running on a database. Good configuration plus accurate data produces coordination. Bad data produces expensive confusion with perfect traceability.**
+
+## From demand to purchase order: MRP logic
+
+<VocabTooltip slug="mrp">Material Requirements Planning (MRP)</VocabTooltip> is the calculation that
+converts a production schedule (what you need to build, when) into a procurement plan (what you need
+to buy, from whom, by when). MRP has been running on computers since the 1960s; it is the core
+algorithm inside every ERP system.
+
+```python
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Optional
+
+@dataclass
+class BOMLine:
+    """A single line in a Bill of Materials."""
+    parent_part: str
+    child_part: str
+    quantity_per: float      # How many child parts per parent assembly
+    lead_time_days: int      # Supplier or production lead time for this child
+
+@dataclass
+class InventoryRecord:
+    part_number: str
+    on_hand_qty: float
+    on_order_qty: float      # Quantity on open purchase orders not yet received
+    safety_stock: float      # Minimum buffer — don't plan to consume below this
+
+@dataclass
+class DemandRecord:
+    part_number: str
+    quantity: float
+    required_date: date
+
+@dataclass
+class PlannedOrder:
+    """Output of MRP: a purchase order or production order the system recommends."""
+    part_number: str
+    quantity: float
+    order_type: str          # "purchase" or "production"
+    release_date: date       # When to release the order (today or future)
+    due_date: date
+
+
+def explode_bom(
+    parent_part: str,
+    quantity_needed: float,
+    bom_lines: list[BOMLine],
+) -> dict[str, float]:
+    """
+    Recursively walk the Bill of Materials to find all child-part requirements
+    for a given parent assembly quantity.
+
+    BOM explosion is the heart of MRP: a customer order for 10 assemblies
+    becomes requirements for dozens of sub-assemblies and hundreds of raw materials.
+    """
+    requirements: dict[str, float] = {}
+
+    for line in bom_lines:
+        if line.parent_part == parent_part:
+            child_qty_needed = quantity_needed * line.quantity_per
+            requirements[line.child_part] = (
+                requirements.get(line.child_part, 0) + child_qty_needed
+            )
+            # Recurse: does this child have its own BOM children?
+            child_requirements = explode_bom(line.child_part, child_qty_needed, bom_lines)
+            for part, qty in child_requirements.items():
+                requirements[part] = requirements.get(part, 0) + qty
+
+    return requirements
+
+
+def run_mrp(
+    demand_records: list[DemandRecord],
+    inventory: dict[str, InventoryRecord],
+    bom_lines: list[BOMLine],
+) -> list[PlannedOrder]:
+    """
+    Simplified MRP run: for each demand record, explode the BOM and net
+    against available inventory to generate planned orders.
+
+    Real MRP also handles: time-phased netting, lot sizing rules (EOQ, min/max),
+    firm planned orders, pegging (tracing demand back to originating order),
+    and multi-plant distribution. This implementation captures the core logic.
+    """
+    planned_orders: list[PlannedOrder] = []
+
+    for demand in demand_records:
+        # Step 1: Explode the BOM to find all component requirements
+        component_requirements = explode_bom(
+            demand.part_number, demand.quantity, bom_lines
+        )
+        # Include the top-level part itself
+        component_requirements[demand.part_number] = (
+            component_requirements.get(demand.part_number, 0) + demand.quantity
+        )
+
+        # Step 2: Net requirements against inventory (gross-to-net calculation)
+        for part_number, gross_required in component_requirements.items():
+            inv = inventory.get(part_number)
+            if inv is None:
+                # Part not in inventory master — treat as zero on-hand
+                net_required = gross_required
+                lead_time = 14  # Default lead time if unknown
+            else:
+                # Available = on-hand + on-order - safety stock reservation
+                available = (inv.on_hand_qty + inv.on_order_qty) - inv.safety_stock
+                # Net requirement is what we still need after using available inventory
+                net_required = max(0.0, gross_required - available)
+                # Find lead time from BOM (use first matching line)
+                lead_time = next(
+                    (line.lead_time_days for line in bom_lines
+                     if line.child_part == part_number),
+                    14
+                )
+
+            if net_required > 0:
+                # Step 3: Offset backward by lead time to calculate release date
+                release_date = demand.required_date - timedelta(days=lead_time)
+                order_type = "purchase" if not any(
+                    line.parent_part == part_number for line in bom_lines
+                ) else "production"
+
+                planned_orders.append(PlannedOrder(
+                    part_number=part_number,
+                    quantity=net_required,
+                    order_type=order_type,
+                    release_date=release_date,
+                    due_date=demand.required_date,
+                ))
+
+    return planned_orders
+
+
+# ── Example: a simple gearbox assembly ───────────────────────────────────────
+
+bom_lines = [
+    BOMLine("GEARBOX-001", "HOUSING-A",   quantity_per=1, lead_time_days=21),
+    BOMLine("GEARBOX-001", "GEAR-SET-B",  quantity_per=1, lead_time_days=14),
+    BOMLine("GEARBOX-001", "BEARING-C",   quantity_per=4, lead_time_days=7),
+    BOMLine("GEAR-SET-B",  "GEAR-PINION", quantity_per=1, lead_time_days=10),
+    BOMLine("GEAR-SET-B",  "GEAR-RING",   quantity_per=1, lead_time_days=10),
+]
+
+inventory = {
+    "BEARING-C": InventoryRecord("BEARING-C", on_hand_qty=20, on_order_qty=0, safety_stock=5),
+    "HOUSING-A": InventoryRecord("HOUSING-A", on_hand_qty=2,  on_order_qty=3, safety_stock=1),
+}
+
+demand = [
+    DemandRecord("GEARBOX-001", quantity=5, required_date=date(2026, 7, 15)),
+]
+
+orders = run_mrp(demand, inventory, bom_lines)
+print("MRP Planned Orders:")
+print(f"{'Part':<20} {'Qty':>5} {'Type':<12} {'Release Date':<14} {'Due Date'}")
+print("-" * 70)
+for o in sorted(orders, key=lambda x: x.release_date):
+    print(f"{o.part_number:<20} {o.quantity:>5.0f} {o.order_type:<12} "
+          f"{o.release_date.isoformat():<14} {o.due_date.isoformat()}")
+```
+
+## ERP and the shop floor: ISA-95
+
+MRP lives in ERP (the enterprise layer). The machines, robots, and humans executing the plan live on the shop floor. Between them sits a **Manufacturing Execution System (MES)**, which translates high-level ERP work orders into real-time machine instructions and reports actual production back up to ERP.
+
+The standard that defines how these two layers exchange data is <VocabTooltip slug="isa-95">ISA-95</VocabTooltip> (IEC 62264). ISA-95 defines a hierarchical model (Levels 0–4) and the data objects — production schedule, production performance, material lot information — that cross the MES/ERP boundary. Without ISA-95, every ERP-to-MES integration is a custom project. With ISA-95, the data models are standardized enough that integration work follows a known pattern.
+
+```python
+# ISA-95 Level definitions and data flow
+ISA_95_LEVELS = {
+    0: "Physical Process (sensors, actuators — the machines themselves)",
+    1: "Basic Control (PLCs, motion controllers — closed-loop automation)",
+    2: "Supervisory Control (SCADA, HMI — operator visibility and override)",
+    3: "Manufacturing Operations Management (MES — work order execution, quality, maintenance)",
+    4: "Business Planning and Logistics (ERP — demand, supply, finance)",
+}
+
+# ISA-95 data objects that cross the Level 3/4 boundary
+ISA_95_LEVEL_3_4_OBJECTS = {
+    "ProductionSchedule":
+        "ERP sends to MES: what to build, how many, by when",
+    "ProductionPerformance":
+        "MES sends to ERP: what was actually built, yield, cycle time",
+    "MaterialLot":
+        "Traceability data: which raw material batch went into which finished unit",
+    "QualityTestResult":
+        "Inspection results from MES quality module up to ERP supplier quality",
+}
+
+# When ERP generates a purchase order, ISA-95 defines the expected
+# acknowledgment and shipment notification data structures so
+# the receiving dock can auto-match incoming parts to open POs.
+print("ISA-95 Level Model:")
+for level, description in ISA_95_LEVELS.items():
+    print(f"  Level {level}: {description}")
+```
+
+## Supplier quality: FAI and CoC
+
+Before a new supplier's part is used in production at any quantity, aerospace, automotive, and medical device supply chains require a **First Article Inspection (FAI)** — a complete dimensional and functional verification of the first production-representative part, documented against every characteristic on the drawing.
+
+Once a supplier is qualified, every shipment is accompanied by a **Certificate of Conformance (CoC)** — a signed declaration that the parts in this lot were produced to the specified revision of the drawing and comply with all referenced standards.
+
+```python
+from dataclasses import dataclass, field
+from datetime import date
+from enum import Enum
+
+class InspectionResult(Enum):
+    CONFORMING = "conforming"
+    NON_CONFORMING = "non_conforming"
+    CONDITIONAL = "conditional"  # Meets spec but deviations noted
+
+@dataclass
+class MeasurementDataPoint:
+    characteristic_id: str       # Drawing balloon number (e.g., "DIM-007")
+    nominal: float
+    upper_tol: float
+    lower_tol: float
+    measured_value: float
+    expanded_uncertainty: float   # U95 from the measurement system
+
+    @property
+    def deviation(self) -> float:
+        return self.measured_value - self.nominal
+
+    @property
+    def guard_banded_result(self) -> InspectionResult:
+        """
+        ISO 14253-1 conformance: subtract uncertainty from tolerance before comparing.
+        Parts near the tolerance edge that look conforming may not be after guard banding.
+        """
+        guard_band_limit = min(abs(self.upper_tol), abs(self.lower_tol)) - self.expanded_uncertainty
+        if abs(self.deviation) <= guard_band_limit:
+            return InspectionResult.CONFORMING
+        elif abs(self.deviation) <= min(abs(self.upper_tol), abs(self.lower_tol)):
+            # Within tolerance but outside guard band — uncertain zone
+            return InspectionResult.CONDITIONAL
+        else:
+            return InspectionResult.NON_CONFORMING
+
+
+@dataclass
+class FirstArticleInspectionRecord:
+    """
+    FAI record links every drawing characteristic to a measurement result.
+    In aerospace, this maps to AS9102 Part 1 (design characteristics).
+    """
+    part_number: str
+    drawing_revision: str
+    supplier_code: str
+    inspection_date: date
+    cmm_serial_number: str
+    operator_id: str
+    measurements: list[MeasurementDataPoint] = field(default_factory=list)
+
+    def overall_result(self) -> InspectionResult:
+        results = [m.guard_banded_result for m in self.measurements]
+        if any(r == InspectionResult.NON_CONFORMING for r in results):
+            return InspectionResult.NON_CONFORMING
+        elif any(r == InspectionResult.CONDITIONAL for r in results):
+            return InspectionResult.CONDITIONAL
+        return InspectionResult.CONFORMING
+
+    def non_conforming_characteristics(self) -> list[MeasurementDataPoint]:
+        return [m for m in self.measurements
+                if m.guard_banded_result != InspectionResult.CONFORMING]
+
+
+@dataclass
+class CertificateOfConformance:
+    """
+    CoC accompanies every production shipment. It is a legal attestation.
+    If a CoC is falsified or issued for parts that were not inspected,
+    it is fraud — not a quality escape.
+    """
+    supplier_code: str
+    part_number: str
+    drawing_revision: str
+    lot_number: str
+    quantity: int
+    ship_date: date
+    applicable_standards: list[str]  # e.g., ["AS9100D", "ASME Y14.5-2018"]
+    authorized_signatory: str
+    declaration: str = (
+        "The parts in this shipment were manufactured in compliance with "
+        "the referenced drawing revision and all listed specifications. "
+        "Records are available for review for a minimum of 10 years."
+    )
+
+
+# ── ERP quality record: linking CMM data to supplier records ──────────────
+
+@dataclass
+class ERPQualityRecord:
+    """
+    The data fields that ERP quality modules (SAP QM, Oracle Quality, etc.)
+    store when an incoming inspection is posted. These fields create the
+    audit trail from a physical part back to its supplier lot and FAI record.
+    """
+    # Purchase order linkage — traces back to the MRP demand that caused the PO
+    purchase_order_number: str
+    po_line_item: int
+
+    # Part identity
+    part_number: str
+    drawing_revision: str
+    lot_number: str
+    quantity_received: int
+    quantity_inspected: int
+
+    # Inspection linkage
+    inspection_date: date
+    cmm_serial_number: str         # Maintains calibration traceability
+    operator_id: str
+    fai_record_id: str             # FK to FirstArticleInspectionRecord
+
+    # Supplier quality linkage
+    supplier_code: str
+    coc_document_number: str       # FK to CertificateOfConformance
+
+    # Result
+    overall_result: InspectionResult
+    non_conformance_report_id: Optional[str] = None  # Set if non-conforming
+
+    def post_to_inventory(self) -> str:
+        """
+        ERP logic: if conforming, move parts to unrestricted stock.
+        If non-conforming, place in quarantine location pending disposition.
+        """
+        if self.overall_result == InspectionResult.CONFORMING:
+            return f"MOVE {self.quantity_received} pcs to UNRESTRICTED stock"
+        else:
+            return f"MOVE {self.quantity_received} pcs to QUARANTINE — NCR {self.non_conformance_report_id}"
+
+
+from typing import Optional
+
+# Simulate an incoming inspection workflow
+fai = FirstArticleInspectionRecord(
+    part_number="HOUSING-A-REV-C",
+    drawing_revision="C",
+    supplier_code="SUP-4422",
+    inspection_date=date(2026, 6, 15),
+    cmm_serial_number="HEX-DEA-0041",
+    operator_id="OP-089",
+    measurements=[
+        MeasurementDataPoint("DIM-001", 25.000,  0.010, -0.010, 25.006, 0.003),
+        MeasurementDataPoint("DIM-002", 50.000,  0.015, -0.015, 49.998, 0.003),
+        MeasurementDataPoint("DIM-003", 12.500,  0.008, -0.008, 12.509, 0.003),
+    ]
+)
+
+print(f"FAI Result: {fai.overall_result().value}")
+if fai.non_conforming_characteristics():
+    for m in fai.non_conforming_characteristics():
+        print(f"  Non-conforming: {m.characteristic_id} "
+              f"deviation={m.deviation*1000:+.1f} µm, "
+              f"result={m.guard_banded_result.value}")
+
+quality_record = ERPQualityRecord(
+    purchase_order_number="PO-2026-1847",
+    po_line_item=1,
+    part_number="HOUSING-A-REV-C",
+    drawing_revision="C",
+    lot_number="LOT-88321",
+    quantity_received=50,
+    quantity_inspected=5,
+    inspection_date=date(2026, 6, 17),
+    cmm_serial_number="HEX-DEA-0041",
+    operator_id="OP-089",
+    fai_record_id="FAI-2026-0031",
+    supplier_code="SUP-4422",
+    coc_document_number="COC-SUP4422-2026-0618",
+    overall_result=fai.overall_result(),
+    non_conformance_report_id="NCR-2026-0112" if fai.overall_result() != InspectionResult.CONFORMING else None,
+)
+
+print(f"\nERP Inventory Action: {quality_record.post_to_inventory()}")
+```
+
+## Check your understanding
+
+<Quiz
+  question="An MRP run explodes a bill-of-materials for 10 assemblies. The BOM calls for 4 bearings per assembly. Inventory shows 22 bearings on hand with a safety stock of 5. How many bearings will MRP recommend ordering?"
+  choices={[
+    "40 bearings — MRP orders the full gross requirement",
+    "18 bearings — gross requirement 40 minus (on-hand 22) = 18",
+    "23 bearings — gross requirement 40 minus (available 22 minus safety stock 5) = 23",
+    "3 bearings — on-hand minus safety stock is 17, and 17 + 3 = 20 which rounds up to 40",
+  ]}
+  correct={2}
+  explanation="MRP net requirements = gross requirement minus available inventory, where available = on-hand minus safety stock reservation. Available = 22 − 5 = 17 bearings. Gross requirement = 10 assemblies × 4 bearings = 40. Net requirement = 40 − 17 = 23 bearings. Safety stock is not consumed in planning — it is a buffer MRP always tries to maintain."
+/>
+
+<Quiz
+  question="A supplier ships 100 parts with a Certificate of Conformance. Your incoming inspection finds 3 parts with a dimension outside the drawing tolerance. Which action does your ERP quality module require next?"
+  choices={[
+    "Accept all 100 parts — the CoC overrides the inspection results",
+    "Reject the entire lot and return it to the supplier without documentation",
+    "Open a Non-Conformance Report (NCR) for the non-conforming parts, quarantine the affected parts, and notify the supplier for disposition",
+    "Accept the 97 conforming parts and discard the 3 non-conforming parts without record",
+  ]}
+  correct={2}
+  explanation="A CoC is a supplier's attestation, not a guarantee — the receiving inspection is the independent verification. When inspection finds non-conformances, the ERP quality module requires an NCR to document the discrepancy, quarantine the parts pending disposition (use-as-is, rework, return to vendor, scrap), and formally notify the supplier. The CoC discrepancy itself may trigger a supplier corrective action request (SCAR)."
+/>
+
+<Quiz
+  question="ISA-95 defines a hierarchy from Level 0 (physical process) to Level 4 (ERP). A MES-to-ERP integration exchanges 'ProductionPerformance' data objects. What information does this object carry and which direction does it flow?"
+  choices={[
+    "It carries the production schedule from ERP down to MES so the shop floor knows what to build",
+    "It carries actual production results (what was built, yield, cycle time) from MES up to ERP so the business layer has accurate inventory and schedule status",
+    "It carries machine sensor data from Level 0 up to Level 4 for financial reporting",
+    "It carries purchase order data from ERP to MES so the shop floor can track incoming materials",
+  ]}
+  correct={1}
+  explanation="ISA-95 defines the direction of each data object explicitly. ProductionSchedule flows downward (ERP → MES): what to make. ProductionPerformance flows upward (MES → ERP): what was made, with actual quantities, cycle times, and yield. This upward flow is what keeps ERP inventory accurate — without it, ERP shows planned quantities while the floor has different reality."
+/>
+
+## What you learned
+
+- MRP transforms a customer demand signal into supplier purchase orders by exploding the bill-of-materials to find all component requirements, then netting those requirements against available inventory (on-hand plus on-order, minus safety stock) to compute what must be ordered and when.
+- ISA-95 defines the four-level hierarchy from physical machines (Level 0) to ERP (Level 4) and specifies the standardized data objects — ProductionSchedule, ProductionPerformance, MaterialLot — that cross the MES/ERP boundary, making integrations follow a known pattern instead of being custom every time.
+- First Article Inspection validates the first production-representative part from a new supplier against every drawing characteristic before production quantities are accepted; the CoC on every subsequent shipment is the supplier's legal attestation of conformance to the approved revision.
+- ERP quality records link a physical part back to its purchase order, supplier lot, CoC document, and FAI record — at minimum: PO number, part number, drawing revision, lot number, CMM serial number, and inspection date — creating the traceability audit trail required by AS9100, IATF 16949, and similar standards.
+- Measurement data from CMM inspection closes the supply chain loop: it is the evidence that the parts delivered against a purchase order actually match the specification, and it feeds directly into supplier performance metrics that drive future sourcing decisions.
+
+This module — metrology and supply chain management — sits at the intersection of two disciplines: the precision measurement techniques that produce trustworthy conformance data, and the enterprise systems that route that data into procurement, production, and supplier quality decisions. An engineer who understands both sides can close the loop between what is designed, what is ordered, what arrives, and what is shipped to the customer.

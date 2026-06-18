@@ -1,0 +1,441 @@
+---
+title: "CUDA Programming — Kernels, Threads, Shared Memory"
+description: "Write your first CUDA kernels, manage GPU memory manually, and use shared memory to turn a memory-bound computation into a throughput-bound one."
+phase: 7
+module: "7-5"
+order: 5
+estimatedMinutes: 20
+difficulty: "advanced"
+standards:
+  cs2023: ["SF-3", "SF-4", "PD-4"]
+  swebok: ["Software Construction", "Software Performance"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - cuda-kernel
+  - thread-block
+  - grid
+  - shared-memory
+  - global-memory
+  - warp-divergence
+  - coalesced-access
+  - synchronization-barrier
+  - occupancy
+learningOutcomes:
+  - "Write a syntactically correct CUDA kernel that performs a parallel reduction or matrix operation"
+  - "Allocate global memory on the GPU with cudaMalloc and transfer data with cudaMemcpy in the correct order"
+  - "Declare shared memory within a kernel and use __syncthreads() to coordinate reads before any thread proceeds"
+  - "Explain why uncoalesced global memory access is 10-100x slower and restructure a naive kernel to coalesce reads"
+  - "Launch a kernel with a 2D grid configuration and correctly compute a thread's logical row/column index"
+prerequisites:
+  - "C syntax — pointers, structs, function definitions, sizeof"
+  - "GPU architecture — warps, SIMD execution, global vs. shared memory hierarchy"
+  - "Parallel computing concepts — thread, thread block, data parallelism"
+---
+
+## Why this matters
+
+Every machine learning model you have ever used was trained on a GPU. Every real-time graphics frame, every physics simulation, every large-scale data pipeline runs on GPU hardware precisely because the throughput numbers are staggering — a modern GPU executes billions of floating-point operations per second in parallel. That throughput is not automatic. Poorly written GPU code can be slower than a single CPU core. The difference between a kernel that saturates hardware and one that wastes it comes down to three decisions: how you structure thread blocks, where you store data between reads, and whether your memory access pattern lets the hardware coalesce requests.
+
+CUDA (Compute Unified Device Architecture) is NVIDIA's programming model for this hardware. It extends C with a small vocabulary — `__global__`, `threadIdx`, `blockIdx`, `__shared__`, `__syncthreads()` — and those additions unlock the entire GPU. By the end of this lesson, you will understand why those keywords exist, not just what they do. That understanding is what separates a programmer who can copy-paste GPU code from one who can debug and optimize it.
+
+## The post-office analogy
+
+Imagine a post office with 65,536 identical sorting clerks, each assigned one letter to process. A <VocabTooltip slug="cuda-kernel">kernel</VocabTooltip> is the set of instructions posted on the wall: "open the envelope, read the number, add 1, write the result." Every clerk executes those same instructions, but each on their own letter. There is no communication between clerks except through a shared table in the center of the room — and to use the table safely, a clerk must wait until all clerks at the same table are ready to read.
+
+That is CUDA. The kernel is the instruction sheet. The clerks are threads. The table is <VocabTooltip slug="shared-memory">shared memory</VocabTooltip>. The waiting rule is `__syncthreads()`.
+
+> **A CUDA kernel is a C function that runs N times simultaneously, once per thread — with every thread running the same code but on different data.**
+
+## The CUDA execution model
+
+Before writing code, you need the three-level hierarchy clear:
+
+```
+Grid
+ └── Block (threadIdx.x, threadIdx.y, threadIdx.z identify threads within a block)
+      └── Thread
+
+A kernel launch specifies:
+  - Grid dimensions:  how many blocks  (gridDim.x, gridDim.y, gridDim.z)
+  - Block dimensions: how many threads per block (blockDim.x, blockDim.y, blockDim.z)
+
+A thread's unique global index (1D example):
+  int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+```
+
+The hardware constraint: all threads in a block share one <VocabTooltip slug="synchronization-barrier">`__syncthreads()`</VocabTooltip> barrier and one pool of shared memory. Threads in different blocks cannot synchronize mid-kernel — they are scheduled independently across streaming multiprocessors.
+
+## Your first kernel: vector addition
+
+The simplest meaningful GPU program adds two arrays element-by-element. Every element is independent, so every thread handles one element.
+
+```c
+// ===== vector_add.cu =====
+// CUDA files use the .cu extension; compiled with nvcc instead of gcc.
+
+#include <stdio.h>
+#include <cuda_runtime.h>
+
+// __global__ marks a function as a kernel: called from CPU, runs on GPU.
+// The GPU cannot return a value from a kernel — results go back through memory.
+__global__ void vectorAdd(const float* a, const float* b, float* c, int n) {
+    // Each thread computes exactly one output element.
+    // blockIdx.x = which block this thread is in (0, 1, 2, ...)
+    // blockDim.x = how many threads per block (e.g., 256)
+    // threadIdx.x = thread's position within its block (0..255)
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Guard: the last block may have threads past the end of the array.
+    // Without this, those threads would write to out-of-bounds GPU memory.
+    if (i < n) {
+        c[i] = a[i] + b[i];
+    }
+}
+
+int main() {
+    int n = 1 << 20;            // 1M elements
+    size_t size = n * sizeof(float);
+
+    // --- CPU (host) memory ---
+    float *h_a = (float*)malloc(size);
+    float *h_b = (float*)malloc(size);
+    float *h_c = (float*)malloc(size);
+
+    for (int i = 0; i < n; i++) {
+        h_a[i] = (float)i;
+        h_b[i] = (float)(n - i);
+    }
+
+    // --- GPU (device) memory ---
+    // cudaMalloc allocates memory in GPU DRAM (global memory).
+    // These pointers are only valid on the GPU — dereferencing them on the CPU crashes.
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, size);
+    cudaMalloc(&d_b, size);
+    cudaMalloc(&d_c, size);
+
+    // Transfer data from CPU to GPU. cudaMemcpyHostToDevice specifies direction.
+    // This crosses the PCIe bus — minimize how often you do this.
+    cudaMemcpy(d_a, h_a, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, size, cudaMemcpyHostToDevice);
+
+    // --- Kernel launch ---
+    // Angle-bracket syntax: <<<gridDim, blockDim>>>
+    // 256 threads/block is a common starting point; must be multiple of 32 (warp size).
+    int threadsPerBlock = 256;
+    // Ceiling division so we cover all n elements even if n is not divisible by 256.
+    int blocksPerGrid = (n + threadsPerBlock - 1) / threadsPerBlock;
+
+    vectorAdd<<<blocksPerGrid, threadsPerBlock>>>(d_a, d_b, d_c, n);
+
+    // Kernel launches are asynchronous — the CPU continues immediately.
+    // cudaMemcpy from device implicitly synchronizes (waits for kernel to finish).
+    cudaMemcpy(h_c, d_c, size, cudaMemcpyDeviceToHost);
+
+    // Verify correctness: every element should equal n (i + (n-i))
+    for (int i = 0; i < n; i++) {
+        if (h_c[i] != (float)n) {
+            printf("Error at index %d: expected %f, got %f\n", i, (float)n, h_c[i]);
+            break;
+        }
+    }
+    printf("Vector addition correct.\n");
+
+    // Always free GPU memory. GPU memory leaks persist until the process exits.
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    free(h_a); free(h_b); free(h_c);
+    return 0;
+}
+```
+
+## Shared memory: the key to performance
+
+<VocabTooltip slug="global-memory">Global memory</VocabTooltip> is large (gigabytes) but slow (~500
+cycles per access). <VocabTooltip slug="shared-memory">Shared memory</VocabTooltip> is tiny (~48 KB
+per block) but fast (~5 cycles). The canonical optimization is to load a tile of data from global
+memory into shared memory once, do all the computation against shared memory, then write results
+back once.
+
+This pattern — tiled computation — is what separates 5 GB/s kernels from 500 GB/s kernels.
+
+```c
+// ===== tiled_matmul.cu =====
+// Matrix multiplication: C = A * B
+// Naive version: each thread reads A's row and B's column from global memory.
+// Every element of A is read B_cols times. Every element of B is read A_rows times.
+// That's O(N^3) global memory reads for an N×N multiply — catastrophically slow.
+//
+// Tiled version: each block loads a TILE_SIZE×TILE_SIZE submatrix of A and B
+// into shared memory. Threads do all their dot-product work from shared memory.
+// Global memory reads drop from O(N^3) to O(N^3 / TILE_SIZE).
+
+#define TILE_SIZE 16  // 16×16 = 256 threads — fills one warp group cleanly
+
+__global__ void tiledMatMul(
+    const float* A, const float* B, float* C,
+    int rowsA, int colsA, int colsB
+) {
+    // __shared__ declares memory that lives in on-chip SRAM, shared by ALL threads
+    // in this block. It persists for the lifetime of the block, not per-thread.
+    __shared__ float tileA[TILE_SIZE][TILE_SIZE];
+    __shared__ float tileB[TILE_SIZE][TILE_SIZE];
+
+    // This thread's output matrix coordinates
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    float sum = 0.0f;
+
+    // Stride through tiles along the shared dimension (colsA == rowsB)
+    int numTiles = (colsA + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (int t = 0; t < numTiles; t++) {
+        // Each thread loads one element of the tile into shared memory.
+        // This is a coalesced read: consecutive threads (threadIdx.x 0,1,2,...)
+        // load consecutive memory addresses — hardware merges into one transaction.
+        int aCol = t * TILE_SIZE + threadIdx.x;
+        int bRow = t * TILE_SIZE + threadIdx.y;
+
+        tileA[threadIdx.y][threadIdx.x] = (row < rowsA && aCol < colsA)
+            ? A[row * colsA + aCol] : 0.0f;
+
+        tileB[threadIdx.y][threadIdx.x] = (bRow < colsA && col < colsB)
+            ? B[bRow * colsB + col] : 0.0f;
+
+        // __syncthreads() is a barrier: NO thread in this block proceeds past this
+        // line until EVERY thread has finished writing to shared memory.
+        // Without it, fast threads would read tiles before slow threads wrote them.
+        __syncthreads();
+
+        // Compute the partial dot product using the now-fully-loaded tile.
+        // All reads are from shared memory (~5 cycles) not global memory (~500 cycles).
+        for (int k = 0; k < TILE_SIZE; k++) {
+            sum += tileA[threadIdx.y][k] * tileB[k][threadIdx.x];
+        }
+
+        // Second barrier: prevent any thread from overwriting the tile for the next
+        // iteration before all threads finish reading the current one.
+        __syncthreads();
+    }
+
+    if (row < rowsA && col < colsB) {
+        C[row * colsB + col] = sum;
+    }
+}
+```
+
+## Memory coalescing — the hardware contract
+
+The GPU memory controller batches requests from all 32 threads in a warp into one or a few DRAM transactions — but only if those threads access consecutive memory addresses. This is <VocabTooltip slug="coalesced-access">coalesced access</VocabTooltip>.
+
+```c
+// COALESCED: thread i reads address base + i
+// Warp threads 0..31 read addresses base+0, base+1, ..., base+31
+// Hardware merges into 1 transaction (128 bytes = 32 floats at 4 bytes each)
+float val = globalArray[threadIdx.x + blockIdx.x * blockDim.x];
+
+// UNCOALESCED: thread i reads address base + i * stride
+// Warp threads 0..31 read addresses base+0, base+32, base+64, ..., base+992
+// Hardware cannot merge — issues 32 separate transactions (32x the memory bus time)
+float val = globalArray[(threadIdx.x + blockIdx.x * blockDim.x) * 32];
+
+// RULE: structure data so the thread dimension (threadIdx.x) indexes the
+// fastest-changing address dimension. For 2D arrays, store row-major and
+// let threadIdx.x vary across columns — that is coalesced.
+```
+
+## Warp divergence — why if-statements cost you
+
+Every 32 threads in a <VocabTooltip slug="thread-block">warp</VocabTooltip> execute the same instruction simultaneously. When threads in the same warp take different branches of an `if` statement, the hardware must run both branches serially with the non-participating threads masked off.
+
+```c
+// DIVERGENT: threads with even/odd threadIdx.x take different paths
+// The warp executes BOTH branches, masking half the threads each time.
+// Throughput: 50% of peak for this code region.
+if (threadIdx.x % 2 == 0) {
+    result = computeExpensive(data[i]);
+} else {
+    result = data[i] * 2.0f;
+}
+
+// CONVERGENT: branch depends on block index (whole blocks go one way)
+// All 32 threads in a warp always take the same branch.
+// Throughput: 100% of peak.
+if (blockIdx.x < gridDim.x / 2) {
+    result = computeExpensive(data[i]);
+} else {
+    result = data[i] * 2.0f;
+}
+
+// KEY INSIGHT: divergence is harmless at block or grid granularity.
+// It only costs performance when the diverging condition varies WITHIN a warp —
+// meaning within a 32-thread chunk of consecutive threadIdx values.
+```
+
+## Parallel reduction with shared memory
+
+Reduction — summing an array, finding the maximum — is a pattern that appears everywhere. A naive approach reads global memory O(N log N) times. The shared-memory reduction reads global memory once.
+
+```c
+// ===== reduction.cu =====
+// Sum all elements of an array. Each block reduces a segment of 2*blockDim.x
+// elements to a single value in shared memory, then writes to a partial-sums array.
+// A second kernel (or CPU loop) sums the partial results.
+
+__global__ void reduceSumV2(const float* input, float* partialSums, int n) {
+    // One shared-memory slot per thread in this block
+    extern __shared__ float sdata[];  // size passed at kernel launch: <<<g, b, b*sizeof(float)>>>
+
+    int tid = threadIdx.x;
+    int globalIdx = blockIdx.x * (blockDim.x * 2) + tid;
+
+    // Load two elements per thread to maximize memory bandwidth utilization
+    float val = 0.0f;
+    if (globalIdx < n)           val += input[globalIdx];
+    if (globalIdx + blockDim.x < n) val += input[globalIdx + blockDim.x];
+    sdata[tid] = val;
+
+    // Wait for all threads to finish loading before any thread begins reducing
+    __syncthreads();
+
+    // Reduction tree: each step halves the active threads.
+    // After log2(blockDim.x) steps, sdata[0] holds the block's sum.
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            // Only the lower half of threads are active each step —
+            // no warp divergence within the active half.
+            sdata[tid] += sdata[tid + stride];
+        }
+        // Synchronize before the next stride so we don't read stale values
+        __syncthreads();
+    }
+
+    // Thread 0 writes the block's result to global memory
+    if (tid == 0) {
+        partialSums[blockIdx.x] = sdata[0];
+    }
+}
+
+// Kernel launch with dynamic shared memory:
+// reduceSumV2<<<numBlocks, threadsPerBlock, threadsPerBlock * sizeof(float)>>>(...)
+//                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+//                                           Third angle-bracket arg = shared mem bytes
+```
+
+## Practice
+
+<SandboxExercise
+  language="c"
+  instructions="A kernel that multiplies every element of an array by a scalar is given below, but it has three bugs: (1) the thread index calculation is wrong and will read out-of-bounds, (2) the bounds check condition is inverted, and (3) the result is written back to the wrong array. Fix all three bugs."
+  initialCode={`#include <cuda_runtime.h>
+
+// BUG: this kernel has three bugs. Find and fix them.
+**global** void scaleArray(const float* input, float* output, float scalar, int n) {
+// Bug 1: threadIdx.x should be combined with blockIdx and blockDim
+int i = threadIdx.x;
+
+    // Bug 2: condition is inverted — should execute when i IS less than n
+    if (i >= n) {
+        // Bug 3: result should go to output, not back to input
+        input[i] = input[i] * scalar;
+    }
+
+}
+
+// Correct launch configuration (do not change this):
+// scaleArray<<<(n + 255) / 256, 256>>>(d_input, d_output, 2.5f, n);`}
+  solution={`#include <cuda_runtime.h>
+
+**global** void scaleArray(const float* input, float* output, float scalar, int n) {
+// Fix 1: global thread index combines block and thread coordinates
+int i = blockIdx.x \* blockDim.x + threadIdx.x;
+
+    // Fix 2: guard executes when i IS within bounds (< n, not >= n)
+    if (i < n) {
+        // Fix 3: result written to output array, not input
+        output[i] = input[i] * scalar;
+    }
+
+}`}
+testCases={[
+"thread index uses blockIdx.x * blockDim.x + threadIdx.x",
+"bounds check uses i < n",
+"write goes to output not input"
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "You launch a kernel with 512 threads per block and 1000 blocks. Thread (blockIdx.x=3, threadIdx.x=47) computes its global index as `blockIdx.x * blockDim.x + threadIdx.x`. What is the result?",
+      options: ["47", "1583", "1535", "3047"],
+      correct: 1,
+      explanation:
+        "3 * 512 + 47 = 1536 + 47 = 1583. This is the standard formula for mapping a (block, thread) coordinate to a flat array index.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A kernel reads a 2D matrix where each row has 1024 floats. Thread (threadIdx.x=0) reads column 0, thread (threadIdx.x=1) reads column 1024, thread (threadIdx.x=2) reads column 2048. Is this access coalesced?",
+      options: [
+        "Yes — each thread reads one element",
+        "No — consecutive threads access addresses 1024 floats apart, causing 32 separate DRAM transactions per warp",
+        "Yes — column-major access is always coalesced",
+        "It depends on the GPU model",
+      ],
+      correct: 1,
+      explanation:
+        "Consecutive threads access addresses that are 1024 floats = 4096 bytes apart. The hardware cannot merge these into one transaction — it issues 32 separate DRAM requests. The fix is to have threadIdx.x vary across the column dimension (consecutive addresses), not across rows.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A kernel uses `__shared__ float buffer[256]` and loads values from global memory. Thread 0 reads one element, thread 255 reads another. Thread 0 then tries to read thread 255's element from shared memory. What is required before that read?",
+      options: [
+        "Nothing — shared memory writes are immediately visible to all threads",
+        "__syncthreads() — to guarantee thread 255 has finished writing before thread 0 reads",
+        "cudaDeviceSynchronize() — to synchronize the entire GPU",
+        "volatile keyword on the shared array to prevent caching",
+      ],
+      correct: 1,
+      explanation:
+        "__syncthreads() is a block-level barrier that prevents any thread from proceeding past it until every thread in the block has reached it. Without it, thread 0 may read shared memory before thread 255 has written its value — a classic race condition on shared memory.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "You have a kernel where threads 0-15 in a warp execute branch A and threads 16-31 execute branch B. How does this affect performance?",
+      options: [
+        "No effect — modern GPUs predict branches",
+        "The warp executes both branches serially with half the threads masked each time, approximately halving throughput for that code region",
+        "The kernel will crash due to warp divergence",
+        "Only threads 0-15 execute; threads 16-31 are silently skipped",
+      ],
+      correct: 1,
+      explanation:
+        "Warp divergence causes the hardware to run both branches sequentially, masking inactive threads during each pass. For a 50/50 split, the code takes roughly 2x as long as a convergent warp. The program is still correct — just slower. Divergence across entire blocks or grids (not within a warp) is free.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="To safely use shared memory written by other threads, a thread must call _______ before reading. This function acts as a block-level _______ where all threads must arrive before any thread continues."
+  blanks={["__syncthreads()", "barrier"]}
+  hint="Think about what prevents one fast thread from reading memory before a slow thread has written it."
+/>
+
+## What you learned
+
+- A CUDA kernel is a C function marked `__global__` that executes once per thread; threads compute their global index as `blockIdx.x * blockDim.x + threadIdx.x` and use it to select their data element
+- GPU memory management follows a strict host/device separation: `cudaMalloc` allocates on-device global memory, `cudaMemcpy` transfers data across PCIe, and `cudaFree` releases device allocations
+- Shared memory (`__shared__`) is on-chip SRAM accessible by all threads in a block; it requires `__syncthreads()` barriers before reads that depend on other threads' writes
+- Coalesced access — consecutive threads reading consecutive addresses — is the single most impactful memory optimization, reducing DRAM transactions from 32 per warp to 1
+- Warp divergence occurs when threads in the same 32-thread warp take different branches; the hardware serializes both paths and masks inactive threads, roughly proportionally reducing throughput
+
+CUDA kernels, shared memory tiling, and coalesced access are the foundation for writing neural network layers, image processing pipelines, physics simulations, and any computation where the data parallelism is too large for CPU throughput. The patterns here — tile, sync, reduce — appear unchanged in libraries like cuDNN and cuBLAS that power production ML systems.

@@ -1,0 +1,308 @@
+---
+title: "Server-Sent Events"
+description: "Use the browser's built-in EventSource API to receive a continuous stream of server updates over plain HTTP — no WebSocket complexity required."
+phase: 2
+module: "2-7"
+order: 3
+estimatedMinutes: 10
+difficulty: "intermediate"
+standards:
+  cs2023: ["NC-1", "WS-2"]
+  swebok: ["Software Design", "Software Construction"]
+  bloom: "apply"
+  sfia: 2
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - server-sent-events
+  - eventsource
+  - event-stream
+  - last-event-id
+  - cors-sse
+learningOutcomes:
+  - "Write a browser EventSource client that connects to an SSE endpoint and dispatches named events"
+  - "Implement a Node.js SSE endpoint that conforms to the text/event-stream protocol format"
+  - "Explain three scenarios where SSE is a better architectural choice than WebSockets"
+  - "Use the Last-Event-ID header to resume an interrupted SSE stream without losing events"
+prerequisites:
+  - "HTTP polling vs. push (lesson 2-7-1)"
+  - "The WebSocket protocol (lesson 2-7-2)"
+  - "Node.js / Express HTTP handlers"
+  - "JavaScript event listeners"
+---
+
+## Why this matters
+
+WebSockets are powerful, but they carry real complexity: custom framing protocol, bidirectional state management, and infrastructure that must support persistent TCP connections. When your data only flows one way — server to client — you're carrying all that complexity without needing the bidirectionality. <VocabTooltip slug="server-sent-events">Server-Sent Events (SSE)</VocabTooltip> give you server-to-client push over plain HTTP, with automatic reconnection built into the browser, and a wire format you can read as plain text. For live dashboards, notification feeds, progress bars, and AI streaming responses, SSE is often the right tool and WebSockets are overkill.
+
+Knowing when _not_ to reach for the most powerful tool is a professional skill. This lesson teaches you SSE's capabilities and honest limitations, so you can make that call deliberately rather than defaulting to WebSockets for everything real-time.
+
+## A radio broadcast, not a phone call
+
+WebSockets are a phone call — both sides talk. SSE is a radio broadcast: the station (server) transmits, and your radio (browser) receives. You don't talk back over the same channel.
+
+> _<VocabTooltip slug="eventsource">EventSource</VocabTooltip> is a browser API that opens a persistent HTTP connection and fires a JavaScript event every time the server sends a new line of data._
+
+The connection is standard HTTP. The response body never closes — it just keeps receiving new lines. The browser handles reconnection automatically, with no code from you.
+
+## The wire format
+
+The <VocabTooltip slug="event-stream">event-stream</VocabTooltip> format is intentionally simple:
+
+```
+data: Hello, world!\n\n
+```
+
+Each message is one or more `field: value` lines, terminated by a **blank line** (two newlines). That double newline is what signals "this message is complete — dispatch it."
+
+Named events look like this:
+
+```
+event: user-joined\n
+data: {"name":"Alice","room":"general"}\n
+\n
+```
+
+A full message with an ID for resumption:
+
+```
+id: 42\n
+event: score-update\n
+data: {"team":"home","score":3}\n
+\n
+```
+
+You can test this format by opening an SSE endpoint directly in your browser — you'll see the raw text stream in the response body.
+
+## Server implementation
+
+```javascript
+// Express handler — keeps the response open and streams events
+app.get("/api/events", (req, res) => {
+  // These three headers are required for the SSE protocol
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  // Immediately flush the headers so the browser knows the stream has started
+  res.flushHeaders();
+
+  // Helper to write a well-formed SSE message
+  function sendEvent(eventName, data, id = null) {
+    if (id !== null) res.write(`id: ${id}\n`);
+    res.write(`event: ${eventName}\n`);
+    // data must be a string — JSON.stringify handles objects
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  }
+
+  // Send a heartbeat comment every 20 seconds to keep proxies from closing the connection
+  // SSE comments start with a colon — the browser ignores them
+  const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 20_000);
+
+  let eventId = 0;
+
+  // Simulate pushing a score update every 3 seconds
+  const scoreUpdates = setInterval(() => {
+    sendEvent("score-update", { home: 3, away: 2, minute: 67 }, ++eventId);
+  }, 3000);
+
+  // When the client disconnects, clean up intervals — otherwise they run forever
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    clearInterval(scoreUpdates);
+  });
+});
+```
+
+## Browser implementation
+
+```javascript
+// One line to open the stream — the browser handles reconnection automatically
+const source = new EventSource("/api/events");
+
+// Listen for a specific named event type
+source.addEventListener("score-update", (event) => {
+  const score = JSON.parse(event.data);
+  document.querySelector("#score").textContent =
+    `${score.home} – ${score.away} (min. ${score.minute})`;
+});
+
+// The generic "message" event catches events with no explicit "event:" field
+source.addEventListener("message", (event) => {
+  console.log("Generic message:", event.data);
+});
+
+// "error" fires on connection failure — the browser auto-reconnects
+source.addEventListener("error", (event) => {
+  if (event.readyState === EventSource.CLOSED) {
+    console.log("Stream closed permanently");
+  } else {
+    // readyState is CONNECTING — the browser is already retrying
+    console.log("Connection lost, browser is reconnecting…");
+  }
+});
+
+// Clean up when the user leaves the page — close the connection explicitly
+window.addEventListener("beforeunload", () => source.close());
+```
+
+## Resuming after disconnection with Last-Event-ID
+
+When the browser reconnects after a dropped SSE stream, it automatically sends the ID of the last event it received in a `Last-Event-ID` header. Your server can use this to replay any events the client missed — preventing data loss without the client ever needing to ask.
+
+```javascript
+app.get("/api/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  // The browser sends this header automatically on reconnect
+  const lastId = parseInt(req.headers["last-event-id"] ?? "0", 10);
+
+  // Replay any events the client missed since it disconnected
+  const missed = eventLog.filter((event) => event.id > lastId);
+  for (const event of missed) {
+    res.write(`id: ${event.id}\n`);
+    res.write(`event: ${event.type}\n`);
+    res.write(`data: ${JSON.stringify(event.data)}\n\n`);
+  }
+
+  // Now subscribe the client to live events going forward
+  // ... subscription logic here
+});
+```
+
+The <VocabTooltip slug="last-event-id">`Last-Event-ID`</VocabTooltip> mechanism makes SSE streams naturally resumable with zero client-side code — the browser handles it automatically.
+
+## SSE vs. WebSockets: the decision tree
+
+| Criterion        | Prefer SSE                                     | Prefer WebSockets                  |
+| ---------------- | ---------------------------------------------- | ---------------------------------- |
+| Data direction   | Server → client only                           | Bidirectional                      |
+| Infrastructure   | Any HTTP server                                | Requires WS support                |
+| Auto-reconnect   | Built in (free)                                | Must implement                     |
+| Browser support  | All modern browsers                            | All modern browsers                |
+| Event replay     | Built in (Last-Event-ID)                       | Must implement                     |
+| Message ordering | Guaranteed (HTTP/1.1)                          | Guaranteed                         |
+| Binary data      | No (text only)                                 | Yes                                |
+| Use cases        | Feeds, dashboards, AI streaming, notifications | Chat, games, collaborative editing |
+
+SSE is simpler to implement, simpler to proxy, simpler to debug (it's just text), and handles reconnection without any client code. If your use case fits the "server → client" model, SSE wins on almost every dimension.
+
+## Cross-origin SSE
+
+<VocabTooltip slug="cors-sse">CORS</VocabTooltip> applies to SSE just like fetch. If your SSE
+endpoint is on a different origin, you need the CORS header on the server:
+
+```javascript
+// Allow your frontend origin to receive the stream
+res.setHeader("Access-Control-Allow-Origin", "https://yourapp.com");
+
+// If you need to send cookies with the connection, also add:
+// res.setHeader("Access-Control-Allow-Credentials", "true");
+// And on the client:
+// const source = new EventSource("/api/events", { withCredentials: true });
+```
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// Build a mock SSE parser that processes a stream of text/event-stream data.
+//
+// The SSE format groups fields with a blank line (\n\n) as the message terminator.
+// Each field is "field: value\n".
+//
+// YOUR TASK: implement parseSSEChunk(chunk) which:
+//   - Receives raw text that may contain one or more complete SSE messages
+//   - Returns an array of parsed message objects: { event, data, id }
+//   - Ignores comment lines (starting with ":")
+//   - Uses "message" as the default event type when no "event:" field is present
+
+function parseSSEChunk(chunk) {
+const messages = [];
+// Split on double-newline — that's the message boundary in the SSE spec
+const rawMessages = chunk.split("\\n\\n").filter(Boolean);
+
+for (const raw of rawMessages) {
+const msg = { event: "message", data: null, id: null };
+
+    for (const line of raw.split("\\n")) {
+      // TODO: skip comment lines (lines starting with ":")
+      // TODO: parse "event: <value>" → msg.event
+      // TODO: parse "data: <value>" → msg.data
+      // TODO: parse "id: <value>" → msg.id
+    }
+
+    // Only include messages that have data
+    if (msg.data !== null) messages.push(msg);
+
+}
+
+return messages;
+}
+
+// Tests
+const chunk1 = "data: Hello, world!\\n\\n";
+const result1 = parseSSEChunk(chunk1);
+console.log(result1.length === 1); // true
+console.log(result1[0].event === "message"); // true — default
+console.log(result1[0].data === "Hello, world!"); // true
+
+const chunk2 = "event: score-update\\ndata: {home:3}\\nid: 42\\n\\n";
+const result2 = parseSSEChunk(chunk2);
+console.log(result2[0].event === "score-update"); // true
+console.log(result2[0].id === "42"); // true
+
+const chunk3 = ": heartbeat\\n\\ndata: live data\\n\\n";
+const result3 = parseSSEChunk(chunk3);
+console.log(result3.length === 1); // true — comment-only messages are skipped
+console.log(result3[0].data === "live data"); // true`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="What terminates a single SSE message in the text/event-stream format?"
+  options={[
+    "A single newline character (\\n)",
+    "A blank line — two consecutive newlines (\\n\\n)",
+    "The string END_MESSAGE",
+    "Closing the HTTP response",
+  ]}
+  answer={1}
+  explanation="In the text/event-stream protocol, a blank line (two consecutive newlines) signals that the current message is complete and should be dispatched. A single newline just continues the current message's fields."
+/>
+
+<Quiz
+  question="How does the browser recover missed events after an SSE reconnection?"
+  options={[
+    "It re-requests the entire event history from the beginning",
+    "It sends the Last-Event-ID header with the ID of the last received event",
+    "The developer must implement a custom reconnection payload",
+    "SSE does not support event replay — you must use WebSockets for that",
+  ]}
+  answer={1}
+  explanation="The browser automatically includes a Last-Event-ID request header when reconnecting, containing the id value of the last event it received. The server uses this to replay any events the client missed during the disconnection."
+/>
+
+<Quiz
+  question="Which scenario is a better fit for SSE than WebSockets?"
+  options={[
+    "A multiplayer game where clients send position updates 60 times per second",
+    "A collaborative code editor where multiple users edit the same file simultaneously",
+    "A live sports dashboard that displays score updates to thousands of viewers",
+    "A customer support chat where agents and customers exchange messages",
+  ]}
+  answer={2}
+  explanation="A sports dashboard streams data only from server to client — exactly what SSE is designed for. The multiplayer game, collaborative editor, and chat all require bidirectional communication, making WebSockets the appropriate choice."
+/>
+
+## What you learned
+
+- SSE uses a plain HTTP response body that stays open indefinitely, delivering `text/event-stream` formatted messages — no special protocol beyond standard HTTP
+- The browser's `EventSource` API handles connection, event parsing, and automatic reconnection with zero application code — you only write event listeners
+- The `Last-Event-ID` header enables seamless stream resumption after disconnection: the browser sends it automatically and the server replays any missed events
+- SSE fits server-to-client data flows (feeds, dashboards, AI token streaming, notifications) better than WebSockets, which are required only when the client also needs to send real-time data
+
+The capstone lesson brings together everything from this module — polling trade-offs, WebSocket connections, and server push — by building a complete live chat application from scratch.
