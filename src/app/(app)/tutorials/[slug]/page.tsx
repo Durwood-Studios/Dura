@@ -6,6 +6,7 @@ import { evaluate } from "@mdx-js/mdx";
 import * as runtime from "react/jsx-runtime";
 import matter from "gray-matter";
 import { mdxComponents } from "@/components/lesson/MDXComponents";
+import { TutorialProgressProvider } from "@/components/tutorial/TutorialProgressProvider";
 
 interface TutorialMeta {
   title: string;
@@ -185,7 +186,9 @@ export default async function TutorialPage({ params }: PageProps): Promise<React
         <p className="mt-2 text-[var(--color-text-secondary)]">{tutorial.meta.description}</p>
       </div>
 
-      <article>{tutorial.content}</article>
+      <TutorialProgressProvider slug={tutorial.meta.slug} totalSteps={tutorial.meta.steps}>
+        <article>{tutorial.content}</article>
+      </TutorialProgressProvider>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
-import type { TutorialProgress } from "@/types/tutorial";
+import type { TutorialProgress, TutorialCheckpoint } from "@/types/tutorial";
 
 /**
  * Retrieve a single tutorial progress record by its unique id.
@@ -41,45 +41,66 @@ export async function getAllTutorialProgress(): Promise<TutorialProgress[]> {
 /**
  * Mark a checkpoint completed, advance currentStep, and touch lastActiveAt.
  *
- * - Finds the checkpoint by id inside the progress record.
- * - Sets its status to "completed" and stamps completedAt.
- * - Unlocks the next checkpoint (status: "locked" → "active") if one exists.
- * - Advances currentStep to reflect the newly unlocked step.
- * - If all checkpoints are completed, stamps completedAt on the record itself.
+ * - If the checkpoint already exists in the progress record, marks it
+ *   "completed", unlocks the next "locked" checkpoint, and advances currentStep.
+ * - If the checkpoint is NOT yet in the record (MDX-authored tutorials populate
+ *   checkpoints lazily at completion time), adds it as "completed" and updates
+ *   the step counter based on the number of completed checkpoints so far.
+ * - If all checkpoints are completed (count === totalSteps), stamps completedAt.
  * - Persists the updated record via putTutorialProgress.
  *
- * Returns the updated record, or null if the progress record doesn't exist
- * or the checkpoint id is not found.
+ * Returns the updated record, or null if the progress record doesn't exist.
+ *
+ * @param progressId   - IDB key of the TutorialProgress record.
+ * @param checkpointId - Unique id of the checkpoint being completed.
+ * @param label        - Display label used when lazily inserting a new checkpoint.
  */
 export async function completeCheckpoint(
   progressId: string,
-  checkpointId: string
+  checkpointId: string,
+  label?: string
 ): Promise<TutorialProgress | null> {
   try {
     const existing = await getTutorialProgress(progressId);
     if (!existing) return null;
 
-    const checkpointIdx = existing.checkpoints.findIndex((c) => c.id === checkpointId);
-    if (checkpointIdx === -1) return null;
-
     const now = Date.now();
-    const updatedCheckpoints = existing.checkpoints.map((cp, i) => {
-      if (i === checkpointIdx) {
-        return { ...cp, status: "completed" as const, completedAt: now };
-      }
-      // Unlock the checkpoint immediately following the one just completed.
-      if (i === checkpointIdx + 1 && cp.status === "locked") {
-        return { ...cp, status: "active" as const };
-      }
-      return cp;
-    });
+    const checkpointIdx = existing.checkpoints.findIndex((c) => c.id === checkpointId);
 
-    const allCompleted = updatedCheckpoints.every((cp) => cp.status === "completed");
+    let updatedCheckpoints: TutorialCheckpoint[];
 
-    // currentStep is 1-based: point to the next active checkpoint, capped at totalSteps.
+    if (checkpointIdx === -1) {
+      // Checkpoint not pre-registered — lazily add it as completed.
+      // This handles MDX tutorials where checkpoint IDs are only known at render time.
+      const newEntry: TutorialCheckpoint = {
+        id: checkpointId,
+        label: label ?? checkpointId,
+        status: "completed",
+        completedAt: now,
+      };
+      updatedCheckpoints = [...existing.checkpoints, newEntry];
+    } else {
+      updatedCheckpoints = existing.checkpoints.map((cp, i) => {
+        if (i === checkpointIdx) {
+          return { ...cp, status: "completed" as const, completedAt: now };
+        }
+        // Unlock the checkpoint immediately following the one just completed.
+        if (i === checkpointIdx + 1 && cp.status === "locked") {
+          return { ...cp, status: "active" as const };
+        }
+        return cp;
+      });
+    }
+
+    const completedCount = updatedCheckpoints.filter((cp) => cp.status === "completed").length;
+    const allCompleted = completedCount >= existing.totalSteps;
+
+    // currentStep is 1-based: next active checkpoint index, or totalSteps when done.
     const nextActiveIdx = updatedCheckpoints.findIndex((cp) => cp.status === "active");
     const currentStep =
-      nextActiveIdx === -1 ? existing.totalSteps : Math.min(nextActiveIdx + 1, existing.totalSteps);
+      nextActiveIdx === -1
+        ? Math.min(completedCount + 1, existing.totalSteps)
+        : Math.min(nextActiveIdx + 1, existing.totalSteps);
 
     const updated: TutorialProgress = {
       ...existing,

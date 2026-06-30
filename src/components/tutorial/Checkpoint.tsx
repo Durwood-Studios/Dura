@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { completeCheckpoint } from "@/lib/db/tutorial-progress";
+import { useTutorialProgressContext } from "@/lib/tutorial-progress-context";
 import type { CheckpointStatus } from "@/types/tutorial";
 
 interface CheckpointProps {
@@ -33,12 +34,18 @@ export function Checkpoint({
   status,
   challenge,
   answer,
-  progressId,
+  progressId: progressIdProp,
   onComplete,
   children,
 }: CheckpointProps): React.ReactElement {
   const [userInput, setUserInput] = useState("");
   const [isWrong, setIsWrong] = useState(false);
+
+  // Fall back to the context progressId when the prop is omitted.
+  // MDX-authored tutorials never pass progressId directly — the page
+  // wraps content in TutorialProgressProvider instead.
+  const { progressId: progressIdFromContext } = useTutorialProgressContext();
+  const progressId = progressIdProp ?? progressIdFromContext;
 
   /**
    * Central completion handler: persist to IDB when progressId is set,
@@ -47,7 +54,8 @@ export function Checkpoint({
   function handleComplete(): void {
     if (progressId) {
       // Fire-and-forget — errors are logged inside completeCheckpoint.
-      void completeCheckpoint(progressId, id);
+      // Pass label so it can be stored if this checkpoint isn't pre-registered.
+      void completeCheckpoint(progressId, id, label);
     }
     onComplete?.(id);
   }
