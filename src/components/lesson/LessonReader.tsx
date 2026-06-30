@@ -9,6 +9,7 @@ import { BiteMode } from "@/components/lesson/BiteMode";
 import { StandardsBadges } from "@/components/lesson/StandardsBadges";
 import { AITutorMount } from "@/components/lesson/AITutor/AITutorMount";
 import { AnnotationsPanel } from "@/components/lesson/AnnotationsPanel";
+import { AddFlashcardButton } from "@/components/lesson/AddFlashcardButton";
 import { formatMinutes } from "@/lib/utils";
 import { ShareButton } from "@/components/seo/ShareButton";
 import { buildBadges } from "@/lib/standards";
@@ -66,7 +67,7 @@ export async function LessonReader({
     MDXContent = MDXFallback;
   }
 
-  const hasQuiz = /<Quiz\b/.test(body);
+  const hasQuiz = /<Quiz\b/.test(body) || /<FillBlank\b/.test(body) || /<ParsonsPanel\b/.test(body);
 
   // Merge lesson-level standards (from frontmatter) with module-level
   // K-12 alignment (CSTA / AP / ISTE) from PHASE_STANDARDS, so every
@@ -159,6 +160,7 @@ export async function LessonReader({
       )}
 
       <AITutorMount meta={meta} lessonBody={body} />
+      <AddFlashcardButton lessonId={meta.id} lessonTitle={meta.title} />
     </article>
   );
 }
