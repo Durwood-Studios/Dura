@@ -16,13 +16,34 @@ import { buildHarnessJs, INDEX_HTML, PASS_MARKER, FAIL_MARKER } from "@/lib/sand
 import { CircleCheckIcon } from "@/components/ui/circle-check";
 import { usePlayOnMount } from "@/components/celebration/usePlayOnMount";
 
+type SandboxLanguage = "javascript" | "typescript" | "react" | "html";
+
 interface SandboxExerciseInnerProps {
-  language: "javascript" | "typescript";
+  language: SandboxLanguage;
   instructions: string;
   initialCode: string;
   solution: string;
   testCases: string[];
 }
+
+/** Maps lesson language prop to the Sandpack template id. */
+const LANGUAGE_TEMPLATE_MAP = {
+  javascript: "vanilla",
+  typescript: "vanilla-ts",
+  react: "react",
+  html: "static",
+} as const satisfies Record<SandboxLanguage, string>;
+
+/**
+ * Maps lesson language to the primary editable file inside Sandpack.
+ * Must match the template's expected entry-point name.
+ */
+const LANGUAGE_FILE_MAP = {
+  javascript: "/index.js",
+  typescript: "/index.ts",
+  react: "/index.js",
+  html: "/index.html",
+} as const satisfies Record<SandboxLanguage, string>;
 
 type TestState = "pending" | "pass" | "fail";
 type Verdict = "idle" | "pass" | "fail" | "partial";
@@ -71,11 +92,13 @@ function SandboxControls({
   solution,
   testCases,
   language,
+  mainFile,
 }: {
   initialCode: string;
   solution: string;
   testCases: string[];
-  language: SandboxExerciseInnerProps["language"];
+  language: SandboxLanguage;
+  mainFile: string;
 }): React.ReactElement {
   const { sandpack } = useSandpack();
   const { logs, reset: resetLogs } = useSandpackConsole({
@@ -168,7 +191,7 @@ function SandboxControls({
   }, [sandpack, resetLogs]);
 
   const reset = () => {
-    sandpack.updateFile("/index.js", initialCode);
+    sandpack.updateFile(mainFile, initialCode);
     setVerdict("idle");
     setVerdictMessage("");
     setTestStates(new Map());
@@ -176,7 +199,7 @@ function SandboxControls({
   };
 
   const showSolution = () => {
-    sandpack.updateFile("/index.js", solution);
+    sandpack.updateFile(mainFile, solution);
     setVerdict("idle");
     setVerdictMessage("");
     setTestStates(new Map());
@@ -288,23 +311,26 @@ export default function SandboxExerciseInner({
   testCases,
 }: SandboxExerciseInnerProps): React.ReactElement {
   // Build harness + custom HTML once per testCases set. They're static
-  // per-lesson, so this needn't react to user edits in /index.js.
+  // per-lesson, so this needn't react to user edits in the main file.
   const harnessJs = useMemo(() => buildHarnessJs(testCases), [testCases]);
+
+  const template = LANGUAGE_TEMPLATE_MAP[language];
+  const mainFile = LANGUAGE_FILE_MAP[language];
 
   return (
     <SandpackProvider
-      template="vanilla"
+      template={template}
       theme={SANDPACK_THEME}
       files={{
         "/index.html": { code: INDEX_HTML, hidden: true },
-        "/index.js": initialCode,
+        [mainFile]: initialCode,
         "/harness.js": { code: harnessJs, hidden: true },
       }}
       options={{
         recompileMode: "delayed",
         recompileDelay: 500,
-        activeFile: "/index.js",
-        visibleFiles: ["/index.js"],
+        activeFile: mainFile,
+        visibleFiles: [mainFile],
       }}
     >
       <figure
@@ -319,6 +345,7 @@ export default function SandboxExerciseInner({
           solution={solution}
           testCases={testCases}
           language={language}
+          mainFile={mainFile}
         />
         <SandpackLayout className="!flex-col sm:!flex-row">
           <SandpackCodeEditor showLineNumbers showTabs={false} wrapContent />

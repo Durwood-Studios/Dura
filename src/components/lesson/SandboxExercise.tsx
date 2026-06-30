@@ -5,7 +5,7 @@ import dynamic from "next/dynamic";
 import { SandboxExerciseSkeleton } from "@/components/lesson/SandboxExerciseSkeleton";
 
 interface SandboxExerciseProps {
-  language?: "javascript" | "typescript";
+  language?: "javascript" | "typescript" | "react" | "html";
   instructions: string;
   initialCode: string;
   solution: string;
