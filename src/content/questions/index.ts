@@ -10,6 +10,8 @@ import { PHASE_7_QUESTIONS } from "@/content/questions/phase-7";
 import { PHASE_8_QUESTIONS } from "@/content/questions/phase-8";
 import { PHASE_9_QUESTIONS } from "@/content/questions/phase-9";
 import { PHASE_10_QUESTIONS } from "@/content/questions/phase-10";
+import { PHASE_11_QUESTIONS } from "@/content/questions/phase-11";
+import { PHASE_12_QUESTIONS } from "@/content/questions/phase-12";
 import { PHASE_13_QUESTIONS } from "@/content/questions/phase-13";
 import { PHASE_14_QUESTIONS } from "@/content/questions/phase-14";
 
@@ -30,6 +32,8 @@ export const ALL_QUESTIONS: AssessmentQuestion[] = [
   ...PHASE_8_QUESTIONS,
   ...PHASE_9_QUESTIONS,
   ...PHASE_10_QUESTIONS,
+  ...PHASE_11_QUESTIONS,
+  ...PHASE_12_QUESTIONS,
   ...PHASE_13_QUESTIONS,
   ...PHASE_14_QUESTIONS,
 ];
@@ -51,6 +55,8 @@ export const QUESTION_COUNT: number =
   PHASE_8_QUESTIONS.length +
   PHASE_9_QUESTIONS.length +
   PHASE_10_QUESTIONS.length +
+  PHASE_11_QUESTIONS.length +
+  PHASE_12_QUESTIONS.length +
   PHASE_13_QUESTIONS.length +
   PHASE_14_QUESTIONS.length;
 
