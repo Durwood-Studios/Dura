@@ -46,7 +46,7 @@ function diffTouchesHighRiskPath() {
   return files.some((f) => patterns.some((re) => re.test(f)));
 }
 
-export default {
+const config = {
   extends: ["@commitlint/config-conventional"],
   plugins: [
     {
@@ -94,3 +94,5 @@ export default {
     "ai-provenance-required": [2, "always"],
   },
 };
+
+export default config;
