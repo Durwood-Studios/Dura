@@ -67,6 +67,7 @@ const eslintConfig = [
       // Local-only tooling (gitignored, absent on CI) — never lint these.
       "tools/**",
       "xDocs/**",
+      ".claude/**",
     ],
   },
   {
