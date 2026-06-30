@@ -1,0 +1,206 @@
+---
+title: "Memory Layout and the Stack in Cortex-M"
+description: "What happens to the call stack, local variables, and global state in a Cortex-M binary — and why the linker script from lesson 01 already handles it correctly."
+phase: 10
+module: "e-1-c-toolchain-arm-cortex-m"
+order: 2
+estimatedMinutes: 20
+difficulty: 3
+prerequisites:
+  - "e-1-c-toolchain-arm-cortex-m/01"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "understand"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - call-stack
+  - stack-frame
+  - heap
+  - bss
+  - data-segment
+  - stack-pointer
+  - link-register
+  - frame-pointer
+  - stack-overflow
+  - cortex-m
+learningOutcomes:
+  - "Describe the four memory regions in a Cortex-M binary (text, data, bss, stack) and where each lives at runtime"
+  - "Trace through a function call and explain what gets pushed to the stack and why"
+  - "Distinguish heap and stack and explain why most bare-metal firmware avoids the heap"
+  - "Predict what happens when the stack grows past the end of SRAM on a Cortex-M device without MPU protection"
+professionalContext: "Stack overflows are the second-most common class of unexplained crashes in embedded firmware, after interrupt races. An engineer who knows how the stack grows — and why a 2 KB stack allocation for a task with a 1.9 KB local array is a time bomb — can read a crash dump and find the cause in minutes. Engineers who can't reason about the memory layout spend days adding printf statements to narrow down a location that objdump would show them in thirty seconds."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Lesson 01 built a binary and verified its section placement with objdump. That was the static view: where the compiler put things in flash and SRAM. This lesson adds the dynamic view: what happens to memory when the program actually runs.
+
+When a function calls another function — calling another function — and that deepest function allocates a 4 KB local array, something has to hold all of those stack frames simultaneously. Where? In SRAM, in a region called the stack. When the stack runs out of SRAM, the device either silently corrupts other memory or (if the MPU is configured) triggers a <VocabTooltip slug="hard-fault">HardFault</VocabTooltip>. Neither outcome is pleasant to diagnose without first understanding the layout.
+
+## The four runtime regions
+
+After the startup code from lesson 01 finishes (copies .data, zeros .bss, calls main), SRAM holds:
+
+```
+High addresses (top of SRAM)  ← _estack (stack pointer starts here)
+┌─────────────────────────────┐
+│  Stack                      │  grows DOWNWARD ↓
+│  (call frames, local vars)  │
+├─────────────────────────────┤  (collision zone — where overflow crashes)
+│  (free space)               │
+├─────────────────────────────┤  _ebss = end of BSS
+│  BSS segment (.bss)         │  zero-initialized statics and globals
+│  static int total;          │
+├─────────────────────────────┤  _sbss = _edata
+│  Data segment (.data)       │  initialized statics and globals
+│  static int x = 5;          │  (copied from flash by startup code)
+└─────────────────────────────┘  _sdata = 0x20000000 (SRAM base)
+Low addresses
+```
+
+Flash holds the code and the initial values of initialized globals (the LMA copy that startup reads):
+
+```
+Flash (0x08000000)
+┌─────────────────────────────┐
+│  Vector table (.isr_vector) │
+│  Text (.text)               │
+│  Read-only data (.rodata)   │
+│  .data initial values       │  ← startup copies these to SRAM
+└─────────────────────────────┘
+```
+
+There is no heap unless you add one. `malloc` doesn't exist in a freestanding environment — the standard library that provides it isn't linked. If you call `malloc`, the linker will fail with an undefined reference. This is correct behavior. Most bare-metal firmware uses static allocation exclusively; the exceptions (FreeRTOS heap allocators, jemalloc port) are explicit additions with explicit size limits.
+
+## The call stack in detail
+
+A <VocabTooltip slug="call-stack">call stack</VocabTooltip> is a region of SRAM used to hold <VocabTooltip slug="stack-frame">stack frames</VocabTooltip>. Each frame contains:
+
+- The return address (where to resume when this function returns)
+- Saved registers (so the caller's registers aren't clobbered)
+- Local variables (that couldn't be kept in registers)
+- Function arguments (that didn't fit in R0-R3)
+
+On Cortex-M with the AAPCS calling convention, R0-R3 pass the first four function arguments, R0 returns the result. Anything beyond that goes on the stack. On each CALL:
+
+```
+PUSH {LR, R4-R11}      ; save link register (return addr) and preserved registers
+SUB  SP, SP, #N         ; allocate space for locals
+; ... function body ...
+ADD  SP, SP, #N         ; deallocate locals
+POP  {PC, R4-R11}       ; restore registers; POP into PC = return
+```
+
+`SP` is the Stack Pointer. It starts at `_estack` (top of SRAM) and moves DOWN with each frame. It moves back up when functions return.
+
+Let's trace a concrete example:
+
+```c
+int sum(int a, int b) {
+    int result = a + b;   // local — lives in a register or on stack
+    return result;
+}
+
+void main_loop(void) {
+    int x = 10;   // local
+    int y = 20;   // local
+    int z = sum(x, y);   // call
+}
+```
+
+Disassembly (simplified, with -O0 to see every step):
+
+```asm
+main_loop:
+    PUSH {R7, LR}          ; save frame pointer and return address
+    SUB  SP, SP, #12       ; allocate 12 bytes for x, y, z
+    MOV  R3, #10
+    STR  R3, [SP, #8]      ; x = 10
+    MOV  R3, #20
+    STR  R3, [SP, #4]      ; y = 20
+    LDR  R1, [SP, #4]      ; second arg in R1
+    LDR  R0, [SP, #8]      ; first arg in R0
+    BL   sum               ; branch-with-link → saves PC+4 into LR, jumps to sum
+    STR  R0, [SP, #0]      ; store return value into z
+    ADD  SP, SP, #12       ; free locals
+    POP  {R7, PC}          ; restore, return
+```
+
+The key insight: `BL sum` stores the return address into the Link Register (LR). If sum calls anything else, it must first save LR onto the stack (because BL will overwrite it). A function that calls no other functions (a leaf function) never has to spill LR to the stack — that's why leaf functions in disassembly usually lack the PUSH/POP.
+
+## Stack overflow — what actually happens
+
+The stack grows downward. If it collides with the BSS or data segments:
+
+1. **Without MPU protection** (default on most bare-metal projects): the stack silently overwrites BSS variables or data variables. Your static counters start changing values mysteriously. The firmware eventually does something undefined and crashes — but the crash location has nothing to do with the actual cause.
+
+2. **With MPU protection** (configured explicitly): the MPU fires a MemManage fault when the stack pointer crosses into a protected region. You get a fault handler with a backtrace. Still painful to debug but at least you see the cause immediately.
+
+The canonical way to detect overflow without an MPU: paint the bottom of the stack with a known value (often `0xDEADBEEF`) at startup, then periodically check whether the paint survived. If it was overwritten, the stack got too deep at some point. FreeRTOS's `uxTaskGetStackHighWaterMark` does this.
+
+## How much stack is enough?
+
+Rule of thumb for bare-metal (no RTOS):
+
+1. Add up the worst-case simultaneous call depth: max frames active at once × max frame size.
+2. Add 128 bytes for interrupt frame overhead (Cortex-M exception frame pushes 8 registers).
+3. Add 256 bytes of margin.
+4. Paint the stack bottom and check the high-water mark after stress testing.
+
+The most common surprise: large arrays declared as local variables. An `int buffer[256]` local variable is 1 KB on the stack. If that function is called from an ISR that interrupted a function that also had large locals, you can easily consume 3-4 KB without noticing until the demo.
+
+The structural fix: make large buffers `static`. A `static` local variable lives in BSS, not on the stack. It persists across calls (which may or may not be what you want), but it doesn't grow the stack frame.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A firmware engineer declares `uint8_t temp_buf[4096]` as a local variable inside a processing function. The function is called from the main loop (not from an ISR). The chip has 32 KB of SRAM and the linker places the stack at the top. What is the minimum stack size that doesn't overflow when this function runs?",
+      options: [
+        "256 bytes — the array is small",
+        "4096 bytes for the buffer plus space for the return address, saved registers, and any other local variables — in practice at least 4200-4352 bytes; the array lives on the stack for the duration of the call, not in BSS",
+        "Stack size doesn't matter — the compiler allocates buffers in BSS automatically",
+        "The array is allocated from the heap by default when it's large",
+      ],
+      correct: 1,
+      explanation:
+        "A local variable lives on the stack. A 4096-byte local array occupies 4096 bytes of stack for the entire duration of the function call. If the total stack allocation is less than that (plus frame overhead for the function itself and any functions it calls), the stack will overflow. The fix is to declare the buffer `static` (moving it to BSS) or at module scope if the buffer's contents don't need to be fresh each call. The compiler does not automatically move large locals to BSS or the heap. The heap doesn't exist in a freestanding environment without an explicit allocator.",
+    },
+    {
+      question:
+        "A Cortex-M binary crashes with a HardFault at an address that appears to be in the middle of a BSS variable — not in any function. What is the most likely cause?",
+      options: [
+        "A bug in the linker script that placed BSS in flash",
+        "Stack overflow: the stack grew past the end of the BSS region upward and the CPU tried to execute BSS contents as code; or — more commonly — the overflowed stack corrupted BSS variables and the code later dereferenced one of those corrupted values as a pointer, jumping to a garbage address in the BSS range",
+        "The CPU is defective",
+        "BSS was not zeroed by startup code",
+      ],
+      correct: 1,
+      explanation:
+        "Stack overflow and data corruption is the canonical root cause of crashes at bizarre addresses. When the stack (which grows downward) runs into the BSS region (which sits below it), it overwrites BSS variables. If those variables are pointers, the corrupted values become arbitrary addresses. When the code later dereferences them, the CPU fetches instructions from wherever those garbage pointers lead — often into BSS, which contains zeros. The CPU then tries to execute zeros (which on ARM decode to AND R0, R0, R0 — or sometimes invalid encodings), producing a HardFault at an address in the BSS range. The remedy is to paint the stack bottom and check the high-water mark.",
+    },
+    {
+      question:
+        "Why does most production bare-metal embedded firmware avoid dynamic memory allocation (malloc) entirely?",
+      options: [
+        "malloc is too slow for embedded use",
+        "Three structural reasons: (1) heap fragmentation — in a long-running system, alternating allocations and frees of different sizes fragment the heap until no contiguous block large enough for a new request remains, even if total free bytes exceed the request; (2) non-determinism — allocation latency depends on heap state, violating real-time guarantees; (3) failure handling — malloc returns NULL on failure, requiring every allocation site to handle a failure mode that static allocation never has. Static allocation eliminates all three at compile time. MISRA-C:2023 Rule 21.3 codifies this as Required for safety-critical code.",
+        "The embedded C standard doesn't include malloc",
+        "malloc isn't available in GCC arm-none-eabi",
+      ],
+      correct: 1,
+      explanation:
+        "The three reasons (fragmentation, non-determinism, failure handling) each independently motivate the prohibition. Together they make dynamic allocation incompatible with the latency guarantees and long-running reliability requirements of most embedded products. MISRA-C:2023 Rule 21.3 elevates this to a Required coding rule for safety-critical code. malloc IS available in newlib-nano (the libc bundled with GCC arm-none-eabi) if you provide a _sbrk implementation, but using it is an explicit choice that requires justification. The idiomatic embedded approach: every buffer is sized and allocated at compile time.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 03 examines two C keywords that every embedded programmer must understand precisely: `volatile` and `const`. `volatile` you saw briefly in E2 for GPIO registers; `const` controls what the linker puts in flash versus RAM. The combination — `const volatile` — appears in embedded code for hardware-defined read-only registers, and understanding why requires knowing what both keywords actually tell the compiler.

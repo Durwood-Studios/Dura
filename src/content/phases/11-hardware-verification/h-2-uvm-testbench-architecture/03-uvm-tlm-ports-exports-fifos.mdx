@@ -1,0 +1,267 @@
+---
+title: "UVM TLM Ports, Exports, and Analysis FIFOs"
+description: "The connection primitives that move transactions between UVM components — ports, exports, imps, and FIFOs — and how to wire them without runtime errors."
+phase: 11
+module: "h-2-uvm-testbench-architecture"
+order: 3
+estimatedMinutes: 60
+difficulty: 4
+prerequisites:
+  - "h-2-uvm-phases-and-config-db"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - tlm-port
+  - tlm-export
+  - tlm-imp
+  - analysis-port
+  - analysis-export
+  - uvm-tlm-fifo
+  - blocking-put
+  - blocking-get
+  - broadcast
+  - fan-out
+learningOutcomes:
+  - "Distinguish port from export from imp and explain which end of a connection each belongs on"
+  - "Write a monitor that broadcasts transactions via uvm_analysis_port to multiple subscribers"
+  - "Connect a put_port to a get_export through a uvm_tlm_fifo buffer"
+  - "Trace a TLM connection error message to its root cause in the component hierarchy"
+professionalContext: "Every UVM scoreboard, coverage collector, and checker connects to a monitor via a TLM analysis port. TLM is UVM's internal bus — getting a transaction from A to B without understanding ports vs exports produces cryptic 'TLM connection not found' errors at simulation start. Engineers who can navigate TLM connections wire new components into an existing testbench in minutes; engineers who can't are blocked for days."
+thresholdConcept: false
+---
+
+## The TLM connection model
+
+TLM (Transaction-Level Modeling) defines a set of interfaces for moving objects between components. The two endpoints are:
+
+- **Port** — the initiator. Lives on the component that wants to SEND or REQUEST. Contains a handle that points to the other end.
+- **Export / Imp** — the responder. Lives on the component that RECEIVES or RESPONDS. Implements the actual method.
+
+The rule: a port connects TO an export. Never port-to-port. Never export-to-export.
+
+```
+Component A          Component B
+┌──────────┐         ┌──────────┐
+│ put_port │────────▶│put_export│
+│  (calls) │         │(responds)│
+└──────────┘         └──────────┘
+```
+
+## Port types — blocking vs non-blocking
+
+```systemverilog
+// Blocking put: caller blocks until receiver accepts
+uvm_blocking_put_port #(my_txn) put_p;
+
+// Non-blocking put: returns immediately with success/failure
+uvm_nonblocking_put_port #(my_txn) try_put_p;
+
+// Both: combined interface
+uvm_put_port #(my_txn) combined_p;
+
+// Blocking get: caller blocks until sender has something
+uvm_blocking_get_port #(my_txn) get_p;
+
+// Peek: like get but doesn't consume the transaction
+uvm_blocking_peek_port #(my_txn) peek_p;
+```
+
+Matching rule: port type must match export type. A `blocking_put_port` connects to a `blocking_put_export` or a `put_export` (combined). Mismatches produce elaboration-time errors.
+
+## Analysis ports — the broadcast pattern
+
+The most common TLM connection in UVM is the analysis port — one monitor broadcasting to multiple subscribers:
+
+```systemverilog
+class my_monitor extends uvm_monitor;
+    `uvm_component_utils(my_monitor)
+    uvm_analysis_port #(my_txn) ap;   // Broadcast port
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        ap = new("ap", this);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        my_txn tr;
+        forever begin
+            sample_from_interface(tr);
+            ap.write(tr);   // Fan-out to ALL connected subscribers
+        end
+    endtask
+endclass
+```
+
+The `uvm_analysis_port::write()` is non-blocking and fans out to every connected `uvm_analysis_export`. You can have zero subscribers (no error) or ten subscribers — all receive the same transaction object. (Be careful: if a subscriber modifies the transaction, all subsequent subscribers see the modification. Clone before modifying.)
+
+## uvm_analysis_export and uvm_analysis_imp
+
+A scoreboard receives from the analysis port via an export:
+
+```systemverilog
+class my_scoreboard extends uvm_scoreboard;
+    `uvm_component_utils(my_scoreboard)
+    // Imp = implementation: directly calls a method on THIS component
+    uvm_analysis_imp #(my_txn, my_scoreboard) analysis_export;
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        analysis_export = new("analysis_export", this);
+    endfunction
+
+    // Called automatically when ap.write() fires
+    function void write(my_txn tr);
+        // Check tr against expected
+        $display("[SB] received: data=0x%h", tr.data);
+    endfunction
+endclass
+```
+
+`uvm_analysis_imp #(T, COMP)` is a special imp (implementation) type that calls `write(T)` on the `COMP` component. The scoreboard implements `write()` as a regular function — no explicit `forever` loop needed.
+
+## Multiple analysis exports on one component
+
+A scoreboard receiving from TWO monitors (request side and response side) needs two exports:
+
+```systemverilog
+// Use the macro to create two uniquely-named imp types
+`uvm_analysis_imp_decl(_req)   // Creates uvm_analysis_imp_req
+`uvm_analysis_imp_decl(_rsp)   // Creates uvm_analysis_imp_rsp
+
+class dual_sb extends uvm_scoreboard;
+    `uvm_component_utils(dual_sb)
+    uvm_analysis_imp_req #(req_txn, dual_sb) req_ap;
+    uvm_analysis_imp_rsp #(rsp_txn, dual_sb) rsp_ap;
+
+    function void write_req(req_txn tr);  // Called for req transactions
+        req_q.push_back(tr);
+    endfunction
+
+    function void write_rsp(rsp_txn tr);  // Called for rsp transactions
+        check(req_q.pop_front(), tr);
+    endfunction
+endclass
+```
+
+The `_decl` macros generate unique imp types whose `write()` calls the correspondingly-named `write_req()` / `write_rsp()` functions.
+
+## uvm_tlm_fifo — decoupling producer and consumer
+
+When a producer and consumer run at different rates, a FIFO buffers between them:
+
+```systemverilog
+// In the environment connect_phase:
+uvm_tlm_fifo #(my_txn) fifo;
+fifo = new("fifo", this);
+
+// Driver's put_port → FIFO's put_export
+driver.put_port.connect(fifo.put_export);
+
+// Monitor's get_port → FIFO's get_export
+monitor.get_port.connect(fifo.get_export);
+```
+
+The FIFO's depth is a constructor argument:
+
+```systemverilog
+fifo = new("fifo", this, 16);   // 16-entry deep FIFO
+```
+
+With depth 0 (synchronous): producer blocks until consumer is ready.
+With depth N: producer can fill up to N before blocking.
+
+## Connecting in connect_phase
+
+```systemverilog
+class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    my_agent      agent;
+    my_scoreboard sb;
+
+    function void connect_phase(uvm_phase phase);
+        // Monitor's analysis port → Scoreboard's analysis export
+        agent.monitor.ap.connect(sb.analysis_export);
+
+        // Alternatively: driver seq_item_port already connected inside agent
+        // (agent's connect_phase handles internal connections)
+    endfunction
+endclass
+```
+
+The parent's `connect_phase` makes CROSS-COMPONENT connections. Each component's own `connect_phase` makes INTERNAL connections (driver port to sequencer export).
+
+## Competency check
+
+<SandboxExercise
+  language="systemverilog"
+  instructions={`A coverage collector class needs to receive transactions from a monitor's analysis port. The collector should:
+1. Declare a \`uvm_analysis_imp\` named \`cov_export\`.
+2. Implement the \`write()\` function that calls \`cg.sample()\` on a covergroup.
+3. Register itself with the UVM factory.
+
+Complete the skeleton below. Assume \`uart_txn\` exists with a field \`bit [7:0] data\`.`}
+  initialCode={`class uart_cov_collector extends uvm_subscriber #(uart_txn);
+\`uvm_component_utils(uart_cov_collector)
+
+    uart_txn current;
+
+    covergroup cg;
+        cp_data : coverpoint current.data {
+            bins zero    = {8'h00};
+            bins ff      = {8'hFF};
+            bins mid[]   = {[8'h01 : 8'hFE]};
+        }
+    endgroup
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        cg = new();
+    endfunction
+
+    // TODO: implement write() — uvm_subscriber provides the analysis_export automatically
+    // write() is declared pure virtual in uvm_subscriber; implement it here
+
+endclass`}
+  solution={`class uart_cov_collector extends uvm_subscriber #(uart_txn);
+\`uvm_component_utils(uart_cov_collector)
+
+    uart_txn current;
+
+    covergroup cg;
+        cp_data : coverpoint current.data {
+            bins zero    = {8'h00};
+            bins ff      = {8'hFF};
+            bins mid[]   = {[8'h01 : 8'hFE]};
+        }
+    endgroup
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        cg = new();
+    endfunction
+
+    // uvm_subscriber declares: pure virtual function void write(T t)
+    // We implement it here to sample coverage
+    function void write(uart_txn t);
+        current = t;     // Store so covergroup can access fields
+        cg.sample();     // Sample with current transaction's values
+    endfunction
+
+endclass`}
+  testCases={[
+    "Class extends uvm_subscriber #(uart_txn)",
+    "write() function is implemented",
+    "write() stores the transaction to current",
+    "write() calls cg.sample()",
+    "`uvm_component_utils macro is present"
+]}
+/>
+
+## What's next
+
+Lesson H2-4 explores the UVM factory in depth — how `type_id::create()` works internally, how to use `set_type_override` and `set_inst_override` for targeted substitution, and how to debug factory-related failures when the wrong class is instantiated.

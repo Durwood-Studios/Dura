@@ -1,0 +1,191 @@
+---
+title: "solve-before Ordering and Constraint Implications"
+description: "How the SV solver handles dependent constraints, when solve-before matters, and how implication operators tighten your stimulus model."
+phase: 11
+module: "h-3-constrained-random-stimulus"
+order: 2
+estimatedMinutes: 60
+difficulty: 4
+prerequisites:
+  - "h-3-randomization-constraints"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - solve-before
+  - constraint-implication
+  - bidirectional-constraint
+  - constraint-ordering
+  - conditional-constraint
+learningOutcomes:
+  - "Use solve-before to control which random variable is chosen first by the solver"
+  - "Write implication constraints using the -> operator"
+  - "Explain the difference between bidirectional constraints and solve-before ordering"
+  - "Debug unexpected distributions caused by constraint ordering"
+professionalContext: "Constraint ordering bugs are silent killers — the testbench compiles, randomize() returns 1, but the distribution is wrong. An engineer who checks only that randomize() succeeds will ship a testbench that never exercises certain corner cases. Understanding when and why the solver makes ordering choices is the difference between a biased stimulus generator and an unbiased one."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Imagine you're generating burst-write transactions. Each burst has a `len` field (1–16 beats) and an `addr` field that must be aligned to `len × 4` bytes. Your constraint looks correct — but after 10,000 randomizations, the coverage report shows that `len=16` almost never occurs.
+
+The solver is choosing `addr` first from a large space, then solving `len` such that alignment holds. Because most addresses only divide evenly by small values of `len`, the solver gravitates toward `len=1`. The constraint is right; the ordering is wrong.
+
+`solve-before` exists to fix this.
+
+## How the SV solver works
+
+The IEEE 1800-2023 solver treats all `rand` variables and constraints as a constraint satisfaction problem (CSP). In principle it picks a satisfying assignment simultaneously. In practice, solvers use variable ordering heuristics to decompose the problem, and those heuristics can produce biased distributions when constraint relationships are asymmetric.
+
+The default variable-ordering heuristic varies between simulators (Questa, VCS, Xcelium all differ). This is why a testbench that "works" in one simulator can have a completely different distribution in another — both satisfy the constraints, but the coverage profiles differ. `solve-before` makes the ordering explicit and portable.
+
+## solve-before syntax
+
+```systemverilog
+class burst_txn;
+    rand bit [3:0]  len;   // 1-16 beats
+    rand bit [31:0] addr;
+
+    // Alignment: addr must be a multiple of len*4
+    constraint c_align { (addr % (len * 4)) == 0; }
+
+    // Alignment range: addr in 4 KB window
+    constraint c_range { addr inside { [0 : 32'h0000_0FFF] }; }
+
+    // Tell the solver: pick len FIRST, then pick addr satisfying c_align
+    // Without this, the solver may pick addr first and bias toward small len.
+    constraint c_order { solve len before addr; }
+
+    constraint c_len { len inside { [1:16] }; }
+endclass
+```
+
+With `solve len before addr`, the solver:
+
+1. Picks `len` uniformly in [1:16].
+2. Picks `addr` from values that satisfy `c_align` given the chosen `len`.
+
+Result: `len` is uniformly distributed across 1–16. Without `solve-before`, small `len` values dominate because they have more satisfying `addr` values.
+
+## Constraint implication — the -> operator
+
+The implication operator `->` (if A then B) creates conditional constraints:
+
+```systemverilog
+class mem_txn;
+    rand bit [1:0]  txn_type;   // 0=read, 1=write, 2=atomic, 3=prefetch
+    rand bit [7:0]  data;
+    rand bit        poison;
+
+    // Poison bit: only relevant for writes and atomics
+    constraint c_poison {
+        (txn_type inside {1, 2}) -> (poison inside {0, 1});  // free
+        !(txn_type inside {1, 2}) -> (poison == 0);           // force 0 for reads/prefetch
+    }
+endclass
+```
+
+The implication `A -> B` is logically equivalent to `(!A) || B` — if A is false, the constraint is vacuously satisfied; if A is true, B must also be true.
+
+A common mistake: writing a one-sided implication and expecting it to enforce BOTH directions.
+
+```systemverilog
+// WRONG INTENT: engineer wants poison=1 to ONLY occur with writes
+constraint c_bad { poison -> (txn_type == 1); }
+// This says: IF poison=1 THEN type=1. But it does NOT say IF type=0 THEN poison=0.
+// poison=0 with type=0,2,3 is legal. poison=1 with type=0 is forbidden.
+// The intent is right but only half the story.
+
+// CORRECT: add the reverse
+constraint c_correct {
+    poison -> (txn_type inside {1, 2});
+    // Now: poison=1 forces type to be write or atomic.
+    // type=0 (read) doesn't force poison, but combined with not-meeting-antecedent,
+    // poison can be 0 or 1. If you ALSO want type=read to REQUIRE poison=0:
+    (txn_type == 0) -> (poison == 0);
+}
+```
+
+## Bidirectional constraints vs solve-before
+
+Bidirectional constraints are symmetric — they restrict the joint distribution. `solve-before` affects only the distribution, not the set of legal values.
+
+```systemverilog
+// This constraint is bidirectional — it restricts (len, addr) pairs:
+constraint c_align { (addr % (len * 4)) == 0; }
+
+// This ordering hint only affects distribution, not legality:
+constraint c_order { solve len before addr; }
+
+// Both together: solve-before makes the distribution of (len, addr) more uniform.
+// Without it, the pair distribution is biased toward small len.
+```
+
+Think of it this way:
+
+- Constraints define the FEASIBLE SET (which values are legal).
+- `solve-before` affects SAMPLING within that feasible set (which legal values are chosen more often).
+
+## When solve-before is NOT the answer
+
+`solve-before` cannot rescue an over-constrained or inherently asymmetric problem. If:
+
+- Only 1% of `addr` values are `len=16` aligned in your address range, then even with `solve len before addr`, hitting `len=16` requires that `addr` is in the small set of aligned values.
+- You genuinely want uniform coverage of all `(len, addr)` combinations, you need a `dist` directive or a directed sequence for the corner cases.
+
+`solve-before` helps when the feasible set IS large enough to support uniform distribution but the solver's ordering heuristic produces a biased sample.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer writes `constraint c { solve b before a; }`. After 1000 randomizations, `b` shows a flat distribution. What does this tell you about the constraint?",
+      options: [
+        "The constraint has no effect — b is distributed the same regardless",
+        "`b` was chosen first by the solver due to the solve-before directive, and it was assigned uniformly because no other constraint biases its distribution. The distribution of `a` may be affected by solve-before — it is chosen from the values satisfying all constraints given the already-chosen `b`. If `a`'s constraint depends on `b`, then the ordering matters. But the fact that `b` is uniform just tells us the solver is picking it first without distortion.",
+        "The constraint is unnecessary",
+        "The solver ignores solve-before",
+      ],
+      correct: 1,
+      explanation:
+        "solve-before controls ordering, not the distribution of the first-solved variable. The first variable (b) is picked freely from its feasible set; the second (a) is picked given b. A uniform b distribution means no other constraint biases b. Whether solve-before matters depends on whether a's feasible set changes based on b.",
+    },
+    {
+      question:
+        "What is the logical equivalence of the implication constraint `A -> B` in SystemVerilog?",
+      options: [
+        "A && B must both be true",
+        "(!A) || B — either A is false (constraint is vacuously met), or both A and B are true. If A is true, B must also be true. If A is false, B can be anything.",
+        "A || B — at least one is true",
+        "B -> A — B implies A",
+      ],
+      correct: 1,
+      explanation:
+        "The implication `A -> B` is the conditional: if the antecedent A is true, the consequent B must be true. When A is false, the implication is satisfied regardless of B. This is equivalent to `(!A) || B` in Boolean logic. This is why a one-sided implication does not enforce symmetry — you often need both `A -> B` and `B -> A` (or explicit bidirectional constraints) to capture mutual exclusivity.",
+    },
+    {
+      question:
+        "An engineer changes simulators from Questa to VCS and suddenly coverage drops from 85% to 60% with the same testbench. No code changed. What is the most likely cause?",
+      options: [
+        "VCS has a constraint solver bug",
+        "The two simulators use different variable-ordering heuristics for unconstrained random variables. Without explicit solve-before directives, the distribution produced by one simulator's solver may differ significantly from another's, even when both produce legally-valid outputs. The fix is to add explicit solve-before constraints for variables whose ordering significantly affects coverage, making the distribution portable across simulators.",
+        "Coverage models are simulator-specific",
+        "The seed changed",
+      ],
+      correct: 1,
+      explanation:
+        "This is a real-world pain point for teams switching EDA vendors or running regression on multiple simulators. IEEE 1800 does not mandate a specific random variable ordering; it only says the distribution must be uniform over the feasible set for each chosen ordering. Explicit solve-before constraints make distribution portable. This is why professional DV teams document their solve-before choices as part of their constraint methodology.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H3-3 covers `randcase` and `randsequence` — SystemVerilog's procedural weighted-selection constructs that complement `randomize()` when you need probabilistic control flow rather than probabilistic field values.

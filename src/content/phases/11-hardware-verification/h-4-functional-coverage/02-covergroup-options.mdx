@@ -1,0 +1,259 @@
+---
+title: "Covergroup Options — at_least, weight, goal, per_instance"
+description: "Fine-tuning how covergroups report, what counts as covered, and how per-instance tracking reveals distribution across separate stimulus sources."
+phase: 11
+module: "h-4-functional-coverage"
+order: 2
+estimatedMinutes: 55
+difficulty: 4
+prerequisites:
+  - "h-4-covergroups-bins-cross"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - covergroup-option
+  - at-least
+  - weight
+  - goal
+  - per-instance
+  - type-option
+  - coverage-goal
+learningOutcomes:
+  - "Set at_least to require multiple hits before a bin is considered covered"
+  - "Use weight to emphasize or de-emphasize specific coverpoints in the aggregate"
+  - "Declare per_instance to track coverage independently per object instantiation"
+  - "Read a multi-instance coverage report and identify cross-instance gaps"
+professionalContext: "Default covergroup settings — one hit per bin, equal weight for all coverpoints — are almost never correct for production verification. Protocol compliance tests require each sequence type to be exercised multiple times under different conditions, not just once. DV leads who know covergroup options write verification plans that match reality; engineers who accept defaults sign off on insufficient coverage."
+thresholdConcept: false
+---
+
+## Why this matters
+
+After a week of random simulation, your coverage report says 98%. The team celebrates. But two questions are unanswered:
+
+1. Does "covered" mean the bin was hit once — or enough times to build statistical confidence in the DUT's behavior?
+2. Does the 98% aggregate hide a specific agent or instance that never exercised certain bins?
+
+Covergroup options answer both questions. They turn a binary "hit or not" model into a richer "hit enough times, weighted by importance, tracked per instance" model.
+
+## option.at_least — minimum hit count
+
+By default, a bin is covered after a single hit. For many protocol scenarios, one observation isn't enough:
+
+```systemverilog
+covergroup cg_axi_burst;
+    option.at_least = 10;   // Each bin must be hit at least 10 times
+
+    cp_len : coverpoint len {
+        bins single = { 1 };
+        bins short  = { [2:8] };
+        bins medium = { [9:64] };
+        bins long   = { [65:256] };
+    }
+endgroup
+```
+
+With `at_least = 10`, the 98% report now means each bin has been hit 10+ times. The statistical confidence in the DUT behavior across those scenarios is much higher.
+
+Set `at_least` per-covergroup globally, or per-bin individually:
+
+```systemverilog
+covergroup cg_mixed;
+    cp_type : coverpoint txn_type {
+        bins read   = { 0 } iff (at_least == 20);   // Reads need 20 hits
+        bins write  = { 1 } iff (at_least == 50);   // Writes need 50 (more important)
+        bins atomic = { 2 };                         // Uses group default
+    }
+    option.at_least = 5;   // Group default: 5 hits
+endgroup
+```
+
+## option.weight — coverage contribution
+
+Not all coverpoints are equally important. `weight` controls how much a coverpoint contributes to the group's aggregate coverage percentage:
+
+```systemverilog
+covergroup cg_protocol;
+    option.weight = 1;   // Group-level default
+
+    // This cross is the most important thing — 3x weight
+    cx_addr_type : cross cp_addr, cp_txn_type {
+        option.weight = 3;
+    }
+
+    // Address alone matters less than the cross
+    cp_addr : coverpoint addr {
+        option.weight = 1;
+    }
+
+    // Transaction type alone is least important (the cross covers it)
+    cp_txn_type : coverpoint txn_type {
+        option.weight = 1;
+    }
+endgroup
+```
+
+Aggregate formula: `total_weight_covered / total_weight`. If the cross (weight=3) is 100% covered and both coverpoints (weight=1 each) are 80%, the aggregate is `(3×100 + 1×80 + 1×80) / (3+1+1) = 92%`.
+
+A cross at weight 0 appears in the report but doesn't affect the aggregate — useful for informational tracking without changing the sign-off number.
+
+## option.goal — per-coverpoint completion target
+
+The `goal` option sets the coverage percentage that represents "done" for a coverpoint. Default is 100%.
+
+```systemverilog
+covergroup cg_with_goals;
+    // This coverpoint only needs 90% — some bins are legitimately hard to reach
+    cp_addr : coverpoint addr {
+        option.goal = 90;
+    }
+
+    // This cross needs all bins — no excuses
+    cx_primary : cross cp_addr, cp_size {
+        option.goal = 100;
+    }
+endgroup
+```
+
+`goal` is distinct from `at_least`: `goal` is the percentage of bins that must be covered; `at_least` is how many hits each covered bin needs. Use `goal` when some bins will legitimately not be covered (e.g., hardware-impossible combinations) and you don't want to use `ignore_bins` (which removes bins from the report entirely).
+
+## type_option.merge_instances — per-instance vs merged
+
+The most impactful option for UVM testbenches is `per_instance`. By default, all instances of a covergroup class merge their data — you see the aggregate. `per_instance` tracks each instance separately:
+
+```systemverilog
+class agent_cov;
+    int agent_id;
+    covergroup cg_per_agent;
+        option.per_instance = 1;   // Track each agent separately
+        option.name = $sformatf("agent_%0d_cg", agent_id);
+
+        cp_addr : coverpoint addr {
+            bins low  = { [0:32'h7FFF_FFFF] };
+            bins high = { [32'h8000_0000:32'hFFFF_FFFF] };
+        }
+    endgroup
+
+    function new(int id);
+        agent_id = id;
+        cg_per_agent = new();
+    endfunction
+endclass
+```
+
+Without `per_instance`, if Agent 0 covers only low addresses and Agent 1 covers only high addresses, the merged report shows 100%. With `per_instance`, you see:
+
+```
+agent_0_cg: low=100%, high=0%   → 50%
+agent_1_cg: low=0%, high=100%  → 50%
+Merged:  low=100%, high=100%    → 100%
+```
+
+The per-instance report reveals that each agent has a coverage gap — the merged report hid it.
+
+## type_option — class-level vs instance-level
+
+`type_option` sets options at the CLASS level (affects all instances identically); `option` sets them at the instance level. Common use:
+
+```systemverilog
+covergroup cg_global;
+    type_option.merge_instances = 0;  // Each instance reported separately (same as per_instance)
+    type_option.strobe = 0;           // Count every sample call, not just distinct value changes
+endgroup
+```
+
+`type_option.merge_instances = 0` is equivalent to `option.per_instance = 1` but set globally.
+
+## A complete example — per-agent AXI coverage
+
+```systemverilog
+class axi_agent_cov extends uvm_subscriber #(axi4_lite_write_txn);
+    `uvm_component_utils(axi_agent_cov)
+
+    int unsigned agent_id;
+    axi4_lite_write_txn cur;
+
+    covergroup cg_axi with function sample(axi4_lite_write_txn t);
+        option.per_instance = 1;
+        option.at_least     = 5;       // Each bin needs 5 hits
+
+        cp_addr : coverpoint t.awaddr[15:12] {  // 16 address zones
+            bins zones[] = { [0:15] };
+            option.weight = 2;          // Higher weight — address space is primary
+        }
+
+        cp_strb : coverpoint t.wstrb {
+            bins full    = { 4'b1111 };
+            bins partial = default;
+        }
+
+        cx : cross cp_addr, cp_strb {
+            option.weight = 3;          // Cross is most important
+        }
+    endgroup
+
+    function new(string n, uvm_component p);
+        super.new(n, p);
+        cg_axi = new();
+    endfunction
+
+    function void write(axi4_lite_write_txn t);
+        cg_axi.sample(t);
+    endfunction
+endclass
+```
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A covergroup has option.at_least=5. A bin has been sampled 4 times. How does this affect the aggregate coverage percentage?",
+      options: [
+        "The bin counts as 80% covered (4/5)",
+        "The bin is NOT counted as covered at all — it contributes 0% to the aggregate until it reaches 5 hits. With at_least semantics, coverage is binary per bin: hit count >= at_least → covered (100%); hit count < at_least → not covered (0%). There is no partial credit per bin. The aggregate percentage reflects the ratio of bins that have reached their at_least threshold.",
+        "The bin is fully covered",
+        "The at_least count only affects the report header, not percentages",
+      ],
+      correct: 1,
+      explanation:
+        "at_least is a threshold — either reached or not. A bin with 4 hits when at_least=5 is NOT covered and contributes 0% to the aggregate. This is different from a progress bar (where 4/5 = 80%). The IEEE 1800 spec is clear: bin coverage is 100% if hit_count >= at_least, else 0%. This means the aggregate coverage can jump from, say, 75% to 85% when one run finally gets a stubborn bin past the threshold.",
+    },
+    {
+      question:
+        "Two covergroup instances (from Agent A and Agent B) are merged. Agent A covers bins 1-8; Agent B covers bins 9-16. The merged report shows 100%. Is the verification plan closed?",
+      options: [
+        "Yes — 100% is 100%",
+        "It depends on the verification plan. If the plan requires each AGENT to cover all 16 bins (because both agents drive a shared resource and should each exercise the full protocol), then no — each agent has a gap. The merged 100% hides per-agent coverage holes. Use option.per_instance=1 to expose the per-agent view. If the plan only requires that the combined system exercises all bins (any agent can cover any bin), then yes, 100% merged is valid. The verification plan must specify which interpretation applies.",
+        "No — merged coverage is never valid",
+        "Run more transactions",
+      ],
+      correct: 1,
+      explanation:
+        "Whether merged or per-instance coverage matters depends on the verification goal. Per-instance is critical when each instance must independently demonstrate certain behavior (e.g., each master on a bus must exercise all transaction types independently). Merged is sufficient when you only care about system-level coverage (some master exercised every type). The verification plan must specify this; the coverage model must enforce it.",
+    },
+    {
+      question:
+        "What is the difference between option.goal=90 and marking 10% of bins as ignore_bins?",
+      options: [
+        "They produce the same result",
+        "option.goal=90 keeps all bins in the report — uncovered bins appear as gaps — but declares the coverpoint 'done' when 90% are covered. The 10% gap is visible and auditable. ignore_bins removes bins from the report entirely — they don't appear, and reviewers can't see what was excluded. Use goal when you acknowledge certain bins are hard to reach but want to track them. Use ignore_bins when the bins represent genuinely impossible scenarios that don't belong in the model at all.",
+        "ignore_bins reduces simulation time",
+        "goal affects the weight calculation; ignore_bins does not",
+      ],
+      correct: 1,
+      explanation:
+        "Auditability is the key difference. ignore_bins produces a clean report with no mention of the excluded cases — a reviewer sees 100% with no visible gap. option.goal=90 keeps the unmet bins visible but sets the 'done' threshold below 100%, so a reviewer sees the gap and can verify the rationale for not requiring it. For verification sign-off, visible gaps with documented rationale are preferable to invisible exclusions.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H4-3 covers the UVM subscriber pattern — how to connect a coverage collector to the testbench's analysis ports so it samples transactions automatically, without the sequence or driver knowing coverage exists.

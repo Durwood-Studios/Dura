@@ -1,0 +1,257 @@
+---
+title: "Optimization Flags and Their Traps"
+description: "-O0 passes testing. -O2 ships to production. The bugs that only appear at higher optimization levels, and the GCC flags every embedded Makefile should include."
+phase: 10
+module: "e-1-c-toolchain-arm-cortex-m"
+order: 4
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-1-c-toolchain-arm-cortex-m/03"
+standards:
+  primaryAnchor: "GCC Manual — Optimization Options"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - optimization-level
+  - undefined-behavior
+  - strict-aliasing
+  - volatile
+  - link-time-optimization
+  - dead-code-elimination
+  - loop-unrolling
+  - constant-folding
+  - inlining
+learningOutcomes:
+  - "Explain what GCC optimization levels -O0 through -O3 and -Os enable"
+  - "Identify the strict-aliasing rule and describe the pointer casts in embedded C that violate it"
+  - "Describe how undefined behavior at one optimization level can silently produce wrong behavior at another"
+  - "List the GCC flags that every production embedded Makefile should include for safety and size"
+  - "Use -fno-strict-aliasing and -fwrapv strategically where needed and explain the tradeoff"
+professionalContext: "The phrase 'it works in debug but not in release' is almost always a story about optimization-exposed bugs — missing volatile, undefined behavior the optimizer exploits, or strict-aliasing violations hiding in type punning code. Senior engineers write firmware that compiles clean at -O2 from day one; they never find out about the bugs the optimizer was masking. This lesson gives you the vocabulary and the patterns to do the same."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Most embedded projects develop at `-O0` (no optimization) and ship at `-O2` or `-Os`. At `-O0`, GCC generates straightforward code: every C statement is a few instructions, execution matches source order, variables live in memory. At `-O2`, GCC applies dozens of transformations: constant folding, dead-code elimination, loop unrolling, function inlining, code motion, tail-call optimization. Most of these are safe. A few of them are traps for embedded C patterns that inadvertently invoke undefined behavior.
+
+The compiler is correct to exploit undefined behavior for optimization. It is also not obligated to warn you when it does. The result: code that passes all your `-O0` tests fails silently at `-O2` in production.
+
+## The optimization levels
+
+| Flag  | What it enables                                                                                                     |
+| ----- | ------------------------------------------------------------------------------------------------------------------- |
+| `-O0` | No optimization. Every statement is one or more instructions. Easy to debug; large code, slow execution.            |
+| `-O1` | Basic optimizations: dead code, constant folding, basic block ordering.                                             |
+| `-O2` | Full optimization: inlining, loop transformations, strict aliasing enabled. The standard production choice.         |
+| `-O3` | Aggressive loop unrolling, auto-vectorization. Larger code than -O2; sometimes faster, sometimes not.               |
+| `-Os` | Optimize for size: removes any optimization that increases code size. Standard for memory-constrained chips.        |
+| `-Og` | Optimize for debugging: enables optimizations that don't hurt debugger visibility. Better than -O0 for development. |
+
+For most Cortex-M projects, the production Makefile uses `-Os` (code fits in flash) or `-O2` (performance matters more than size). Development uses `-Og` rather than `-O0` for a more honest test of production behavior.
+
+## Trap 1 — strict aliasing and type punning
+
+The C strict-aliasing rule (C11 §6.5): "An object shall have its stored value accessed only by an lvalue expression that has one of the following types..." The rule permits accessing through `char *` but not through arbitrary other pointer types. Accessing an object through an incompatible pointer type is undefined behavior.
+
+The embedded pattern that violates it:
+
+```c
+uint32_t raw = read_sensor_register();
+
+// Type punning via pointer cast — UNDEFINED BEHAVIOR under strict aliasing
+float value = *(float *)(&raw);
+```
+
+At `-O0` this works because the compiler generates the store + load literally. At `-O2` with strict aliasing enabled, the compiler may decide the `float *` read cannot possibly alias `raw` (a `uint32_t`), reorder or eliminate it, and produce a wrong result.
+
+The safe patterns:
+
+```c
+// Option 1: memcpy — always safe, compiles to one instruction on Cortex-M
+float value;
+memcpy(&value, &raw, sizeof(float));
+
+// Option 2: union — defined behavior in C11 (not C++)
+union {
+    uint32_t u;
+    float    f;
+} pun = { .u = raw };
+float value = pun.f;
+
+// Option 3: -fno-strict-aliasing — disables the aliasing optimization globally
+// Use as a last resort; it prevents legitimate optimizations
+```
+
+In peripheral driver code, type-punning through `uint32_t *` pointing at structs also violates strict aliasing. The CMSIS headers use `volatile uint32_t *` for registers precisely to avoid this — accesses through `volatile` pointers are already exempt from most aliasing optimizations because the compiler can't make assumptions about volatile side effects.
+
+## Trap 2 — signed integer overflow
+
+C11 says signed integer overflow is undefined behavior. The compiler is allowed to assume it never happens. At `-O2`, this produces wrong code:
+
+```c
+// Intended: detect wraparound
+int counter = get_counter();
+if (counter + 1 < counter) {
+    handle_overflow();
+}
+```
+
+With `-O2`, the compiler sees `counter + 1 < counter` and reasons: "signed overflow is undefined behavior, so I can assume it never happens, so `counter + 1 > counter` is always true, so `counter + 1 < counter` is always false, so I can delete this branch." The overflow check silently disappears.
+
+Fixes:
+
+```c
+// Option 1: use unsigned — unsigned overflow is defined (wraps mod 2^N)
+uint32_t counter = get_counter();
+if (counter + 1U < counter) { handle_overflow(); }
+
+// Option 2: explicit check that doesn't rely on the overflow
+if (counter == INT_MAX) { handle_overflow(); }
+
+// Option 3: -fwrapv — makes signed overflow wrap (UB → defined wrap)
+// Useful for porting code that relied on signed wraparound
+```
+
+For embedded code, prefer unsigned integers for counters, indices, and anything where wraparound semantics matter. MISRA-C:2023 rules 10.1 and 10.4 push engineers toward this by flagging mixed signed/unsigned operations.
+
+## Trap 3 — volatile and memory ordering
+
+`volatile` prevents the compiler from caching a value in a register. It does NOT prevent the compiler from reordering volatile accesses relative to non-volatile accesses.
+
+```c
+volatile uint32_t *STATUS = (volatile uint32_t *)0x40005400;
+volatile uint32_t *DATA   = (volatile uint32_t *)0x40005404;
+
+void send_byte(uint8_t byte) {
+    while (!(*STATUS & TX_READY)) { }   // Wait for FIFO ready
+    *DATA = byte;                       // Write byte
+    // Is this order guaranteed? Yes for volatile-volatile ordering.
+    // But if STATUS and DATA are two different volatile objects, the order
+    // IS preserved in C. This is fine.
+}
+```
+
+The reordering issue arises when non-volatile code intervenes. The compiler can reorder a non-volatile store past a volatile read if it judges them independent. The defense: use memory barriers `__DMB()` (Data Memory Barrier) around DMA-region accesses and at critical protocol boundaries.
+
+More commonly: the volatile + non-volatile reorder issue bites when you set a non-volatile "ready" flag after writing a volatile buffer:
+
+```c
+// BUG: compiler may reorder
+data_buffer[i] = value;   // non-volatile write to DMA buffer
+transfer_done = 1;         // non-volatile flag
+
+// Main loop reads transfer_done. But DMA reads data_buffer.
+// Compiler proves transfer_done and data_buffer are independent,
+// reorders: transfer_done = 1 first, then data_buffer write.
+// DMA reads stale data.
+```
+
+The fix:
+
+```c
+data_buffer[i] = value;
+__DMB();            // Data Memory Barrier — all writes before this complete
+transfer_done = 1;
+```
+
+## The production Makefile flags
+
+Every embedded Makefile should include:
+
+```makefile
+CFLAGS = \
+  -mcpu=cortex-m4 -mthumb                  # Target architecture
+  -mfloat-abi=hard -mfpu=fpv4-sp-d16       # Hardware FPU (M4F)
+  -Os                                       # Optimize for size
+  -Wall -Wextra -Werror                     # All warnings are errors
+  -Wdouble-promotion                        # Catch float→double promotion (expensive on M4)
+  -Wundef                                   # Catch undefined macro use
+  -Wshadow                                  # Catch variable shadowing
+  -ffunction-sections -fdata-sections       # Garbage-collect unused code/data
+  -ffreestanding                            # No hosted-environment assumptions
+  -nostartfiles                             # We provide our own startup
+  -std=c11                                  # Explicit C standard
+```
+
+And the linker flags:
+
+```makefile
+LDFLAGS = \
+  -T linker.ld
+  -Wl,--gc-sections                         # Dead code elimination at link time
+  -Wl,-Map=firmware.map                     # Generate map file for size analysis
+  -nostdlib                                 # No host standard library
+```
+
+Notable: `-Wall -Wextra -Werror` catches the missing-volatile, signed-overflow, and type-punning issues at compile time if the pattern is recognizable to the compiler. `-ffunction-sections -fdata-sections` combined with `--gc-sections` eliminates unused functions and variables from the binary. This matters enormously on chips with 64 KB flash.
+
+What NOT to use for production: `-O0`. It hides real bugs. Use `-Og` in development (optimizes but preserves debugger visibility), `-Os` or `-O2` in production.
+
+## Analyzing the map file
+
+The `-Wl,-Map=firmware.map` flag produces a file listing every symbol, its size, and where it landed in memory. This is how you find what's eating your 64 KB flash:
+
+```
+.text           0x08000000     0x4210
+ *(fill)        0x08000000       0x10
+ .text.main     0x08000010      0x88   main.o
+ .text.uart_putc 0x08000098     0x44   uart.o
+ .text.printf   0x080000DC     0x1A40  printf_nano.o   ← 6.5 KB!
+```
+
+Finding that `printf` from newlib-nano is 6.5 KB often motivates writing a minimal `uart_printf` for the embedded target (lesson 06). The map file makes the problem visible.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "Code passes all tests at -O0. At -O2, a specific comparison that should detect counter wraparound no longer works: `if (counter + 1 < counter)` always evaluates to false. What is the root cause and the correct fix?",
+      options: [
+        "The optimizer has a bug — use -O1 instead",
+        "counter is declared as signed int; the C standard defines signed integer overflow as undefined behavior; at -O2 the compiler applies the optimization 'counter + 1 can never overflow, therefore counter + 1 > counter always, therefore the branch is dead and can be removed'; the fix is to declare counter as uint32_t (unsigned overflow is defined as mod-2^32 wraparound) or to check explicitly with counter == INT_MAX instead of relying on the overflow condition",
+        "Add volatile to counter",
+        "The CPU integer unit has a bug on Cortex-M",
+      ],
+      correct: 1,
+      explanation:
+        "Signed integer overflow is undefined behavior in C11. The compiler is permitted to assume it never happens and optimize accordingly. At higher optimization levels, GCC applies this assumption aggressively — dead branch elimination, range narrowing, loop strength reduction. Making counter uint32_t fixes the root cause because unsigned wraparound IS defined. volatile would prevent caching but wouldn't fix the undefined behavior exploitation. The optimizer does not have a bug; it's correct per the standard.",
+    },
+    {
+      question:
+        "A driver accesses a DMA buffer then sets a flag: `buf[i] = val; done = 1;`. Under what conditions could the CPU execute these in the wrong order, and what is the fix?",
+      options: [
+        "The CPU always executes in source order — no reordering is possible",
+        "The compiler can reorder non-volatile writes it judges to be independent; if buf and done are not related by a data dependency visible to the compiler, the optimizer may emit `done = 1` before the buffer write; additionally, Cortex-M's write buffer can delay store visibility; the fix is `__DMB()` (Data Memory Barrier) between the buffer write and the flag set, which flushes the write buffer and prevents the compiler from reordering past the barrier",
+        "Add volatile to done only",
+        "This cannot happen because main and DMA are in the same core",
+      ],
+      correct: 1,
+      explanation:
+        "Two sources of reordering: the compiler (for non-volatile accesses it judges independent) and the CPU write buffer (stores may complete out of order). __DMB() addresses both: it is a compiler barrier (GCC treats it as a memory clobber, preventing reordering) and a hardware barrier (flushes the write buffer before the next instruction). Adding volatile to done alone would prevent caching the flag's value but would not create a barrier between the buffer write and the flag write. DMA and the CPU sharing the same silicon does not prevent reordering — the DMA sees the memory bus, not the CPU's write buffer.",
+    },
+    {
+      question:
+        "A production Makefile uses -O0. An engineer argues that testing at -O0 and shipping at -O0 avoids optimization-related bugs. What is wrong with this reasoning?",
+      options: [
+        "Nothing — -O0 is safer for embedded",
+        "-O0 generates significantly larger and slower code than -Os or -O2, potentially exceeding flash or RAM limits; more seriously, -O0 MASKS bugs that -O2 would expose — missing volatile, signed overflow exploitation, dead-code assumptions — so testing at -O0 provides false confidence; shipping firmware that could fit in flash only at -O0 and crashes only at -O0 is not better than shipping -O2 firmware with the real bugs found during -O2 testing; the correct practice is to develop and test at -Og or -Os and fix the bugs that optimization exposes",
+        "-O0 is not available in GCC arm-none-eabi",
+        "The flag should be spelled -O 0 with a space",
+      ],
+      correct: 1,
+      explanation:
+        "Testing at -O0 and shipping at -O0 avoids the optimization bugs but introduces code-size and performance problems that may make the firmware non-viable. More importantly, it gives false confidence: the -O0 test suite passes because the optimizer wasn't applied to expose the underlying bugs. When someone later enables -O2 for a tight flash budget, the bugs appear in production. The right approach: develop at -Og (which enables some optimization but preserves debugger information), test at -Os or -O2 (the target production flag), fix the bugs exposed by optimization, then ship. Never develop a habit of testing at a different optimization level than production.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 05 leaves the build system and enters the debugging toolchain: semihosting, SEGGER RTT, and OpenOCD — the three mechanisms that let you emit log messages from firmware running on a real chip, without a printf that writes to an absent OS. Once you can see what's happening inside your binary, debugging stops being guesswork.

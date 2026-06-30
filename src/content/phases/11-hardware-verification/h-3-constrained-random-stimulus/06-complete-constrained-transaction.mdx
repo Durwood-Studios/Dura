@@ -1,0 +1,367 @@
+---
+title: "Complete Constrained Transaction — AXI4-Lite Write"
+description: "A production-quality transaction class combining layered constraints, solve-before, distribution biasing, constraint-mode switching, and post_randomize. The template you'll reuse throughout Phase H."
+phase: 11
+module: "h-3-constrained-random-stimulus"
+order: 6
+estimatedMinutes: 70
+difficulty: 4
+prerequisites:
+  - "h-3-post-randomize-callbacks"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog) / ARM AMBA AXI4-Lite Specification"
+  cs2023: []
+  swebok: []
+  bloom: "create"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - axi4-lite
+  - transaction-class
+  - layered-constraints
+  - coverage-feedback
+learningOutcomes:
+  - "Build a complete transaction class that uses all five constrained-random mechanisms together"
+  - "Apply the coverage-feedback loop to refine constraints until a target coverage model closes"
+  - "Derive a scoreboard-ready transaction with all expected fields populated in post_randomize"
+  - "Register the transaction class with the UVM factory"
+professionalContext: "A well-engineered transaction class is the multiplier for the rest of the testbench. Every sequence, every coverage model, every scoreboard comparison rests on it. The AXI4-Lite write transaction built in this lesson is the foundation for the H8 capstone and is typical of what DV engineers produce in their first weeks on a new chip project."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The previous four lessons taught the mechanisms separately. Real transactions require ALL of them simultaneously:
+
+- Constraints to define the valid stimulus space.
+- Solve-before to produce uniform distributions across coverage targets.
+- Distribution biasing to weight toward interesting corner cases.
+- Constraint-mode switching to serve multiple test scenarios from one class.
+- post_randomize to compute derived protocol fields.
+
+This lesson builds a complete, production-quality AXI4-Lite write transaction class and demonstrates the coverage-driven refinement loop that closes the verification plan.
+
+## AXI4-Lite write protocol recap
+
+AXI4-Lite (ARM AMBA spec, subset of AXI4) has two channels for writes:
+
+- **AW channel** — address phase: AWADDR (32-bit), AWPROT (3-bit protection flags)
+- **W channel** — data phase: WDATA (32-bit), WSTRB (4-bit byte enables)
+- **B channel** — response phase: BRESP (2-bit: OKAY=0, EXOKAY=1, SLVERR=2, DECERR=3)
+
+A write transaction drives AW + W, then waits for B.
+
+## The transaction class
+
+```systemverilog
+// File: axi4_lite_write_txn.sv
+class axi4_lite_write_txn extends uvm_sequence_item;
+    `uvm_object_utils(axi4_lite_write_txn)
+
+    // ===== Stimulus fields (randomized) =====
+    rand bit [31:0] awaddr;     // Write address
+    rand bit [2:0]  awprot;     // Protection: {priv, secure, instruction}
+    rand bit [31:0] wdata;      // Write data
+    rand bit [3:0]  wstrb;      // Byte enables
+
+    // ===== Derived fields (post_randomize) =====
+    bit [31:0]  expected_readback;   // What a readback should return
+    int         active_byte_count;   // Number of active byte lanes
+    bit [31:0]  effective_data;      // Masked write data (strb applied)
+
+    // ===== Response fields (populated by monitor) =====
+    bit [1:0]   bresp;
+
+    // ===== Test metadata =====
+    bit         is_error_injection;  // Set by error-mode test
+
+    // =====================================================================
+    // CONSTRAINTS
+    // =====================================================================
+
+    // --- Normal mode: valid aligned addresses ---
+    constraint c_addr_word_aligned {
+        awaddr[1:0] == 2'b00;   // 32-bit word alignment required by AXI4-Lite
+    }
+
+    constraint c_addr_range {
+        // Default: stay in the low 64 KB window
+        soft awaddr inside { [32'h0000_0000 : 32'h0000_FFFF] };
+    }
+
+    constraint c_strb_nonzero {
+        wstrb != 4'b0000;   // No-op writes aren't interesting
+    }
+
+    // Control distribution toward boundary addresses and full/partial strobes
+    constraint c_addr_distribution {
+        awaddr dist {
+            32'h0000_0000               := 10,   // Zero address — common corner
+            [32'h0000_0004 : 32'h0000_FFFC] := 70,  // Mid range
+            32'h0000_FFFC               := 10,   // Near-top — potential overflow
+            [32'h0001_0000 : 32'hFFFF_FFFC] := 10   // Above window (if unlocked)
+        };
+    }
+
+    constraint c_strb_distribution {
+        wstrb dist {
+            4'b1111 := 50,   // Full-word write (most common in real traffic)
+            4'b0001 := 10,   // Byte 0 only
+            4'b0010 := 10,   // Byte 1 only
+            4'b0100 := 10,   // Byte 2 only
+            4'b1000 := 10,   // Byte 3 only
+            4'b0011 := 5,    // Lower halfword
+            4'b1100 := 5     // Upper halfword
+        };
+    }
+
+    // solve-before: let wstrb distribute freely first, then pick wdata
+    constraint c_order { solve wstrb before wdata; }
+
+    // awprot: normally privileged-secure-data
+    constraint c_prot_normal { awprot == 3'b000; }
+
+    // --- Error injection mode (disabled by default) ---
+    constraint c_unaligned_addr {
+        awaddr[1:0] != 2'b00;   // Violate AXI4-Lite alignment requirement
+    }
+
+    // --- Stress mode (disabled by default) ---
+    constraint c_wide_addr {
+        awaddr inside { [32'h0001_0000 : 32'hFFFF_FFFC] };
+    }
+
+    // =====================================================================
+    // CONSTRUCTOR
+    // =====================================================================
+    function new(string name = "axi4_lite_write_txn");
+        super.new(name);
+        // Error and stress modes off by default
+        c_unaligned_addr.constraint_mode(0);
+        c_wide_addr.constraint_mode(0);
+        is_error_injection = 0;
+    endfunction
+
+    // =====================================================================
+    // POST_RANDOMIZE — derive computed fields
+    // =====================================================================
+    function void post_randomize();
+        // 1. Compute effective data after applying byte-enable mask
+        effective_data = 32'h0;
+        for (int b = 0; b < 4; b++) begin
+            if (wstrb[b]) begin
+                effective_data[b*8 +: 8] = wdata[b*8 +: 8];
+            end
+        end
+
+        // 2. Count active byte lanes
+        active_byte_count = $countones(wstrb);
+
+        // 3. Compute expected readback
+        // For a simple register: readback = effective_data
+        // (Scoreboard uses this to check DUT response after read-after-write)
+        expected_readback = effective_data;
+    endfunction
+
+    // =====================================================================
+    // MODE SWITCH API
+    // =====================================================================
+    function void set_error_mode();
+        c_addr_word_aligned.constraint_mode(0);
+        c_addr_range.constraint_mode(0);
+        c_unaligned_addr.constraint_mode(1);
+        c_wide_addr.constraint_mode(1);
+        c_prot_normal.constraint_mode(0);
+        is_error_injection = 1;
+    endfunction
+
+    function void set_normal_mode();
+        c_addr_word_aligned.constraint_mode(1);
+        c_addr_range.constraint_mode(1);
+        c_unaligned_addr.constraint_mode(0);
+        c_wide_addr.constraint_mode(0);
+        c_prot_normal.constraint_mode(1);
+        is_error_injection = 0;
+    endfunction
+
+    // =====================================================================
+    // UTILITY
+    // =====================================================================
+    function string convert2string();
+        return $sformatf(
+            "AXI4L_WRITE: addr=0x%08h prot=%03b data=0x%08h strb=%04b [%s]",
+            awaddr, awprot, wdata, wstrb,
+            is_error_injection ? "ERROR" : "NORMAL"
+        );
+    endfunction
+
+    function void do_copy(uvm_object rhs);
+        axi4_lite_write_txn t;
+        super.do_copy(rhs);
+        if (!$cast(t, rhs))
+            `uvm_fatal("TXN", "do_copy: wrong type")
+        awaddr     = t.awaddr;
+        awprot     = t.awprot;
+        wdata      = t.wdata;
+        wstrb      = t.wstrb;
+        bresp      = t.bresp;
+        is_error_injection = t.is_error_injection;
+    endfunction
+endclass
+```
+
+## The coverage model — pairing with the transaction
+
+```systemverilog
+class axi4_lite_write_cov extends uvm_subscriber #(axi4_lite_write_txn);
+    `uvm_component_utils(axi4_lite_write_cov)
+
+    axi4_lite_write_txn cur;
+
+    covergroup cg_write;
+        cp_addr_region : coverpoint cur.awaddr[31:16] {
+            bins zero_page  = { 16'h0000 };
+            bins low_range  = { [16'h0001 : 16'h00FF] };
+            bins mid_range  = { [16'h0100 : 16'hFEFF] };
+            bins high_range = { [16'hFF00 : 16'hFFFF] };
+        }
+
+        cp_strb : coverpoint cur.wstrb {
+            bins full          = { 4'b1111 };
+            bins byte_enables[] = { 4'b0001, 4'b0010, 4'b0100, 4'b1000 };
+            bins halfwords[]   = { 4'b0011, 4'b1100 };
+            bins misc          = default;
+        }
+
+        cp_prot : coverpoint cur.awprot;
+
+        cx_strb_region : cross cp_addr_region, cp_strb;
+    endgroup
+
+    function new(string n, uvm_component p);
+        super.new(n, p);
+        cg_write = new();
+    endfunction
+
+    function void write(axi4_lite_write_txn t);
+        cur = t;
+        cg_write.sample();
+    endfunction
+endclass
+```
+
+## Closing coverage — the refinement loop
+
+After 1000 transactions, the report shows:
+
+- `cp_addr_region.high_range × cp_strb.halfwords` — 0 hits.
+
+Analysis: the dist constraint weights high addresses at only 10%; halfword strobes at 10%. Combined probability: 1%. In 1000 transactions, expect ~10 hits — but cross bins have higher variance.
+
+Fix: add a targeted sequence for this cross:
+
+```systemverilog
+class high_addr_halfword_seq extends uvm_sequence #(axi4_lite_write_txn);
+    `uvm_object_utils(high_addr_halfword_seq)
+
+    task body();
+        axi4_lite_write_txn t;
+        repeat (20) begin
+            t = axi4_lite_write_txn::type_id::create("t");
+            start_item(t);
+            t.c_wide_addr.constraint_mode(1);
+            t.c_addr_range.constraint_mode(0);
+            assert(t.randomize() with {
+                awaddr inside { [32'hFF00_0000 : 32'hFFFF_FFFC] };
+                wstrb  inside { 4'b0011, 4'b1100 };
+            });
+            finish_item(t);
+        end
+    endtask
+endclass
+```
+
+Run targeted sequence → check coverage report → iterate until all cross bins have hit count ≥ `at_least` goal.
+
+## Check your understanding
+
+<SandboxExercise
+  language="systemverilog"
+  instructions={`The AXI4-Lite write transaction class above has a gap: it doesn't verify that the solver's awaddr distribution actually produces all four address regions with reasonable frequency.
+
+Task:
+
+1. Write a for loop that creates 500 transactions and randomizes them.
+2. Count how many fall in each region (zero_page, low_range, mid_range, high_range).
+3. Print the counts and percentages.
+4. Identify which region(s) the dist constraint is biased toward.
+
+Use the class structure from the lesson. You don't need to implement the full class — assume it exists.`}
+  initialCode={`module test;
+initial begin
+axi4_lite_write_txn t;
+int cnt_zero, cnt_low, cnt_mid, cnt_high;
+cnt_zero = 0; cnt_low = 0; cnt_mid = 0; cnt_high = 0;
+
+        t = new();
+        repeat (500) begin
+            t.randomize();
+            // TODO: classify t.awaddr into regions
+            // zero_page:  awaddr[31:16] == 0
+            // low_range:  awaddr[31:16] inside [1:255]
+            // mid_range:  awaddr[31:16] inside [256:65279]
+            // high_range: awaddr[31:16] inside [65280:65535]
+        end
+
+        // TODO: print counts and percentages
+        $finish;
+    end
+
+endmodule`}
+  solution={`module test;
+initial begin
+axi4_lite_write_txn t;
+int cnt_zero, cnt_low, cnt_mid, cnt_high;
+cnt_zero = 0; cnt_low = 0; cnt_mid = 0; cnt_high = 0;
+
+        t = new();
+        repeat (500) begin
+            void'(t.randomize());
+            case (1'b1)
+                (t.awaddr[31:16] == 16'h0000):
+                    cnt_zero++;
+                (t.awaddr[31:16] inside { [16'h0001:16'h00FF] }):
+                    cnt_low++;
+                (t.awaddr[31:16] inside { [16'h0100:16'hFEFF] }):
+                    cnt_mid++;
+                default:
+                    cnt_high++;
+            endcase
+        end
+
+        // The dist constraint gives:
+        // zero_page: 10 parts of 100 → ~10%
+        // mid_range: 70 parts of 100 → ~70%  ← most biased
+        // near-top: 10 parts → ~10%
+        // above window: 10 parts → ~10%
+        // The 'soft addr_range' makes most fall in [0..64K]
+        $display("zero_page:  %0d (%0d%%)", cnt_zero, cnt_zero*100/500);
+        $display("low_range:  %0d (%0d%%)", cnt_low,  cnt_low*100/500);
+        $display("mid_range:  %0d (%0d%%)", cnt_mid,  cnt_mid*100/500);
+        $display("high_range: %0d (%0d%%)", cnt_high, cnt_high*100/500);
+        // Expected: mid_range dominates (~70%); others ~10% each
+        $finish;
+    end
+
+endmodule`}
+testCases={[
+"All 500 transactions are randomized",
+"Addresses are classified into the four regions",
+"Counts and percentages are printed for all four regions",
+"The mid_range region receives the most hits (highest dist weight)"
+]}
+/>
+
+## What's next
+
+Module H4 covers functional coverage — the measurement layer that tells you when your constrained-random stimulus from H3 has exercised enough scenarios. You'll define covergroups that target the same transaction class built here, run the coverage-driven verification loop, and close your first coverage plan.

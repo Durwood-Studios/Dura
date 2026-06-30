@@ -1,0 +1,337 @@
+---
+title: "CRTP and Policy-Based Design — Static Polymorphism Without vtables"
+description: "Replace virtual dispatch with the Curiously Recurring Template Pattern and policy classes for zero-overhead runtime behaviour selection in HFT hot paths."
+phase: 12
+module: "q-1-modern-cpp-for-hft"
+order: 2
+estimatedMinutes: 40
+difficulty: 4
+prerequisites:
+  - "q-1-modern-cpp-for-hft/01-modern-cpp-for-hft"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - crtp
+  - static-polymorphism
+  - dynamic-polymorphism
+  - vtable
+  - mixin
+  - policy-class
+  - curiously-recurring-template-pattern
+  - barton-nackman-trick
+  - devirtualization
+  - empty-base-optimization
+learningOutcomes:
+  - "After this lesson you can implement CRTP to give a base class access to derived-class methods without a vtable"
+  - "After this lesson you can compose behaviour at compile time using policy classes, and explain why this eliminates indirect dispatch on the hot path"
+  - "After this lesson you can identify when CRTP is the right tool versus ordinary templates, concepts, or virtual dispatch"
+  - "After this lesson you can apply empty-base optimisation so a zero-size policy class adds no bytes to the containing struct"
+professionalContext: "HFT infrastructure must support multiple execution venues and order types — different tick rules, different session protocols, different fill-or-kill semantics — without paying a vtable load and indirect branch on every message. The industry solution is CRTP and policy-based design: the abstraction is real, the indirection is not. Firms like Jump Trading and Tower Research write entire execution layers this way, exploiting the fact that which venue or strategy is active is known at compile time for a given binary deployment even if it changes between deployments. CRTP is one of the three C++ patterns (with concepts and constexpr) that every HFT C++ engineer must read fluently."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You have a market-data normaliser that must handle Nasdaq ITCH, CBOE pitch, and an internal synthetic feed — three different decoders. The obvious design: a `FeedDecoder` base class with a virtual `decode()` method. It works, scales, and costs you a vtable lookup and an indirect branch on every packet. At a hundred million packets per day, that branch is mispredicted a meaningful fraction of the time and eats nanoseconds.
+
+The alternative is <VocabTooltip slug="crtp">CRTP</VocabTooltip> — the Curiously Recurring Template Pattern. The abstraction stays; the indirection disappears. Which decoder you use is chosen at compile time, the call is inlined, and the branch predictor never has to guess.
+
+## The problem CRTP solves
+
+<VocabTooltip slug="dynamic-polymorphism">Dynamic polymorphism</VocabTooltip> (virtual functions)
+dispatches at _runtime_ through a pointer in a <VocabTooltip slug="vtable">vtable</VocabTooltip>.
+The CPU cannot always predict where the pointer leads, flushes the pipeline on a mispredict, and the
+linker must keep the vtable structure around so `dynamic_cast` can work. On the hot path this is
+three costs for one abstraction.
+
+<VocabTooltip slug="static-polymorphism">Static polymorphism</VocabTooltip> resolves the type at
+compile time. The compiler sees through the template, inlines the correct implementation, and the
+vtable is never emitted. CRTP is the most common C++ spelling of static polymorphism.
+
+## The mechanism: CRTP
+
+The pattern is this: the base class takes itself as a template parameter. The derived class inherits from the base class instantiation of itself:
+
+```cpp
+#include <cstdint>
+#include <span>
+
+// Base: knows the derived type at compile time via the template parameter.
+// No virtual keyword anywhere — no vtable, no runtime dispatch.
+template <typename Derived>
+class FeedDecoder {
+public:
+    // down-cast to Derived and call its decode implementation.
+    // static_cast is safe here: the invariant of CRTP is that Derived
+    // inherits from FeedDecoder<Derived> and nothing else calls this.
+    void decode(std::span<const std::byte> packet) {
+        static_cast<Derived*>(this)->decode_impl(packet);
+    }
+
+    // Provide a default that Derived can override selectively.
+    std::uint64_t sequence_number() const {
+        return static_cast<const Derived*>(this)->sequence_number_impl();
+    }
+
+protected:
+    std::uint64_t seq_{0};
+};
+
+// Derived A: Nasdaq ITCH.
+class ItchDecoder : public FeedDecoder<ItchDecoder> {
+public:
+    void decode_impl(std::span<const std::byte> packet) {
+        // Parse ITCH fixed-width binary directly.
+        // The compiler inlines this — no virtual call, no indirect branch.
+        if (!packet.empty()) ++seq_;
+    }
+
+    std::uint64_t sequence_number_impl() const { return seq_; }
+};
+
+// Derived B: internal synthetic feed.
+class SyntheticDecoder : public FeedDecoder<SyntheticDecoder> {
+public:
+    void decode_impl(std::span<const std::byte> packet) {
+        // Different format, different logic, same interface.
+        if (packet.size() >= 4) ++seq_;
+    }
+
+    std::uint64_t sequence_number_impl() const { return seq_ * 2; }
+};
+
+// A generic consumer templated on the decoder type.
+// At compile time, only ONE path exists in the final binary.
+template <typename DecoderT>
+void process_feed(DecoderT& dec, std::span<const std::byte> pkt) {
+    dec.decode(pkt);   // inlined: no vtable load, no indirect branch
+}
+```
+
+The rule that makes CRTP work: in `FeedDecoder<Derived>`, `Derived` is fully defined by the time any member function is called (though not at the point of the `class` definition — forward-declaring the name is enough). The `static_cast` is the downcast; the invariant that `Derived` extends `FeedDecoder<Derived>` makes it safe.
+
+> **Mental model.** CRTP is the template equivalent of `virtual`: it says "the base class expresses an interface, derived classes supply implementations." The difference is that CRTP bakes the choice into the type at compile time, so the call becomes a direct, inlined call instead of an indirect one. The class hierarchy exists; the runtime dispatch does not.
+
+## Policy-based design: composing behaviour at compile time
+
+CRTP expresses an "is-a" relationship. <VocabTooltip slug="policy-class">Policy classes</VocabTooltip> express "configured with" — injected as template parameters, they supply swappable behaviour with no runtime cost. Alexandrescu's _Modern C++ Design_ popularised this; HFT infrastructure uses it everywhere.
+
+```cpp
+#include <cstdint>
+#include <cstring>   // std::memcpy
+
+// Policy A: transmit using a raw UDP socket (or mock).
+struct UdpTransport {
+    void send(const void* buf, std::size_t len) noexcept {
+        // In production: sendto(sockfd, buf, len, 0, &addr, sizeof addr)
+        (void)buf; (void)len;   // placeholder
+    }
+    static constexpr bool kBatched = false;
+};
+
+// Policy B: batch sends into a kernel-bypass ring (e.g. DPDK).
+struct DpdkTransport {
+    void send(const void* buf, std::size_t len) noexcept {
+        // rte_eth_tx_burst(...) — no copy, no syscall
+        (void)buf; (void)len;
+    }
+    static constexpr bool kBatched = true;
+};
+
+// OrderSender is parameterised on Transport. The policy class is injected
+// at construction and methods may be inlined — zero overhead.
+// empty-base-optimization: if Transport has no data members, sizeof(OrderSender)
+// is the same as if Transport were not there.
+template <typename Transport>
+class OrderSender : private Transport {
+public:
+    void send_order(std::uint64_t order_id, std::int64_t price, std::uint32_t qty) {
+        // Build a tiny wire frame on the stack — no heap allocation.
+        struct Frame { std::uint64_t id; std::int64_t price; std::uint32_t qty; };
+        Frame frame{order_id, price, qty};
+
+        // This call is inlined and, with DPDK, becomes an rte_mbuf enqueue.
+        // With UDP it becomes a sendto. The decision is compile-time.
+        Transport::send(&frame, sizeof frame);
+
+        if constexpr (Transport::kBatched) {
+            // Only compiled in for batched transports.
+            flush_batch();
+        }
+    }
+
+private:
+    void flush_batch() { /* flush the DPDK TX ring */ }
+};
+```
+
+The `if constexpr` branch exists only in the binary for transports where `kBatched` is `true`. The dead branch is dead-code-eliminated by the compiler before any linking happens — not at runtime, at compile time.
+
+> The <VocabTooltip slug="empty-base-optimization">empty-base optimisation</VocabTooltip> (EBO): when you use `private` inheritance to inject a policy, and that policy has no data members, the compiler is permitted to make it occupy zero bytes in the derived class. Private inheritance of a stateless policy is the canonical way to inject behaviour without cost. If you held the policy as a `Transport transport_` member variable instead, you would pay at least 1 byte (compilers cannot make a named member zero bytes).
+
+## CRTP for mixins: sharing implementation across unrelated types
+
+A third use of CRTP is a <VocabTooltip slug="mixin">mixin</VocabTooltip>: a base that adds methods to whatever derives from it, using only the derived class's public interface.
+
+```cpp
+#include <cstdint>
+
+// Mixin: adds a non-virtual clone method to any Derived that provides
+// a copy constructor. Works on any class, no modification needed.
+template <typename Derived>
+struct Cloneable {
+    Derived clone() const {
+        return static_cast<const Derived&>(*this);  // invokes copy constructor
+    }
+};
+
+// Any class can mixin this without any other base.
+class OrderTicket : public Cloneable<OrderTicket> {
+public:
+    explicit OrderTicket(std::uint64_t id) : id_(id) {}
+    std::uint64_t id() const { return id_; }
+private:
+    std::uint64_t id_;
+};
+
+// usage: auto copy = ticket.clone();  — no virtual, no heap
+```
+
+This pattern avoids the <VocabTooltip slug="barton-nackman-trick">Barton-Nackman trick</VocabTooltip> of defining friend operators and keeps each mixin focussed on a single concern.
+
+## When NOT to use CRTP
+
+CRTP is the right tool when the type is known at compile time. It becomes the wrong tool when:
+
+- **The type is chosen at runtime** (loaded from config, determined by user input, selected by a factory). A virtual function is correct there; refusing to pay 5 ns for a function that runs once a minute is premature optimisation.
+- **You are building a plugin system** where the concrete type must be unknown to the caller's translation unit. Concepts and virtual dispatch are the right tools.
+- **The codebase is not template-heavy** and the maintainer cost of deeply nested template hierarchies exceeds the latency win.
+
+The HFT rule of thumb: CRTP on the hot path (message handler, order sender, book update), virtual where the concrete type is dynamic (admin console, configuration loader, logging backends).
+
+## Apply it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Simulate CRTP static dispatch in JavaScript by implementing a FeedDecoder base object factory and two decoders (ItchDecoder and SyntheticDecoder). Implement makeFeedDecoder(impl) which takes an object with a decode_impl(packet) method and returns an object with a decode(packet) method that delegates to impl.decode_impl(packet). Then createItchDecoder() returns a concrete decoder that counts packets (a parsed counter). createSyntheticDecoder() doubles the count. This models the CRTP pattern: the 'base class' machinery (decode) is defined once, the impl is swapped at factory-call time (equivalent to compile time in C++)."
+  initialCode={`// Models CRTP: makeFeedDecoder wraps any impl with a standard decode() interface.
+function makeFeedDecoder(impl) {
+  // TODO: return { decode(packet): delegates to impl.decode_impl(packet) }
+}
+
+function createItchDecoder() {
+let count = 0;
+return makeFeedDecoder({
+decode_impl(packet) { if (packet.length > 0) count++; },
+getCount() { return count; }
+});
+}
+
+function createSyntheticDecoder() {
+let count = 0;
+return makeFeedDecoder({
+decode_impl(packet) { if (packet.length >= 4) count += 2; },
+getCount() { return count; }
+});
+}
+
+const itch = createItchDecoder();
+itch.decode([0x41, 0x00]);
+itch.decode([0x41]);
+console.log("itch count:", itch.getCount()); // 2
+
+const syn = createSyntheticDecoder();
+syn.decode([0x01, 0x02, 0x03, 0x04]);
+console.log("syn count:", syn.getCount()); // 2`}
+  solution={`function makeFeedDecoder(impl) {
+return {
+decode(packet) { impl.decode_impl(packet); },
+getCount() { return impl.getCount(); }
+};
+}
+
+function createItchDecoder() {
+let count = 0;
+return makeFeedDecoder({
+decode_impl(packet) { if (packet.length > 0) count++; },
+getCount() { return count; }
+});
+}
+
+function createSyntheticDecoder() {
+let count = 0;
+return makeFeedDecoder({
+decode_impl(packet) { if (packet.length >= 4) count += 2; },
+getCount() { return count; }
+});
+}
+
+const itch = createItchDecoder();
+itch.decode([0x41, 0x00]);
+itch.decode([0x41]);
+console.log("itch count:", itch.getCount());
+
+const syn = createSyntheticDecoder();
+syn.decode([0x01, 0x02, 0x03, 0x04]);
+console.log("syn count:", syn.getCount());`}
+testCases={[
+"decode() delegates to decode_impl() without knowing the concrete type",
+"itch decoder increments count for every non-empty packet",
+"synthetic decoder adds 2 for every packet with 4+ bytes",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A CRTP base class has `static_cast<Derived*>(this)->do_work()`. A code reviewer says this cast is undefined behaviour because the base class does not contain a Derived object. Is the reviewer right?",
+      options: [
+        "Yes — casting from base to derived is always undefined behaviour in C++",
+        "No — the CRTP invariant is that every instance of FeedDecoder<Derived> IS part of a Derived object (Derived inherits from FeedDecoder<Derived>), so the static_cast is valid exactly as a downcast within a real containment relationship; it is the programmer's responsibility to enforce the invariant by making FeedDecoder's constructor protected so only Derived can construct it",
+        "Yes, but only if the base class is not polymorphic (has no virtual destructor)",
+        "No — static_cast from base to derived is always safe because C++ checks it at runtime",
+      ],
+      correct: 1,
+      explanation:
+        "The cast is valid because of the CRTP invariant: if you have a FeedDecoder<Derived>, it must be the base-class subobject of a Derived (because Derived : FeedDecoder<Derived>). Under that invariant, the cast is a valid downcast — the same as casting a Shape* to a Circle* when you know it is a Circle. It is UB only if the invariant is violated (someone directly instantiates FeedDecoder<SomeUnrelatedType>), which is why protecting the constructor is the standard hardening. Static_cast does NOT check at runtime; that is dynamic_cast's job.",
+    },
+    {
+      question:
+        "You want to add a `log()` method to every order type in your system (OrderTicket, CancelRequest, AmendOrder) without copy-pasting the logging logic three times. Which pattern fits and why?",
+      options: [
+        "A virtual base class with `virtual void log() = 0` — forces each order type to implement it",
+        "A CRTP mixin: `template<typename D> struct Loggable` that implements `log()` using only D's public interface (e.g. `D::to_string()`); each order type inherits from `Loggable<OrderType>` and gains `log()` for free, with no vtable and no code duplication",
+        "A free function `template<typename T> void log(T& t)` using concepts — identical result with less ceremony",
+        "A copy-paste with slight modifications, because inheritance is slower than direct dispatch",
+      ],
+      correct: 1,
+      explanation:
+        "The CRTP mixin is the right pattern here: you write `log()` once in `Loggable<D>`, using `static_cast<const D*>(this)->to_string()` to access derived-class data; each order type opts in via `class OrderTicket : public Loggable<OrderTicket>`. There is no vtable because no virtual function is used. Option C (free function template) is also valid and in many cases simpler — it requires no inheritance at all and may be preferred for readability. The CRTP mixin adds it as a member method while option C keeps it non-member. Neither copies code. Option A (pure virtual) reintroduces dynamic dispatch and requires every concrete type to explicitly implement the method.",
+    },
+    {
+      question:
+        "A policy-based OrderSender<Transport> uses `if constexpr (Transport::kBatched)` to conditionally flush. A reviewer says this is equivalent to a runtime `if (kBatched)` on a compile-time constant and argues both compile to the same code. Is the reviewer correct?",
+      options: [
+        "Yes — the optimiser will dead-code-eliminate the false branch either way, so there is no difference",
+        "No — `if constexpr` discards the dead branch at parse time, so it does not need to be syntactically valid for all instantiations of the template; a plain `if` with a compile-time constant is evaluated at runtime by the language rules (though the optimiser may eliminate it), and its dead branch MUST be well-formed in all template instantiations, which can cause compilation failures when the dead branch references a method that only exists on one policy",
+        "Yes, but only under -O2 or higher",
+        "No — `if constexpr` is slower at runtime because it performs an additional type check",
+      ],
+      correct: 1,
+      explanation:
+        "`if constexpr` is not a runtime construct at all; the standard says the discarded branch is not instantiated. This matters in templates: if `flush_batch()` only exists on `DpdkTransport`, a plain `if (Transport::kBatched) { flush_batch(); }` would fail to compile for `UdpTransport` (because `flush_batch()` does not exist there) even though the branch is never reached. `if constexpr` drops the entire branch before instantiation, so the compiler never tries to compile `flush_batch()` for `UdpTransport`. The 'optimiser will fix it' argument (option A) is wrong precisely because for templates the code must be syntactically and semantically valid before the optimiser sees it.",
+    },
+  ]}
+/>
+
+## What's next
+
+The next lesson addresses the other major compile-time tool in HFT C++: branch prediction hints (`[[likely]]`, `[[unlikely]]`) and branchless arithmetic — how you tell the CPU which paths to optimise for and how you eliminate branches entirely on the latency-critical code.

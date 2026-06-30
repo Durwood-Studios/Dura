@@ -1,0 +1,233 @@
+---
+title: "Dynamic Arrays, Queues, and Associative Arrays"
+description: "The heap-allocated data structures that make SystemVerilog testbenches productive — and why they don't exist in synthesizable RTL."
+phase: 11
+module: "h-1-systemverilog-basics"
+order: 4
+estimatedMinutes: 45
+difficulty: 3
+prerequisites:
+  - "h-1-sv-packages-and-parameterized-classes"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - dynamic-array
+  - queue
+  - associative-array
+  - heap
+  - packed-array
+  - unpacked-array
+  - foreach
+learningOutcomes:
+  - "Declare and resize a dynamic array, iterate it with foreach"
+  - "Use a queue as a FIFO with push_back and pop_front"
+  - "Implement a lookup table with an associative array indexed by string or integer"
+  - "Explain why these structures are simulation-only and cannot be synthesized"
+professionalContext: "Scoreboards hold expected results in queues until the DUT produces the actual results. Coverage collectors index coverage data in associative arrays keyed by transaction ID. Reference models accumulate state in dynamic arrays that grow as the test runs. Every UVM engineer uses these three data structures daily — yet they're invisible in synthesizable RTL because hardware can't allocate memory at runtime."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A UART scoreboard needs to hold the bytes the testbench sent, in order, until the DUT echoes them back. How many bytes? It depends on how long the test runs — you don't know at compile time. In C, you'd use a linked list or vector. In SystemVerilog's verification subset, you use a queue.
+
+The same pattern recurs across every testbench: storage that grows and shrinks at runtime. These three structures handle it.
+
+## Dynamic arrays — runtime-sized packed storage
+
+```systemverilog
+// Declaration (no size yet)
+int data[];                  // Empty dynamic array of ints
+logic [7:0] bytes[];         // Empty dynamic array of bytes
+
+// Allocate
+data  = new[10];             // Allocate 10 ints
+bytes = new[256];            // Allocate 256 bytes
+
+// Initialize while allocating
+int init[] = '{1, 2, 3, 4};   // Array literal
+
+// Resize (copies existing, pads with 0 or default)
+data = new[20](data);         // Grow to 20, keep existing 10
+
+// Access
+data[0] = 42;
+data[9] = 99;
+
+// Iterate
+foreach (data[i]) begin
+    $display("data[%0d] = %0d", i, data[i]);
+end
+
+// Size query
+$display("size = %0d", data.size());
+
+// Delete (return to heap)
+data.delete();
+```
+
+**Key rule**: `new[N]` allocates. `delete()` frees. Between these two calls, the array behaves like a fixed-size packed array — random access, no overhead per element. After `delete()`, size is 0 and any access is an error.
+
+Dynamic arrays are useful when you know the size at runtime but want contiguous indexing. For variable-size collections where elements are added and removed, use a queue.
+
+## Queues — the testbench FIFO
+
+```systemverilog
+int q[$];          // Queue — no size limit (grows dynamically)
+
+// Push
+q.push_back(10);   // Append to end
+q.push_back(20);
+q.push_front(5);   // Prepend to front; queue is now [5, 10, 20]
+
+// Pop
+int x = q.pop_front();   // 5 — first element removed
+int y = q.pop_back();    // 20 — last element removed
+
+// Size
+$display("remaining: %0d", q.size());   // 1
+
+// Random access (without removing)
+$display("q[0] = %0d", q[0]);   // 10
+
+// Delete all
+q.delete();
+```
+
+A queue in SV behaves like a deque (double-ended queue) — push and pop from either end in O(1). Most testbench uses are FIFO-style: `push_back` to enqueue, `pop_front` to dequeue.
+
+**Scoreboard pattern**:
+
+```systemverilog
+class uart_scoreboard;
+    uart_txn exp_q[$];   // Expected transactions, in order
+
+    function void write_expected(uart_txn exp);
+        exp_q.push_back(exp);
+    endfunction
+
+    function void check_actual(uart_txn act);
+        if (exp_q.size() == 0) begin
+            `uvm_error("SB", "Got actual with no expected pending")
+            return;
+        end
+        uart_txn exp = exp_q.pop_front();
+        if (exp.data !== act.data)
+            `uvm_error("SB", $sformatf(
+                "Mismatch: exp=0x%h act=0x%h", exp.data, act.data))
+    endfunction
+endclass
+```
+
+## Associative arrays — key-value lookup
+
+```systemverilog
+// Index by integer
+int packet_counts[int];              // key: packet ID, value: count
+packet_counts[42] = 5;
+packet_counts[99]++;                 // Creates entry with 0, then increments
+
+// Index by string
+bit [31:0] reg_map[string];         // key: register name, value: address
+reg_map["CTRL"]   = 32'h0000_0000;
+reg_map["STATUS"] = 32'h0000_0004;
+
+// Check existence (don't access missing keys — returns 0 but may create entry)
+if (reg_map.exists("CTRL")) begin
+    $display("CTRL = 0x%h", reg_map["CTRL"]);
+end
+
+// Iterate
+string key;
+if (reg_map.first(key)) begin
+    do begin
+        $display("  %s = 0x%h", key, reg_map[key]);
+    end while (reg_map.next(key));
+end
+
+// Delete one entry
+reg_map.delete("STATUS");
+
+// Delete all
+reg_map.delete();
+```
+
+Associative arrays are hash maps — O(1) average access, arbitrary keys. They're ideal for sparse lookup tables: register address maps, packet-ID tracking, coverage bins indexed by a non-integer key.
+
+**Common pitfall**: accessing a non-existent key in an associative array CREATES the entry with a zero/default value and returns it. Always use `.exists(key)` to check before accessing if you're unsure.
+
+## Why these structures don't synthesize
+
+Synthesis maps hardware description to logic gates. That requires knowing at compile time:
+
+- How many bits each signal has (for dynamic arrays: unknown until `new[N]` runs).
+- What address space each memory covers (for queues: unbounded growth).
+- What physical storage backs a lookup table (for assoc arrays: hash table with runtime keys).
+
+Silicon is fixed at manufacture. A chip can't `new[]` more memory at runtime — it has what it was fabricated with. The synthesis tool needs to know EVERYTHING about storage at compile time.
+
+The verification subset exists precisely to lift this constraint: testbenches need runtime flexibility that silicon doesn't have.
+
+## Competency check
+
+<SandboxExercise
+  language="systemverilog"
+  instructions={`Write a SystemVerilog class called \`txn_tracker\` that:
+1. Maintains a queue of integers representing transaction IDs of in-flight requests.
+2. Has a method \`send(int id)\` that enqueues the ID.
+3. Has a method \`receive(int id)\` that removes the ID from the queue (anywhere in the queue — use the queue's delete(index) method) and prints "MATCH id=N" if found, or \`uvm_error if not found.
+4. Has a method \`pending_count()\` that returns the current queue size.
+
+The receive method must find the ID anywhere in the queue (requests may complete out-of-order).`}
+  initialCode={`class txn_tracker;
+// TODO: declare the queue
+
+    // TODO: send method
+
+    // TODO: receive method (search anywhere, not just front)
+
+    // TODO: pending_count method
+
+endclass`}
+  solution={`class txn_tracker;
+int in_flight[$]; // Queue of in-flight transaction IDs
+
+    function void send(int id);
+        in_flight.push_back(id);
+        $display("[TRACKER] sent id=%0d, pending=%0d", id, in_flight.size());
+    endfunction
+
+    function void receive(int id);
+        // Search for the ID anywhere in the queue
+        foreach (in_flight[i]) begin
+            if (in_flight[i] == id) begin
+                in_flight.delete(i);   // Remove by index
+                $display("[TRACKER] MATCH id=%0d, remaining=%0d", id, in_flight.size());
+                return;
+            end
+        end
+        // If we get here, the ID wasn't found
+        \`uvm_error("TRACKER", $sformatf("receive: id=%0d not in flight queue", id))
+    endfunction
+
+    function int pending_count();
+        return in_flight.size();
+    endfunction
+
+endclass`}
+testCases={[
+"Queue declared as int q[$]",
+"send() uses push_back",
+"receive() searches with foreach and uses delete(i)",
+"pending_count() returns in_flight.size()"
+]}
+/>
+
+## What's next
+
+Lesson H1-5 covers program blocks and clocking blocks — the SV constructs that control WHEN testbench actions happen relative to clock edges, preventing race conditions between the DUT and the stimulus. This is the final piece of SV infrastructure before diving into the UVM testbench architecture in H2.

@@ -1,0 +1,254 @@
+---
+title: "volatile, const, and the Embedded Memory Map"
+description: "Two C keywords that control where things live and whether the compiler can optimize them away. The rules for hardware registers, ISR-shared variables, and read-only data in flash."
+phase: 10
+module: "e-1-c-toolchain-arm-cortex-m"
+order: 3
+estimatedMinutes: 20
+difficulty: 3
+prerequisites:
+  - "e-1-c-toolchain-arm-cortex-m/02"
+standards:
+  primaryAnchor: "ISO C11 Standard — Section 6.7.3 (Type Qualifiers)"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - volatile
+  - const
+  - type-qualifier
+  - optimizer
+  - side-effect
+  - rodata
+  - isr-shared
+  - const-volatile
+  - register
+learningOutcomes:
+  - "State the operational definition of volatile — what the compiler must do and must not do with a volatile-qualified access"
+  - "Identify every situation in embedded C that requires volatile: peripheral registers, ISR-shared variables, debugger-watched locations"
+  - "Explain where const data lives (flash, .rodata) vs RAM data, and why this matters for memory-constrained devices"
+  - "Use const volatile correctly for hardware-defined read-only registers"
+  - "Demonstrate how missing volatile leads to bugs that appear and disappear with optimization flags"
+professionalContext: "These two keywords appear in every embedded file ever written and are misunderstood by a surprising fraction of working engineers. The most common bug class in embedded: ISR updates a variable that the main loop reads, but missing volatile means the compiler caches the value in a register and never re-reads it. The loop spins forever on a stale value. Adding volatile fixes it. Removing the optimization flag fixes it (until production). Understanding the mechanism saves hours of debugging and prevents the class of bugs that only appear in production builds."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Add or remove `-O2` from your Makefile. Watch a firmware bug appear or disappear. That is not compiler magic or a toolchain bug. It is missing `volatile`.
+
+The optimizer's job is to generate code that behaves identically to the source _from the C program's perspective_. The key phrase is "from the C program's perspective" — which does not include hardware side effects. A read of a GPIO register is, from the compiler's perspective, just a read of a uint32_t variable. If the value never changes from C's viewpoint, the compiler is allowed — and at `-O2`, will — cache it in a register and reuse it forever. The hardware may have changed the register twenty times. The cached value is stale. Your firmware is wrong.
+
+`volatile` is the word that tells the compiler: "this variable has externally observable behavior. Every access must happen. In source order. No caching."
+
+## The volatile contract
+
+The C11 standard (ISO/IEC 9899:2011 §6.7.3) defines volatile's guarantee:
+
+> "An object that has volatile-qualified type may be modified in ways unknown to the implementation or have other unknown side effects. Therefore, any expression referring to such an object shall be evaluated strictly according to the rules of the abstract machine."
+
+In practice:
+
+1. **Every read generates a real load instruction.** No caching in a register, no hoisting out of a loop.
+2. **Every write generates a real store instruction.** No dead-store elimination, no coalescing.
+3. **Accesses happen in source order.** The compiler cannot reorder a volatile access past another volatile access.
+
+What volatile does NOT do:
+
+- It does not add atomicity. A 32-bit read is one instruction on Cortex-M, but a 64-bit read is two — an ISR between them sees a torn value. See lesson E3 for atomic patterns.
+- It does not add memory barriers for hardware DMA. Use `__DMB()` for that.
+- It does not protect against out-of-order CPU execution. On Cortex-M (in-order pipeline), this rarely matters, but it matters when working with DMA.
+
+## When to use volatile
+
+### Rule 1: Every peripheral register access
+
+```c
+// WITHOUT volatile — optimizer may decide "this never changes, cache it"
+uint32_t *const ODR = (uint32_t *)(GPIOD_BASE + 0x14);
+while (!(*ODR & (1U << 5))) { }   // Infinite loop possible: compiler reads ODR once
+
+// WITH volatile — every loop iteration issues a real load
+volatile uint32_t *const ODR = (volatile uint32_t *)(GPIOD_BASE + 0x14);
+while (!(*ODR & (1U << 5))) { }   // Correct: always reads from hardware
+```
+
+The canonical pattern from the CMSIS headers: every peripheral register access goes through a `volatile` pointer. The stm32f4xx.h header defines the peripheral structs with `__IO` (which expands to `volatile`) on every field.
+
+### Rule 2: Variables shared between main and an ISR
+
+```c
+// The ISR sets this flag when a byte arrives
+volatile uint8_t rx_flag = 0;
+
+void USART2_IRQHandler(void) {
+    rx_flag = 1;    // write in ISR context
+}
+
+void process(void) {
+    while (!rx_flag) { }   // read in main context
+    // WITHOUT volatile: compiler proves rx_flag never changes in this function
+    // and compiles this to an infinite spin on a register copy.
+    // WITH volatile: every loop iteration reads rx_flag from SRAM.
+}
+```
+
+This is the second most common embedded bug class. The ISR sets the flag; main never sees it because the optimizer already decided the flag doesn't change. Adding `volatile` is mandatory for any variable that can be modified by an ISR, DMA engine, or debugger.
+
+### Rule 3: Busy-wait delay loops
+
+```c
+// Without volatile, optimizer removes the loop (it has no observable side effects)
+for (volatile uint32_t i = 0; i < 1000000; i++) { }
+
+// The volatile on i forces the increment to happen. Still a crude delay;
+// use a timer for production code. But for a startup blink, this works.
+```
+
+## const — where read-only data lives
+
+`const` tells the compiler: "this variable is never written after initialization." The C standard does not mandate where `const` data lives — that's linker-script territory — but GCC's ARM toolchain puts `const` globals in `.rodata`, which the linker script we wrote in lesson 01 places in flash.
+
+Why this matters: flash is larger than SRAM on most microcontrollers. A 1 KB lookup table declared without `const` lives in SRAM (copied there at boot from flash). With `const`, it lives in flash directly. On a device with 256 KB flash and 64 KB SRAM, moving read-only tables to flash can be the difference between the firmware fitting and not fitting.
+
+```c
+// Lives in SRAM — wastes 1 KB of RAM
+uint32_t sine_table[256] = { /* 256 values */ };
+
+// Lives in flash — zero RAM cost
+const uint32_t sine_table[256] = { /* 256 values */ };
+```
+
+Verify with objdump:
+
+```bash
+$ arm-none-eabi-objdump -t firmware.elf | grep sine_table
+08001234 g     O .rodata   00000400 sine_table   # In flash if const
+20000004 g     O .data     00000400 sine_table   # In SRAM if not
+```
+
+String literals are automatically `const` in C (though the type is `char *`, assigning them to `const char *` is correct style). `"Hello"` in your firmware lives in flash without any explicit `const`.
+
+## const volatile — not a contradiction
+
+A hardware register that the CPU can only read (not write) — like a hardware identification register — should be `const volatile uint32_t *`:
+
+```c
+// DBGMCU_IDCODE — device identity register, read-only at hardware level
+const volatile uint32_t *const DBGMCU_IDCODE =
+    (const volatile uint32_t *)0xE0042000;
+
+uint32_t id = *DBGMCU_IDCODE;   // Reads from hardware; write would be a compile error
+```
+
+- `volatile` → the compiler must issue a real load every time; the hardware can change this value asynchronously.
+- `const` → the C program cannot write to this location; the compiler rejects any attempt.
+- Both together → the hardware side effect requires volatile; the program's intent to never write requires const.
+
+This isn't common (most peripheral registers are read-write), but it appears in vendor headers for status-only registers.
+
+## The optimization test
+
+A reliable way to demonstrate missing volatile: write a tight loop, compile with `-O0` and `-O2`, examine the disassembly.
+
+```c
+uint8_t flag = 0;   // NOT volatile
+
+void poll_loop(void) {
+    while (!flag) { }
+}
+```
+
+At `-O0`:
+
+```asm
+poll_loop:
+  ldr  r3, =flag
+  .L1:
+  ldrb r0, [r3]     ; load flag from memory each iteration
+  cmp  r0, #0
+  beq  .L1          ; loop if zero
+  bx   lr
+```
+
+At `-O2`:
+
+```asm
+poll_loop:
+  ldr  r3, =flag
+  ldrb r0, [r3]     ; load ONCE — hoisted out of the loop
+  cmp  r0, #0
+  bne  .Ldone
+  .L1:
+  b    .L1           ; INFINITE LOOP — optimizer proved flag is never written
+  .Ldone:
+  bx   lr
+```
+
+With `volatile uint8_t flag`:
+
+At `-O2`:
+
+```asm
+poll_loop:
+  ldr  r3, =flag
+  .L1:
+  ldrb r0, [r3]     ; must load each iteration — volatile
+  cmp  r0, #0
+  beq  .L1
+  bx   lr
+```
+
+The `-O2` output with volatile matches the `-O0` output. The bug is gone and the performance is acceptable (one memory access per loop iteration, as intended).
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An ISR increments a counter: `rx_count++`. A logging task reads `rx_count` periodically. At `-O0` the log shows the count climbing correctly. At `-O2` the logged value is always 0. What is the fix and why does the optimization flag matter?",
+      options: [
+        "Use a higher optimization flag",
+        "Declare rx_count as `volatile uint32_t rx_count`. At -O2 the compiler sees that rx_count is never written in the logging task's code path and caches its initial value (0) in a register, never re-reading from SRAM. The ISR's writes go to SRAM but the task never sees them. volatile forces every read to issue a real load instruction, so the cached-register optimization cannot apply. The optimization flag matters because -O0 generates a load for every read anyway (no optimization) while -O2 applies the caching optimization that the missing volatile should have prevented.",
+        "Disable the ISR during the read",
+        "The linker placed rx_count in flash by mistake",
+      ],
+      correct: 1,
+      explanation:
+        "This is the canonical volatile bug. The optimizer at -O2 sees the variable never changes within the logging task's code (the ISR is invisible to the intra-function analysis), so it hoists the load out of the loop and reuses the register value. volatile is the precise fix: it tells the optimizer that every access must generate a real memory operation. The -O0 vs -O2 difference is a symptom: -O0 generates loads for everything; -O2 applies the optimization. Production firmware runs with high optimization; the bug appears there and not in debug builds, which makes it particularly insidious.",
+    },
+    {
+      question:
+        "A firmware image has a 2 KB CRC lookup table used in one function. The table should be declared as:",
+      options: [
+        "uint32_t crc_table[512]",
+        "const uint32_t crc_table[512] — because the table is never modified; const causes the linker to place it in .rodata in flash rather than copying it to SRAM; on a chip with 16 KB SRAM, saving 2 KB for a static table that never changes is significant; the function that reads the table only loads values from flash, which is fine on Cortex-M",
+        "volatile uint32_t crc_table[512]",
+        "static uint32_t crc_table[512]",
+      ],
+      correct: 1,
+      explanation:
+        "const on a global array causes the toolchain to place it in .rodata, which the linker script places in flash. Without const, the linker places it in .data and the startup code copies all 2 KB from flash to SRAM at boot — wasting 2 KB of SRAM forever. The table doesn't need volatile (it's not hardware-mapped or ISR-written). Static would limit the scope to the translation unit but wouldn't change the section placement (it would still be .data without const). The correct declaration is const for any lookup table or constant data.",
+    },
+    {
+      question:
+        "A bootloader reads a hardware version register that can only be read (not written) by the CPU. The appropriate declaration for a pointer to this register is:",
+      options: [
+        "uint32_t *const ptr = (uint32_t *)0x1FFF7A10",
+        "const volatile uint32_t *const ptr = (const volatile uint32_t *)0x1FFF7A10 — const (on the pointed-to type) prevents the C program from writing to the register and causes a compile error if it tries; volatile ensures every read issues a real load; const (on the pointer itself) prevents accidentally reassigning ptr to a different address; all three are correct and independently motivated",
+        "volatile uint32_t *ptr",
+        "const uint32_t *ptr",
+      ],
+      correct: 1,
+      explanation:
+        "Three qualifiers serve three purposes: const on the pointed-to type prevents writes (compile error if the program tries to write), volatile on the pointed-to type ensures real loads, const on the pointer prevents reassigning the pointer itself. All three are independently correct. volatile alone (option 3) allows write attempts to hardware. const alone (option 4) allows the compiler to cache the value since it doesn't see writes — and for a hardware register that can change asynchronously, caching is wrong. The pattern const volatile uint32_t * appears in CMSIS headers for read-only hardware registers.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 04 examines optimization flags and the specific embedded bugs they introduce beyond volatile-related ones: `-fno-strict-aliasing` violations that corrupt register structs, `-Os` that reorders code past peripheral accesses, and the specific flags that GCC embedded profiles use to avoid UB that production code mustn't trigger.

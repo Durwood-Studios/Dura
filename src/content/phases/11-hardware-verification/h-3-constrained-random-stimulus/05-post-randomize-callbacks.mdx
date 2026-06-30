@@ -1,0 +1,265 @@
+---
+title: "post_randomize and pre_randomize Callbacks"
+description: "The hooks that fire before and after every randomize() call. Use post_randomize to derive computed fields, apply cross-field corrections, and integrate with external state."
+phase: 11
+module: "h-3-constrained-random-stimulus"
+order: 5
+estimatedMinutes: 50
+difficulty: 4
+prerequisites:
+  - "h-3-constraint-mode-overrides"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - post-randomize
+  - pre-randomize
+  - derived-field
+  - randomization-callback
+  - checksum
+learningOutcomes:
+  - "Implement post_randomize to compute derived fields that depend on randomized values"
+  - "Use pre_randomize to capture state before randomization"
+  - "Call super.post_randomize() correctly in derived class hierarchies"
+  - "Identify when post_randomize is the right tool vs a constraint"
+professionalContext: "post_randomize() is the bridge between the constraint solver's output and the real-world requirements that can't be expressed as pure constraints: checksum computation, CRC generation, protocol header assembly, and integration with external tables or address maps. Every production UVM transaction class uses post_randomize for at least one of these. Engineers who don't know it either duplicate the logic in every test or produce incorrect transaction objects."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The constraint solver picks random values for your `rand` fields. But many protocol transactions have DERIVED fields — fields whose values are deterministically computed from the random fields:
+
+- A packet's CRC is computed from its payload.
+- A TLP's byte-count field is derived from its length field.
+- A register write's expected-read-back value depends on the write data.
+
+These can't be expressed as constraints (they're not random; they're derived). They can't be set before `randomize()` (the random fields aren't assigned yet). `post_randomize()` is called by the simulator automatically after every `randomize()` call, when all `rand` fields have their new values — exactly the right moment.
+
+## post_randomize — the callback
+
+```systemverilog
+class ethernet_frame;
+    rand bit [7:0]  payload [];   // Variable-size payload
+    rand bit [15:0] etype;
+    rand bit [47:0] dst_mac;
+    rand bit [47:0] src_mac;
+
+    // Derived (not rand)
+    bit [31:0] crc32;
+    int        frame_length;
+
+    constraint c_payload_size { payload.size() inside { [46:1500] }; }
+    constraint c_etype_ipv4   { soft etype == 16'h0800; }
+
+    function void post_randomize();
+        // Compute CRC from the randomized payload
+        crc32 = compute_crc32(payload);
+
+        // Compute frame_length from all fields
+        frame_length = 6 + 6 + 2 + payload.size() + 4;  // dst + src + etype + payload + crc
+    endfunction
+
+    function automatic bit [31:0] compute_crc32(bit [7:0] data[]);
+        bit [31:0] crc = 32'hFFFF_FFFF;
+        foreach (data[i]) begin
+            // Simplified CRC-32 — real implementation uses lookup table
+            for (int j = 0; j < 8; j++) begin
+                if ((crc[0] ^ data[i][j]) == 1'b1)
+                    crc = (crc >> 1) ^ 32'hEDB8_8320;
+                else
+                    crc = crc >> 1;
+            end
+        end
+        return ~crc;
+    endfunction
+endclass
+
+// After randomize(), the CRC and frame_length are automatically correct:
+ethernet_frame f = new();
+f.randomize();
+// f.crc32 is now computed from f.payload — no extra call needed
+```
+
+## pre_randomize — before randomization
+
+`pre_randomize()` fires BEFORE the solver runs. Uses:
+
+- Save the current state before randomization (for comparison).
+- Set up external state that the constraints will reference.
+- Seed or adjust the randomization context.
+
+```systemverilog
+class stateful_txn;
+    rand bit [31:0] addr;
+    rand int        txn_id;
+    int             prev_txn_id;   // Last issued ID (non-random)
+    int             next_expected;  // Computed from issue history
+
+    constraint c_id_sequential { txn_id > prev_txn_id; }
+
+    function void pre_randomize();
+        // Save current state before the solver changes rand fields
+        prev_txn_id = txn_id;   // txn_id still has its old value here
+    endfunction
+
+    function void post_randomize();
+        // After solver picks new txn_id, derive the expected
+        next_expected = txn_id + 1;
+    endfunction
+endclass
+```
+
+The lifecycle per `randomize()` call:
+
+```
+1. pre_randomize() fires   (txn_id still has old value)
+2. Constraint solver runs  (assigns new values to rand fields)
+3. post_randomize() fires  (all rand fields have new values)
+```
+
+## Inheritance and super calls
+
+In a derived class, you MUST call `super.post_randomize()`:
+
+```systemverilog
+class base_txn;
+    rand bit [31:0] data;
+    bit [31:0] parity;
+
+    function void post_randomize();
+        parity = ^data;   // XOR parity of data
+    endfunction
+endclass
+
+class extended_txn extends base_txn;
+    rand bit [15:0] tag;
+    bit [15:0]      tag_checksum;
+
+    function void post_randomize();
+        super.post_randomize();   // MUST call first — computes parity
+        // Now add the derived class's post-randomize work
+        tag_checksum = tag ^ 16'hDEAD;
+    endfunction
+endclass
+```
+
+If you forget `super.post_randomize()`, the base class's derived fields (parity in this example) won't be computed. This is the single most common inheritance bug in post_randomize.
+
+## post_randomize vs constraints — which to use
+
+| Use case                                                         | Right tool      |
+| ---------------------------------------------------------------- | --------------- |
+| Restrict the range of a random field                             | constraint      |
+| Enforce relationships between random fields                      | constraint      |
+| Compute a field deterministically from random fields             | post_randomize  |
+| Integrate with external state (address map, scoreboard context)  | post_randomize  |
+| Generate a CRC, checksum, or hash                                | post_randomize  |
+| Conditionally populate optional fields after random choices made | post_randomize  |
+| Clamp a value to a runtime-determined range                      | pre + post pair |
+
+Constraints can only express relationships between `rand` fields. post_randomize can call any function, access any external state, and compute anything the constraints cannot.
+
+## A complete example — AXI write burst
+
+```systemverilog
+class axi_write_burst;
+    rand bit [31:0]  base_addr;
+    rand bit [7:0]   beat_count;       // 1-256 beats
+    rand bit [2:0]   burst_size;       // bytes per beat: 2^size
+    rand bit [1:0]   burst_type;       // 0=FIXED, 1=INCR, 2=WRAP
+    rand bit [31:0]  write_data [];    // Randomized payload
+
+    // Derived fields
+    bit [31:0] addresses [];   // Per-beat address
+    int        byte_count;     // Total bytes in transaction
+
+    constraint c_beat_count   { beat_count inside { [1:16] }; }
+    constraint c_burst_size   { burst_size inside { [0:3] }; }  // 1/2/4/8 bytes
+    constraint c_incr_align   { burst_type == 1 -> (base_addr % (1 << burst_size)) == 0; }
+    constraint c_data_size    { write_data.size() == beat_count; }
+
+    function void post_randomize();
+        bit [31:0] addr = base_addr;
+        addresses = new[beat_count];
+
+        // Compute per-beat addresses based on burst type
+        for (int i = 0; i < beat_count; i++) begin
+            addresses[i] = addr;
+            case (burst_type)
+                1: addr += (1 << burst_size);          // INCR: add stride
+                2: addr = wrap_address(addr, burst_size, beat_count); // WRAP
+                // FIXED: addr stays the same (no update)
+            endcase
+        end
+
+        byte_count = beat_count * (1 << burst_size);
+    endfunction
+
+    function automatic bit [31:0] wrap_address(
+        bit [31:0] current, bit [2:0] size, bit [7:0] count
+    );
+        int wrap_boundary = (1 << size) * count;
+        int wrap_mask = ~(wrap_boundary - 1);
+        bit [31:0] wrap_base = current & wrap_mask;
+        bit [31:0] offset = (current + (1 << size)) % wrap_boundary;
+        return wrap_base | offset;
+    endfunction
+endclass
+```
+
+After `txn.randomize()`, `txn.addresses[]` contains the complete address sequence for the burst — ready to drive directly into a UVM driver.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A derived class overrides post_randomize but forgets to call super.post_randomize(). What is the consequence?",
+      options: [
+        "A compile error",
+        "The base class's post_randomize work is not performed — derived fields computed in the base class (checksums, CRCs, derived address fields) will have stale values from the previous randomize() call, or their initial default values on the first call. This is a silent correctness bug: randomize() returns 1 (success), but the transaction object is partially incorrect. The scoreboard may check these derived fields against the DUT's response and get wrong answers.",
+        "A runtime error",
+        "No consequence — derived class fully replaces base",
+      ],
+      correct: 1,
+      explanation:
+        "Forgetting super.post_randomize() is the most common inheritance bug in SV transaction classes. The base class may compute critical fields (CRC, parity, byte-count) in its post_randomize; skipping super means those computations don't happen. The result is a transaction with correct rand fields but incorrect derived fields — a hard-to-diagnose bug because randomize() succeeds.",
+    },
+    {
+      question:
+        "Can a post_randomize() function call $urandom() to further randomize non-rand fields?",
+      options: [
+        "No — post_randomize only computes deterministic derived fields",
+        "Yes — post_randomize is a regular function and can call any function including $urandom(), access external databases, modify any field, or call other class methods. The IEEE 1800 standard only guarantees the ordering (pre → solve → post); the content of post_randomize is unconstrained. Using $urandom() in post_randomize bypasses the constraint solver, so those values aren't covered by the constraint coverage infrastructure — this is sometimes intentional (for fields that need true randomness outside the solver) and sometimes a mistake.",
+        "Only if the field is declared rand",
+        "Only in UVM contexts",
+      ],
+      correct: 1,
+      explanation:
+        "post_randomize is an ordinary function — it can do anything. The constraint solver doesn't see what happens inside it. Using $urandom() for non-rand fields is valid; those fields just won't appear in constraint debugging tools or be affected by solve-before ordering. Distinguish: rand fields are solver-controlled; post_randomize can further manipulate any fields procedurally after the solver completes.",
+    },
+    {
+      question:
+        "An engineer wants to constrain a rand field `len` such that it's always a power of 2. They write `constraint c { len == (1 << $urandom_range(0,3)); }`. What's wrong with this?",
+      options: [
+        "Nothing — $urandom_range is valid in constraints",
+        "$urandom_range() is a simulation function, not a synthesizable expression the constraint solver can analyze. Calling it inside a constraint produces undefined behavior — some simulators may error, others may treat it as a constant sampled once. The correct approaches are: (1) `constraint c { len inside {1, 2, 4, 8, 16}; }` — inside with specific values; or (2) use a rand bit [3:0] shift field and derive `len = (1 << shift)` in post_randomize. The constraint solver can only solve algebraic relationships between rand fields and constants.",
+        "len must be declared randc",
+        "Use $random() instead",
+      ],
+      correct: 1,
+      explanation:
+        "Constraint blocks are analyzed by the constraint solver at compile and elaboration time to produce a constraint satisfaction problem. They cannot contain calls to simulation-time random functions like $urandom_range(). The inside operator with a set of valid values is the idiomatic solution for 'must be one of these specific values.' Derived relationships (e.g., len = 2^shift) go in post_randomize.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H3-6 brings the constrained-random module to a close with a complete worked example: a full AXI4-Lite write transaction class with layered constraints, solve-before ordering, distribution biasing, constraint-mode switching, and post_randomize for derived fields. This serves as the transaction model you'll plug into the UVM sequences from H5.

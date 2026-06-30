@@ -1,0 +1,329 @@
+---
+title: "Error Handling Without Exceptions — std::expected and Error Codes"
+description: "How HFT code returns errors as values using std::expected (C++23), error enumerations, and monadic chaining — eliminating the exception machinery from the hot path entirely."
+phase: 12
+module: "q-1-modern-cpp-for-hft"
+order: 5
+estimatedMinutes: 30
+difficulty: 4
+prerequisites:
+  - "q-1-modern-cpp-for-hft/01-modern-cpp-for-hft"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - std-expected
+  - error-code
+  - value-or-error
+  - monadic-error-handling
+  - noexcept
+  - exception-unwinding
+  - zero-overhead-exception
+  - fno-exceptions
+  - happy-path
+  - error-propagation
+learningOutcomes:
+  - "After this lesson you can return a value-or-error from a function using std::expected and chain operations with and_then and transform"
+  - "After this lesson you can explain why exceptions are banned on the hot path and what the compile flag -fno-exceptions removes"
+  - "After this lesson you can design a typed error enumeration that carries enough context to log the failure without a stack trace"
+  - "After this lesson you can compose a multi-step pipeline of std::expected returns without nested if-statements"
+professionalContext: "HFT systems compile with -fno-exceptions on the hot path. The reasons are not merely theoretical: the exception-unwinding tables that the compiler emits to support throw grow the binary and pollute the instruction cache, and the zero-overhead exception model is only zero-overhead when exceptions are not thrown — calling a function that might throw requires the compiler to keep a recovery path alive even on the success branch. std::expected, standardised in C++23, gives the same expressive power as exceptions — a function that either returns a value or an error — in a form that is a regular value, never touches the exception machinery, and composes with monadic chaining that is as readable as exception-based code. The whole industry moved this direction; knowing std::expected is now a baseline expectation for a C++ role at a quantitative firm."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You parse an ITCH message. Three things can go wrong: the buffer is too short, the message type is unknown, and the price field is out of range. With exceptions you throw three different exception types and the caller catches them. With `-fno-exceptions` the throws are program termination and you must design a different channel for errors.
+
+The classical alternative — returning an error code as an `int` or an out-parameter — works but is fragile: callers can ignore error codes, there is no type enforcement that the error was checked, and composing a three-step parser requires three nested `if (err) return err` checks.
+
+`std::expected<T, E>` solves this: it is a type that is either a `T` (success) or an `E` (error), and the type system forces the caller to handle both cases. It is a regular value — you can return it, store it, pass it — with no heap allocation and no runtime overhead.
+
+## The mechanism: std::expected
+
+`std::expected<T, E>` (header `<expected>`, C++23) is a tagged union that holds either a `T` value or an `E` error. On the success path, the storage is a `T`. On the failure path, it holds an `E`.
+
+```cpp
+#include <expected>  // C++23
+#include <cstdint>
+#include <span>
+#include <string_view>
+
+// An error type: a strongly-typed enum so callers cannot ignore which error occurred.
+// Having a small enum rather than a heap-allocated string keeps error handling on-stack.
+enum class ParseError : std::uint8_t {
+    BufferTooShort,
+    UnknownMessageType,
+    PriceOutOfRange,
+};
+
+// Helper: turn an error into a human-readable string for logging.
+// Called on the failure path only — not hot.
+constexpr std::string_view describe(ParseError e) noexcept {
+    switch (e) {
+        case ParseError::BufferTooShort:     return "buffer too short";
+        case ParseError::UnknownMessageType: return "unknown message type";
+        case ParseError::PriceOutOfRange:    return "price out of range";
+    }
+    return "unknown error";
+}
+
+// Return type: either a parsed price (uint32_t) or a ParseError.
+// No heap, no exception, no implicit error-channel.
+[[nodiscard]] std::expected<std::uint32_t, ParseError>
+parse_price(std::span<const std::byte> buf) noexcept {
+    if (buf.size() < 36) {
+        return std::unexpected(ParseError::BufferTooShort);  // failure branch
+    }
+    if (std::to_integer<char>(buf[0]) != 'A') {
+        return std::unexpected(ParseError::UnknownMessageType);
+    }
+    // Read the 4-byte big-endian price at offset 32.
+    std::uint32_t raw = 0;
+    for (int i = 0; i < 4; ++i) {
+        raw = (raw << 8) | std::to_integer<std::uint32_t>(buf[32 + i]);
+    }
+    if (raw == 0) {
+        return std::unexpected(ParseError::PriceOutOfRange);
+    }
+    return raw;  // success: implicit conversion to std::expected<uint32_t, ParseError>
+}
+```
+
+The caller checks the result:
+
+```cpp
+auto result = parse_price(packet);
+if (result) {
+    // result.value() is the uint32_t price
+    std::uint32_t price = *result;  // operator* is shorthand for value()
+    process(price);
+} else {
+    // result.error() is the ParseError
+    log_warning(describe(result.error()));
+}
+```
+
+## Monadic chaining: and_then, transform, or_else
+
+Three steps in sequence — parse the message type, then parse the price, then convert to ticks — each of which can fail, produce three nested if-statements in the classical style. `std::expected` provides monadic operations that chain these flatly:
+
+```cpp
+#include <expected>
+#include <cstdint>
+#include <span>
+
+// Three independent parse steps, each returning expected<T, ParseError>.
+[[nodiscard]] std::expected<char, ParseError>
+    parse_type(std::span<const std::byte> buf) noexcept;
+
+[[nodiscard]] std::expected<std::uint32_t, ParseError>
+    parse_raw_price(std::span<const std::byte> buf) noexcept;
+
+[[nodiscard]] std::expected<std::int64_t, ParseError>
+    to_ticks(std::uint32_t raw_price) noexcept;
+
+// Monadic chain: stops at the first error, passes the success value forward.
+// No nested ifs. The [[nodiscard]] ensures the result is checked.
+[[nodiscard]] std::expected<std::int64_t, ParseError>
+parse_add_order_price(std::span<const std::byte> buf) noexcept {
+    return parse_type(buf)
+        .and_then([&](char /*type*/) { return parse_raw_price(buf); })
+        .and_then([](std::uint32_t raw)  { return to_ticks(raw); });
+}
+```
+
+- `and_then(f)`: if the value is present, call `f(value)` and return its `expected`; if the value is an error, propagate the error without calling `f`. This is the flatMap / bind of monadic composition.
+- `transform(f)`: if the value is present, call `f(value)` and wrap the result in a success; propagate errors unchanged.
+- `or_else(f)`: called when the value is an error; `f` can recover or return a different error.
+
+The chain reads left to right: "parse type, then parse raw price, then convert to ticks — bail at the first failure." Under `-O3` this compiles to the same machine code as three nested ifs, with no function call overhead.
+
+## -fno-exceptions: what it removes
+
+The compiler flag `-fno-exceptions` (GCC and Clang) disables exception support throughout the translation unit. The effects:
+
+- `throw` becomes `std::terminate()` (a deliberate crash — the compiler will tell you if you try to throw, and the program aborts at runtime if unhandled)
+- **Unwinding tables** — the `.eh_frame` and `.gcc_except_table` sections that tell the runtime how to unwind the stack when an exception is thrown — are not emitted. These tables can be megabytes on a large binary; removing them shrinks the binary and reduces the ELF sections the dynamic linker must process.
+- The **zero-overhead exception path** — code the compiler emitted to keep open the possibility of unwinding — is removed. Functions marked `noexcept` under normal compilation still emit a small landing pad in case a `throw` slips through; `-fno-exceptions` removes those landing pads entirely.
+
+On the hot path the practical effect is subtle: the binary is smaller and the instruction cache has fewer competing sections, but the per-instruction latency of `throw`-free code is already nearly identical to exception-free code because of the zero-overhead model. The real benefit is the **unwinding tables and the binary size** — and the signal it sends to the optimiser that it can assume no function in this unit will propagate an exception.
+
+## Designing the error type
+
+A good error type for a `std::expected` in HFT is:
+
+- **Small**: fits in one or two registers. An `enum class` backed by `uint8_t` or `uint32_t` is ideal.
+- **Typed**: strong enough that the compiler errors if you mix error types from two unrelated systems.
+- **Self-describing**: `describe(e)` or a `std::format` specialisation so the logging path does not need a stack trace.
+- **Not heap-allocated**: `std::string` as the error type forces heap allocation on every error path — the opposite of what you want.
+
+Do NOT use `std::variant<T, std::string>` as a poor-man's expected for hot-path code. The string allocation kills the point.
+
+## Apply it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a Result type (like std::expected) and a three-step parser pipeline using monadic chaining. Result.ok(value) constructs a success; Result.err(e) constructs a failure. Result has andThen(fn) which calls fn(value) if ok and propagates the error if not. Implement parseType, parsePrice, and toTicks, each returning a Result. Chain them to implement parseMessage."
+  initialCode={`// A minimal Result<T,E> — models std::expected.
+class Result {
+  static ok(value) { return new Result(true, value, null); }
+  static err(error) { return new Result(false, null, error); }
+
+constructor(ok, value, error) {
+this.\_ok = ok; this.\_value = value; this.\_error = error;
+}
+
+isOk() { return this.\_ok; }
+value() { return this.\_value; }
+error() { return this.\_error; }
+
+andThen(fn) {
+// TODO: if ok, call fn(value) and return its Result;
+// if error, propagate this error without calling fn.
+return this;
+}
+}
+
+function parseType(buf) {
+if (!buf || buf.length < 1) return Result.err("BufferTooShort");
+if (buf[0] !== 0x41) return Result.err("UnknownMessageType");
+return Result.ok('A');
+}
+
+function parsePrice(buf) {
+if (!buf || buf.length < 36) return Result.err("BufferTooShort");
+const raw = (buf[32] << 24) | (buf[33] << 16) | (buf[34] << 8) | buf[35];
+if (raw === 0) return Result.err("PriceOutOfRange");
+return Result.ok(raw);
+}
+
+function toTicks(raw) {
+// 4 implied decimal places: raw / 10000 expressed as integer ticks
+if (raw > 1_000_000_000) return Result.err("PriceOutOfRange");
+return Result.ok(raw); // already in 1/10000 dollar units = ticks
+}
+
+function parseMessage(buf) {
+return parseType(buf)
+.andThen(() => parsePrice(buf))
+.andThen(raw => toTicks(raw));
+}
+
+const goodBuf = new Array(36).fill(0x00);
+goodBuf[0] = 0x41; // 'A'
+goodBuf[32] = 0x00; goodBuf[33] = 0x1C; goodBuf[34] = 0x50; goodBuf[35] = 0xD8;
+const r1 = parseMessage(goodBuf);
+console.log(r1.isOk(), r1.value()); // true, 1855704
+
+const r2 = parseMessage([]);
+console.log(r2.isOk(), r2.error()); // false, "BufferTooShort"`}
+  solution={`class Result {
+static ok(value) { return new Result(true, value, null); }
+static err(error) { return new Result(false, null, error); }
+
+constructor(ok, value, error) {
+this.\_ok = ok; this.\_value = value; this.\_error = error;
+}
+
+isOk() { return this.\_ok; }
+value() { return this.\_value; }
+error() { return this.\_error; }
+
+andThen(fn) {
+if (!this.\_ok) return this;
+return fn(this.\_value);
+}
+}
+
+function parseType(buf) {
+if (!buf || buf.length < 1) return Result.err("BufferTooShort");
+if (buf[0] !== 0x41) return Result.err("UnknownMessageType");
+return Result.ok('A');
+}
+
+function parsePrice(buf) {
+if (!buf || buf.length < 36) return Result.err("BufferTooShort");
+const raw = ((buf[32] & 0xFF) << 24) | ((buf[33] & 0xFF) << 16) |
+((buf[34] & 0xFF) << 8) | (buf[35] & 0xFF);
+if (raw === 0) return Result.err("PriceOutOfRange");
+return Result.ok(raw >>> 0); // unsigned
+}
+
+function toTicks(raw) {
+if (raw > 1_000_000_000) return Result.err("PriceOutOfRange");
+return Result.ok(raw);
+}
+
+function parseMessage(buf) {
+return parseType(buf)
+.andThen(() => parsePrice(buf))
+.andThen(raw => toTicks(raw));
+}
+
+const goodBuf = new Array(36).fill(0x00);
+goodBuf[0] = 0x41;
+goodBuf[32] = 0x00; goodBuf[33] = 0x1C; goodBuf[34] = 0x50; goodBuf[35] = 0xD8;
+const r1 = parseMessage(goodBuf);
+console.log(r1.isOk(), r1.value());
+
+const r2 = parseMessage([]);
+console.log(r2.isOk(), r2.error());`}
+testCases={[
+"andThen propagates the error without calling fn when result is an error",
+"parseMessage returns ok with the raw price integer for a valid 36-byte buffer",
+"parseMessage returns err('BufferTooShort') for an empty buffer",
+"andThen calls fn(value) and returns its result when the current result is ok",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A function returns `std::expected<Order, ParseError>`. The caller writes `auto o = parse(); process(o.value());` without checking `o.isOk()`. What happens at runtime when parsing fails?",
+      options: [
+        "The program silently uses the default-constructed Order",
+        "value() throws std::bad_expected_access (if exceptions are enabled) or invokes undefined behaviour / calls std::terminate (with -fno-exceptions) — the correct pattern is to check the result before calling value(), or use value_or() for a default fallback",
+        "The compiler rejects the code because value() is only callable after isOk()",
+        "parse() automatically retries until it succeeds",
+      ],
+      correct: 1,
+      explanation:
+        "Calling value() on a std::expected in the error state is defined to throw std::bad_expected_access<E> when exceptions are enabled — a checked access, not silent UB. With -fno-exceptions the standard allows the implementation to call std::terminate. In neither case does it return a default-constructed T. The correct pattern is: check with `if (o)` or `o.has_value()`, then access with `*o` or `o.value()`. Alternatively, `o.value_or(default_value)` returns the value or a supplied fallback without throwing. The compiler does not enforce the check statically (option C is wrong); [[nodiscard]] only enforces that the return value is not discarded, not that it is checked before use.",
+    },
+    {
+      question:
+        "Your colleague says: 'std::expected is redundant — we can just use std::optional<T> for success and log errors separately.' What is the critical thing std::optional cannot model that std::expected can?",
+      options: [
+        "std::optional cannot hold non-trivial types",
+        "std::optional says 'value or nothing' with no information about why it is nothing; std::expected<T, E> says 'value or a typed error E' — the error carries diagnostic information (which failure, what context) that the caller can dispatch on, log precisely, and propagate through a chain with and_then without a separate error channel; using optional discards that information at the call site",
+        "std::optional does not support monadic chaining",
+        "std::optional always heap-allocates, making it unsuitable for HFT",
+      ],
+      correct: 1,
+      explanation:
+        "std::optional<T> is either a T or 'nothing (nullopt)'. It carries no information about why it is empty. std::expected<T, E> carries either a T or an E, where E is a typed, inspectable error value. This distinction is critical when there are multiple failure modes (BufferTooShort vs UnknownMessageType vs PriceOutOfRange): optional collapses all failures to nullopt, losing the ability to log, dispatch, or propagate the specific error. Note: C++23 std::optional DOES have and_then, transform, and or_else (option C is wrong — it was added in C++23 alongside expected). std::optional does not heap-allocate (option D is wrong — it is a fixed-size value type).",
+    },
+  ]}
+/>
+
+## What you learned in the q-1 module
+
+The five lessons in this module covered the C++ subset HFT engineers write on the hot path:
+
+- **Move semantics, perfect forwarding, constexpr, concepts, std::span** (lesson 1) — the zero-cost abstraction toolkit.
+- **CRTP and policy classes** (lesson 2) — static polymorphism that replaces virtual dispatch with inlined, compile-time-resolved calls.
+- **Branch prediction hints and branchless arithmetic** (lesson 3) — `[[likely]]`/`[[unlikely]]` for layout and ternary/cmov patterns for branchless integer comparison.
+- **Custom allocators and placement new** (lesson 4) — arenas, slab pools, and `std::pmr` to eliminate the global allocator from the hot path.
+- **Error handling without exceptions** (lesson 5) — `std::expected`, typed error enumerations, and monadic chaining for `-fno-exceptions` code.
+
+## What's next
+
+Module q-2 descends into the floating-point numbers themselves — the bit layout of binary64, the special values (NaN, infinity, negative zero) that propagate through financial calculations, and the Kahan summation algorithm that recovers precision when you must sum many doubles accurately.

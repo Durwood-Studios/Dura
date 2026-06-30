@@ -1,0 +1,260 @@
+---
+title: "constraint_mode and Runtime Constraint Overrides"
+description: "Enable, disable, and replace individual constraint blocks at simulation time. One class, many test scenarios, no source edits."
+phase: 11
+module: "h-3-constrained-random-stimulus"
+order: 4
+estimatedMinutes: 55
+difficulty: 4
+prerequisites:
+  - "h-3-randcase-and-randsequence"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - constraint-mode
+  - rand-mode
+  - inline-constraint
+  - constraint-namespace
+  - constraint-override
+learningOutcomes:
+  - "Use constraint_mode(0) to disable a named constraint block at runtime"
+  - "Use rand_mode(0) to freeze a random field to a fixed value"
+  - "Layer inline randomize-with constraints over class constraints"
+  - "Design a transaction class that supports multiple test modes via constraint switching"
+professionalContext: "Production DV testbenches maintain ONE transaction class that dozens of different tests reuse with different constraint configurations. Constraint overriding is the mechanism that makes this possible — instead of forking one class per test scenario, engineers disable/enable/replace constraints at the point of use. Knowing the three override mechanisms (constraint_mode, rand_mode, randomize-with) is entry-level for any team using constrained-random methodology."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A DV team building a PCIe testbench needs the same `pcie_txn` class to serve: a correctness regression (all valid transactions), an error-injection test (invalid TLPs), a performance test (only max-payload bursts), and a compliance test (specific vendor-mandated sequences).
+
+Without override mechanisms, the team either forks the class (maintenance nightmare) or adds flag fields to the class (complexity spiral). The right answer is one clean class with named constraints, and override at call time.
+
+## constraint_mode — enable and disable constraints
+
+Every named constraint block can be turned on or off:
+
+```systemverilog
+class pcie_tlp;
+    rand bit [9:0]  length;     // TLP length in DW
+    rand bit [1:0]  fmt;        // TLP format (mem, io, cfg, msg)
+    rand bit        poisoned;
+
+    // Default: valid lengths only
+    constraint c_valid_length { length inside { [1:256] }; }
+
+    // Stress: also allow max payload
+    constraint c_max_payload { length == 256; }
+
+    // Error: allow poisoned TLPs
+    constraint c_clean { poisoned == 0; }
+
+    function new();
+        // Default: max_payload and error modes OFF
+        c_max_payload.constraint_mode(0);
+        // c_valid_length is ON by default
+        // c_clean is ON by default
+    endfunction
+endclass
+
+// In the normal test:
+pcie_tlp t = new();
+t.randomize();    // Uses c_valid_length + c_clean; length in [1:256], no poison
+
+// In the error injection test:
+pcie_tlp t = new();
+t.c_clean.constraint_mode(0);   // Disable clean constraint
+t.randomize();    // poisoned can now be 0 or 1
+t.c_clean.constraint_mode(1);   // Re-enable after
+
+// In the performance test:
+pcie_tlp t = new();
+t.c_valid_length.constraint_mode(0);  // Disable default range
+t.c_max_payload.constraint_mode(1);   // Enable max-payload-only
+t.randomize();    // length will be 256
+```
+
+`constraint_mode(0)` disables; `constraint_mode(1)` enables. Default is 1 (enabled) unless the constructor sets otherwise.
+
+**Important**: disabled constraints are IGNORED by the solver. The field can take any value from the remaining active constraints. If you disable the only constraint on a field, it becomes unconstrained — the solver picks any value from its type's full range.
+
+## rand_mode — freeze or release fields
+
+`rand_mode()` controls whether a field participates in randomization at all:
+
+```systemverilog
+class mem_txn;
+    rand bit [31:0] addr;
+    rand bit [31:0] data;
+    rand bit [3:0]  strb;
+endclass
+
+mem_txn t = new();
+
+// Directed test: hold addr fixed, randomize data and strb
+t.addr.rand_mode(0);   // Freeze addr
+t.addr = 32'h4000;     // Set the fixed value
+t.randomize();          // addr stays 32'h4000; data and strb randomize
+t.addr.rand_mode(1);   // Re-enable for next randomize
+```
+
+`rand_mode(0)` freezes the field — it's treated as a static value by the solver. `rand_mode(1)` releases it back to randomization.
+
+A pattern for directed-random corner cases:
+
+```systemverilog
+// Fix address to boundary value, randomize everything else
+for (int i = 0; i < INTERESTING_ADDRS.size(); i++) begin
+    t.addr.rand_mode(0);
+    t.addr = INTERESTING_ADDRS[i];
+    repeat (100) begin
+        t.randomize();
+        drive(t);
+    end
+    t.addr.rand_mode(1);
+end
+```
+
+This exercises 100 random data/strb patterns at each interesting address — neither pure directed nor pure random.
+
+## randomize-with — inline constraint addition
+
+The `randomize() with` form adds extra constraints for one call only:
+
+```systemverilog
+class burst_txn;
+    rand bit [31:0] addr;
+    rand bit [7:0]  len;
+    constraint c_default { addr inside { [0 : 32'h0001_0000] }; }
+endclass
+
+burst_txn t = new();
+
+// Normal test: use class defaults
+t.randomize();
+
+// Corner case test: override for ONE call
+t.randomize() with {
+    addr inside { [32'h0001_0000 : 32'h0001_FFFF] };  // Different range
+    len == 8'd255;                                       // Max length
+};
+// Next randomize() reverts to class defaults automatically
+
+// Another corner case
+t.randomize() with {
+    addr == 32'h0;    // Zero address (potential corner case)
+};
+```
+
+The `randomize() with` block adds constraints on top of — not instead of — the class's active constraints. The combined constraint set must be satisfiable.
+
+To REPLACE a class constraint for one call, disable it first:
+
+```systemverilog
+t.c_default.constraint_mode(0);
+t.randomize() with { addr inside { [32'hFFFF_0000 : 32'hFFFF_FFFF] }; };
+t.c_default.constraint_mode(1);
+```
+
+## Designing constraint-switchable transaction classes
+
+The pattern for a reusable, switch-configurable transaction:
+
+```systemverilog
+class axi_write_txn;
+    rand bit [31:0] addr;
+    rand bit [31:0] data;
+    rand bit [3:0]  strb;
+    rand bit [1:0]  burst;      // FIXED=0, INCR=1, WRAP=2
+    rand bit [7:0]  len;
+
+    // === Normal-operation constraints (always-on defaults) ===
+    constraint c_addr_aligned { addr[1:0] == 2'b00; }
+    constraint c_len_normal   { len inside { [1:16] }; }
+    constraint c_burst_valid  { burst inside { 1, 2 }; }  // No FIXED in normal mode
+
+    // === Error-injection constraints (disabled by default) ===
+    constraint c_unaligned    { addr[1:0] != 2'b00; }     // Misaligned address
+    constraint c_len_stress   { len inside { [64:256] }; }
+    constraint c_wrap_only    { burst == 2; }
+
+    function new(string name = "axi_write_txn");
+        // Disable error/stress modes by default
+        c_unaligned.constraint_mode(0);
+        c_len_stress.constraint_mode(0);
+        c_wrap_only.constraint_mode(0);
+    endfunction
+
+    // Convenience API for test-level switching
+    function void set_error_mode();
+        c_addr_aligned.constraint_mode(0);
+        c_unaligned.constraint_mode(1);
+        c_len_normal.constraint_mode(0);
+        c_len_stress.constraint_mode(1);
+    endfunction
+
+    function void set_normal_mode();
+        c_addr_aligned.constraint_mode(1);
+        c_unaligned.constraint_mode(0);
+        c_len_normal.constraint_mode(1);
+        c_len_stress.constraint_mode(0);
+    endfunction
+endclass
+```
+
+One class handles normal-mode, error-mode, and stress-mode testing. The test calls `set_error_mode()` before a burst of error-injection randomizations, then `set_normal_mode()` to return.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer disables a field's only constraint with `c_range.constraint_mode(0)`. What does the solver do with that field?",
+      options: [
+        "The field stays at its last value",
+        "The field becomes fully unconstrained — the solver can assign it any value from its type's full range. For a `rand bit [31:0]` field, that's any 32-bit value. For a `rand bit [7:0]` field, 0–255. This is often not what the engineer intended — the result is an unintentionally wide distribution that may miss the actual interesting address range entirely. Always verify what other constraints remain active when disabling one.",
+        "randomize() fails",
+        "The field is frozen at 0",
+      ],
+      correct: 1,
+      explanation:
+        "Disabling a constraint makes it invisible to the solver. If it was the only constraint on a field, that field is now unconstrained and samples uniformly from its full type range. This is almost never what you want for an address or length field — verify the remaining active constraints after any constraint_mode(0) call.",
+    },
+    {
+      question: "What is the difference between `rand_mode(0)` and `constraint_mode(0)`?",
+      options: [
+        "They are equivalent",
+        "`rand_mode(0)` removes the field from randomization entirely — it is treated as a constant by the solver, retaining its last assigned value. Other constraints referencing this field still see its fixed value. `constraint_mode(0)` disables a named constraint block — the field is still randomized, just without that particular constraint influencing it. Use rand_mode when you want a directed value; use constraint_mode when you want to change which constraints are active.",
+        "rand_mode affects coverage; constraint_mode affects the solver",
+        "constraint_mode only works in testbench code",
+      ],
+      correct: 1,
+      explanation:
+        "The distinction is: rand_mode controls PARTICIPATION in randomization (the field becomes a constant); constraint_mode controls which RULES constrain the randomization. Both are runtime mechanisms. A common pattern: use rand_mode(0) to fix a specific value for a directed corner case, then rand_mode(1) to return to randomized behavior for subsequent calls.",
+    },
+    {
+      question:
+        "A `randomize() with { X > 100; }` call is made on a class that already has `constraint c { X < 50; }`. What happens?",
+      options: [
+        "The inline constraint overrides the class constraint",
+        "The inline constraint is COMBINED with the class constraint. The solver must satisfy both X > 100 AND X < 50, which is unsatisfiable. randomize() returns 0 (failure). The object state is unchanged. The correct approach is to disable c before calling randomize() with the inline constraint. randomize-with ADDS constraints; it does not replace them.",
+        "randomize() returns 1 and picks X=50",
+        "The class constraint is ignored in randomize-with mode",
+      ],
+      correct: 1,
+      explanation:
+        "randomize-with adds constraints on top of active class constraints. The combined set X > 100 && X < 50 has no solution. randomize() returns 0. To replace a class constraint for one call: disable it with constraint_mode(0), make the randomize() call, then re-enable. This is a very common newcomer mistake — assuming randomize-with replaces the class constraints.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H3-5 covers `post_randomize()` — the callback that fires automatically after each `randomize()` call, letting you enforce derived relationships between random fields, clamp values to legal ranges, and integrate with the rest of your class hierarchy.

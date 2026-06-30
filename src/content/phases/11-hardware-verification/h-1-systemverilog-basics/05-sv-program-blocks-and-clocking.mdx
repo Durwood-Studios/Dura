@@ -1,0 +1,205 @@
+---
+title: "Program Blocks and Clocking Blocks — Taming the Race Window"
+description: "Why testbench code races DUT code in plain Verilog, and how SV's program blocks and clocking blocks eliminate the hazard at the language level."
+phase: 11
+module: "h-1-systemverilog-basics"
+order: 5
+estimatedMinutes: 50
+difficulty: 4
+prerequisites:
+  - "h-1-sv-dynamic-arrays-queues-assoc"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - program-block
+  - clocking-block
+  - reactive-region
+  - active-region
+  - preponed-region
+  - non-blocking-assignment
+  - input-skew
+  - output-skew
+  - race-condition
+learningOutcomes:
+  - "Explain the simulation scheduling regions and why testbench code in a module races RTL code"
+  - "Identify when a program block is the correct container for testbench code"
+  - "Write a clocking block that defines input and output skews for a protocol interface"
+  - "Use a clocking block to drive and sample an interface without timing races"
+professionalContext: "The most insidious simulation bugs are race conditions between testbench drives and DUT samples — the testbench drives a signal at the same moment the DUT clock edge samples it, producing results that differ between simulation runs, between different simulators, and between simulation and silicon. SV's program blocks and clocking blocks eliminate this class of bug structurally. UVM drivers use clocking blocks internally. Engineers who don't understand the scheduling model spend hours chasing phantom timing failures."
+thresholdConcept: true
+---
+
+## Why this matters
+
+A testbench that writes `vif.data <= 8'hAA; @(posedge clk);` might SEEM correct — the data is driven before the clock. But if the DUT samples `data` on that same `posedge clk`, the simulator may evaluate the testbench drive and the DUT sample in either order, depending on the simulation event queue. The bug manifests as a test that passes 999 times and fails once — or passes on VCS but fails on Questa. This is not a RTL bug; it's a testbench timing bug.
+
+SystemVerilog has a formal solution: the scheduling region model.
+
+## The simulation scheduling regions
+
+IEEE 1800 defines a total ordering of events within one simulation timestep:
+
+```
+Active region     → #0 (NBA) region     → Observed region   → Reactive region
+RTL always blocks   Non-blocking           Monitor samples    Program blocks
+  evaluate          assignments              (clocking blocks)  execute
+```
+
+The crucial separation:
+
+- **Active region**: RTL `always` blocks, initial blocks in modules, blocking assignments.
+- **NBA (Non-Blocking Assignment) region**: the left-hand side updates from `<=` assignments. This is why NBA is used for RTL registers — the RTL samples first, THEN updates.
+- **Observed region**: clocking blocks sample their inputs HERE, after all active and NBA events.
+- **Reactive region**: program blocks and clocking block outputs execute HERE, after the DUT has settled.
+
+The race problem: if testbench code lives in a module's `always` or `initial` block, it runs in the Active region — same time as the DUT. Either can "win" the race.
+
+## Program blocks — the reactive-region container
+
+```systemverilog
+// Old way (races):
+module tb_top;
+    initial begin
+        @(posedge clk);
+        vif.data = 8'hAA;   // Races with DUT's posedge clk sampling
+    end
+endmodule
+
+// Better way (no races):
+program tb_program(interface vif, input logic clk);
+    initial begin
+        @(posedge clk);
+        vif.data <= 8'hAA;  // Reactive region: guaranteed AFTER DUT settled
+    end
+endprogram
+```
+
+A `program` block's code executes in the Reactive region — AFTER all RTL in the Active and NBA regions has settled. No race.
+
+Additionally:
+
+- A program block cannot contain `always` blocks (no combinational loops from testbench).
+- A program block has its own `end_of_simulation` event ($finish from program block ends sim cleanly).
+
+## Clocking blocks — synchronizing interface access
+
+A clocking block attaches to a clock and defines the timing contract for interface signals:
+
+```systemverilog
+interface axi_if(input logic clk, input logic rst_n);
+    logic        awvalid, awready;
+    logic [31:0] awaddr;
+    logic [7:0]  wdata;
+    logic        wvalid, wready;
+
+    // Clocking block for the master (testbench drives the master side)
+    clocking master_cb @(posedge clk);
+        // input skew: sample 1ns BEFORE the clock edge (in the preponed region)
+        // This ensures we read stable DUT outputs, not glitches
+        default input  #1ns;
+
+        // output skew: drive 1ns AFTER the clock edge
+        // This gives the DUT setup time on the next cycle
+        default output #1ns;
+
+        output awvalid, awaddr, wdata, wvalid;
+        input  awready, wready;
+    endclocking
+
+    modport master_mp (clocking master_cb, input rst_n);
+endinterface
+```
+
+Usage in a testbench driver:
+
+```systemverilog
+task drive_write(input logic [31:0] addr, input logic [7:0] data);
+    // Wait for rising edge via clocking block
+    @(vif.master_cb);
+
+    // Drive through clocking block — scheduled in reactive region
+    vif.master_cb.awvalid <= 1'b1;
+    vif.master_cb.awaddr  <= addr;
+    vif.master_cb.wdata   <= data;
+    vif.master_cb.wvalid  <= 1'b1;
+
+    // Wait for handshake — sample via clocking block (preponed region)
+    @(posedge vif.clk iff vif.master_cb.awready);
+endtask
+```
+
+The clocking block:
+
+1. **input skew** (`#1ns`): inputs are sampled 1 ns before the clock edge — guaranteed to be after the RTL has propagated and settled, avoiding sampling during a glitch.
+2. **output skew** (`#1ns`): outputs are driven 1 ns AFTER the clock edge — the DUT sees stable input well before its NEXT clock edge samples it.
+3. Driving via `vif.master_cb.awvalid <= ...` runs in the reactive region automatically.
+
+## The ##N cycle delay with clocking blocks
+
+```systemverilog
+// Wait N clock cycles using clocking block syntax
+##5;                          // Wait 5 edges of the clocking block's clock
+##1 vif.master_cb.valid <= 1; // Drive on the next cycle
+```
+
+This is safer than `#N` delays because it's clock-synchronous. `#100` is 100 time units and breaks if the clock period changes. `##10` is 10 clock edges and adapts automatically.
+
+## Why UVM drivers prefer clocking blocks
+
+UVM drivers typically access the DUT via `virtual interface` handles. The driver's `task run_phase` waits on `@(posedge vif.clk iff vif.ready)` patterns. This works BUT can race.
+
+Modern UVM drivers use clocking blocks to avoid this:
+
+```systemverilog
+task drive_to_interface(my_transaction tr);
+    @(vif.drv_cb);                     // Wait for next edge
+    vif.drv_cb.valid <= 1'b1;         // Drive in reactive region
+    vif.drv_cb.data  <= tr.data;
+    @(vif.drv_cb iff vif.drv_cb.ready); // Sample in preponed region
+    vif.drv_cb.valid <= 1'b0;
+endtask
+```
+
+No race. The clocking block guarantees timing. This is the production pattern.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A testbench in a module `initial` block drives `vif.data = 8'hAA` at the same timestep the DUT's `always_ff @(posedge clk)` samples `data`. Which outcome is correct per the IEEE 1800 scheduling model?",
+      options: [
+        "The testbench always drives first because initial blocks run before always blocks",
+        "The result is indeterminate — both the module's initial block and the DUT's always_ff run in the Active region at the same timestep. The simulator can evaluate them in any order within the region. The testbench may sample old data or new data depending on evaluation order, which can differ between runs, simulators, and optimization settings. The fix: move testbench code to a program block (Reactive region) or use a clocking block with output skew.",
+        "The DUT always samples first because always_ff has priority",
+        "The simulation produces a compile error for same-timestep conflicts",
+      ],
+      correct: 1,
+      explanation:
+        "Same-timestep events in the Active region are non-deterministically ordered per IEEE 1800. Both module initial blocks and always blocks run in Active. The fix is structural: program blocks execute in Reactive (after Active+NBA), and clocking block outputs execute in Reactive with explicit skew. These are the language-level solutions to testbench/DUT races.",
+    },
+    {
+      question:
+        "A clocking block is defined with `default input #2ns`. What does this mean and why is sampling before the clock edge the correct choice?",
+      options: [
+        "Inputs are driven 2 ns before the clock — this sets up the testbench stimulus timing",
+        "Inputs are SAMPLED 2 ns before the clock edge (in the preponed region). This captures the DUT's output AFTER it has settled from the previous clock edge and BEFORE the next edge could change it — the most stable point in the cycle. Sampling AT the clock edge risks capturing glitches from RTL propagation. Sampling 1-2 ns before guarantees a clean read of the settled state.",
+        "The clocking block adds 2 ns of latency to all signals",
+        "The `default input #2ns` sets the hold time requirement for the DUT",
+      ],
+      correct: 1,
+      explanation:
+        "Input skew in a clocking block specifies when to SAMPLE relative to the clock edge. `#2ns` with the `input` direction means 'sample 2 ns BEFORE the clock edge' — this is in the preponed region, after RTL propagation from the previous edge has settled. Sampling AT the edge risks seeing partially-updated values. The input skew choice is about signal stability, not setup/hold of the DUT. This is distinct from the output skew, which controls when the testbench drives signals relative to the clock edge.",
+    },
+  ]}
+/>
+
+## What's next
+
+Module H2 introduces the UVM testbench architecture — the canonical structure that uses SystemVerilog classes, packages, interfaces, and clocking blocks assembled into the industry-standard verification framework. Every concept from H1 (OOP, packages, dynamics, timing) appears in UVM.

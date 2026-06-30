@@ -1,0 +1,353 @@
+---
+title: "Template Metaprogramming — Type Lists, Tag Dispatch, and Compile-Time Introspection"
+description: "Variadic templates, std::tuple, type lists, and tag dispatch: the compile-time machinery HFT codebases use to build protocol decoders, event routers, and zero-overhead type maps."
+phase: 12
+module: "q-1-modern-cpp-for-hft"
+order: 6
+estimatedMinutes: 45
+difficulty: 5
+prerequisites:
+  - "q-1-modern-cpp-for-hft/02-crtp-and-policy-classes"
+  - "q-1-modern-cpp-for-hft/01-modern-cpp-for-hft"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - variadic-template
+  - parameter-pack
+  - pack-expansion
+  - type-list
+  - tag-dispatch
+  - std-tuple
+  - std-index-sequence
+  - fold-expression
+  - if-constexpr
+  - type-traits
+  - std-is-same
+  - compile-time-dispatch
+learningOutcomes:
+  - "After this lesson you can write a variadic template and expand its parameter pack with a fold expression"
+  - "After this lesson you can build a compile-time type list and index into it with std::tuple_element"
+  - "After this lesson you can implement tag dispatch to select a function overload at compile time based on a type trait"
+  - "After this lesson you can apply if constexpr to branch on type properties without requiring the dead branch to compile"
+professionalContext: "An HFT market-data handler receives packets of many message types — Add Order, Delete Order, Execute Order, each with a different binary layout and a different handler. The idiomatic C approach is a `switch` on a tag byte; the idiomatic HFT C++ approach is a compile-time dispatch table: a variadic type list maps tag bytes to handler types, the compiler instantiates each handler once, and the final dispatch is a table lookup into function pointers that the compiler inlined. Firms that build protocol adapters in-house — Virtu, Citadel, DRW — use this pattern because it is simultaneously the most expressive and the most measurable: adding a new message type is a one-line change and the cost is zero runtime overhead."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You are building a market-data handler for Nasdaq ITCH. The feed carries twelve distinct message types. For each type you need a fast, specialized parser, a dedicated counter, and a different event payload. The naive design: `switch (msg_type) { case 'A': parse_add(buf); break; case 'D': parse_delete(buf); break; ... }`. That works. It also means every time you add a message type you touch the switch, the counter struct, the parser, and the test — four edits in four places, each a chance to introduce a mismatch.
+
+The C++ alternative is a compile-time type list: one place where all message types are registered, and the rest of the system derived from that list at compile time. The dispatch is a generated table of function pointers, the counters are a generated array, and adding a new type is a one-line append to the list. Zero runtime cost, zero duplication. This is template metaprogramming doing its real job: making a system where the thing you register in one place and the thing that runs are the same thing.
+
+## Variadic templates and parameter packs
+
+A <VocabTooltip slug="variadic-template">variadic template</VocabTooltip> accepts any number of type arguments. The type arguments collectively form a <VocabTooltip slug="parameter-pack">parameter pack</VocabTooltip>. A <VocabTooltip slug="fold-expression">fold expression</VocabTooltip> (C++17) expands the pack into an operator applied to every element.
+
+```cpp
+#include <cstdio>
+#include <cstdint>
+
+// Count bytes across N buffers at compile time — N is deduced.
+template <typename... Spans>
+std::size_t total_bytes(Spans... spans) {
+    // Fold expression: (expr op ...) applies `op` between every element.
+    // `(spans.size() + ...)` expands to spans0.size() + spans1.size() + ...
+    return (spans.size() + ...);
+}
+
+// Sum all arguments with a fold over `+`.
+template <typename... Ts>
+auto sum(Ts... vals) { return (vals + ...); }
+
+// Call f(x) for every element in a pack — fold over the comma operator.
+template <typename F, typename... Ts>
+void for_each_arg(F&& f, Ts&&... args) {
+    (f(args), ...);   // evaluates f(args0), f(args1), ... left-to-right
+}
+```
+
+Fold expressions replace the pre-C++17 recursive unpacking idiom, which required a base-case overload and two function templates to expand a pack of three elements. With folds, the pattern fits in one line and compiles faster.
+
+## Type lists with std::tuple
+
+<VocabTooltip slug="std-tuple">std::tuple</VocabTooltip> is the standard type list: it stores N
+types and lets you access the Nth type at compile time with `std::tuple_element`. You can use it as
+a pure type container — never instantiate a value, just use the template machinery.
+
+```cpp
+#include <tuple>
+#include <type_traits>
+#include <cstddef>
+
+// --- Define the type list ---
+// These are the ITCH message handler types. Each has a static parse() method.
+struct AddOrderHandler   { static constexpr char kTag = 'A'; };
+struct DeleteOrderHandler{ static constexpr char kTag = 'D'; };
+struct ExecuteHandler    { static constexpr char kTag = 'E'; };
+
+// The list itself. We never create a tuple<...> value; we use it as metadata.
+using MessageHandlers = std::tuple<AddOrderHandler, DeleteOrderHandler, ExecuteHandler>;
+
+// --- Index into the list ---
+// tuple_size gives the count.
+static_assert(std::tuple_size_v<MessageHandlers> == 3);
+
+// tuple_element<I, Tuple>::type gives the Ith type.
+using FirstHandler = std::tuple_element_t<0, MessageHandlers>;   // AddOrderHandler
+static_assert(std::is_same_v<FirstHandler, AddOrderHandler>);
+
+// --- Iterate the list at compile time with std::index_sequence ---
+#include <utility>   // std::index_sequence, std::make_index_sequence
+
+// Print the tag character of each handler in the type list.
+template <typename HandlerList, std::size_t... Is>
+void print_tags_impl(std::index_sequence<Is...>) {
+    // fold over the comma: calls each lambda once per index
+    ([]{
+        using H = std::tuple_element_t<Is, HandlerList>;
+        std::printf("Handler %zu: tag='%c'\n", Is, H::kTag);
+    }(), ...);
+}
+
+template <typename HandlerList>
+void print_tags() {
+    print_tags_impl<HandlerList>(
+        std::make_index_sequence<std::tuple_size_v<HandlerList>>{}
+    );
+}
+```
+
+`std::index_sequence` together with `std::make_index_sequence<N>` generates a pack `0, 1, 2, ..., N-1` that you can expand to visit every element of a tuple-type-list.
+
+## Tag dispatch: select overloads by type properties
+
+<VocabTooltip slug="tag-dispatch">Tag dispatch</VocabTooltip> selects a function overload using a
+lightweight tag type that carries a compile-time property. It is older than concepts but still
+idiomatic when you need overloads that differ by a property, not by type equality.
+
+```cpp
+#include <type_traits>
+#include <cstdint>
+#include <span>
+
+// Two tag types — empty structs that exist only for overload selection.
+struct IntegralPriceTag   {};
+struct FloatingPriceTag   {};
+
+// Helper: produce the right tag for a price type at compile time.
+template <typename T>
+constexpr auto price_tag() {
+    if constexpr (std::is_integral_v<T>)        return IntegralPriceTag{};
+    else if constexpr (std::is_floating_point_v<T>) return FloatingPriceTag{};
+}
+
+// Two overloads, selected by tag.
+template <typename T>
+void log_price(T price, IntegralPriceTag) {
+    std::printf("integer price: %lld ticks\n", (long long)price);
+}
+
+template <typename T>
+void log_price(T price, FloatingPriceTag) {
+    std::printf("float   price: %.8f\n", (double)price);
+}
+
+// Unified entry: the correct overload is selected at compile time.
+template <typename T>
+void log_price(T price) {
+    log_price(price, price_tag<T>());
+}
+```
+
+With C++20 concepts the same effect is expressible more readably via `requires` clauses. Tag dispatch is valuable when your codebase is mixed C++17/20 or when the dispatch logic is complex enough to live in its own type.
+
+## if constexpr: conditional compilation inside templates
+
+<VocabTooltip slug="if-constexpr">if constexpr</VocabTooltip> evaluates its condition at compile
+time and drops the dead branch before it is instantiated. This is critical in template code where
+the dead branch may reference a member that only exists for some types:
+
+```cpp
+#include <cstdint>
+#include <type_traits>
+#include <span>
+
+// A generic message parser that has two modes:
+// - integral MessageId: extract as a plain integer.
+// - a struct MessageId: extract by parsing a fixed header.
+template <typename MessageId>
+MessageId parse_id(std::span<const std::byte> buf) {
+    if constexpr (std::is_integral_v<MessageId>) {
+        // Only instantiated when MessageId is an integer.
+        // If the branch were plain `if`, the struct-parsing code
+        // would need to compile for int too — and it would not.
+        MessageId id{};
+        if (buf.size() >= sizeof(id))
+            __builtin_memcpy(&id, buf.data(), sizeof(id));
+        return id;
+    } else {
+        // Only instantiated when MessageId is a struct.
+        return MessageId::from_bytes(buf);   // does not exist for int, but that's fine
+    }
+}
+```
+
+The key difference from a plain `if` on a compile-time constant: with `if constexpr`, the **dead branch is not instantiated**. `MessageId::from_bytes(buf)` need not exist when `MessageId` is `int`. With a plain `if`, it must compile even though it never runs — which is why `if constexpr` exists.
+
+## Building a compile-time dispatch table
+
+Combine the pieces: a type list, index expansion, and function pointers to build a compile-time dispatch table for ITCH message types.
+
+```cpp
+#include <tuple>
+#include <array>
+#include <utility>
+#include <cstdint>
+#include <span>
+#include <cstddef>
+
+// Each handler provides: static constexpr char kTag; and static void handle(std::span<const std::byte>);
+struct AddOrderHandler {
+    static constexpr char kTag = 'A';
+    static void handle(std::span<const std::byte> /*buf*/) { /* parse add order */ }
+};
+struct DeleteOrderHandler {
+    static constexpr char kTag = 'D';
+    static void handle(std::span<const std::byte> /*buf*/) { /* parse delete */ }
+};
+struct ExecuteHandler {
+    static constexpr char kTag = 'E';
+    static void handle(std::span<const std::byte> /*buf*/) { /* parse execute */ }
+};
+
+using HandlerList = std::tuple<AddOrderHandler, DeleteOrderHandler, ExecuteHandler>;
+constexpr std::size_t kCount = std::tuple_size_v<HandlerList>;
+
+// Function pointer type for a message handler.
+using HandlerFn = void(*)(std::span<const std::byte>);
+
+// Build two parallel arrays at compile time: tag characters and handler pointers.
+// Indexed so dispatch is: find tag in kTags[], call kHandlers[i].
+template <std::size_t... Is>
+constexpr std::array<char, kCount> make_tags(std::index_sequence<Is...>) {
+    return { std::tuple_element_t<Is, HandlerList>::kTag... };
+}
+
+template <std::size_t... Is>
+constexpr std::array<HandlerFn, kCount> make_fns(std::index_sequence<Is...>) {
+    return { &std::tuple_element_t<Is, HandlerList>::handle... };
+}
+
+constexpr auto kTags    = make_tags(std::make_index_sequence<kCount>{});
+constexpr auto kHandlers = make_fns(std::make_index_sequence<kCount>{});
+
+// Dispatch: find the matching tag in the constant array and call its handler.
+// For kCount <= 16 a linear scan is branch-predictor-friendly; for larger
+// counts replace with a 256-element jump table keyed by tag byte.
+void dispatch(char tag, std::span<const std::byte> buf) {
+    for (std::size_t i = 0; i < kCount; ++i) {
+        if (kTags[i] == tag) { kHandlers[i](buf); return; }
+    }
+}
+```
+
+Both `kTags` and `kHandlers` are `constexpr` — they live in read-only memory, are fully laid out at link time, and have no initialization cost. Adding `TradeHandler` with `kTag = 'T'` is one line in `HandlerList` and zero lines anywhere else.
+
+## Apply it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement a compile-time-style dispatch table in JavaScript. Write makeDispatchTable(handlers) where handlers is an array of objects with {tag, handle(buf)}. It should return a dispatch(tag, buf) function that looks up the tag and calls the matching handler — or throws 'unknown tag' if none match. Then verify it with two test handlers."
+  initialCode={`function makeDispatchTable(handlers) {
+  // Build a Map from tag -> handle function (like our constexpr arrays).
+  // Return { dispatch(tag, buf) }
+}
+
+const table = makeDispatchTable([
+{ tag: 'A', handle(buf) { return 'add:' + buf.length; } },
+{ tag: 'D', handle(buf) { return 'del:' + buf.length; } },
+]);
+
+console.log(table.dispatch('A', [1,2,3])); // "add:3"
+console.log(table.dispatch('D', [9])); // "del:1"
+try { table.dispatch('X', []); } catch(e) { console.log(e.message); } // "unknown tag"`}
+  solution={`function makeDispatchTable(handlers) {
+const map = new Map(handlers.map(h => [h.tag, h.handle]));
+return {
+dispatch(tag, buf) {
+const fn = map.get(tag);
+if (!fn) throw new Error('unknown tag');
+return fn(buf);
+}
+};
+}
+
+const table = makeDispatchTable([
+{ tag: 'A', handle(buf) { return 'add:' + buf.length; } },
+{ tag: 'D', handle(buf) { return 'del:' + buf.length; } },
+]);
+
+console.log(table.dispatch('A', [1,2,3]));
+console.log(table.dispatch('D', [9]));
+try { table.dispatch('X', []); } catch(e) { console.log(e.message); }`}
+testCases={[
+"dispatch('A', ...) calls the add handler",
+"dispatch('D', ...) calls the delete handler",
+"dispatch with an unregistered tag throws 'unknown tag'",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A template function has `if constexpr (std::is_integral_v<T>) { return T::parse(); }`. When T is `int`, `int::parse()` does not exist. Does the code compile?",
+      options: [
+        "No — the compiler must check that the dead branch compiles for all instantiations",
+        "Yes — with if constexpr the dead branch is discarded before instantiation, so it does not need to be well-formed when T=int",
+        "Yes, but only if -O2 or higher is used",
+        "No — you must add a static_assert to suppress the error",
+      ],
+      correct: 1,
+      explanation:
+        "if constexpr discards the dead branch before the compiler instantiates the template for that type. The discarded branch does not need to be syntactically valid, let alone type-check. This is the key difference from a plain if with a compile-time condition: a plain if's branches must all type-check for every instantiation, even if they are never executed. if constexpr exists precisely to support template branches that reference members or functions only some types provide.",
+    },
+    {
+      question:
+        "You have a fold expression `(f(args), ...)` over a parameter pack. What does the comma operator do here, and in what order are the calls evaluated?",
+      options: [
+        "The comma operator is the comma in a function argument list — it separates arguments to f()",
+        "The comma operator sequences the calls left-to-right: f(args0) is evaluated and its result discarded, then f(args1) is evaluated and discarded, and so on — the fold produces a void expression that sequences all side effects",
+        "The order is unspecified — fold expressions are evaluated in an undefined order",
+        "The comma operator here forms a tuple of the results of each f(arg) call",
+      ],
+      correct: 1,
+      explanation:
+        "In a fold expression over the comma operator `(f(args), ...)`, the comma is the built-in comma operator — it sequences its left and right operands. For a left fold `(... , f(args))` the standard guarantees left-to-right evaluation. For a right fold `(f(args) , ...)` it is right-to-left. In practice `(f(args), ...)` is a right fold, evaluating f(args0), f(args1), ... in order, each side effect committed before the next. This is the idiomatic way to call a function for each element of a pack without recursion.",
+    },
+    {
+      question:
+        "You want to route an ITCH message to the correct handler using a tag byte. The handler set is fixed at compile time and never changes at runtime. You have two options: (A) a 256-entry array of function pointers indexed by tag byte, built constexpr; (B) a std::unordered_map<char, HandlerFn> populated at startup. What are the latency trade-offs?",
+      options: [
+        "Option B is faster because unordered_map uses a hash and is O(1)",
+        "Option A is faster: the array is a single memory load (tag byte is the index) with no hashing, no heap, and no possibility of a hash collision; the array lives in read-only memory and is often L1-cached; std::unordered_map adds a hash computation, a heap pointer dereference, and possible chaining — each adding nanoseconds on the critical path",
+        "Both are identical in latency because modern CPUs optimize both patterns",
+        "Option A is faster but only holds 256 entries — ITCH has more message types than that",
+      ],
+      correct: 1,
+      explanation:
+        "A constexpr array indexed by the tag byte (which is a byte 0-255) is a single array load: compute the index, load the function pointer, call it. There is no hash function, no heap allocation, no linked-list traversal. std::unordered_map performs a hash of the key, indexes into a bucket list (heap-allocated), and potentially follows a chain of collisions — each step is a potential cache miss and nanoseconds of overhead. On a handler called millions of times per second, those nanoseconds add up. ITCH 5.0 has roughly 25 message type codes, all well within the 256-entry table; sparse entries simply hold a null pointer.",
+    },
+  ]}
+/>
+
+## What's next
+
+The next lesson tackles type erasure — how to store heterogeneous objects of unrelated types in a container or pass them through a pipeline without paying for `virtual` dispatch or a heap allocation, using a technique called the small-buffer-optimized eraser.

@@ -1,0 +1,240 @@
+---
+title: "randcase and randsequence — Probabilistic Control Flow"
+description: "When you need weighted random CHOICES rather than weighted random values. randcase for random selection, randsequence for random grammar-based stimulus generation."
+phase: 11
+module: "h-3-constrained-random-stimulus"
+order: 3
+estimatedMinutes: 55
+difficulty: 4
+prerequisites:
+  - "h-3-solve-before-ordering"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - randcase
+  - randsequence
+  - production-rule
+  - weighted-selection
+  - probabilistic-control-flow
+learningOutcomes:
+  - "Write a randcase statement to implement weighted random branching"
+  - "Write a randsequence production grammar for multi-phase stimulus generation"
+  - "Distinguish when randcase is appropriate vs a rand class field with a dist constraint"
+  - "Compose randsequence productions to model protocol state machines"
+professionalContext: "Some verification scenarios require random control over WHICH SCENARIO HAPPENS next, not random values within one scenario. A testbench that verifies a DMA controller needs to randomly mix read bursts, write bursts, scatter-gather, and aborted transactions. randcase and randsequence provide this at the procedural level, complementing constraint randomization at the transaction level."
+thresholdConcept: false
+---
+
+## Why this matters
+
+`randomize()` + constraints pick random FIELD VALUES for one transaction. But sometimes you want random control over WHICH TYPE of stimulus to generate next — a weighted coin flip at the procedural level.
+
+Example: verifying a cache coherence protocol. Your test needs to randomly interleave:
+
+- 60% normal reads
+- 20% write-invalidate sequences
+- 10% back-to-back reads (streaming)
+- 10% aborted transactions
+
+This is not a field value inside one transaction — it's a random CHOICE of which sequence to execute. `randcase` handles the coin flip; `randsequence` handles grammars.
+
+## randcase — weighted random branching
+
+```systemverilog
+class cache_test_gen;
+    task run_random_stimulus();
+        repeat (1000) begin
+            randcase
+                60: begin   // 60 parts out of (60+20+10+10=100)
+                    normal_read_seq seq = new();
+                    seq.randomize();
+                    seq.start(sequencer);
+                end
+                20: begin
+                    write_invalidate_seq seq = new();
+                    seq.randomize();
+                    seq.start(sequencer);
+                end
+                10: begin
+                    streaming_read_seq seq = new();
+                    seq.randomize();
+                    seq.start(sequencer);
+                end
+                10: begin
+                    abort_txn_seq seq = new();
+                    seq.randomize();
+                    seq.start(sequencer);
+                end
+            endcase
+        end
+    endtask
+endclass
+```
+
+The weights are RELATIVE — 60:20:10:10 means 60%, 20%, 10%, 10% probability. The actual values don't need to sum to 100; they're ratios. `60:20:10:10` is the same as `6:2:1:1`.
+
+Weights can be expressions (not just literals):
+
+```systemverilog
+int write_weight = 20;
+int read_weight  = 80;
+
+randcase
+    read_weight:  drive_read();
+    write_weight: drive_write();
+endcase
+```
+
+## randcase vs dist constraint
+
+Both produce weighted selection. Use:
+
+- **`randcase`** when the choice controls WHICH CODE EXECUTES — different sequences, different stimulus types.
+- **`dist` constraint** when the choice controls a FIELD VALUE within one randomization.
+
+```systemverilog
+// dist constraint: the txn_type field gets a weighted value
+class txn;
+    rand bit [1:0] txn_type;
+    constraint c { txn_type dist { 0 := 60, 1 := 20, 2 := 10, 3 := 10 }; }
+endclass
+
+// randcase: different stimulus paths execute
+randcase
+    60: execute_read_path();
+    20: execute_write_path();
+    10: execute_streaming_path();
+    10: execute_abort_path();
+endcase
+```
+
+The behavioral difference: `dist` produces one class instance with the chosen type field; `randcase` can invoke completely different procedures with different logic paths.
+
+## randsequence — grammar-based stimulus
+
+`randsequence` lets you define a production grammar for stimulus. Each "production" is a rule that expands into sub-productions or terminal actions. This mirrors the structure of protocol state machines.
+
+```systemverilog
+task axi_traffic_gen();
+    randsequence(axi_scenario)
+        // Top-level: a scenario is either a write-then-read or a pure-read burst
+        axi_scenario : write_then_read  := 3    // 3 parts: write-then-read
+                     | read_only        := 1;   // 1 part: read only
+
+        // Write-then-read: config write, then burst
+        write_then_read : config_write data_burst;
+
+        // Read only: 1 or more reads
+        read_only : read_burst
+                  | read_burst read_burst;
+
+        // Terminals: leaf actions
+        config_write : { do_config_write(); }
+        data_burst   : { do_data_burst(); }
+        read_burst   : { do_read_burst(); }
+    endsequence
+endtask
+```
+
+The grammar:
+
+- Non-terminals expand into other non-terminals (separated by `|` for choice or concatenation for sequence).
+- Weights (`:= N`) control the probability of each alternative.
+- Curly braces `{ }` contain the terminal actions (procedural code).
+
+`randsequence` is more powerful than `randcase` because it naturally models hierarchical stimulus — sequences that themselves have random sub-structure.
+
+## Protocol grammar example — AXI interleaved transactions
+
+```systemverilog
+task generate_axi_traffic();
+    randsequence(traffic)
+        // Top: a mix of normal and stress
+        traffic : normal_traffic  := 7
+               | stress_traffic  := 3;
+
+        // Normal: a few writes + reads
+        normal_traffic : wr_seq rd_seq
+                       | rd_seq wr_seq
+                       | rd_seq rd_seq rd_seq;
+
+        // Stress: back-to-back writes
+        stress_traffic : wr_seq wr_seq wr_seq
+                       | wr_seq wr_seq;
+
+        // Leaf sequences with inline randomization
+        wr_seq : { rand_write_txn t = new(); t.randomize(); drive_axi_write(t); }
+        rd_seq : { rand_read_txn t = new(); t.randomize(); drive_axi_read(t); }
+    endsequence
+endtask
+```
+
+The grammar structure ensures that the random choices at each level compose naturally: 70% of top-level scenarios are "normal" mixes; 30% are "stress" bursts; within each, the sub-choices add another level of randomness.
+
+## break and return in randsequence
+
+You can exit a randsequence early:
+
+```systemverilog
+randsequence(main)
+    main : { if (halt_requested) break; } scenario;
+    scenario : normal_op := 9 | error_op := 1;
+    // ...
+endsequence
+```
+
+`break` exits the entire `randsequence` block. `return` exits the current production and returns to the parent.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer writes `randcase 3: A(); 1: B(); endcase`. What percentage of the time is A() called?",
+      options: [
+        "3%",
+        "75% — weights are 3 and 1; total is 4. A() is called with probability 3/4 = 75%. The absolute values don't matter; only the ratio. randcase 30:A(); 10:B(); produces the same distribution.",
+        "30%",
+        "50%",
+      ],
+      correct: 1,
+      explanation:
+        "randcase weights are proportional. 3 + 1 = 4 total parts; A() gets 3/4 = 75%. This is the same as a dist constraint with :=3 and :=1. The absolute magnitude is irrelevant; only the ratio determines probability.",
+    },
+    {
+      question: "When should you use randsequence instead of a series of randcase statements?",
+      options: [
+        "Always — randsequence is strictly more powerful",
+        "When the stimulus has a hierarchical, grammar-like structure where sub-choices are themselves randomly generated from their own rules. A flat list of alternatives is equally well handled by randcase; hierarchical protocol scenarios with nested randomness are natural randsequence. Example: 'a write transaction is either a single-beat write or a burst-write, where burst-write is either 4 or 8 beats, where each beat is either a full-strobe or partial-strobe write.' That nested structure is the natural home of randsequence productions.",
+        "When the weights sum to 100",
+        "When you don't have access to rand classes",
+      ],
+      correct: 1,
+      explanation:
+        "randsequence's production grammar is designed for hierarchical, composable random structures — the same kind of thing a formal grammar covers for language syntax. Flat weighted choices map cleanly to randcase. Hierarchical, nested random structures are natural in randsequence. Both compile to similar underlying behavior; the expressiveness difference matters for readability and maintainability.",
+    },
+    {
+      question:
+        "An engineer's randsequence-based traffic generator always produces the same sequence on repeated simulation runs with the same random seed. Is this expected behavior?",
+      options: [
+        "No — randsequence should produce different sequences each run",
+        "Yes — both randcase and randsequence draw from the simulator's pseudo-random number generator (PRNG). With the same seed, the same PRNG sequence is produced, which means the same weighted choices are made in the same order. To get different sequences: use a different seed (+seed=<N> in the simulator invocation). Repeatability with a given seed is a FEATURE — it allows reproduction of interesting test scenarios for debug.",
+        "It's a simulator bug",
+        "Only randcase is seeded; randsequence is non-deterministic",
+      ],
+      correct: 1,
+      explanation:
+        "Determinism with a fixed seed is the entire point of pseudo-random constrained-random verification. You run with seed 42, find a bug, reproduce the bug with seed 42, debug it. This reproducibility is why simulation is preferred over truly random hardware for finding and debugging DUT bugs. Different seeds produce different stimulus; the same seed always reproduces the same run.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H3-4 covers `constraint_mode()` and runtime constraint overrides — the mechanisms that let a test enable, disable, and replace individual constraint blocks at simulation time without editing the class source, enabling one transaction class to serve many different test scenarios.

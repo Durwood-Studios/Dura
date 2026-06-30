@@ -1,0 +1,214 @@
+---
+title: "SV Packages and Parameterized Classes"
+description: "Namespace management with packages, type-generic containers with parameterized classes — the mechanisms that keep large testbenches modular and reusable."
+phase: 11
+module: "h-1-systemverilog-basics"
+order: 3
+estimatedMinutes: 45
+difficulty: 4
+prerequisites:
+  - "h-1-sv-oop-inheritance-polymorphism"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - package
+  - import
+  - wildcard-import
+  - parameterized-class
+  - typedef
+  - localparam
+  - type-parameter
+learningOutcomes:
+  - "Define types and functions in a SystemVerilog package and import them into other files"
+  - "Distinguish explicit imports from wildcard imports and explain when each is appropriate"
+  - "Write a parameterized class and instantiate it with different type arguments"
+  - "Use typedef to create reusable type aliases within and across packages"
+professionalContext: "Large DV projects span dozens of engineers and hundreds of files. Without packages, every file redefines the same types and function names conflict. Without parameterized classes, testbench utilities are duplicated per protocol. The UVM base library itself is structured as packages (`uvm_pkg`) and parameterized classes (`uvm_tlm_fifo #(T)`, `uvm_seq_item_pull_port #(T)`). Reading UVM source and writing shared utilities requires fluency in both."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A UVM testbench for a complex SoC might have 50 transaction types, 30 sequences, 20 agents, and a dozen scoreboard variants — all in separate files, maintained by multiple engineers. Without a namespace mechanism, name collisions make this unmanageable. Without generic containers, you write a separate FIFO for every transaction type.
+
+SystemVerilog packages solve the first problem. Parameterized classes solve the second.
+
+## Packages — organized namespaces
+
+```systemverilog
+// uart_types_pkg.sv
+package uart_types_pkg;
+
+    typedef enum logic [1:0] {
+        PARITY_NONE  = 2'b00,
+        PARITY_ODD   = 2'b01,
+        PARITY_EVEN  = 2'b10
+    } parity_e;
+
+    typedef logic [7:0] byte_t;
+
+    localparam int BAUD_DIV_DEFAULT = 8;
+
+    function automatic int baud_to_div(int baud);
+        return (50_000_000 / baud);
+    endfunction
+
+endpackage
+```
+
+Usage in another file:
+
+```systemverilog
+// uart_txn.sv
+package uart_txn_pkg;
+    import uart_types_pkg::parity_e;     // Explicit import: one name
+    import uart_types_pkg::PARITY_NONE;  // Explicit: one constant
+
+    class uart_txn;
+        rand byte_t       data;         // byte_t still needs import
+        rand parity_e     parity;
+        // ...
+    endclass
+endpackage
+```
+
+Or import the whole package:
+
+```systemverilog
+import uart_types_pkg::*;    // Wildcard: all names become available
+```
+
+**When to use each:**
+
+- **Explicit import** (`import pkg::name`) — preferred in production code. Makes dependencies obvious; avoids hiding name collisions.
+- **Wildcard import** (`import pkg::*`) — acceptable in test files or when the package is large and many names are needed. Use with care — two wildcard imports from different packages can shadow each other silently.
+
+## Package compilation order
+
+Packages must be compiled before the files that import them. In a multi-file project, the compilation order is:
+
+```
+1. All packages (leaf-first if packages import each other)
+2. Interfaces
+3. Modules and classes that import packages
+```
+
+Tools like VCS and Questa use `-f` file lists where order matters. UVM itself depends on this: `uvm_pkg` must be compiled before any UVM-using file.
+
+## Parameterized classes — type-generic containers
+
+```systemverilog
+// A generic FIFO for any object type
+class typed_fifo #(type T = int);
+    T queue[$];
+
+    function void push(T item);
+        queue.push_back(item);
+    endfunction
+
+    function T pop();
+        if (queue.size() == 0)
+            $fatal(1, "FIFO underflow");
+        return queue.pop_front();
+    endfunction
+
+    function int size();
+        return queue.size();
+    endfunction
+endclass
+```
+
+Usage with different types:
+
+```systemverilog
+typed_fifo #(uart_txn)  uart_q;   // FIFO of UART transactions
+typed_fifo #(axi_txn)   axi_q;    // FIFO of AXI transactions
+typed_fifo #(int)       int_q;    // FIFO of integers
+
+uart_q = new();
+axi_q  = new();
+```
+
+One class definition, three instantiations with different types. This is exactly how `uvm_tlm_fifo #(T)` works inside UVM.
+
+## Type parameters and default values
+
+```systemverilog
+class scoreboard #(type REQ = base_txn, type RSP = base_txn);
+    REQ exp_q[$];
+    RSP act_q[$];
+
+    function void check(REQ exp, RSP act);
+        if (exp.data !== act.data)
+            `uvm_error("SB", $sformatf("Data mismatch: exp=0x%h act=0x%h", exp.data, act.data))
+    endfunction
+endclass
+
+// Instantiate with defaults (both are base_txn)
+scoreboard sb_default = new();
+
+// Instantiate with specific types
+scoreboard #(.REQ(uart_txn), .RSP(uart_txn)) sb_uart = new();
+```
+
+Default values (`= base_txn`) let callers omit the type argument when the default is appropriate.
+
+## typedef — creating aliases
+
+```systemverilog
+package bus_pkg;
+    // Type alias for readability
+    typedef logic [63:0] addr_t;
+    typedef logic [511:0] cacheline_t;
+
+    // Parameterized type alias (SV 2012+)
+    typedef typed_fifo #(uart_txn) uart_fifo_t;
+
+    // Enum with typedef
+    typedef enum { IDLE, ACTIVE, DRAIN } fifo_state_e;
+endpackage
+```
+
+`typedef` inside a package makes names available to importers. Well-named typedefs (`addr_t` vs `logic [63:0]`) make signal declarations self-documenting and let you change the underlying type in one place.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer imports two packages with wildcard imports: `import pkg_a::*; import pkg_b::*;`. Both packages define a function `get_status()`. What happens at compile time?",
+      options: [
+        "The first import wins; pkg_b's version is ignored",
+        "A compile error if `get_status()` is actually used in that scope — the compiler can't resolve the ambiguous wildcard. If `get_status()` is never called in the file, there's no error. The fix: use explicit imports (`import pkg_a::get_status`) or rename one function. This is why production code prefers explicit imports — wildcard conflicts are silent until the name is actually used.",
+        "The last import wins; pkg_a's version is ignored",
+        "Both versions are accessible via pkg_a::get_status() and pkg_b::get_status()",
+      ],
+      correct: 1,
+      explanation:
+        "Wildcard imports are resolved lazily — no conflict until the ambiguous name is used. When used, the compiler reports an ambiguous import error. Explicit imports (`import pkg_a::get_status`) don't have this problem. In large projects, production code uses explicit imports at package level and reserves wildcard imports for testbench top-level files where the full namespace is needed.",
+    },
+    {
+      question:
+        "Why doesn't `typed_fifo #(uart_txn)` require the FIFO class to be recompiled when `uart_txn` adds a new field?",
+      options: [
+        "It does require recompilation",
+        "The parameterized class operates on `T` generically — it only calls methods and accesses members that T is known to have. If the FIFO's `push` and `pop` only use `T` as an opaque value (pass by handle), adding fields to `uart_txn` doesn't change the FIFO's compilation requirements. The FIFO code is compiled once; each instantiation `#(T)` creates a specialized version at compile time. This is SystemVerilog's template specialization — analogous to C++ templates.",
+        "All parameterized class uses require full project recompilation",
+        "The FIFO must be re-typed after uart_txn changes",
+      ],
+      correct: 1,
+      explanation:
+        "Parameterized classes in SV work like C++ templates: the generic code is parameterized by type. The FIFO's `push(T item)` and `pop(): T` don't know or care about T's internals — they hold handles. Adding fields to T doesn't change the FIFO's interface. Recompilation is only triggered by changes to the parameterized class definition itself or to the files that import/use it. This is the point of parameterization — the container is independent of the contained type.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H1-4 covers SystemVerilog's dynamic data structures — dynamic arrays, queues, and associative arrays — the heap-allocated containers that testbenches use for scoreboards, coverage tables, and transaction logging. These structures don't exist in synthesizable Verilog and are where SV's verification power over plain RTL becomes clear.

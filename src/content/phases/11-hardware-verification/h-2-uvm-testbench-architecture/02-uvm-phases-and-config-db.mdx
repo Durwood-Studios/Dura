@@ -1,0 +1,230 @@
+---
+title: "UVM Phases and the Configuration Database"
+description: "The phase execution model that synchronizes component setup, and the config DB pattern that connects testbench knobs to deep-nested components."
+phase: 11
+module: "h-2-uvm-testbench-architecture"
+order: 2
+estimatedMinutes: 60
+difficulty: 4
+prerequisites:
+  - "h-2-uvm-components"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - uvm-phase
+  - build-phase
+  - connect-phase
+  - run-phase
+  - objection
+  - uvm-config-db
+  - config-db-set
+  - config-db-get
+  - phase-barrier
+learningOutcomes:
+  - "Name each UVM phase in execution order and explain what work belongs in each"
+  - "Use uvm_config_db to pass virtual interfaces and configuration objects between components"
+  - "Raise and drop objections correctly to control when the run_phase ends"
+  - "Debug a testbench that ends at time 0 or hangs forever using phase and objection diagnostics"
+professionalContext: "Phase sequencing bugs — testbenches that end immediately, hang, or crash during build — account for a significant portion of new-engineer productivity loss on UVM projects. Understanding WHY phases exist and HOW the config DB connects components is what separates an engineer who can inherit and extend a testbench from one who is blocked every time the testbench structure changes."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A UVM testbench can span dozens of components, each needing to set up before others can connect, and connect before any can run. Without an orchestrated setup sequence, components try to connect to handles that don't exist yet. The phase model is UVM's solution: a barrier-synchronized execution protocol that guarantees ordering.
+
+## The full phase sequence
+
+```
+build_phase         ← Components create their children (top-down)
+connect_phase       ← TLM connections made between existing components
+end_of_elaboration  ← One-time sanity checks; all connections exist
+start_of_simulation ← Optional pre-run initialization
+run_phase           ← Simulation runs; parallel tasks; objections control duration
+extract_phase       ← Collect data after sim ends
+check_phase         ← Verify collected data
+report_phase        ← Print summary
+final_phase         ← Tear-down actions (close files, etc.)
+```
+
+The simulator calls each phase's method on EVERY component before moving to the next phase. This is the barrier: `build_phase` of every component completes before any `connect_phase` begins.
+
+## build_phase — top-down construction
+
+```systemverilog
+class my_env extends uvm_env;
+    `uvm_component_utils(my_env)
+    my_agent  agent;
+    my_scoreboard sb;
+
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        // Create sub-components HERE, not in new()
+        agent = my_agent::type_id::create("agent", this);
+        sb    = my_scoreboard::type_id::create("sb", this);
+        // The agent's build_phase will run AFTER this function returns
+    endfunction
+endclass
+```
+
+Key rule: create sub-components in `build_phase`, not in `new()`. The factory isn't ready in `new()`, and the config DB isn't populated yet.
+
+Top-down means: `uvm_test::build_phase` runs first, then `uvm_env::build_phase`, then each `uvm_agent::build_phase`. Children are always created before the scheduler descends into them.
+
+## connect_phase — wiring TLM ports
+
+```systemverilog
+function void connect_phase(uvm_phase phase);
+    // By now, both agent and scoreboard exist
+    agent.driver.seq_item_port.connect(agent.sequencer.seq_item_export);
+    agent.monitor.ap.connect(sb.analysis_export);
+endfunction
+```
+
+`connect_phase` runs AFTER all `build_phase` calls complete. This guarantees that both ends of every TLM connection exist before any connection is attempted. Trying to connect in `build_phase` fails because the peer component may not exist yet.
+
+## run_phase — the simulation heart
+
+`run_phase` is the only phase that runs time. All other phases are zero-time functions.
+
+```systemverilog
+task run_phase(uvm_phase phase);
+    my_sequence seq = my_sequence::type_id::create("seq");
+    phase.raise_objection(this);    // "I have work to do"
+    seq.start(agent.sequencer);
+    phase.drop_objection(this);     // "I'm done"
+endtask
+```
+
+Objections are reference-counted. `run_phase` ends when ALL objections across ALL components drop to zero. This is the mechanism that keeps simulation alive until every component finishes its work.
+
+**Common bugs:**
+
+| Symptom                            | Cause                                    | Fix                                        |
+| ---------------------------------- | ---------------------------------------- | ------------------------------------------ |
+| Sim ends at time 0                 | No component raises an objection         | Add `raise_objection` before blocking work |
+| Sim runs forever                   | An objection is raised but never dropped | Verify `drop_objection` is reached         |
+| Sim ends before sequence completes | Objection dropped before sequence starts | Raise before `seq.start()`, drop after     |
+
+## The configuration database
+
+The config DB is UVM's mechanism for passing arbitrary data — virtual interfaces, configuration objects, integers — from the testbench top level into deeply nested components without building constructor argument chains.
+
+**Setting** (from top module or test):
+
+```systemverilog
+// From top-level SV module (before run_test)
+module tb_top;
+    uart_if u_if(.clk(clk), .rst_n(rst_n));
+    initial begin
+        // Set the interface in the DB for any component whose path contains "uvm_test_top"
+        uvm_config_db #(virtual uart_if)::set(null, "uvm_test_top.*", "vif", u_if);
+        run_test("my_uart_test");
+    end
+endmodule
+```
+
+**Getting** (from deep inside the component tree):
+
+```systemverilog
+class uart_driver extends uvm_driver #(uart_txn);
+    virtual uart_if vif;
+
+    function void build_phase(uvm_phase phase);
+        // Retrieve the interface from the DB
+        if (!uvm_config_db #(virtual uart_if)::get(this, "", "vif", vif))
+            `uvm_fatal("DRV", "uart_if not found in config DB — check path and key")
+    endfunction
+endclass
+```
+
+The `set` call signature:
+
+```
+uvm_config_db #(T)::set(context, path_pattern, key, value)
+```
+
+- `context` — which component is the "root" for the path pattern. `null` means UVM root.
+- `path_pattern` — glob pattern for the component hierarchy path. `"uvm_test_top.*"` matches any component under the test.
+- `key` — the lookup name. Must match exactly between set and get.
+
+The `get` call:
+
+```
+uvm_config_db #(T)::get(this, "", key, variable)
+```
+
+- `this` — the requesting component (its path is used for matching).
+- `""` — additional path extension (usually empty).
+- Returns 1 if found; 0 if not found (the `if (!...)` pattern).
+
+## Configuration objects pattern
+
+For complex configuration (multiple parameters per agent), use a configuration class:
+
+```systemverilog
+class uart_agent_cfg extends uvm_object;
+    `uvm_object_utils(uart_agent_cfg)
+    int baud_rate  = 115200;
+    bit parity_en  = 1'b0;
+    bit active     = 1'b1;   // 1=active agent, 0=passive (monitor only)
+    function new(string name = "uart_agent_cfg");
+        super.new(name);
+    endfunction
+endclass
+
+// In test:
+uart_agent_cfg cfg = uart_agent_cfg::type_id::create("cfg");
+cfg.baud_rate = 9600;
+cfg.active    = 0;   // Passive mode
+uvm_config_db #(uart_agent_cfg)::set(this, "env.uart_agent", "cfg", cfg);
+
+// In agent's build_phase:
+uart_agent_cfg cfg;
+if (!uvm_config_db #(uart_agent_cfg)::get(this, "", "cfg", cfg))
+    cfg = uart_agent_cfg::type_id::create("cfg");  // Use defaults
+```
+
+This pattern lets tests configure agents without knowing their internal structure.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        'An engineer\'s driver uses `uvm_config_db #(virtual my_if)::get(this, "", "vif", vif)` in `build_phase`. The testbench runs but the driver reports \'vif not found\'. What are the two most common causes?',
+      options: [
+        "The virtual interface type is wrong",
+        'First: the SET path pattern doesn\'t match the driver\'s component path. The driver\'s full path is `uvm_test_top.env.agent.driver`. If the SET uses `"uvm_test_top.env"`, it won\'t reach the driver. Fix: use `"uvm_test_top.*"` or the exact path. Second: the SET and GET use different keys (`"vif"` vs `"interface"`). The key must match character-for-character. Enable `UVM_CONFIG_DB_TRACE` in simulation arguments to see all SET calls and their paths.',
+        "Config DB doesn't support virtual interfaces",
+        "build_phase is too early for config DB access",
+      ],
+      correct: 1,
+      explanation:
+        "Config DB mismatches have two failure modes: path mismatch (the SET path glob doesn't cover the GET component's path) and key mismatch (different string names). The trace flag shows all SET operations and lets you compare paths mechanically. Path debugging is the #1 time sink for UVM newcomers on their first project.",
+    },
+    {
+      question:
+        "A UVM testbench has two components both raising objections in run_phase. Component A drops its objection after 100 ns. Component B drops its objection after 200 ns. When does the run_phase end?",
+      options: [
+        "100 ns — when the first objection drops",
+        "200 ns — when the last objection drops. Objections are reference-counted. The run_phase ends when the count reaches zero — which requires EVERY raised objection to be dropped. This is the correct design: if any component has outstanding work (a pending sequence, a watchdog timer, a drain period), the simulation continues until it completes.",
+        "150 ns — the average",
+        "Simulation-tool dependent",
+      ],
+      correct: 1,
+      explanation:
+        "Objection semantics are additive: every raise increments a counter; every drop decrements it; the phase ends when the counter reaches zero. If 10 components raise objections and 9 drop them, the phase continues until the 10th drops. This is the design that prevents tests from ending before all agents drain their queues. The `uvm_test` typically owns the primary objection while sequences run.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H2-3 goes deep into TLM ports — the connection primitives that carry transactions between components. Understanding port types, exports, and FIFO buffers is what lets you debug `TLM connection not found` errors and write new components that integrate cleanly into an existing testbench.

@@ -1,0 +1,230 @@
+---
+title: "Type Erasure Without virtual — Small-Buffer Optimized Erasers"
+description: "How to store heterogeneous callable or message-handler objects of unrelated types in one container without heap allocation, using the small-buffer optimization and hand-rolled vtable pointers."
+phase: 12
+module: "q-1-modern-cpp-for-hft"
+order: 7
+estimatedMinutes: 40
+difficulty: 5
+prerequisites:
+  - "q-1-modern-cpp-for-hft/06-template-metaprogramming"
+  - "q-1-modern-cpp-for-hft/04-custom-allocators-and-placement-new"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - type-erasure
+  - small-buffer-optimization
+  - sbo
+  - virtual-table-pointer
+  - concept-model
+  - std-function
+  - std-any
+  - move-only-function
+  - inplace-storage
+  - heap-fallback
+learningOutcomes:
+  - "After this lesson you can explain the difference between type erasure via virtual inheritance and type erasure via a hand-rolled vtable pointer stored inline"
+  - "After this lesson you can describe why std::function may heap-allocate and how the small-buffer optimization avoids it for callables that fit"
+  - "After this lesson you can implement a minimal type-erased wrapper with inplace storage and a function-pointer vtable"
+  - "After this lesson you can choose between std::function, std::move_only_function, and a custom eraser based on latency requirements"
+professionalContext: "A strategy engine needs to call a handler for each market event, but the handler type differs per venue (ITCH callback, FIX execution report, synthetic) and is decided at startup, not compile time. The naive solution is a pure virtual base class — but that means a heap allocation for each handler object and a vtable load on every call. The standard alternative is std::function — but std::function may itself heap-allocate when the callable does not fit in its small-buffer. Production HFT frameworks write a custom type-erased wrapper with a fixed inplace buffer large enough for the largest real handler, falling back to heap only as a documented startup cost, never on the hot path. This lesson shows you how that wrapper is built."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You have a `Strategy` class that must call a `fill_handler` whenever an execution report arrives. The fill handler is one of three concrete types depending on which execution venue is active — but which one is chosen at startup from configuration, not at compile time. You need to store the handler by value (no owning pointer, no heap) inside `Strategy` and call it with zero overhead on the hot path.
+
+The moment you reach for a `virtual` base class you are paying: a heap allocation to create the polymorphic object, a vtable pointer in every instance, and an indirect branch on every call. `std::function` sidesteps the virtual machinery but may heap-allocate the callable if it does not fit in its internal small buffer. The answer that HFT frameworks converge on is a _custom type-erased wrapper_ — an object that holds a fixed-size buffer (big enough for the largest concrete type), stores function pointers for call/copy/move/destroy in a hand-rolled vtable, and falls back to the heap only for oversized types the author decided were startup-time paths.
+
+## The standard tools and their costs
+
+```cpp
+#include <functional>   // std::function, std::move_only_function (C++23)
+#include <any>          // std::any
+
+// std::function<void(int)>:
+//   - Stores ANY callable: function pointer, lambda, functor, member pointer.
+//   - Has a small-buffer: callables fitting in ~48 bytes (implementation-defined)
+//     are stored inline with no heap allocation.
+//   - Callables LARGER than the buffer go on the heap (one dynamic allocation
+//     per construction/copy). This is the latency land mine.
+//   - Copyable: captures by copy, the contained callable must be copy-constructible.
+//   - The call operator dispatches through a function pointer inside the object,
+//     NOT through a vtable — it is one indirect call, same cost as a vtable call.
+
+// std::move_only_function<void(int)> (C++23):
+//   - Same idea but requires only movable callables.
+//   - Avoids the const correctness gotcha of std::function.
+//   - Same SBO trade-off: buffer size is implementation-defined.
+
+// std::any:
+//   - Type-erases any CopyConstructible object but provides only type-unsafe
+//     retrieval via std::any_cast. Mostly used for configuration, not hot-path dispatch.
+```
+
+The critical line is _"callables LARGER than the buffer go on the heap."_ The buffer size is not specified in the standard — it is roughly 24–48 bytes in practice (libstdc++, libc++). A lambda capturing a `std::shared_ptr` and two `std::string` fields will spill to the heap. On a hot path called a million times per second, that is one allocation that poisons your latency tail. The fix is not "use smaller lambdas" — it is _custom type erasure with a buffer you control_.
+
+## Building a minimal type-erased callable
+
+The pattern: allocate a fixed `std::aligned_storage` (or a `char` array with `alignas`) large enough for the target type, construct the callable in that storage with placement new, and store three function pointers — call, move, destroy — in a plain old struct (the hand-rolled vtable).
+
+```cpp
+#include <cstddef>
+#include <utility>
+#include <new>
+#include <cassert>
+#include <type_traits>
+
+// A type-erased callable that fits callables up to kBufBytes bytes
+// inline. Heap-fallback on overflow (never on the hot path if callables
+// are sized correctly).
+template <typename Sig, std::size_t kBufBytes = 64>
+class InlineFunction;   // only the specialisation below is defined
+
+template <typename Ret, typename... Args, std::size_t kBufBytes>
+class InlineFunction<Ret(Args...), kBufBytes> {
+public:
+    InlineFunction() = default;
+
+    // Construct from any callable F.
+    // Fails at compile time if F is too large and we want to enforce
+    // no-heap. Relax the static_assert to allow a heap fallback.
+    template <typename F,
+              typename = std::enable_if_t<!std::is_same_v<std::decay_t<F>, InlineFunction>>>
+    InlineFunction(F&& f) {
+        using DecayF = std::decay_t<F>;
+        static_assert(sizeof(DecayF) <= kBufBytes,
+            "Callable too large for InlineFunction's inline buffer. "
+            "Increase kBufBytes or decompose the lambda.");
+        static_assert(alignof(DecayF) <= alignof(std::max_align_t));
+
+        // Construct F in the inline buffer.
+        ::new (static_cast<void*>(&buf_)) DecayF(std::forward<F>(f));
+
+        // Write function pointers into the vtable struct.
+        vtable_.call    = [](const void* buf, Args... args) -> Ret {
+            return (*reinterpret_cast<const DecayF*>(buf))(
+                std::forward<Args>(args)...);
+        };
+        vtable_.move_construct = [](void* dst, void* src) {
+            ::new (dst) DecayF(std::move(*reinterpret_cast<DecayF*>(src)));
+        };
+        vtable_.destroy = [](void* buf) {
+            reinterpret_cast<DecayF*>(buf)->~DecayF();
+        };
+    }
+
+    // Move-construct: copy the vtable struct and move-construct the callable.
+    InlineFunction(InlineFunction&& other) noexcept {
+        vtable_ = other.vtable_;
+        if (vtable_.move_construct)
+            vtable_.move_construct(&buf_, &other.buf_);
+    }
+
+    ~InlineFunction() {
+        if (vtable_.destroy) vtable_.destroy(&buf_);
+    }
+
+    // Call: one indirect function pointer — same cost as a virtual dispatch.
+    Ret operator()(Args... args) const {
+        assert(vtable_.call && "calling an empty InlineFunction");
+        return vtable_.call(&buf_, std::forward<Args>(args)...);
+    }
+
+    explicit operator bool() const { return vtable_.call != nullptr; }
+
+private:
+    // The function-pointer vtable — a plain struct, NOT a class hierarchy.
+    struct Vtable {
+        Ret  (*call)          (const void*, Args...) = nullptr;
+        void (*move_construct)(void* dst, void* src) = nullptr;
+        void (*destroy)       (void*)                = nullptr;
+    };
+
+    alignas(std::max_align_t) char buf_[kBufBytes]{};
+    Vtable vtable_{};
+};
+```
+
+The cost of calling `operator()`: one load of `vtable_.call`, then one indirect jump through that pointer. This is identical to a virtual call — the difference is that the vtable is per-object (stored inside the `InlineFunction`) rather than per-class (stored in read-only segment). The heap cost for construction is zero for any callable ≤ 64 bytes, which covers virtually all HFT lambdas.
+
+> **Why not just use `std::function`?** For callables that fit in its internal SBO buffer (implementation-defined size, typically 24–48 bytes), `std::function` has the same zero-heap cost and you should use it. Write a custom `InlineFunction` only when (a) you need to control the exact buffer size to guarantee no heap allocation for your specific callable types, (b) you need a move-only wrapper (use `std::move_only_function` in C++23 first), or (c) you need to embed the erased callable directly in a struct that has a fixed layout requirement.
+
+## std::move_only_function (C++23)
+
+C++23 adds `std::move_only_function<Sig>` to `<functional>`. It fixes two `std::function` annoyances for HFT use:
+
+1. **No spurious copy requirement.** `std::function` requires the stored callable to be copyable (because `std::function` itself is copyable). This rules out lambdas capturing `std::unique_ptr` or other move-only state. `std::move_only_function` has no copy constructor, so it can hold any movable callable.
+2. **Correct const-propagation.** `std::function::operator()` is `const` but calls the callable non-const — a long-standing correctness problem. `std::move_only_function` ties `const`-ness of the call to the signature.
+
+```cpp
+#include <functional>  // std::move_only_function (C++23)
+#include <memory>
+
+std::unique_ptr<int> up = std::make_unique<int>(42);
+
+// Captures a unique_ptr — not copyable, but movable.
+std::move_only_function<int()> fn =
+    [p = std::move(up)]() { return *p; };   // OK with move_only_function
+
+// std::function<int()> fn = [p = std::move(up)]() { return *p; };
+// ^^^ compile error: lambda not CopyConstructible
+```
+
+On the hot path, prefer `std::move_only_function` over `std::function` when you need move-only callables. The SBO semantics are implementation-defined but equivalent.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A std::function<void(int)> stores a lambda that captures a 100-byte struct by value. The SBO buffer in your standard library is 48 bytes. What happens on construction?",
+      options: [
+        "Compilation fails — the callable is too large for std::function",
+        "The lambda is stored inline by truncating the captured struct to 48 bytes",
+        "std::function heap-allocates a copy of the lambda (the 100-byte struct plus overhead) and stores a pointer in its internal buffer — one dynamic allocation on construction and one deallocation on destruction",
+        "The lambda is stored inline in the buffer and the excess bytes overflow to adjacent memory",
+      ],
+      correct: 2,
+      explanation:
+        "std::function's small-buffer optimization stores the callable inline only when it fits. When it does not fit, std::function falls back to a heap allocation (using the allocator, which by default calls operator new). The 100-byte lambda does not fit in 48 bytes, so the implementation allocates a heap block, move-constructs the lambda there, and stores a pointer in the inline buffer. This single allocation on the hot path can dominate latency when the function is constructed frequently.",
+    },
+    {
+      question:
+        "The InlineFunction wrapper above stores three function pointers in a Vtable struct per object, not per type. A virtual function stores one vtable pointer per object pointing to a per-type table. What is the latency difference on a call?",
+      options: [
+        "InlineFunction is faster because its vtable is stored inline (in the same cache line as the callable), whereas a virtual vtable pointer chases one additional pointer to a separately-allocated table",
+        "Virtual dispatch is faster because the per-type vtable is shared and stays in cache across many calls to the same type",
+        "They are identical — both ultimately execute one indirect branch",
+        "InlineFunction is slower because it stores three pointers instead of one",
+      ],
+      correct: 0,
+      explanation:
+        "Both mechanisms pay one indirect call. The difference is cache locality. A virtual vtable pointer in an object points to a per-class table in read-only memory — two pointer dereferences (load vtable pointer, load function pointer from table). An InlineFunction's vtable struct is embedded directly in the InlineFunction object, so the function pointer and the callable data are in the same cache line. When the callable's cache line is already hot (common when it is stored inline in a Strategy struct), the function pointer load comes for free from the same line. With virtual dispatch the vtable is in a separate read-only page that may not be in L1. In practice the difference is a few nanoseconds — real and measurable on a hot path called millions of times per second.",
+    },
+    {
+      question:
+        "You need to store three different handler types (each ~40 bytes of state) in a std::vector and call them uniformly. You are considering: (A) std::vector<std::function<void(Event)>>; (B) std::vector<InlineFunction<void(Event), 64>>; (C) std::vector<std::unique_ptr<HandlerBase>> with a virtual dispatch. On the hot path the handlers are called in sequence. Rank A, B, C by expected latency on the call loop.",
+      options: [
+        "C < B < A (virtual fastest because vtable is shared and cache-warm after first call)",
+        "B < A ≈ C (InlineFunction avoids heap indirection; std::function and unique_ptr both require a pointer dereference per call)",
+        "A < B < C (std::function is the most optimized standard type)",
+        "All three are identical; the compiler eliminates all indirection",
+      ],
+      correct: 1,
+      explanation:
+        "InlineFunction<void(Event), 64> stores the 40-byte callable inline in the vector element. The call is one indirect function-pointer load from within the same cache line as the callable data — cache-friendly. std::function may also be cache-friendly for ~40-byte callables that fit in its SBO (its buffer is ~48 bytes on libstdc++), so A ≈ B if callables fit. unique_ptr<HandlerBase> is one extra dereference: load the unique_ptr, dereference to reach the heap object, then dereference its vtable pointer — two pointer chases vs one, and the heap objects are likely in a different cache line from the pointer. C is therefore slower on the hot loop, not faster. The vtable sharing argument for C applies to reducing code size, not call latency.",
+    },
+  ]}
+/>
+
+## What's next
+
+The next lesson introduces SIMD intrinsics — SSE4.2 and AVX2 — for operations that need to process multiple prices in a single CPU instruction: comparing eight 32-bit prices simultaneously, searching a sorted array of tick sizes, or computing a mid-price across a vector of bid/ask pairs. SIMD is how C++ achieves vectorized throughput without the compiler needing to auto-vectorize correctly.

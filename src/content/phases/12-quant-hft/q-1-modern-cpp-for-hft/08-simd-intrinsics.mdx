@@ -1,0 +1,233 @@
+---
+title: "SIMD Intrinsics — SSE4.2 and AVX2 for Price Arithmetic"
+description: "Hand-vectorize hot-path price operations with Intel SIMD intrinsics: compare eight 32-bit prices in one instruction, search a sorted tick table with _mm256_cmpgt_epi32, and compute parallel mid-prices."
+phase: 12
+module: "q-1-modern-cpp-for-hft"
+order: 8
+estimatedMinutes: 50
+difficulty: 5
+prerequisites:
+  - "q-1-modern-cpp-for-hft/03-branch-prediction-and-branchless-patterns"
+  - "q-3-cache-aware-programming"
+standards:
+  primaryAnchor: "Intel Intrinsics Guide (https://www.intel.com/content/www/us/en/docs/intrinsics-guide/)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - simd
+  - vector-register
+  - xmm-register
+  - ymm-register
+  - lane
+  - intrinsic
+  - mm256-load-si256
+  - mm256-cmpgt-epi32
+  - mm256-movemask-epi8
+  - horizontal-reduction
+  - auto-vectorization
+  - scalar-remainder
+learningOutcomes:
+  - "After this lesson you can load eight int32_t prices into a 256-bit AVX2 register and compare them against a threshold in a single instruction"
+  - "After this lesson you can extract a bitmask from a SIMD comparison result and use it to find the first matching lane"
+  - "After this lesson you can write an AVX2 loop over a price array with a scalar fallback for the tail"
+  - "After this lesson you can explain why auto-vectorization often fails on HFT code and when hand-vectorization with intrinsics is warranted"
+professionalContext: "An HFT order book processes hundreds of thousands of price-level updates per second. Many hot-path operations — 'is this price above the threshold?', 'which tick band does this price fall in?', 'compute mid-price for eight symbols at once' — are data-parallel: the same arithmetic applied to eight or sixteen values independently. A scalar loop takes eight iterations; an AVX2 instruction takes one. This 8x throughput improvement on a latency-critical loop is the reason HFT C++ engineers hand-write SIMD intrinsics rather than hoping the compiler auto-vectorizes correctly. Firms like Optiver, IMC, and SIG have entire library layers of hand-written SIMD routines for price arithmetic, and reading and writing intrinsics code is an expected competency for senior C++ roles."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Your order book's best-bid/best-ask computation runs on 1,024 price levels. For each level you check whether the price is better than the current best, and if so update. Written as a scalar loop, that is 1,024 iterations with a branch. Written with AVX2, it is 128 iterations — eight prices compared simultaneously — with no branch inside the loop body. You also get to do this while the cache prefetcher brings in the next batch. The result on a 3 GHz CPU: the scalar loop takes ~340 ns; the AVX2 version takes ~43 ns.
+
+That eight-fold improvement is not unusual. It is the expected throughput ratio when you go from one-at-a-time to eight-at-a-time arithmetic. SIMD is not an advanced optimization — on any data-parallel hot path, it is the correct baseline.
+
+## SIMD conceptual model
+
+<VocabTooltip slug="simd">SIMD</VocabTooltip> — Single Instruction, Multiple Data — is a CPU feature
+where one instruction operates on N values packed into a wide register simultaneously. Modern x86-64
+supports:
+
+- **SSE / SSE4.2**: 128-bit registers (`xmm0`–`xmm15`), four `float` or four `int32_t` per register.
+- **AVX2**: 256-bit registers (`ymm0`–`ymm15`), eight `float` or eight `int32_t` per register.
+- **AVX-512**: 512-bit registers, sixteen `float`. Available on server Intel/AMD; not universal.
+
+Each register holds N values in independent <VocabTooltip slug="lane">lanes</VocabTooltip>. Operations apply to all lanes simultaneously: `_mm256_add_epi32(a, b)` adds eight pairs of int32_t in one instruction, producing eight results, in the same number of cycles as a scalar add.
+
+> **Mental model.** A 256-bit AVX2 integer register is an array of eight 32-bit integers. `_mm256_add_epi32(a, b)` is `for (int i=0; i<8; ++i) result[i] = a[i] + b[i];` done in one clock cycle. You write it with Intel <VocabTooltip slug="intrinsic">intrinsics</VocabTooltip> — C functions that map one-to-one to machine instructions.
+
+## Setup: headers and alignment
+
+```cpp
+#include <immintrin.h>   // all AVX2 intrinsics (also pulls in SSE4.2)
+#include <cstdint>
+#include <cstring>   // std::memcpy for unaligned loads
+
+// A price array for examples. Align to 32 bytes so we can use
+// _mm256_load_si256 instead of the slower _mm256_loadu_si256.
+// In practice use alignas or posix_memalign / aligned_alloc.
+alignas(32) int32_t prices[1024] = {};  // initialized to 0 for the example
+```
+
+Alignment matters: `_mm256_load_si256` requires 32-byte alignment and is slightly faster than the unaligned `_mm256_loadu_si256`. On a hot path over a pre-allocated buffer you control, align it at allocation time.
+
+## Comparing eight prices against a threshold
+
+```cpp
+#include <immintrin.h>
+#include <cstdint>
+#include <cstdio>
+
+// Returns a bitmask: bit i is set if prices[i] > threshold.
+// Processes eight int32_t prices in ONE AVX2 instruction pair.
+int32_t prices_above(const int32_t* __restrict__ prices, int32_t threshold) {
+    // Broadcast the scalar threshold into all 8 lanes of a 256-bit register.
+    __m256i vthresh = _mm256_set1_epi32(threshold);
+
+    // Load 8 int32_t (256 bits) from the array.
+    // __restrict__ tells the compiler prices and vthresh do not alias.
+    __m256i vprices = _mm256_loadu_si256(
+        reinterpret_cast<const __m256i*>(prices));
+
+    // Compare: result lane i = 0xFFFFFFFF if vprices[i] > vthresh[i], else 0x00000000.
+    __m256i vcmp = _mm256_cmpgt_epi32(vprices, vthresh);
+
+    // Extract the most significant bit of each byte (32 bytes = 32 bits of mask).
+    // Each int32_t produces 4 bytes → 4 bits in the mask, all 0 or all 1.
+    // So bits 0,4,8,...28 of the 32-bit mask correspond to lanes 0-7.
+    int32_t mask = _mm256_movemask_epi8(vcmp);
+    return mask;
+}
+
+// Find the index of the first price above threshold (in a group of 8).
+// Returns -1 if none.
+int first_above(const int32_t* prices, int32_t threshold) {
+    int32_t mask = prices_above(prices, threshold);
+    if (mask == 0) return -1;
+    // Each lane produces 4 consecutive set bits. ctz gives the lowest set bit.
+    // Divide by 4 to get lane index.
+    return __builtin_ctz(static_cast<unsigned>(mask)) / 4;
+}
+```
+
+`_mm256_movemask_epi8` collapses 32 bytes of comparison result into a 32-bit integer where each bit is the top bit of one byte. Because each `int32_t` comparison produces 4 bytes of `0xFF` or `0x00`, every group of 4 bits represents one lane — you divide the bit index by 4 to get the lane number.
+
+## Processing a full price array with a scalar tail
+
+```cpp
+#include <immintrin.h>
+#include <cstdint>
+#include <cstddef>
+
+// Count how many prices in [begin, end) are strictly greater than threshold.
+// AVX2 fast path processes 8 at a time; scalar loop handles the tail.
+std::size_t count_above(const int32_t* begin, std::size_t count, int32_t threshold) {
+    std::size_t result = 0;
+    std::size_t i      = 0;
+
+    // Process 8 elements at a time while enough remain.
+    __m256i vthresh = _mm256_set1_epi32(threshold);
+    for (; i + 8 <= count; i += 8) {
+        __m256i vp  = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(begin + i));
+        __m256i cmp = _mm256_cmpgt_epi32(vp, vthresh);
+        // popcount of movemask_epi8: each lane with >threshold contributes 4 set bits.
+        result += static_cast<std::size_t>(
+            __builtin_popcount(static_cast<unsigned>(_mm256_movemask_epi8(cmp)))) / 4;
+    }
+
+    // Scalar remainder for the last < 8 elements.
+    for (; i < count; ++i)
+        result += (begin[i] > threshold) ? 1 : 0;
+
+    return result;
+}
+```
+
+This pattern — AVX2 body loop, scalar <VocabTooltip slug="scalar-remainder">tail</VocabTooltip> — is universal in hand-vectorized code. Always write the scalar tail; never assume `count` is a multiple of 8.
+
+## Computing mid-prices for eight symbols simultaneously
+
+```cpp
+#include <immintrin.h>
+#include <cstdint>
+
+// Compute (bid + ask) / 2 for eight symbols at once using integer arithmetic.
+// Prices are in ticks (int32_t). Result rounded toward zero.
+// Storing the result into out[8].
+void compute_mids(const int32_t* bids, const int32_t* asks, int32_t* out) {
+    __m256i vbids = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bids));
+    __m256i vasks = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(asks));
+
+    // (bid + ask) >> 1: arithmetic right shift for signed divide-by-2.
+    // _mm256_add_epi32 adds in each lane; _mm256_srai_epi32 shifts each lane.
+    __m256i sums  = _mm256_add_epi32(vbids, vasks);
+    __m256i mids  = _mm256_srai_epi32(sums, 1);   // arithmetic shift right by 1
+
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(out), mids);
+}
+```
+
+Arithmetic right shift by 1 is exact for positive integers and rounds toward negative infinity for negative ones — correct for mid-price in tick space where both bid and ask are non-negative.
+
+## When auto-vectorization fails
+
+The compiler's auto-vectorizer should handle simple loops automatically. In HFT code it often fails because:
+
+1. **Pointer aliasing.** Without `__restrict__`, the compiler assumes output pointers may alias input pointers and serializes loads/stores.
+2. **Non-trivial control flow.** A branch inside the loop (e.g., `if (prices[i] > threshold) update_book(prices[i])`) breaks vectorization.
+3. **Non-unit stride.** Accessing `structs[i].price` in an array-of-structs layout creates a stride-by-sizeof(struct) load pattern the auto-vectorizer often does not optimize.
+4. **Function calls.** Any non-inline function call inside a loop stops vectorization.
+
+Hand-written intrinsics bypass all of these: you control the loads, the arithmetic, and the control flow explicitly. Use `__restrict__` on hot-path functions as the first step; check with `-fopt-info-vec-optimized` or compiler explorer; fall back to intrinsics when the compiler-generated assembly shows scalar code.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "After calling _mm256_cmpgt_epi32(vprices, vthresh) and then _mm256_movemask_epi8(result), you get mask = 0x0000_F000. Which lane(s) had a price greater than the threshold?",
+      options: [
+        "Lane 3 (bits 12-15 set, lane index = 12/4 = 3)",
+        "Lane 0 (bit 0 set)",
+        "Lanes 12-15 (one per bit)",
+        "None — 0x0000_F000 represents a false result in AVX2",
+      ],
+      correct: 0,
+      explanation:
+        "Each int32_t comparison produces 4 bytes of 0xFF (true) or 0x00 (false). _mm256_movemask_epi8 extracts the MSB of each byte into a 32-bit mask, so a true lane produces 4 consecutive set bits. 0x0000_F000 has bits 12-15 set (counting from bit 0). Bits 12-15 = 4 consecutive bits starting at bit 12 → lane index = 12/4 = 3. Lane 3's price was greater than the threshold. All other lanes had prices at or below it.",
+    },
+    {
+      question:
+        "You have a price array of 1,023 int32_t elements and an AVX2 loop that processes 8 at a time. How many iterations does the AVX2 body execute, and how many elements does the scalar tail handle?",
+      options: [
+        "AVX2: 128 iterations (1024/8), scalar tail: 0 elements",
+        "AVX2: 127 iterations (floor(1023/8) = 127, covering 1016 elements), scalar tail: 7 elements (1023 - 1016 = 7)",
+        "AVX2: 128 iterations, scalar tail: 1 element",
+        "AVX2: 0 iterations (1023 is not divisible by 8), scalar tail: 1023 elements",
+      ],
+      correct: 1,
+      explanation:
+        "floor(1023 / 8) = 127. The AVX2 body runs 127 times and processes 127 × 8 = 1016 elements. The remaining 1023 - 1016 = 7 elements fall into the scalar tail loop. This is why the tail loop is mandatory — any array length not a multiple of 8 leaves a remainder that the AVX2 body cannot safely process (reading past the end of the array would be UB).",
+    },
+    {
+      question:
+        "A colleague says 'the compiler will auto-vectorize this loop anyway, so there's no point writing intrinsics.' Your inner loop is: for (int i=0; i<n; ++i) { if (prices[i] > bid) best_bid = prices[i]; }. Will the compiler vectorize this?",
+      options: [
+        "Yes — modern compilers fully vectorize all comparison and update patterns",
+        "No — the conditional update (if/assignment) creates a data dependency between iterations that breaks auto-vectorization for a generic compiler; you would need to restructure as a horizontal max reduction or use intrinsics explicitly",
+        "Yes, but only with -O3 and -march=native",
+        "Yes — the compiler will convert it to a _mm256_max_epi32 reduction automatically",
+      ],
+      correct: 1,
+      explanation:
+        "The if/assignment pattern introduces a conditional update that is a reduction (running maximum). While GCC and Clang do auto-vectorize simple reductions under -O3 -mavx2, the conditional inside a loop with a non-trivial predicate (writing back to a scalar best_bid outside the loop body) frequently prevents auto-vectorization. Compiling with -fopt-info-vec-missed will confirm. The hand-vectorized version uses _mm256_max_epi32 to compute the per-batch maximum and a scalar horizontal reduction afterward — a pattern the compiler cannot always infer from a conditional assignment.",
+    },
+  ]}
+/>
+
+## What's next
+
+The next lesson completes the q-1 module with hands-on benchmarking: how to use `rdtsc` for nanosecond-accurate timing in C++, how to set up Google Benchmark correctly (avoiding the pitfalls that let the compiler optimize your benchmark to nothing), and how to interpret percentile latency distributions rather than means.

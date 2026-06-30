@@ -1,0 +1,242 @@
+---
+title: "Branch Prediction Hints and Branchless Arithmetic"
+description: "[[likely]]/[[unlikely]] C++20 attributes, CPU pipeline stalls from misprediction, and branchless min/max/clamp patterns that eliminate conditional jumps on the hot path."
+phase: 12
+module: "q-1-modern-cpp-for-hft"
+order: 3
+estimatedMinutes: 35
+difficulty: 4
+prerequisites:
+  - "q-1-modern-cpp-for-hft/01-modern-cpp-for-hft"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - branch-prediction
+  - branch-misprediction
+  - pipeline-flush
+  - likely-attribute
+  - unlikely-attribute
+  - conditional-move
+  - cmov
+  - branchless-arithmetic
+  - saturating-arithmetic
+  - speculative-execution
+learningOutcomes:
+  - "After this lesson you can annotate a hot-path branch with [[likely]] or [[unlikely]] and explain what layout change the compiler makes"
+  - "After this lesson you can rewrite a conditional min/max/clamp as a branchless expression using conditional move semantics"
+  - "After this lesson you can measure branch misprediction rate with perf stat and identify whether a given branch is worth eliminating"
+  - "After this lesson you can state when branchless code is slower than branchy code and why"
+professionalContext: "In a 200-nanosecond tick-to-trade path, a single mispredicted branch consumes 10–20 ns in pipeline flush and recovery — five to ten percent of the whole budget for one wrong guess. HFT engineers audit branches in hot loops the way they audit cache lines: with a profiler first, then with surgical rewrites. The two tools are [[likely]]/[[unlikely]] for branches you keep but want the CPU to lay out correctly, and branchless arithmetic for comparisons so frequent that even a well-predicted branch wastes an instruction slot the CPU could have used for real work."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Your order router checks, on every incoming packet, whether the sequence number is valid. The sequence number is almost always valid — gaps happen perhaps once a day. The branch that handles the gap is therefore cold, and the branch that continues the fast path is hot. Without annotation, the compiler lays out the code in source order. The predictor learns the pattern eventually, but the branch instruction itself still costs a slot and the cold-path instructions pollute the instruction cache.
+
+A single `[[unlikely]]` attribute moves the cold path out of the main flow, making the instruction cache hold only the hot path. That is the smallest possible change — one keyword — for a measurable gain on a path that executes a hundred million times a day.
+
+## The mechanism: CPU branch prediction
+
+The CPU begins executing instructions _before_ it knows whether a branch is taken. This is <VocabTooltip slug="speculative-execution">speculative execution</VocabTooltip>: it guesses "taken" or "not taken" based on the <VocabTooltip slug="branch-prediction">branch predictor</VocabTooltip>'s history. If the guess is right, the speculatively-executed instructions are committed and cost nothing extra. If the guess is wrong — a <VocabTooltip slug="branch-misprediction">misprediction</VocabTooltip> — the pipeline is flushed, the speculative work is discarded, and the CPU starts again on the correct path. On a modern x86-64, this <VocabTooltip slug="pipeline-flush">pipeline flush</VocabTooltip> costs roughly 10–20 cycles.
+
+The branch predictor is excellent at learned patterns: a loop condition that is true 99% of the time will almost always be predicted correctly after a few iterations. The two cases where you must help it:
+
+1. A branch the predictor has never seen before (startup, a cold handler).
+2. A branch that is correlated with external data it cannot track (market data content, protocol type bytes).
+
+## [[likely]] and [[unlikely]]: layout hints
+
+C++20's `[[likely]]` and `[[unlikely]]` attributes on a branch arm tell the compiler — and therefore the code layout — which path the CPU should optimise for. The compiler emits the "likely" path as fall-through in the instruction stream and the "unlikely" path as a forward jump out of line.
+
+```cpp
+#include <cstdint>
+
+// A SoupBinTCP/ITCH receive loop. Packet gaps are extremely rare
+// (maybe once a day), so the gap handler should be cold and off the
+// main path.
+void process_packet(std::uint64_t expected_seq, std::uint64_t actual_seq) {
+    if (actual_seq == expected_seq) [[likely]] {
+        // Hot path: 99.9999% of the time we land here.
+        // [[likely]] lays this out as fall-through in the binary, keeping
+        // it in the instruction cache with the surrounding loop code.
+        process_message();
+    } else [[unlikely]] {
+        // Cold path: gap detected. Slow, infrequent, off-line in the binary.
+        // [[unlikely]] puts this after a jump so it does not pollute i-cache.
+        handle_gap(expected_seq, actual_seq);
+    }
+}
+```
+
+Two important notes:
+
+- The attributes are **hints to the compiler for layout**; they do not change the branch predictor's runtime behaviour. A CPU that has observed this branch is taken 50% of the time will continue to guess 50%, regardless of the attribute. The attribute helps instruction cache density and the optimizer's inlining/hoisting decisions; it does not make the hardware predictor smarter.
+- Use them where profiling shows the branch is on a frequently-executed path AND the probability is highly lopsided. Adding `[[likely]]` to a 60/40 branch is noise.
+
+## Branchless arithmetic: eliminating the branch entirely
+
+For comparisons in tight loops — clamping a quantity, selecting the minimum of two prices — the branch itself (even when perfectly predicted) consumes instruction bandwidth and potentially delays out-of-order execution. The alternative is a <VocabTooltip slug="conditional-move">conditional move</VocabTooltip> (`cmov` on x86-64): a single instruction that selects between two values based on a condition, with no branch and no prediction penalty.
+
+The C++ idiom that reliably generates `cmov` is the ternary expression on integer or pointer types:
+
+```cpp
+#include <cstdint>
+#include <algorithm>   // std::min, std::max, std::clamp
+
+// A quantity cap: hard-coded maximum is 100,000 shares.
+// The ternary compiles to a cmov on x86-64 — no branch.
+// Equivalent to std::min but spelled out to show intent.
+constexpr std::uint32_t kMaxShares = 100'000;
+
+[[nodiscard]] std::uint32_t cap_quantity(std::uint32_t requested) noexcept {
+    return requested > kMaxShares ? kMaxShares : requested;  // -> cmov
+}
+
+// Best-bid update: keep the higher of two prices.
+// std::max<int64_t> also generates cmov for integer types.
+[[nodiscard]] std::int64_t update_best_bid(
+        std::int64_t current_best, std::int64_t new_price) noexcept {
+    return new_price > current_best ? new_price : current_best;
+}
+
+// Tick-size clamped quantity: between minimum lot and maximum lot.
+// std::clamp resolves to two cmovs or a single conditional.
+[[nodiscard]] std::uint32_t lot_round(
+        std::uint32_t qty, std::uint32_t lot_min, std::uint32_t lot_max) noexcept {
+    return std::clamp(qty, lot_min, lot_max);
+}
+```
+
+For `std::min` and `std::max` on arithmetic types, the standard library implementations in libc++ and libstdc++ under optimisation (-O2 or higher) already generate `cmov`. You do not need to write the ternary yourself for those; it is shown here to illustrate what the compiler is doing.
+
+## When branchless is NOT the answer
+
+Eliminating a branch has a cost: the CPU must compute **both** arms (or at least not short-circuit). If one arm involves a potentially-invalid memory access (a dereference of a null pointer, an out-of-bounds array index), branchless arithmetic is unsafe. The canonical trap:
+
+```cpp
+// UNSAFE: the ternary does NOT short-circuit.
+// If p == nullptr, the ternary still evaluates *p, which is UB.
+std::int64_t price = (p != nullptr) ? *p : 0;  // WRONG if p can be null
+
+// SAFE: the branching if short-circuits — *p never evaluates when p is null.
+std::int64_t price = 0;
+if (p != nullptr) price = *p;
+```
+
+Additionally, branchless arithmetic on floating-point types frequently does NOT produce `cmov` — the compiler may still emit a branch because floating-point comparisons involve the FPU status flags, which require different instructions. Always verify with the disassembler (`objdump -d` or Compiler Explorer) before assuming cmov.
+
+The mental model: **use branchless for integer comparisons in inner loops; use `[[likely]]/[[unlikely]]` for rare-but-valid branches; use ordinary branching for pointer checks and floating-point.**
+
+## Measuring misprediction rate
+
+Before rewriting any branch, measure it. On Linux, `perf stat` reports hardware performance counters:
+
+```bash
+# Profile a running binary for 10 seconds.
+# branch-misses / branches is the misprediction rate (%).
+perf stat -e branches,branch-misses ./order_router 2>&1 | grep -E "branches|branch-misses"
+```
+
+A misprediction rate under 1–2% on a branch that runs millions of times per second is already well-predicted; rewriting it for branchlessness buys nothing and may hurt readability. Target branches with a high rate on the critical path, not all branches.
+
+```bash
+# Pinpoint which branch mispredicts most:
+perf record -e branch-misses:u ./order_router
+perf report   # shows source locations of the most-mispredicted branches
+```
+
+## Apply it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement branchless integer clamp, min, and best-price-select functions using ternary expressions (no if/else). These model the cmov idiom. clampQty(qty, lo, hi) returns qty clamped to [lo, hi]. minPrice(a, b) returns the smaller integer price. bestBid(current, incoming) returns the larger of two bid prices."
+  initialCode={`// Branchless clamp: return qty confined to [lo, hi]. Use ternary only.
+function clampQty(qty, lo, hi) {
+  // hint: clamp is two ternaries (or nested ternaries)
+  return 0; // TODO
+}
+
+// Branchless min: return the smaller of two prices (integers).
+function minPrice(a, b) {
+return 0; // TODO
+}
+
+// Branchless best bid: return the larger of two bid prices.
+function bestBid(current, incoming) {
+return 0; // TODO
+}
+
+console.log(clampQty(150, 1, 100)); // 100
+console.log(clampQty(50, 1, 100)); // 50
+console.log(clampQty(0, 1, 100)); // 1
+console.log(minPrice(42100, 42110)); // 42100
+console.log(bestBid(42100, 42110)); // 42110`}
+  solution={`function clampQty(qty, lo, hi) {
+const clamped_lo = qty < lo ? lo : qty;
+return clamped_lo > hi ? hi : clamped_lo;
+}
+
+function minPrice(a, b) {
+return a < b ? a : b;
+}
+
+function bestBid(current, incoming) {
+return incoming > current ? incoming : current;
+}
+
+console.log(clampQty(150, 1, 100));
+console.log(clampQty(50, 1, 100));
+console.log(clampQty(0, 1, 100));
+console.log(minPrice(42100, 42110));
+console.log(bestBid(42100, 42110));`}
+testCases={[
+"clampQty(150, 1, 100) returns 100 (clamped to hi)",
+"clampQty(50, 1, 100) returns 50 (within range)",
+"clampQty(0, 1, 100) returns 1 (clamped to lo)",
+"minPrice(42100, 42110) returns 42100",
+"bestBid(42100, 42110) returns 42110",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "You annotate a branch with `[[likely]]` in C++20. Which of the following is correct?",
+      options: [
+        "The branch predictor will now predict this arm is taken, reducing mispredictions at runtime",
+        "The compiler may lay out the likely arm as fall-through in the instruction stream and move the unlikely arm out of line, improving instruction cache density and enabling certain optimisations; the hardware branch predictor's runtime behaviour is unchanged",
+        "The branch is eliminated and replaced with a conditional move instruction",
+        "The annotation causes the function to be inlined at all call sites",
+      ],
+      correct: 1,
+      explanation:
+        "[[likely]] is a compiler layout hint, not a runtime hardware hint. It affects how the compiler arranges instructions in memory — the likely path becomes fall-through (no jump), the unlikely path is out-of-line — which improves instruction cache utilisation and can allow better optimiser decisions (hoisting, inlining). It does NOT communicate anything to the CPU's branch predictor; the predictor still learns from runtime execution history. It does NOT eliminate the branch or generate cmov. It has no effect on inlining.",
+    },
+    {
+      question:
+        "A loop computes `int64_t best = (a > b) ? a : b;` one hundred million times with random a and b values. A colleague says 'this has a 50% misprediction rate — use a branch to make it faster.' What is wrong with the reasoning?",
+      options: [
+        "Nothing — a branch would be faster with 50% misprediction",
+        "The ternary expression on integers compiles to a cmov instruction, which has no branch and no prediction; the colleague is right that a branch would mispredict 50% of the time but wrong to propose switching to a branch — the correct fix is to verify the ternary generates cmov (check the assembly) because cmov is exactly the solution to the 50%-misprediction problem",
+        "Ternary expressions are always slower than branches regardless of prediction rate",
+        "The loop should use std::max, which never generates branches",
+      ],
+      correct: 1,
+      explanation:
+        "For random 50/50 inputs, a branch mispredicts half the time — the worst possible case, costing 10-20 cycles per misprediction. A cmov instruction (generated by the ternary on integers under optimisation) has no branch and no prediction: it always costs 1-3 cycles regardless of which value was selected. So the colleague correctly diagnosed a 50% misprediction rate on a branch version but incorrectly concluded branching is the solution; cmov IS the solution. std::max also generates cmov for integers (option D is incomplete — it does the right thing but the phrasing 'never generates branches' is an overstatement).",
+    },
+  ]}
+/>
+
+## What's next
+
+The next lesson covers custom allocators and placement new — how to eliminate heap allocation entirely from the hot path and why HFT code pre-allocates fixed-size object pools at startup.

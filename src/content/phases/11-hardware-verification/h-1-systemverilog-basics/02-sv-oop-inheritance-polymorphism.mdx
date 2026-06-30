@@ -1,0 +1,202 @@
+---
+title: "SV Classes — Inheritance, Virtual Methods, and Polymorphism"
+description: "How SystemVerilog's object-oriented system enables reusable, extensible verification components — the class hierarchy that makes UVM possible."
+phase: 11
+module: "h-1-systemverilog-basics"
+order: 2
+estimatedMinutes: 60
+difficulty: 4
+prerequisites:
+  - "h-1-sv-for-dv"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - inheritance
+  - virtual-method
+  - polymorphism
+  - abstract-class
+  - base-class
+  - handle
+  - cast
+  - super
+learningOutcomes:
+  - "Write a derived class that extends a base class using SystemVerilog's extends keyword"
+  - "Declare and override virtual methods to enable polymorphic dispatch"
+  - "Use $cast to safely assign a base-class handle to a derived type"
+  - "Identify when an abstract base class (pure virtual) is the right design choice"
+professionalContext: "UVM is built entirely on SystemVerilog's OOP system. Every uvm_component is a class. Every uvm_sequence_item is a class. Factory overrides work by swapping one derived class for another. Engineers who do not deeply understand inheritance and polymorphism cannot navigate UVM source code, extend existing testbench components, or debug factory-related failures. OOP literacy is the prerequisite to UVM fluency."
+thresholdConcept: false
+---
+
+## Why this matters
+
+When you open any UVM class definition — `uvm_driver`, `uvm_monitor`, `uvm_scoreboard` — the first line is always something like `class my_driver extends uvm_driver #(my_txn)`. Everything downstream flows from that `extends`. Without understanding inheritance and polymorphism, UVM reads as magic. With it, UVM reads as a straightforward application of well-known OOP patterns in SystemVerilog syntax.
+
+## Inheritance — extending a base class
+
+```systemverilog
+// Base class: generic transaction
+class base_txn;
+    rand bit [31:0] addr;
+    rand bit [7:0]  data;
+    int             tag;
+
+    function new(int t = 0);
+        tag = t;
+    endfunction
+
+    virtual function void print();
+        $display("[base_txn] addr=0x%h data=0x%h tag=%0d", addr, data, tag);
+    endfunction
+endclass
+
+// Derived class: adds burst capability
+class burst_txn extends base_txn;
+    rand int unsigned len;
+    constraint c_len { len inside { [1:16] }; }
+
+    function new(int t = 0);
+        super.new(t);   // Call parent constructor
+    endfunction
+
+    // Override the print method
+    virtual function void print();
+        $display("[burst_txn] addr=0x%h data=0x%h len=%0d tag=%0d",
+                 addr, data, len, tag);
+    endfunction
+endclass
+```
+
+Key mechanics:
+
+- `extends base_txn` — `burst_txn` inherits all fields and methods from `base_txn`.
+- `super.new(t)` — explicitly calls the parent's constructor. Always required when the parent constructor has required arguments.
+- The derived class CAN access `addr`, `data`, `tag` directly — they're inherited.
+- The derived class CAN override methods declared `virtual` in the parent.
+
+## Polymorphism — one handle, many types
+
+The power: a base-class handle can hold a derived-class object.
+
+```systemverilog
+base_txn  bh;        // Base-class handle
+burst_txn bt = new();
+bt.addr = 32'hDEAD;
+bt.len  = 4;
+
+bh = bt;             // Legal: derived IS-A base
+bh.print();          // Calls burst_txn::print() — polymorphic dispatch!
+```
+
+`bh` is typed as `base_txn`, but it holds a `burst_txn`. When `print()` is called, SystemVerilog dispatches to the ACTUAL object type, not the handle type. This is polymorphism.
+
+This is exactly how UVM's analysis ports work: they hold `uvm_sequence_item` handles that are actually protocol-specific transactions.
+
+## $cast — safe downcast
+
+Going the other direction (base handle → derived type) requires a runtime check:
+
+```systemverilog
+base_txn  bh;
+burst_txn bt;
+
+// Dynamic cast — safe
+if (!$cast(bt, bh)) begin
+    `uvm_fatal("CAST", "Handle is not a burst_txn")
+end
+// If $cast succeeds, bt now holds the derived object
+
+// Static cast (no check) — DANGEROUS, avoid
+bt = burst_txn'(bh);   // Compiles but silently corrupts if types don't match
+```
+
+`$cast` returns 0 on failure (type mismatch) instead of crashing. Always use `$cast` for downcasts. UVM's factory uses `$cast` internally every time it returns a component.
+
+## Virtual methods — the dispatch contract
+
+A method declared `virtual` in the base class can be overridden in any derived class:
+
+```systemverilog
+class base_txn;
+    virtual function void print();   // virtual = overridable
+        $display("base");
+    endfunction
+
+    function void fixed_method();    // non-virtual = NOT overridable
+        $display("always base");
+    endfunction
+endclass
+
+class derived_txn extends base_txn;
+    virtual function void print();   // Override
+        $display("derived");
+    endfunction
+    // fixed_method() cannot be overridden; base's version always runs
+endclass
+```
+
+Rule: if you think a method might ever need per-type behavior, declare it `virtual` in the base class. Forgetting `virtual` is a common bug — the wrong version runs silently.
+
+## Abstract classes — the pure virtual pattern
+
+Sometimes a base class exists only to define an interface, not an implementation:
+
+```systemverilog
+virtual class base_checker;   // "virtual class" = abstract — cannot be instantiated
+    pure virtual function bit check(base_txn expected, base_txn actual);
+    // No implementation — derived classes MUST provide one
+endclass
+
+class uart_checker extends base_checker;
+    virtual function bit check(base_txn expected, base_txn actual);
+        uart_txn exp_u, act_u;
+        $cast(exp_u, expected);
+        $cast(act_u, actual);
+        return (exp_u.data == act_u.data && exp_u.parity == act_u.parity);
+    endfunction
+endclass
+```
+
+This pattern lets a scoreboard hold a `base_checker` handle and call `check()` without knowing the specific protocol. The factory swaps in `uart_checker` at runtime. UVM's entire component tree uses this pattern.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer writes a base class with a method `function void report();` (without `virtual`). A derived class overrides it. A base-class handle holding a derived object calls `report()`. Which version runs?",
+      options: [
+        "The derived class version — the handle points to the derived object",
+        "The base class version — without `virtual`, dispatch uses the static type of the handle (base_txn), not the dynamic type. This is a frequent, silent bug: the override appears to work when the handle is the derived type, but fails when called through a base handle. Always add `virtual` to any method you intend to override.",
+        "A compile error is produced",
+        "Simulator-dependent behavior",
+      ],
+      correct: 1,
+      explanation:
+        "Non-virtual method dispatch in SystemVerilog uses the static (compile-time) type of the handle. If the handle is declared `base_txn`, the base class `report()` runs regardless of the actual object. Virtual dispatch uses the dynamic (runtime) type. This is the single most common OOP bug in SV testbenches. The fix: add `virtual` to any base-class method that subclasses should be able to override.",
+    },
+    {
+      question:
+        "Why does UVM require `$cast` when the factory returns a component via `type_id::create()`?",
+      options: [
+        "Factory is slow; $cast speeds it up",
+        "The factory returns a `uvm_object` handle (the common base type). The calling code holds a derived-type handle (e.g., `my_driver`). The downcast from `uvm_object` to `my_driver` requires a runtime type check — that's what `$cast` provides. If the factory was overridden to return an incompatible type, `$cast` fails with a controlled error rather than silently corrupting memory. This is why factory type mismatches show as $cast failures at runtime.",
+        "All UVM objects must be cast",
+        "$cast is required by the language spec for all assignments",
+      ],
+      correct: 1,
+      explanation:
+        "The factory's `create()` method returns `uvm_object` — the universal base type. Callers typically need a specific derived type. The downcast requires $cast to perform a runtime type check. When a factory override substitutes an incompatible type, $cast produces a clear error message instead of corrupted behavior. This is how UVM surfaces factory configuration errors.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H1-3 covers SystemVerilog packages and parameterized classes — how to organize types and utilities into shareable namespaces, and how parameterized classes enable type-generic data structures (like `uvm_tlm_fifo #(T)`) that work with any transaction type.

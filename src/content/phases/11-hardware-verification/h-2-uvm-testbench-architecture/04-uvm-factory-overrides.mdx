@@ -1,0 +1,202 @@
+---
+title: "UVM Factory — Overrides, Substitution, and Debug"
+description: "How the UVM factory enables component substitution without testbench edits — and how to debug the common failure modes."
+phase: 11
+module: "h-2-uvm-testbench-architecture"
+order: 4
+estimatedMinutes: 50
+difficulty: 4
+prerequisites:
+  - "h-2-uvm-tlm-ports-exports-fifos"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - uvm-factory
+  - type-override
+  - instance-override
+  - type-id-create
+  - uvm-component-utils
+  - uvm-object-utils
+  - registration
+  - substitution
+learningOutcomes:
+  - "Explain how uvm_component_utils registers a class with the factory"
+  - "Apply set_type_override to substitute one class for another globally in a test"
+  - "Apply set_inst_override to substitute one class at a specific hierarchy path"
+  - "Read factory debug output to identify which class was actually instantiated"
+professionalContext: "The factory is UVM's implementation of the strategy pattern — swap behavior without editing the testbench. Teams maintain ONE testbench that runs hundreds of different tests by substituting components: error-injecting drivers, custom scoreboards, passive monitors for integration tests. Engineers who understand factory mechanics can make these substitutions in minutes; engineers who don't avoid them and instead copy-paste testbench files, creating unmaintainable divergence."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A production UVM testbench serves dozens of tests. The regression suite for a UART IP might include:
+
+- Functional tests (verify correct data transmission)
+- Error injection tests (inject framing errors, parity errors)
+- Performance tests (burst traffic, back-pressure)
+- Power-aware tests (configure domains, test isolation)
+
+These tests share ONE testbench structure. The driver component is what changes between them. The factory is what makes swapping the driver a 3-line change in the test file rather than a testbench fork.
+
+## Factory registration — the `uvm_component_utils` macro
+
+Every class that participates in the factory must register itself:
+
+```systemverilog
+class my_driver extends uvm_driver #(my_txn);
+    `uvm_component_utils(my_driver)   // Registers my_driver with the factory
+    // ...
+endclass
+
+class my_object extends uvm_sequence_item;
+    `uvm_object_utils(my_object)      // For objects (not components)
+    // ...
+endclass
+```
+
+The macro:
+
+1. Declares `typedef my_driver this_type` for type resolution.
+2. Creates a `type_id` nested class that the factory uses for registration.
+3. Implements `get_type_name()` returning `"my_driver"`.
+4. Registers the class with the UVM factory singleton at elaboration time.
+
+Without `uvm_component_utils`, the class cannot participate in factory overrides and `type_id::create()` falls back to creating the registered class by name — which may or may not be this class.
+
+## Creating via the factory — `type_id::create()`
+
+```systemverilog
+// CORRECT: factory-mediated creation
+my_driver drv = my_driver::type_id::create("drv", this);
+
+// WRONG: direct construction bypasses the factory
+my_driver drv = new("drv", this);  // Override won't work
+```
+
+`type_id::create("name", parent)` asks the factory: "give me an instance of my_driver (or whatever is currently overriding it)". If no override, you get `my_driver`. If there's a type override, you get the overriding class.
+
+## Type override — global substitution
+
+```systemverilog
+class error_inject_driver extends my_driver;
+    `uvm_component_utils(error_inject_driver)
+
+    task drive_to_interface(my_txn tr);
+        // 10% of the time, inject a framing error
+        if ($urandom_range(0, 9) == 0) tr.data ^= 8'hFF;
+        super.drive_to_interface(tr);
+    endtask
+endclass
+
+class error_inject_test extends uvm_test;
+    `uvm_component_utils(error_inject_test)
+
+    function void build_phase(uvm_phase phase);
+        // BEFORE creating sub-components, set the override
+        my_driver::type_id::set_type_override(
+            error_inject_driver::get_type()
+        );
+        super.build_phase(phase);
+        env = my_env::type_id::create("env", this);
+    endfunction
+endclass
+```
+
+The override must be set BEFORE `type_id::create()` is called for `my_driver`. Typically, this means setting overrides at the start of `build_phase`, before creating the env.
+
+After the override:
+
+- Every `my_driver::type_id::create()` in the testbench returns an `error_inject_driver`.
+- The testbench wiring is unchanged — `error_inject_driver` extends `my_driver`, so it satisfies the `uvm_driver #(my_txn)` interface.
+
+## Instance override — targeted substitution
+
+Sometimes you want different behavior for ONE specific agent, not all agents:
+
+```systemverilog
+function void build_phase(uvm_phase phase);
+    // Override ONLY the driver at this specific hierarchy path
+    // Other drivers in the testbench are unaffected
+    my_driver::type_id::set_inst_override(
+        error_inject_driver::get_type(),
+        "uvm_test_top.env.uart_agent.driver"  // Exact path
+    );
+    super.build_phase(phase);
+    env = my_env::type_id::create("env", this);
+endfunction
+```
+
+Instance overrides use the component hierarchy path (the dotted path from root). Glob patterns work too: `"uvm_test_top.env.*.driver"` overrides all drivers in all agents under env.
+
+## Priority: instance override wins over type override
+
+If both a type override and an instance override apply to the same component, the instance override wins. This lets a global type override be the default with specific instances customized differently.
+
+## Factory debug — finding what was actually created
+
+When behavior seems wrong, print the factory registry:
+
+```systemverilog
+// In test's build_phase or start_of_simulation_phase:
+uvm_factory::get().print();
+```
+
+Output (abbreviated):
+
+```
+Factory Configuration:
+  Registered types (components):
+    my_driver           [from: my_driver]
+    error_inject_driver [from: error_inject_driver]
+  Type overrides:
+    my_driver           => error_inject_driver   [all instances]
+  Instance overrides:
+    (none)
+  Type lookup test (my_driver at uvm_test_top.env.agent.driver):
+    => error_inject_driver
+```
+
+Also use `uvm_info` messages with the component's `get_type_name()` to verify at runtime which class was instantiated.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer sets a type override for `my_driver` → `debug_driver` in `build_phase`. After running the test, the debug messages from `debug_driver` don't appear. What's the most likely cause?",
+      options: [
+        "Type overrides don't work for drivers",
+        "The type_id::create() call for the driver is in a different build_phase that ran BEFORE the override was set — most likely the env's build_phase, which ran before the test's build_phase called set_type_override. The fix: ensure the override is set before ANY component that creates my_driver runs its build_phase. In practice, set overrides at the very beginning of the test's build_phase, before calling super.build_phase() or creating the env.",
+        "debug_driver must be in a separate package",
+        "uvm_component_utils is missing from debug_driver",
+      ],
+      correct: 1,
+      explanation:
+        "Factory overrides are registered immediately when the set_type_override call executes. Any type_id::create() that runs BEFORE the override is set gets the original class. In a correctly structured testbench, the test's build_phase sets overrides before creating the env, which then creates agents, which then create drivers — so all downstream creates see the override. If the env builds first (e.g., in super.build_phase), the driver is created before the override is set.",
+    },
+    {
+      question:
+        "Why must a factory-override class extend the class it overrides (rather than being an independent class with the same interface)?",
+      options: [
+        "It doesn't need to extend — any registered class works",
+        "The factory performs a type-compatibility check: the overriding class must be a subtype of the overridden class. This enforces the Liskov Substitution Principle — the replacement must be usable wherever the original is expected. After create() returns, the calling code holds a handle of the ORIGINAL type (e.g., `my_driver`). It must be safe to use that handle. If the override doesn't extend the original, $cast fails and UVM produces a fatal error. The extends relationship is the contract.",
+        "It improves performance",
+        "It's only required for uvm_component subclasses",
+      ],
+      correct: 1,
+      explanation:
+        "The factory uses $cast internally to verify type compatibility. If `debug_driver` doesn't extend `my_driver`, the cast fails with a fatal error when the factory tries to return the object. The inheritance relationship is the language-level guarantee that `debug_driver` IS-A `my_driver` and can be used anywhere a `my_driver` handle is expected. This is why all factory-participating classes form inheritance hierarchies.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H2-5 covers UVM's reporting and callback infrastructure — how to configure message filtering, add test-specific callbacks to components without subclassing, and integrate custom reporting into the testbench's report_phase. These are the tools that make large regression failures readable.

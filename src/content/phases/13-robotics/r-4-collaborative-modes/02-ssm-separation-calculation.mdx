@@ -1,0 +1,124 @@
+---
+title: "SSM Implementation — The Minimum Separation Distance Calculation"
+description: "Speed and Separation Monitoring has a mandatory math step: the protective separation distance formula from ISO 10218-1:2025. Getting the variables wrong means the safety-rated stop activates too late."
+phase: 13
+module: "r-4-collaborative-modes"
+order: 2
+estimatedMinutes: 65
+difficulty: 4
+prerequisites:
+  - "r-4-collaborative-modes-01"
+  - "r-3-functional-safety-01"
+standards:
+  primaryAnchor: "ISO 10218-1:2025"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - protective-separation-distance
+  - human-approach-speed
+  - robot-stopping-time
+  - sensor-response-time
+  - reaction-time
+  - speed-distance-function
+  - dynamic-safety-zone
+  - safety-scanner
+  - zone-configuration
+learningOutcomes:
+  - "After this lesson you can: calculate the minimum protective separation distance for an SSM application given sensor response time, robot stopping time, human approach speed, and end-effector reach"
+  - "After this lesson you can: identify the six variables in the ISO 10218-1:2025 SSM separation formula and explain what each contributes"
+  - "After this lesson you can: specify the safety scanner zone configuration that implements a calculated protective separation distance"
+  - "After this lesson you can: explain why the separation distance calculation must be re-done when robot speed, end-effector, or sensor model changes"
+professionalContext: "SSM is the collaborative mode with the most common implementation error in the field. The separation distance is calculated from a formula with six variables; integrators who estimate it by intuition or borrow values from a neighbor cell's documentation routinely under-size the separation, resulting in collisions at the safety-rated stop boundary. ISO 10218-1:2025 provides the formula; every SSM cell must show the calculation with site-specific measured values."
+thresholdConcept: false
+---
+
+## The safety case SSM depends on
+
+Safety-rated Monitored Stop (SMS) is conceptually simple: the robot stops when a human enters the shared space. Speed and Separation Monitoring (SSM) is more complex: the robot slows as the operator approaches and stops at a calculated boundary — with enough room that the robot comes to a complete stop before the operator reaches the robot's hazard zone.
+
+That "enough room" is not an estimate. It is a formula. If the formula is not calculated for the specific cell — specific robot speed, specific sensor response time, specific robot stopping time, specific operator approach speed — the safety case for SSM does not exist. The robot may stop; it may not stop in time.
+
+## The ISO 10218-1:2025 protective separation distance formula
+
+ISO 10218-1:2025 provides the minimum protective separation distance (S_p) formula:
+
+> S_p = (v_h + v_r) × (t_s + t_r) + C_p
+
+Where:
+
+- **v_h** = maximum human approach speed (m/s) — ISO 10218-1:2025 specifies 1.6 m/s as the reference walking speed for approach calculations. This is the value to use unless a lower speed is justified by cell geometry (constrained aisle, slow-speed zone).
+- **v_r** = maximum robot speed at the point of measurement (m/s) — the TCP speed in the programmed trajectory. Not the joint speed; the linear speed of the TCP (or the most hazardous point of the robot/end-effector) during the specific motion.
+- **t_s** = robot stopping time (s) — from the initiation of the stop command to the robot being fully stopped. This is a measured value from the robot model's safety documentation. It includes the safety controller's reaction time plus the mechanical coast-down time.
+- **t_r** = system reaction time (s) — total latency from the sensor detecting the human to the stop command reaching the robot safety controller. This includes: sensor sampling rate, filtering delay, safety controller processing time, and fieldbus latency. For a modern safety scanner with OSSD outputs and EtherNet/IP Safety: typically 50–120 ms total.
+- **C_p** = supplemental distance (m) — accounts for the human reaching INTO the detection zone before the sensor detects them. ISO 10218-1:2025 specifies a depth-of-penetration factor based on the sensor's detection capability. For a typical safety laser scanner with a 30 mm detection object: C_p ≈ 0.12 m.
+
+### Worked example
+
+A pick-and-place SSM cell:
+
+- Robot TCP speed during production cycle: v_r = 0.6 m/s
+- Reference human approach speed: v_h = 1.6 m/s
+- Robot stopping time (from UR10e safety manual, Category 1 stop): t_s = 0.68 s
+- System reaction time (scanner + safety controller + fieldbus): t_r = 0.085 s
+- Supplemental distance (SICK S300 Mini, 30 mm detection): C_p = 0.12 m
+
+> S_p = (1.6 + 0.6) × (0.68 + 0.085) + 0.12
+> S_p = 2.2 × 0.765 + 0.12
+> S_p = 1.683 + 0.12
+> **S_p = 1.80 m**
+
+The inner (stop-trigger) zone boundary of the safety scanner must be at least 1.80 m from the nearest hazardous point of the robot. If the robot's TCP is at the closest point in its trajectory at 0.5 m from the scanner origin, the zone boundary must be at least 1.80 + 0.5 = 2.30 m from the scanner origin.
+
+## The zone configuration
+
+A typical SSM implementation uses a safety laser scanner with at least two zone levels:
+
+- **Warning zone (outer zone):** The robot reduces speed from full programmed speed to a reduced speed. The distance at which speed reduction begins is calculated from the REDUCED speed version of S_p.
+- **Stop zone (inner zone):** The robot executes a safety-rated stop. This distance is the full S_p calculated at FULL programmed speed.
+
+The two zones create the SSM speed-distance profile: normal speed when no one is in either zone, reduced speed when operator is in the warning zone but outside the stop zone, and safety stop when the operator enters the stop zone.
+
+```
+[Robot hazard zone] ← S_p → [Stop zone boundary] ← outer margin → [Warning zone boundary]
+
+Example (from the worked calculation above):
+  Stop zone: 1.80 m from nearest hazardous robot point
+  Warning zone: calculated from reduced speed (e.g., 0.25 m/s):
+    S_p_reduced = (1.6 + 0.25) × (0.68 + 0.085) + 0.12 = 1.85 × 0.765 + 0.12 = 1.54 m
+  (So the warning zone is SMALLER than the stop zone — the robot can move faster at the stop-zone distance
+   because it only needs to slow to 0.25 m/s, not stop, within that time)
+```
+
+Wait — the outer warning zone must be LARGER than the stop zone in physical space (farther from the robot). The speed reduction calculation determines the minimum distance from the robot at which the robot must have already reduced speed. Let me clarify: the warning zone in the scanner is set to trigger when the operator is at the outer distance; the stop zone triggers when the operator reaches the inner (smaller) distance. Both are distances from the ROBOT HAZARD ZONE origin, and the warning zone must be the larger circle.
+
+## Variables that require re-measurement
+
+The S_p calculation is NOT transferable between cells without verification. Any of the following changes invalidates the existing calculation:
+
+1. **Robot program speed change** — v_r changes; S_p must be recalculated.
+2. **Payload or end-effector change** — affects the robot's inertia and stopping time t_s; stopping time must be re-measured.
+3. **Scanner model change** — t_r and C_p are scanner-specific; new model may have different response time and depth-of-penetration.
+4. **Safety controller firmware update** — may affect t_s (stopping time) or t_r (reaction time); manufacturer release notes must be consulted.
+5. **Cell layout change** — if the scanner mounting position changes relative to the robot hazard zone, the zone configuration must be re-commissioned.
+
+The safety file must document which version of the S_p calculation corresponds to which configuration. A cell operating under a changed configuration without a revalidated S_p is operating without a valid SSM safety case.
+
+## Check your understanding
+
+<SandboxExercise
+  title="SSM Separation Distance Calculation"
+  description="You are designing an SSM cell for a UR5e cobot performing screw-driving operations. The following parameters have been measured and documented: robot TCP speed during production = 0.45 m/s; UR5e safety manual specifies Category 0 stopping time = 0.32 s; SICK microScan3 safety scanner reaction time = 0.060 s (OSSD + EtherNet/IP Safety); depth-of-penetration factor for 70 mm detection = 0.15 m. Use the ISO 10218-1:2025 formula with v_h = 1.6 m/s."
+  task="(1) Calculate the minimum protective separation distance S_p. (2) The nearest hazardous point of the robot in its worst-case trajectory is 0.35 m from the scanner's scan plane origin. What is the minimum stop-zone radius configured in the scanner software? (3) If the cell layout only permits a maximum scanner zone radius of 1.8 m due to cell boundary constraints, identify the change that would allow the cell to conform."
+  acceptanceCriteria={[
+    "S_p = (1.6 + 0.45) × (0.32 + 0.060) + 0.15 = 2.05 × 0.380 + 0.15 = 0.779 + 0.15 = 0.929 m (approximately 0.93 m)",
+    "Minimum zone radius = 0.929 + 0.35 = 1.279 m (approximately 1.28 m from scanner origin)",
+    "At 1.8 m maximum zone radius the 1.28 m requirement is already met — no change needed; OR if S_p were larger, acceptable changes include reducing TCP speed (reduces v_r), selecting a scanner with faster response time (reduces t_r), confirming a faster stopping mode (Category 0 vs 1 affects t_s), or using a scanner with smaller depth-of-penetration factor",
+  ]}
+/>
+
+## What's next
+
+Lesson R4-3 covers the Hand Guiding mode — specifically the enabling device requirements, force/torque sensing architecture, and the operator-safety controls that make HG the safest mode for teaching trajectories. The safety function for HG is different from SSM: instead of monitoring separation, you're monitoring operator intent through the enabling device state.
