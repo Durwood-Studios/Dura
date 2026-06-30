@@ -117,8 +117,8 @@ export default function DiscoverPage(): React.ReactElement {
           When you&rsquo;re ready for the full curriculum
         </h2>
         <p className="mt-2 text-sm leading-relaxed text-[var(--color-text-secondary)]">
-          The Discovery Zone is the play surface. The full DURA curriculum runs across 10 phases and
-          53 modules — from binary and the command line through agentic AI in production. Every
+          The Discovery Zone is the play surface. The full DURA curriculum runs across 15 phases and
+          118 modules — from binary and the command line through agentic AI in production. Every
           concept you explore here is taught more deeply somewhere in those phases. Start where you
           want.
         </p>

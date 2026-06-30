@@ -95,7 +95,7 @@ export const PREFIX_QUESTIONS: SkillQuestion[] = [
   },
 ];
 
-/** 35 placement questions across all 10 phases. */
+/** 35 placement questions across the core phases. */
 export const SKILL_QUESTIONS: SkillQuestion[] = [
   // Phase 0-1: Digital Literacy & Programming Fundamentals (8 questions)
   {

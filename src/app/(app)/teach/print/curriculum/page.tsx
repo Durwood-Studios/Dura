@@ -25,7 +25,7 @@ export default async function CurriculumMapPage(): Promise<React.ReactElement> {
         </p>
         <h1 className="mt-1 text-4xl font-semibold">Engineering education, hardened by design</h1>
         <p className="mt-3 text-sm text-[var(--color-text-secondary)]">
-          10 phases · 52 modules · ~406 lessons · ~2,850 hours · Free forever
+          15 phases · 118 modules · 539 lessons · ~3,500 hours · Free forever
         </p>
         <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
           Currently {authoredTotal} lessons authored. Generated{" "}

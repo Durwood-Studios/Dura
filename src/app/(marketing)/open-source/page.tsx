@@ -160,7 +160,7 @@ export default function OpenSourcePage(): React.ReactElement {
             Marketing pages, TipButton · <strong>in progress</strong>
           </li>
           <li>Teacher dashboard and export engine · next</li>
-          <li>Content sprint — all 406 lessons and 500 dictionary terms · after</li>
+          <li>Content sprint — all 539 lessons and 500 dictionary terms · after</li>
           <li>Polish, PWA, accessibility audit, launch · last</li>
         </ol>
       </section>

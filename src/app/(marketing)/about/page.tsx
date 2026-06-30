@@ -42,7 +42,7 @@ export default function AboutPage(): React.ReactElement {
           at every step — what would that look like?
         </p>
         <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          The answer is 10 phases, 52 modules, 406 lessons, and hardened assessments between every
+          The answer is 15 phases, 118 modules, 539 lessons, and hardened assessments between every
           step. Built by one person in the open, because that&apos;s the only way to keep it honest.
         </p>
       </section>

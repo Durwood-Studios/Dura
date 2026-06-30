@@ -8,9 +8,9 @@ interface StatChip {
 }
 
 const STATS: StatChip[] = [
-  { label: "400+ Lessons" },
-  { label: "10 Phases" },
-  { label: "2,850 Hours" },
+  { label: "539 Lessons" },
+  { label: "15 Phases" },
+  { label: "3,500+ Hours" },
   { label: "Free Forever" },
 ];
 
@@ -100,8 +100,8 @@ export function Hero(): React.ReactElement {
           transition={{ duration: 0.6, ease: "easeOut", delay: 0.2 }}
           className="mx-auto mt-5 max-w-2xl text-base leading-relaxed text-[#525252] sm:text-lg dark:text-[#a0a0a8]"
         >
-          From your first click to engineering leadership. 10 phases. 2,850 hours. Standards-backed.
-          Free forever.
+          From your first click to engineering leadership. 15 phases. 3,500+ hours.
+          Standards-backed. Free forever.
         </motion.p>
 
         {/* CTA buttons — full-width stacked on mobile, row on sm+ */}
