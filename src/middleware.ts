@@ -1,35 +1,50 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
-import { isRateLimited } from "@/lib/rate-limit";
+import { rateLimit } from "@/lib/rate-limit";
+import { getClientIp } from "@/lib/get-client-ip";
 
-/** Auth paths that should be rate-limited (sign-in, sign-up, OAuth, callbacks). */
-const AUTH_RATE_LIMITED_PATHS = ["/auth/sign-in", "/auth/sign-up", "/auth/callback"];
+/**
+ * Per-path rate limit budgets for auth endpoints.
+ * Keys are exact path prefixes; first match wins.
+ *
+ * These limits are intentionally loose enough for real users but tight
+ * enough to slow credential-stuffing attacks meaningfully:
+ *   sign-in:         5 attempts / 15 min  (brute-force protection)
+ *   sign-up:         3 attempts / hour    (account-farming protection)
+ *   forgot-password: 3 attempts / hour    (email-spam / enumeration protection)
+ *   callback:       20 attempts / min     (OAuth code-exchange — must be generous)
+ */
+const RATE_LIMIT_CONFIGS: Record<string, { limit: number; windowMs: number }> = {
+  "/auth/sign-in": { limit: 5, windowMs: 15 * 60 * 1_000 },
+  "/auth/sign-up": { limit: 3, windowMs: 60 * 60 * 1_000 },
+  "/auth/forgot-password": { limit: 3, windowMs: 60 * 60 * 1_000 },
+  "/auth/callback": { limit: 20, windowMs: 60 * 1_000 },
+};
 
-function isAuthPath(pathname: string): boolean {
-  return AUTH_RATE_LIMITED_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
-}
-
-/** Best-effort IP extraction — works on Vercel and most proxies. */
-function getClientIp(request: NextRequest): string {
-  return (
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    request.headers.get("x-real-ip") ??
-    "unknown"
+/** Returns the matching config entry for a pathname, or undefined if not rate-limited. */
+function matchRateLimit(
+  pathname: string
+): [string, { limit: number; windowMs: number }] | undefined {
+  return Object.entries(RATE_LIMIT_CONFIGS).find(
+    ([path]) => pathname === path || pathname.startsWith(path + "/")
   );
 }
 
-export async function middleware(request: NextRequest) {
-  // Rate limit auth endpoints to prevent brute-force and credential stuffing.
-  // Gracefully skipped when UPSTASH_REDIS_REST_URL is not configured.
-  if (isAuthPath(request.nextUrl.pathname)) {
-    const ip = getClientIp(request);
-    const { limited, reset } = await isRateLimited(ip);
+export async function middleware(request: NextRequest): Promise<NextResponse> {
+  const matched = matchRateLimit(request.nextUrl.pathname);
 
-    if (limited) {
+  if (matched) {
+    const [matchedPath, opts] = matched;
+    const ip = getClientIp(request);
+    // Bucket key: "sign-in:203.0.113.4" — scoped per-route so limits don't bleed across paths.
+    const routeSlug = matchedPath.split("/").at(-1) ?? "auth";
+    const { success, retryAfter } = await rateLimit(`${routeSlug}:${ip}`, opts);
+
+    if (!success) {
       return new NextResponse("Too Many Requests", {
         status: 429,
         headers: {
-          "Retry-After": String(Math.ceil((reset - Date.now()) / 1000)),
+          "Retry-After": String(retryAfter),
           "Content-Type": "text/plain",
         },
       });
