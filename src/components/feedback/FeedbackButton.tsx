@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { MessageSquare, X, Send, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getDB } from "@/lib/db";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import type { FeedbackCategory, FeedbackEntry } from "@/types/feedback";
 
 const CATEGORIES: { value: FeedbackCategory; label: string }[] = [
@@ -53,10 +54,10 @@ export function FeedbackButton(): React.ReactElement {
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState<"idle" | "submitting" | "done">("idle");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (open) textareaRef.current?.focus();
-  }, [open]);
+  // Confine Tab/Shift+Tab within the dialog while it is open (WCAG 2.1 SC 2.1.2).
+  useFocusTrap(dialogRef, open);
 
   const handleSubmit = async (): Promise<void> => {
     if (!message.trim() || status !== "idle") return;
@@ -98,6 +99,7 @@ export function FeedbackButton(): React.ReactElement {
 
       {open && (
         <div
+          ref={dialogRef}
           role="dialog"
           aria-modal="true"
           aria-labelledby="feedback-title"

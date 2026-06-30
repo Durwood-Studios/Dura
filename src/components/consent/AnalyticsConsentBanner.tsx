@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   declineAnalyticsConsent,
   grantAnalyticsConsent,
   hasMadeConsentChoice,
 } from "@/lib/analytics/consent-gate";
 import { purgeAnalyticsQueue } from "@/lib/analytics";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 interface AnalyticsConsentBannerProps {
   onAccept?: () => void;
@@ -28,10 +29,15 @@ export function AnalyticsConsentBanner({
   onDecline,
 }: AnalyticsConsentBannerProps): React.ReactElement | null {
   const [visible, setVisible] = useState(false);
+  const bannerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setVisible(!hasMadeConsentChoice());
   }, []);
+
+  // Confine Tab/Shift+Tab within the banner while it is visible (WCAG 2.1 SC 2.1.2).
+  // Hook is called unconditionally; trap is inactive until visible becomes true.
+  useFocusTrap(bannerRef, visible);
 
   if (!visible) return null;
 
@@ -50,7 +56,9 @@ export function AnalyticsConsentBanner({
 
   return (
     <div
+      ref={bannerRef}
       role="dialog"
+      aria-modal="true"
       aria-labelledby="analytics-consent-title"
       aria-describedby="analytics-consent-body"
       className="fixed inset-x-4 bottom-4 z-50 mx-auto max-w-2xl rounded-2xl border border-[var(--border)] bg-[var(--bg-surface)] p-5 shadow-xl backdrop-blur-xl sm:inset-x-auto sm:right-6 sm:bottom-6 sm:left-auto"

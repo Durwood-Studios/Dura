@@ -8,6 +8,7 @@ import {
   AIRateLimitError,
   AIOverloadedError,
 } from "@/lib/ai/anthropic-client";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import type { LessonMeta } from "@/types/curriculum";
 
 /**
@@ -94,6 +95,10 @@ export function AITutorPanel({ meta, lessonBody, onClose }: AITutorPanelProps): 
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  // Panel is always active while mounted — confine Tab within it (WCAG 2.1 SC 2.1.2).
+  useFocusTrap(dialogRef, true);
 
   // The system prompt is computed once per panel mount — it doesn't
   // change as the conversation grows.
@@ -190,6 +195,7 @@ export function AITutorPanel({ meta, lessonBody, onClose }: AITutorPanelProps): 
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Ask Claude about this lesson"
