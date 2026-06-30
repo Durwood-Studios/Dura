@@ -8,7 +8,6 @@ import {
   SandpackConsole,
   SandpackPreview,
   useSandpack,
-  type SandpackFiles,
 } from "@codesandbox/sandpack-react";
 import {
   Save,
@@ -735,10 +734,6 @@ const EXTENSIONS: Record<SandboxLanguage, string> = {
 };
 
 const AUTOSAVE_MS = 30_000;
-
-function buildFiles(language: SandboxLanguage, code: string): SandpackFiles {
-  return { [ENTRY_FILE[language]]: { code, active: true } };
-}
 
 function downloadFile(filename: string, contents: string): void {
   const blob = new Blob([contents], { type: "text/plain" });

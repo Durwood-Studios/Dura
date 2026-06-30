@@ -205,7 +205,7 @@ interface Stats {
 }
 
 export function GcVisualizer(): React.ReactElement {
-  const [{ heap, roots, nextId }, setState] = useState<State>(() => initialState());
+  const [{ heap, roots }, setState] = useState<State>(() => initialState());
   const [algo, setAlgo] = useState<AlgoId>("mark-sweep");
   const [phase, setPhase] = useState<Phase>("idle");
   const [snap, setSnap] = useState<MarkSnapshot>(() => emptySnapshot());
