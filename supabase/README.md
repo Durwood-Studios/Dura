@@ -32,17 +32,48 @@
 | `profiles`           | User display name, email, avatar. Auto-created on sign-up.          |
 | `lesson_progress`    | Per-lesson scroll %, time spent, quiz scores, completion status.    |
 | `module_progress`    | Aggregated module-level completion (view or materialized).          |
+| `phase_progress`     | Aggregated phase-level completion and mastery state.                |
 | `flashcards`         | FSRS-5 spaced repetition cards with full scheduling state.          |
 | `review_logs`        | Append-only log of every flashcard review.                          |
 | `goals`              | User-set learning goals (daily, weekly, phase, custom).             |
+| `skill_assessments`  | Skill-level assessment definitions and configurations.              |
 | `assessment_results` | Mastery gate and phase verification exam results.                   |
 | `certificates`       | Phase completion certificates with verification hashes.             |
-| `analytics_events`   | Append-only behavioral analytics (lesson starts, completions, etc). |
+| `analytics`          | Append-only behavioral analytics (lesson starts, completions, etc). |
 | `xp_events`          | Append-only XP award log (lesson, quiz, flashcard, etc).            |
+| `sandbox_saves`      | Persisted sandbox editor state per lesson per user.                 |
+| `track_progress`     | Learning track enrollment and overall track progress.               |
+| `lesson_difficulty`  | Community-sourced difficulty calibration signals per lesson.        |
+| `annotations`        | User-submitted annotations on lesson content.                       |
+| `annotation_votes`   | Upvote/downvote log for community annotations.                      |
+| `activity`           | Presence and activity feed entries with auto-triggers.              |
+| `content_embeddings` | pgvector embeddings for semantic search across all content.         |
+
+**Total: 19 tables.**
 
 ## RLS
 
-All tables have Row Level Security enabled. Users can only read and write their own data. The only exception is `certificates`, which are publicly readable by verification hash via the `get_certificate_by_hash` RPC function (used by `/verify/[hash]`).
+All tables have Row Level Security enabled. Users can only read and write their own data. Exceptions:
+
+- `certificates` — publicly readable by verification hash via the `get_certificate_by_hash` RPC function (used by `/verify/[hash]`)
+- `annotations` / `annotation_votes` — community-readable within the app
+- `feedback` _(staged, not yet applied)_ — anonymous inserts allowed; admin-read only
+
+## Admin Access
+
+Admin read access to sensitive tables (`feedback`, `analytics`, `profiles`, `lesson_progress`) is gated by a JWT claim. To grant admin access to a user:
+
+1. In Supabase Studio → Authentication → Users, run:
+   ```sql
+   UPDATE auth.users
+   SET raw_app_meta_data = '{"is_admin": true}'
+   WHERE email = 'your@email.com';
+   ```
+2. Sign out and sign back in to refresh the JWT.
+
+The `/admin` route in the app checks this claim. The `is_admin` check lives in RLS policies — there is no service role key involved.
+
+**Permitted environment variables:** `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` only. The `SUPABASE_SERVICE_ROLE_KEY` must never be present in this codebase. RLS protects all data.
 
 ## Sync Architecture
 
@@ -59,15 +90,30 @@ The sync engine (`src/lib/supabase/sync.ts`) handles bidirectional sync between 
 
 The app works fully offline. Supabase sync is optional — it adds cross-device backup for users who create an account.
 
-## Additional Migrations (Free Tier Features)
+## Migrations
 
-Run these after the core migrations above:
+### Applied (001–013)
 
+- `001-profiles.sql` — User profiles (auto-created on sign-up via trigger)
+- `002-progress.sql` — Lesson, module, and phase progress tracking
+- `003-flashcards.sql` — FSRS-5 flashcards and review logs
+- `004-goals-and-assessments.sql` — Learning goals, skill assessments, assessment results, certificates
+- `005-analytics-and-xp.sql` — Analytics events and XP event log
+- `006-functions.sql` — Server-side RPC functions (sync_progress, get_certificate_by_hash)
+- `007-views.sql` — Aggregation views (user_stats, module_progress)
+- `008-seed.sql` — Optional seed data for development
 - `009-storage.sql` — Avatar and certificate file storage buckets
 - `010-realtime.sql` — Presence tracking and activity feed table with auto-triggers
 - `011-vectors.sql` — pgvector extension for semantic search across all content
 - `012-auth-metadata.sql` — Instant preferences sync via auth user metadata
 - `013-moat-features.sql` — Difficulty calibration, community annotations, research analytics views
+
+### Staged (not yet applied)
+
+These live in `supabase/staged/` and are **not** applied to the live project yet:
+
+- `016-feedback.sql` — `feedback` table; anonymous inserts allowed, admin-read only via JWT claim
+- `017-admin-rls.sql` — Admin read RLS policies for `feedback`, `analytics`, `profiles`, and `lesson_progress` using the `app_metadata.is_admin` JWT claim
 
 ## Free Tier Limits & Graceful Degradation
 

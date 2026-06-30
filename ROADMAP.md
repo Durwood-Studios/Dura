@@ -2,7 +2,7 @@
 
 > A public-facing view of where DURA is and where it's going. Updated when reality changes — not on a fixed cadence.
 >
-> Last updated: 2026-05-28
+> Last updated: 2026-06-18
 
 DURA is built in the open. This roadmap reflects the actual state of the work, including what's shipped, what's mid-flight, and what's deliberately deferred. Anything not on this list either hasn't been planned yet or isn't on the table.
 
@@ -12,7 +12,9 @@ DURA is built in the open. This roadmap reflects the actual state of the work, i
 
 These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 
-### Curriculum (406 lessons across 10 phases)
+### Curriculum (~456 lessons across 15 phases)
+
+**Core track (10 phases, ~406 lessons)**
 
 | Phase | Focus                    | Lessons | Status  |
 | ----- | ------------------------ | ------- | ------- |
@@ -27,6 +29,16 @@ These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 | 8     | Professional Practice    | 35      | ✅ Live |
 | 9     | CTO Track                | 60      | ✅ Live |
 
+**Specialty track (5 phases, ~50 lessons)**
+
+| Phase | Focus                      | Lessons | Status  |
+| ----- | -------------------------- | ------- | ------- |
+| 10    | Embedded & Firmware        | 8       | ✅ Live |
+| 11    | Hardware Verification      | 8       | ✅ Live |
+| 12    | Quantitative / HFT Systems | 8       | ✅ Live |
+| 13    | Robotics                   | 8       | ✅ Live |
+| 14    | Manufacturing              | 12      | ✅ Live |
+
 ### Platform
 
 - Offline-first PWA — works fully without internet after first load
@@ -37,12 +49,28 @@ These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 - 100 project tutorials across 12 career tracks
 - 35 how-to guides
 - 20 Discovery Center activities for young learners (Phase 0)
-- In-browser code sandboxes (Sandpack) for JS / TS / React
+- In-browser code sandboxes (Sandpack) — templates, save management, fullscreen mode, console output
 - 35-question skill placement assessment with adaptive path recommendations
 - Shareable, downloadable certificates (PDF)
 - 6 study modes (Standard, Bite-sized, Focus, Sprint, Review, Challenge)
 - Accessibility: high contrast, dyslexia font, reduced motion, site-wide font sizing
 - WCAG 2.2 AA — component-level axe-core coverage on interactive surfaces
+- Profile settings page — display name, bio, avatar URL, sticky save bar
+- User profile and sign-out in sidebar (desktop and mobile drawer)
+- Theme toggle — binary light/dark, amber sun glow in dark mode
+- PWA update card — confetti explosion, blur backdrop, no-flicker overlay
+
+### Admin
+
+- Admin dashboard at `/admin` — JWT-gated via `app_metadata.is_admin` (no service_role key)
+- Feedback viewer, analytics viewer, users table, local IDB inspection tools
+
+### Security & auth
+
+- Sign-out properly clears session
+- Auth hardening to OWASP ASVS Level 2
+- Edge rate limiting on auth endpoints via Upstash Redis
+- 19 Supabase tables with row-level security on all of them: profiles, lesson_progress, module_progress, phase_progress, flashcards, review_logs, goals, skill_assessments, assessment_results, certificates, analytics, xp_events, sandbox_saves, track_progress, lesson_difficulty, annotations, annotation_votes, activity, content_embeddings (+ feedback staged in migration 016)
 
 ### Standards & compliance (2026-Q2 compliance sprint, closed 2026-04-26)
 
@@ -59,56 +87,88 @@ These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 - **DLS-1.0** — visual language + OKLCH token system (canonical blue accent, emerald reserved for learner-positive moments)
 - **DLS-2.0** — motion vocabulary (SPRINGS, HAPTICS, signatures, ambient depth model)
 - Geist Sans + Geist Mono via `next/font/local`
-- 22 phases shipped across review/discover/lesson/settings surfaces
+- 22 motion phases shipped across review/discover/lesson/settings surfaces
 
 ---
 
-## Next — in flight or planned for this quarter
+## In Progress
+
+Work that is actively running now.
+
+### Curriculum gap-fill (~20 new modules across all 15 phases)
+
+Lessons and modules being authored to close gaps identified in the standards-alignment audit:
+
+- **Phase 1** — OOP & Classes module
+- **Phase 2** — TypeScript module (critical gap), Real-Time/WebSockets module
+- **Phase 3** — Discrete Mathematics module
+- **Phase 4** — Message Queues & Event-Driven Architecture module
+- **Phase 5** — Concurrency & Parallelism module
+- **Phase 6** — Classical ML Foundations module, Computer Vision module
+- **Phase 7** — Formal Methods & GPU Programming module
+- **Phase 8** — System Design at Scale module, Incident Management module
+- **Phase 9** — Technical Due Diligence module, Compliance & Governance module
+- **Phase 10** — Power Management module, Bootloaders/OTA module
+- **Phase 11** — Clock Domain Crossing module, Emulation/Acceleration module
+- **Phase 12** — Quantitative Finance Mathematics module
+- **Phase 13** — Robotics Science Fundamentals module (kinematics, SLAM, control)
+- **Phase 14** — CNC/CAM module, Metrology/Supply Chain module
+
+### Supabase go-live
+
+Migrations 016 (feedback table) and 017 (admin RLS) are staged and ready. Pending one-shot apply to production per the project's staged-migration policy.
+
+### Auth-gated features
+
+Annotations and lesson completion are being wired to require an account when Supabase is active. Offline behavior is unaffected — the requirement only applies to cross-device sync.
+
+---
+
+## Next Up
 
 Roughly in priority order. Dates are intent, not commitments.
-
-### Security & supply chain
-
-- Dependabot weekly grouped updates (shipped 2026-05-28)
-- CSP `unsafe-eval` removal once Sandpack execution path is reconfirmed safe
-- Playwright e2e smoke suite covering 5 hot paths (lesson, review, discover, certificate, auth)
-
-### Curriculum extension
-
-- Discovery activities for Phases 3–9 — Pathfinding, Race Condition, Embedding Galaxy, and GC Visualizer all shipped 2026-05-28
-- Standards-alignment audit across 418 lessons — automated reconciliation against ACM CS2023, SWEBOK v4, SFIA 9, CSTA K-12, AP CS Principles/A, ISTE (audit script shipped 2026-05-28; first run found one missing module registration, fixed in the same commit)
 
 ### Learning surfaces
 
 - AI tutor — Claude-API-backed Q&A scoped to lesson context, consent-gated, no training-data retention
 - Code review surface — submit a code sample, receive structured feedback with explanations
+- Functional feedback submission flow wired to Supabase (UI exists, backend pending go-live)
+
+### Profile & identity
+
+- Avatar file upload (currently URL input only — full file upload deferred until storage bucket is configured)
+- PWA offline indicator and sync status badge
+
+### Platform hygiene
+
+- Semantic versioning + in-app audit log (release notes surface, like an app store changelog)
+- Playwright e2e smoke suite covering 5 hot paths (lesson, review, discover, certificate, auth)
+- CSP `unsafe-eval` removal once Sandpack execution path is reconfirmed safe
 
 ### Mobile
 
-- Mobile lesson UX audit — first pass shipped 2026-05-28 (3 commits: chrome tap targets + breadcrumb collapse + accent canonical, VocabTooltip dismissal + viewport positioning, Sandpack mobile collapse). Deferred follow-ups in [`xDocs/active/mobile-ux-audit-2026-05.md`](xDocs/active/mobile-ux-audit-2026-05.md)
+- Mobile lesson UX follow-up pass — first audit closed 2026-05-28 (tap targets, breadcrumb collapse, VocabTooltip). Deferred issues tracked in [`xDocs/active/mobile-ux-audit-2026-05.md`](xDocs/active/mobile-ux-audit-2026-05.md)
 
 ### Global reach + i18n
 
-DURA's framing is "a global tool for all software engineers". The
-language registry now declares ~38 languages matching Apple's iOS 18
-localization list ([`src/lib/i18n/languages.ts`](src/lib/i18n/languages.ts)).
-Only English is enabled today; the phased plan:
+DURA's framing is "a global tool for all software engineers." The language registry declares ~38 languages. Only English is enabled today; the phased plan:
 
-1. **Phase 1 — extraction.** Audit the ~2,000 UI strings across components; route them through a `t()` helper backed by `next-intl` (or equivalent). English baseline file ships first. No user-visible change.
-2. **Phase 2 — RTL + bidi.** Wire `dir="rtl"` swap on `<html>` driven by the locale registry; verify the lesson reader, sidebar, and dictionary in Arabic + Hebrew. RTL CSS pass.
-3. **Phase 3 — machine-translated baseline.** Translate the UI string catalog into all enabled locales via an LLM-assisted pipeline; flip each locale's `enabled` flag once a native speaker validates a representative sample. Lessons remain English-only at this phase.
-4. **Phase 4 — community + AI-assisted lesson translation.** This is the big one — 418 lessons × N languages is a six-to-seven-figure translation surface. The plan is community-first, with AI-translated drafts as a baseline that learners and contributors can refine. Provenance + credit tracked per lesson per locale.
+1. **Phase 1 — extraction.** Audit the ~2,000 UI strings; route through a `t()` helper. English baseline first. No user-visible change.
+2. **Phase 2 — RTL + bidi.** Wire `dir="rtl"` swap; verify lesson reader, sidebar, and dictionary in Arabic + Hebrew.
+3. **Phase 3 — machine-translated baseline.** Translate the UI string catalog; flip each locale's `enabled` flag after native-speaker validation. Lessons remain English-only.
+4. **Phase 4 — community + AI-assisted lesson translation.** 456 lessons × N languages is a six-to-seven-figure translation surface. Community-first, AI-translated drafts as a baseline. Provenance and credit tracked per lesson per locale.
 
 This will not happen in a single sprint. The scaffolding is here so contributions can flow in piece by piece.
 
 ---
 
-## Later — on the list, no timeline yet
+## Deferred — on the list, no timeline yet
 
 - Discord launch (community gathering point)
 - Instructor mode — host a cohort, see learner progress (opt-in only, no surveillance defaults)
 - Native mobile shell (Capacitor or equivalent) — only if PWA-on-iOS limitations become a real problem
 - Project tutorial library expansion past 100
+- Discovery activities for Phases 3–9 (Pathfinding, Race Condition, Embedding Galaxy, GC Visualizer shipped 2026-05-28; remaining phases pending)
 
 ---
 

@@ -1,0 +1,410 @@
+---
+title: "Statistical Arbitrage and Pairs Trading"
+description: "Build a complete pairs trading system: test for cointegration, construct the spread, fit an Ornstein-Uhlenbeck model, generate entry/exit signals, and backtest with transaction costs."
+phase: 12
+module: "12-9"
+order: 4
+estimatedMinutes: 18
+difficulty: "advanced"
+prerequisites:
+  - "12-9-01-probability-and-statistics"
+  - "12-9-02-stochastic-processes-brownian-motion"
+standards:
+  cs2023:
+    - "DS/ProbabilityAndStatistics"
+    - "AL/FundamentalsOfDataScienceAndML"
+  swebok:
+    - "mathematical-foundations"
+    - "software-design"
+  bloom: "apply"
+  sfia: 2
+  dreyfus: "proficient"
+vocabulary:
+  - statistical-arbitrage
+  - pairs-trading
+  - cointegration
+  - spread
+  - hedge-ratio
+  - z-score
+  - adf-test
+  - half-life
+  - mean-reversion-speed
+  - correlation
+  - market-neutral
+  - backtest
+  - transaction-costs
+  - signal-to-noise
+learningOutcomes:
+  - "Test two price series for cointegration using the Engle-Granger method and interpret the ADF test result"
+  - "Construct a mean-reverting spread from two cointegrated instruments using OLS regression for the hedge ratio"
+  - "Fit an Ornstein-Uhlenbeck model to a spread and compute the half-life of mean reversion"
+  - "Implement a z-score entry/exit strategy with position sizing and transaction cost accounting"
+  - "Evaluate a pairs strategy backtest by computing Sharpe ratio, max drawdown, and number of round-trip trades"
+---
+
+## Why this matters
+
+Statistical arbitrage is the bread-and-butter of quantitative hedge funds. Renaissance Technologies, D.E. Shaw, and Two Sigma run enormous stat-arb books. The core idea is not to predict where prices go, but to find two instruments whose prices move together so reliably that deviations from their relationship are almost certainly temporary — and to profit from the reversion.
+
+Unlike directional trading, stat-arb aims to be market-neutral: if both legs of the trade move together, macro market moves cancel out and the P&L comes only from the spread converging. This makes the strategy resilient to market crashes and bull markets alike. Implementing it correctly requires cointegration testing, spread construction, signal generation, and rigorous backtesting — all of which you will build in this lesson.
+
+## The rubber band analogy
+
+Imagine two runners training together who always run the same route at nearly the same pace. If one suddenly sprints ahead, you would bet with confidence that they will slow down and the gap will close — not because you know where either runner is going, but because you know their _relationship_.
+
+Statistical arbitrage works the same way. We do not care whether Coca-Cola or Pepsi stock is going up or down. We care that historically, when Pepsi gets expensive relative to Coke, the gap closes. The bet is on the relationship, not the direction.
+
+> **Mental model: pairs trading is not a price prediction — it is a relationship prediction.**
+> _Cointegration means two series share a common stochastic trend; the spread between them is stationary._
+
+## Step 1: Test for cointegration
+
+<VocabTooltip slug="correlation">Correlation</VocabTooltip> is not enough. Two correlated stocks can
+diverge permanently. <VocabTooltip slug="cointegration">Cointegration</VocabTooltip> is a stronger
+property: a linear combination of the two price series is stationary (mean-reverting). The
+Engle-Granger test formalizes this.
+
+```python
+import numpy as np
+from scipy import stats
+
+def simulate_cointegrated_pair(
+    n: int = 500,
+    beta: float = 1.2,   # true hedge ratio
+    sigma_spread: float = 2.0,
+    mu_spread: float = 10.0,
+    seed: int = 42
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Simulate two cointegrated price series for testing.
+
+    A shared random walk (common_trend) drives both prices.
+    The spread y - beta*x should be stationary around mu_spread.
+    """
+    np.random.seed(seed)
+
+    # Shared random walk — the common stochastic trend
+    common_trend = np.cumsum(np.random.randn(n))
+
+    x = 50 + common_trend + np.random.randn(n) * 1.5
+    y = 50 + beta * common_trend + mu_spread + np.random.randn(n) * sigma_spread
+
+    return x, y
+
+def engle_granger_test(y: np.ndarray, x: np.ndarray) -> dict[str, float]:
+    """
+    Engle-Granger two-step cointegration test.
+
+    Step 1: Regress y on x to find the hedge ratio.
+    Step 2: Apply Augmented Dickey-Fuller (ADF) test to the residuals.
+
+    If residuals are stationary (ADF rejects unit root), the pair is cointegrated.
+    """
+    # Step 1: OLS regression y = alpha + beta*x + epsilon
+    # The slope is the hedge ratio — how many shares of x to hold per share of y
+    slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+    residuals = y - (slope * x + intercept)
+
+    # Step 2: ADF test on residuals
+    # Simplified ADF: test if AR(1) coefficient phi is significantly < 1
+    # Full ADF uses lagged differences; this is the conceptual core
+    n = len(residuals)
+    y_lag = residuals[:-1]
+    dy    = np.diff(residuals)
+
+    # Regress dy on y_lag: dy_t = phi * y_{t-1} + error
+    # phi < 0 means mean-reverting; we test phi = 0 (unit root)
+    phi, _, _, p_adf, _ = stats.linregress(y_lag, dy)
+
+    return {
+        "hedge_ratio": slope,
+        "intercept": intercept,
+        "r_squared": r_value**2,
+        "adf_stat": phi,
+        "adf_pvalue": p_adf,
+        "is_cointegrated": p_adf < 0.05
+    }
+
+x, y = simulate_cointegrated_pair(n=500)
+result = engle_granger_test(y, x)
+
+print(f"Hedge ratio (beta):  {result['hedge_ratio']:.4f}  (true: 1.2)")
+print(f"R-squared:           {result['r_squared']:.4f}")
+print(f"ADF statistic:       {result['adf_stat']:.4f}")
+print(f"ADF p-value:         {result['adf_pvalue']:.4f}")
+print(f"Cointegrated?        {result['is_cointegrated']}")
+```
+
+## Step 2: Construct the spread and compute half-life
+
+The <VocabTooltip slug="spread">spread</VocabTooltip> is the residual after removing the long-run relationship. We model it as an <VocabTooltip slug="ornstein-uhlenbeck">Ornstein-Uhlenbeck</VocabTooltip> process to measure how quickly it mean-reverts.
+
+```python
+def fit_ou_model(spread: np.ndarray) -> dict[str, float]:
+    """
+    Fit an OU process to a spread series to estimate mean-reversion speed.
+
+    The OU SDE is: dX = theta*(mu - X)*dt + sigma*dW
+    Discretized: X_{t+1} - X_t = theta*(mu - X_t)*dt + sigma*sqrt(dt)*epsilon
+    This is a linear regression: delta_X = a + b*X_t + error
+    where a = theta*mu*dt, b = -theta*dt
+    """
+    delta_spread = np.diff(spread)
+    spread_lag   = spread[:-1]
+
+    # Regress delta_X on X_{t-1}
+    b, a, _, _, _ = stats.linregress(spread_lag, delta_spread)
+
+    # Recover OU parameters (assuming dt=1 for daily data)
+    theta = -b          # mean-reversion speed (per day)
+    mu    = a / theta   # long-run mean
+
+    # Half-life: time for spread to mean-revert halfway
+    # OU: E[X(t) - mu | X(0)] = (X(0) - mu) * exp(-theta*t)
+    # Half-life t_{1/2}: exp(-theta * t_{1/2}) = 0.5 → t_{1/2} = log(2)/theta
+    half_life = np.log(2) / theta if theta > 0 else float('inf')
+
+    residuals = delta_spread - (a + b * spread_lag)
+    sigma = residuals.std()
+
+    return {"theta": theta, "mu": mu, "sigma": sigma, "half_life_days": half_life}
+
+# Construct the spread using the estimated hedge ratio
+hedge_ratio = result["hedge_ratio"]
+intercept   = result["intercept"]
+spread = y - hedge_ratio * x - intercept  # mean-zero spread
+
+ou_params = fit_ou_model(spread)
+print(f"Mean-reversion speed (theta): {ou_params['theta']:.4f} per day")
+print(f"Half-life:                    {ou_params['half_life_days']:.1f} days")
+print(f"Long-run mean (mu):           {ou_params['mu']:.4f}")
+print(f"Spread volatility (sigma):    {ou_params['sigma']:.4f}")
+# Rule of thumb: half-life 1-30 days is tradeable; longer = capital tied up too long
+```
+
+## Step 3: Generate trading signals
+
+We normalize the spread into a <VocabTooltip slug="z-score">z-score</VocabTooltip> and enter trades when it deviates significantly from zero.
+
+```python
+def generate_signals(
+    spread: np.ndarray,
+    entry_threshold: float = 2.0,   # enter when |z-score| > 2
+    exit_threshold: float = 0.5,    # exit when |z-score| < 0.5
+    lookback: int = 60              # rolling window for z-score normalization
+) -> np.ndarray:
+    """
+    Z-score mean-reversion signals.
+
+    We use a rolling window rather than full-sample stats to avoid
+    lookahead bias — a common error that makes backtests unrealistically good.
+    Signal: +1 = long spread (buy y, sell x), -1 = short spread, 0 = flat
+    """
+    n = len(spread)
+    signal = np.zeros(n)
+    position = 0
+
+    for i in range(lookback, n):
+        # Rolling mean and std from the lookback window only
+        window = spread[i - lookback:i]
+        mu    = window.mean()
+        sigma = window.std()
+
+        if sigma < 1e-8:
+            continue  # avoid division by zero in thin periods
+
+        z = (spread[i] - mu) / sigma
+
+        # State machine: enter on threshold breach, exit on reversion
+        if position == 0:
+            if z > entry_threshold:
+                position = -1   # spread high → short (sell y, buy x)
+            elif z < -entry_threshold:
+                position = +1   # spread low  → long  (buy y, sell x)
+        elif position == 1 and z > -exit_threshold:
+            position = 0        # spread reverted from below — close long
+        elif position == -1 and z < exit_threshold:
+            position = 0        # spread reverted from above — close short
+
+        signal[i] = position
+
+    return signal
+
+signals = generate_signals(spread, entry_threshold=2.0, exit_threshold=0.5)
+n_trades = np.sum(np.abs(np.diff(signals)) > 0)
+print(f"Total signal changes (entries + exits): {n_trades}")
+```
+
+## Step 4: Backtest with transaction costs
+
+```python
+def backtest_pairs_strategy(
+    y: np.ndarray,
+    x: np.ndarray,
+    signal: np.ndarray,
+    hedge_ratio: float,
+    transaction_cost_pct: float = 0.0005,  # 5 bps per side = realistic for liquid equities
+    position_size_y: float = 1000.0         # dollar value of Y leg
+) -> dict[str, float]:
+    """
+    Backtest the pairs strategy with explicit transaction costs.
+
+    Each round-trip trade costs 2 * transaction_cost_pct * notional on each leg.
+    Slippage is not modeled here — in production, add bid-ask spread estimates.
+    """
+    n = len(signal)
+    pnl = np.zeros(n)
+    position_size_x = position_size_y * hedge_ratio  # dollar value of X leg
+
+    for i in range(1, n):
+        signal_change = signal[i] - signal[i - 1]
+
+        if signal_change != 0:
+            # Transaction cost: pay on both legs, entering and exiting
+            cost = (position_size_y + position_size_x) * transaction_cost_pct
+            pnl[i] -= cost
+
+        if signal[i] != 0:
+            # Daily P&L: long y, short x (or vice versa) in proportion to hedge ratio
+            dy = y[i] - y[i - 1]
+            dx = x[i] - x[i - 1]
+
+            # P&L = signal * (y_return * position_y - hedge_ratio * x_return * shares_x)
+            # We express in returns so size cancels
+            y_return = dy / y[i - 1]
+            x_return = dx / x[i - 1]
+
+            spread_return = y_return - hedge_ratio * x_return
+            pnl[i] += signal[i] * spread_return * position_size_y
+
+    cumulative_pnl = np.cumsum(pnl)
+
+    # Sharpe ratio (daily, annualized)
+    trading_days = np.where(signal != 0)[0]
+    if len(trading_days) > 1:
+        active_pnl = pnl[trading_days]
+        sharpe = (active_pnl.mean() / active_pnl.std()) * np.sqrt(252) if active_pnl.std() > 0 else 0
+    else:
+        sharpe = 0
+
+    # Maximum drawdown
+    running_max = np.maximum.accumulate(cumulative_pnl)
+    drawdown    = running_max - cumulative_pnl
+    max_drawdown = drawdown.max()
+
+    return {
+        "total_pnl":     cumulative_pnl[-1],
+        "sharpe":        sharpe,
+        "max_drawdown":  max_drawdown,
+        "n_trades":      int(np.sum(np.abs(np.diff(signal)) > 0) // 2),  # round trips
+        "pct_time_flat": float(np.mean(signal == 0))
+    }
+
+bt = backtest_pairs_strategy(y, x, signals, hedge_ratio=result["hedge_ratio"])
+print(f"Total P&L:      ${bt['total_pnl']:.2f}")
+print(f"Sharpe ratio:   {bt['sharpe']:.2f}")
+print(f"Max drawdown:   ${bt['max_drawdown']:.2f}")
+print(f"Round trips:    {bt['n_trades']}")
+print(f"Time in market: {1 - bt['pct_time_flat']:.1%}")
+```
+
+<SandboxExercise
+  title="Find cointegrated pairs from a universe of stocks"
+  description="Given price data for 5 energy stocks, test all pairs for cointegration and rank them by ADF p-value. Return the top 3 pairs sorted by cointegration strength."
+  starterCode={`import numpy as np
+from scipy import stats
+from itertools import combinations
+
+# Simulated daily prices for 5 energy stocks (252 trading days)
+
+np.random.seed(99)
+n = 252
+common = np.cumsum(np.random.randn(n) \* 0.5) # sector trend
+
+tickers = ["XOM", "CVX", "COP", "EOG", "PXD"]
+prices = {
+"XOM": 100 + 1.1 _ common + np.cumsum(np.random.randn(n) _ 0.3),
+"CVX": 120 + 0.9 _ common + np.cumsum(np.random.randn(n) _ 0.4),
+"COP": 80 + 1.3 _ common + np.cumsum(np.random.randn(n) _ 0.5),
+"EOG": 90 + 0.7 _ common + np.cumsum(np.random.randn(n) _ 0.6),
+"PXD": 95 + 1.5 _ common + np.cumsum(np.random.randn(n) _ 0.7),
+}
+
+# TODO: Test all 10 pairs for cointegration.
+
+# For each pair, run engle_granger_test and collect the ADF p-value.
+
+# Return sorted list: [(ticker1, ticker2, hedge_ratio, adf_pvalue), ...]
+
+# Sort by adf_pvalue ascending (most cointegrated first)
+
+def find_cointegrated_pairs(prices):
+results = []
+for t1, t2 in combinations(tickers, 2): # ... your code here
+pass
+return sorted(results, key=lambda x: x[3])
+
+top*pairs = find_cointegrated_pairs(prices)[:3]
+for t1, t2, hr, pval in top_pairs:
+print(f"{t1}/{t2}: hedge_ratio={hr:.3f}, ADF p-value={pval:.4f}")
+`}
+  solution={`def engle_granger_test(y, x):
+slope, intercept, *, _, _ = stats.linregress(x, y)
+residuals = y - (slope \* x + intercept)
+y*lag = residuals[:-1]
+dy = np.diff(residuals)
+b, a, *, p*adf, * = stats.linregress(y_lag, dy)
+return slope, p_adf
+
+def find_cointegrated_pairs(prices):
+results = []
+for t1, t2 in combinations(tickers, 2):
+y = np.array(prices[t1])
+x = np.array(prices[t2])
+hr, pval = engle_granger_test(y, x)
+results.append((t1, t2, hr, pval))
+return sorted(results, key=lambda x: x[3])`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A pairs spread has an OU half-life of 120 days. Why might this be problematic for a short-term trading strategy?"
+  options={[
+    { label: "120-day half-life means the spread is too volatile to trade safely", correct: false },
+    {
+      label:
+        "Capital is tied up for months waiting for mean reversion, reducing capital efficiency and Sharpe ratio",
+      correct: true,
+    },
+    {
+      label: "The ADF test will always be insignificant for such slow-reverting spreads",
+      correct: false,
+    },
+    { label: "120 days exceeds the option expiry, making hedging impossible", correct: false },
+  ]}
+  explanation="Half-life is how long capital is deployed per trade. A 120-day half-life means positions are open for months on average. This reduces turnover (fewer trades per year), ties up capital that could be deployed elsewhere, and means the Sharpe ratio from any individual trade contributes very little to the annual return. Most stat-arb funds target half-lives of 1–30 days for this reason."
+/>
+
+<Quiz
+  question="You test 45 pairs (choosing 2 from 10 stocks). 4 pass the ADF test at p < 0.05. How many would you expect to pass by chance alone?"
+  options={[
+    { label: "0", correct: false },
+    { label: "2.25", correct: true },
+    { label: "4.5", correct: false },
+    { label: "9", correct: false },
+  ]}
+  explanation="At a 5% significance threshold, 5% of null-hypothesis tests reject by chance: 45 × 0.05 = 2.25 expected false discoveries. Finding 4 passing pairs is meaningfully above chance, but not dramatically so. In practice, quants apply Bonferroni correction or the Benjamini-Hochberg procedure to control the false discovery rate when testing many pairs."
+/>
+
+## What you learned
+
+- <VocabTooltip slug="cointegration">Cointegration</VocabTooltip> is a stronger property than
+  correlation: it means a linear combination of two price series is stationary, making deviations
+  from the relationship mean-reverting rather than permanent
+- The Engle-Granger test regresses one series on the other and applies an ADF test to the residuals; rejection of the unit root (p < 0.05) is evidence of cointegration
+- The OU half-life quantifies how quickly the spread mean-reverts and is the primary signal for strategy viability — short half-lives enable more frequent trades and higher capital efficiency
+- Z-score signals normalize the spread by its rolling mean and standard deviation; entry at ±2σ and exit at ±0.5σ is a classic parameterization
+- Transaction costs must be included in backtesting; a strategy profitable without costs often becomes marginal after realistic bid-ask spreads and commissions
+
+The final lesson broadens the view from individual positions to entire portfolios: Modern Portfolio Theory and risk management frameworks that every fund uses to construct, monitor, and protect a diversified book.

@@ -1,0 +1,544 @@
+---
+title: "Case Study — Design a URL Shortener"
+description: "Walk through a complete system design end-to-end: requirements to architecture, with explicit trade-off decisions at every step."
+phase: 8
+module: "8-6"
+order: 3
+estimatedMinutes: 25
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-1", "SE-2", "SF-3"]
+  swebok: ["Software Design", "Software Requirements"]
+  bloom: "create"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - base62-encoding
+  - redirect-302
+  - idempotency
+  - rate-limiting
+  - token-bucket
+  - cdn-edge-cache
+  - write-ahead-log
+learningOutcomes:
+  - "Produce a complete system design for a URL shortener covering requirements, estimates, data model, API, architecture, and bottlenecks"
+  - "Write the core URL-shortening algorithm using base62 encoding and explain why it is chosen over UUID"
+  - "Justify the HTTP 302 redirect choice over 301 with reference to analytics and mutability requirements"
+  - "Design a rate-limiting strategy using token buckets and explain the trade-off between per-user and per-IP limits"
+  - "Identify three failure modes in the design and propose a mitigation for each"
+prerequisites:
+  - "REDNAC framework (lesson 1)"
+  - "Caching with Redis (lesson 2)"
+  - "HTTP status codes (200, 301, 302, 404, 429)"
+  - "Hashing functions (what MD5/SHA256 do)"
+  - "Read replicas and sharding (lesson 2)"
+---
+
+## Why this matters
+
+The URL shortener is one of the most common system design interview questions — not because it is particularly complex, but because it is a perfect canvas. It is small enough to fully design in 45 minutes, yet rich enough to exercise every major scaling concept: read-heavy workloads, caching, redirect semantics, rate limiting, and analytics at scale.
+
+Working through a URL shortener from scratch builds the pattern-recognition you need for harder problems. The decision "use a 302 not a 301" recurs in every proxy system. The base62 encoding choice recurs in every ID generation problem. Designing a token-bucket rate limiter here prepares you to defend rate-limiting decisions on any API.
+
+## Requirements
+
+Start every case study with the REDNAC framework. Write these down before touching architecture.
+
+**Functional requirements (agreed scope for this interview):**
+
+1. Given a long URL, generate a short URL with a unique code (e.g., `sho.rt/abc123`).
+2. Visiting the short URL redirects the user to the original long URL.
+3. Users can optionally set an expiry date for their short URL.
+4. A basic analytics endpoint returns click count for a short URL (owner only).
+
+**Out of scope:** custom aliases, bulk creation, real-time analytics dashboards, branded domains.
+
+**Non-functional requirements:**
+
+- Scale: 100 million DAU, 1% create per day (1M creates/day), 10 clicks/user/day (1B redirects/day).
+- Latency: redirect in < 50ms p99 at the edge (user feels no delay).
+- Durability: short URL mappings must never be lost (creates are write-once).
+- Availability: 99.99% uptime (< 53 minutes downtime/year).
+- Consistency: redirect reads can be eventually consistent; click counts are approximate.
+
+## Capacity estimates
+
+```python
+# --- WRITES (URL creation) ---
+DAU = 100_000_000
+create_rate         = 0.01        # 1% of users create a URL per day
+creates_per_day     = int(DAU * create_rate)   # 1,000,000
+creates_per_second  = creates_per_day / 86_400  # ~12 QPS
+
+# --- READS (redirects) ---
+clicks_per_user_day = 10
+redirects_per_day   = DAU * clicks_per_user_day  # 1,000,000,000
+redirects_per_second = redirects_per_day / 86_400  # ~11,574 QPS
+
+read_write_ratio = redirects_per_second / creates_per_second  # ~965:1
+# Conclusion: this is an extremely read-heavy system.
+# Cache hit rate must be very high to protect the database.
+
+# --- STORAGE (5 years, no deletions assumed) ---
+record_size_bytes   = 500   # id, code, long_url, user_id, timestamps
+creates_per_year    = creates_per_day * 365        # 365,000,000
+storage_5yr_bytes   = creates_per_year * 5 * record_size_bytes
+storage_5yr_gb      = storage_5yr_bytes / 1e9      # ~912 GB
+
+# Single database node holds 912 GB comfortably. No sharding needed at this scale.
+# If we hit 10x growth, shard by first character of the code (26 partitions).
+
+# --- CODE SPACE ---
+# Base62 (a-z, A-Z, 0-9) with 7 characters: 62^7 = 3.5 trillion unique codes
+# At 1M creates/day, codes last 3.5 trillion / 1M = 9,589 years before exhaustion.
+# 6 characters (62^6 = 56 billion) lasts 153 years — either is fine.
+code_length = 7
+code_space  = 62 ** code_length  # 3,521,614,606,208
+years_of_codes = code_space / creates_per_day / 365  # ~9,589 years
+```
+
+## Data model
+
+```sql
+-- Primary table: the mapping
+CREATE TABLE short_urls (
+  id          BIGSERIAL PRIMARY KEY,
+  -- code is what users type. It is the single hot column — index it.
+  code        VARCHAR(8)  UNIQUE NOT NULL,
+  long_url    TEXT        NOT NULL,
+  user_id     BIGINT      REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- NULL means never expires — avoid sentinel values like '9999-12-31'
+  -- because they require special-casing everywhere.
+  expires_at  TIMESTAMPTZ,
+  is_active   BOOLEAN     NOT NULL DEFAULT TRUE
+);
+
+-- This index is the read path. Almost every query is: WHERE code = ?
+CREATE INDEX idx_short_urls_code ON short_urls(code);
+
+-- Partial index to find active non-expired URLs fast
+CREATE INDEX idx_short_urls_active ON short_urls(code)
+  WHERE is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW());
+
+-- Analytics: separate table so redirect writes don't contend with reads
+-- on the main table during traffic spikes.
+CREATE TABLE url_clicks (
+  id          BIGSERIAL PRIMARY KEY,
+  code        VARCHAR(8)  NOT NULL,
+  clicked_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ip_hash     CHAR(64),      -- SHA256 of IP — never store raw IPs (GDPR)
+  country     CHAR(2),
+  referrer    TEXT,
+  user_agent  TEXT
+);
+
+-- Partition by month so old analytics can be archived cheaply
+CREATE INDEX idx_url_clicks_code ON url_clicks(code, clicked_at DESC);
+
+-- Aggregated counts (updated by background job, not on every click)
+CREATE TABLE url_click_counts (
+  code        VARCHAR(8) PRIMARY KEY REFERENCES short_urls(code),
+  total_clicks BIGINT NOT NULL DEFAULT 0,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+## API design
+
+```
+POST /api/urls
+  Purpose: Create a short URL
+  Auth:    Optional Bearer token. Anonymous allowed, rate-limited harder.
+  Body:    { "long_url": "https://...", "expires_in_days": 30 }
+  201:     { "code": "gT4xK9m", "short_url": "https://sho.rt/gT4xK9m", "expires_at": "..." }
+  400:     { "error": "invalid_url", "message": "long_url must be a valid HTTP/S URL" }
+  422:     { "error": "url_blocked", "message": "This URL has been flagged for abuse" }
+  429:     { "error": "rate_limit_exceeded", "retry_after": 60 }
+
+GET /{code}
+  Purpose: Redirect to the long URL (the hot path — must be sub-50ms)
+  Auth:    None
+  302:     Location: <long_url>
+  301 would be wrong here — browsers cache 301s forever. If a URL is
+  deactivated or updated, browsers with a 301 cache would never know.
+  404:     { "error": "not_found" }
+  410:     { "error": "expired", "message": "This link has expired" }
+
+DELETE /api/urls/{code}
+  Purpose: Deactivate a short URL (sets is_active = false)
+  Auth:    Bearer token (owner only)
+  200:     { "message": "URL deactivated" }
+  403:     { "error": "forbidden" }
+
+GET /api/urls/{code}/stats
+  Purpose: Get analytics for a short URL
+  Auth:    Bearer token (owner only)
+  200:     { "code": "gT4xK9m", "total_clicks": 14200, "clicks_today": 340,
+             "top_countries": [["US", 8400], ["GB", 1200]] }
+```
+
+## Core algorithm — generating short codes
+
+```python
+import hashlib
+import base64
+import re
+
+BASE62_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+def int_to_base62(n: int, length: int = 7) -> str:
+    """Convert an integer to a base62 string of fixed length.
+
+    Why base62 instead of base64? Base64 uses + and / which are special
+    characters in URLs and require percent-encoding. Base62 uses only
+    alphanumeric characters — safe in all URL positions with no encoding.
+    """
+    chars = []
+    while n > 0:
+        chars.append(BASE62_CHARS[n % 62])
+        n //= 62
+    # Pad to desired length with '0' (the zero character in base62)
+    while len(chars) < length:
+        chars.append("0")
+    return "".join(reversed(chars))
+
+
+def generate_code_from_id(row_id: int) -> str:
+    """Generate a short code from a database auto-increment ID.
+
+    Why use the row ID? It guarantees uniqueness without any collision check.
+    A random-string approach requires a database round-trip to verify no collision.
+    At 12 QPS that is fine, but at 100K QPS it becomes a bottleneck.
+
+    Trade-off: codes are slightly predictable (sequential IDs → sequential codes).
+    For a URL shortener this is acceptable. For a secret sharing system it is not.
+    """
+    return int_to_base62(row_id)
+
+
+def generate_random_code(length: int = 7) -> str:
+    """Alternative: cryptographically random codes when ID predictability matters.
+
+    Requires a uniqueness check on insertion. Use ON CONFLICT DO NOTHING
+    with a retry loop — collision probability at 12 QPS is negligible.
+    """
+    import secrets
+    return "".join(secrets.choice(BASE62_CHARS) for _ in range(length))
+
+
+# Validation: reject non-URL inputs before they hit the database
+URL_PATTERN = re.compile(
+    r"^https?://"           # must be HTTP or HTTPS — reject ftp://, file://, etc.
+    r"[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"
+    r"$"
+)
+
+def validate_url(url: str) -> bool:
+    if len(url) > 2048:     # Browser URL length practical limit
+        return False
+    return bool(URL_PATTERN.match(url))
+
+
+# Example flow: create a short URL
+def create_short_url(long_url: str, user_id: int | None) -> dict:
+    if not validate_url(long_url):
+        raise ValueError("invalid_url")
+
+    # Insert and get the auto-generated ID in one round-trip
+    row = db.execute(
+        """
+        INSERT INTO short_urls (long_url, user_id)
+        VALUES (%s, %s)
+        RETURNING id, created_at
+        """,
+        [long_url, user_id]
+    )
+
+    # Derive the code from the ID — no collision check needed
+    code = generate_code_from_id(row["id"])
+
+    # Store the code back (one additional UPDATE, or use a generated column)
+    db.execute("UPDATE short_urls SET code = %s WHERE id = %s", [code, row["id"]])
+
+    return {
+        "code": code,
+        "short_url": f"https://sho.rt/{code}",
+        "created_at": row["created_at"].isoformat()
+    }
+```
+
+## Rate limiting with token buckets
+
+```python
+import time
+
+class TokenBucketRateLimiter:
+    """Token bucket algorithm: a bucket holds up to `capacity` tokens.
+    Tokens refill at `refill_rate` per second. Each request consumes one token.
+    When the bucket is empty, requests are rejected with 429.
+
+    Why token bucket over fixed-window? Fixed window allows bursts at window
+    boundaries (100 requests in the last second of minute 1 + 100 in the first
+    second of minute 2 = 200 in a 2-second window). Token bucket smooths bursts
+    naturally without the boundary problem.
+    """
+
+    def __init__(self, redis_client, capacity: int, refill_rate: float):
+        self.r = redis_client
+        self.capacity = capacity
+        self.refill_rate = refill_rate  # tokens per second
+
+    def is_allowed(self, identifier: str) -> tuple[bool, int]:
+        """Returns (allowed, tokens_remaining)."""
+        now = time.time()
+        key = f"rate_limit:{identifier}"
+
+        # Atomic Lua script — prevents race conditions between check and update
+        script = """
+        local key = KEYS[1]
+        local capacity = tonumber(ARGV[1])
+        local refill_rate = tonumber(ARGV[2])
+        local now = tonumber(ARGV[3])
+
+        local data = redis.call("HMGET", key, "tokens", "last_refill")
+        local tokens = tonumber(data[1]) or capacity
+        local last_refill = tonumber(data[2]) or now
+
+        -- Refill tokens based on elapsed time
+        local elapsed = now - last_refill
+        tokens = math.min(capacity, tokens + elapsed * refill_rate)
+
+        if tokens < 1 then
+            -- Bucket empty — reject
+            return {0, math.floor(tokens)}
+        end
+
+        -- Consume one token
+        tokens = tokens - 1
+        redis.call("HMSET", key, "tokens", tokens, "last_refill", now)
+        redis.call("EXPIRE", key, 3600)  -- TTL so idle buckets self-clean
+
+        return {1, math.floor(tokens)}
+        """
+
+        result = self.r.eval(script, 1, key,
+                             self.capacity, self.refill_rate, now)
+        allowed = result[0] == 1
+        remaining = result[1]
+        return allowed, remaining
+
+
+# Usage: different limits for authenticated vs. anonymous users
+# Authenticated users get a larger bucket — they are accountable.
+# Anonymous users get a tighter limit to reduce abuse.
+auth_limiter  = TokenBucketRateLimiter(redis, capacity=100, refill_rate=10)
+anon_limiter  = TokenBucketRateLimiter(redis, capacity=10,  refill_rate=1)
+
+def rate_limit_check(request) -> tuple[bool, int]:
+    if request.user_id:
+        return auth_limiter.is_allowed(f"user:{request.user_id}")
+    else:
+        # Limit by IP for anonymous requests
+        return anon_limiter.is_allowed(f"ip:{request.client_ip}")
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLIENT REQUEST                            │
+│            GET sho.rt/gT4xK9m  (11,574 QPS)                    │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │   CDN / Edge Cache     │  ← Cloudflare or Fastly
+              │  Cache: code → URL     │    Cache-Control: max-age=3600
+              │  ~70% hit rate         │    ~8,000 QPS absorbed at edge
+              └───────────┬────────────┘
+                          │ 30% miss (3,500 QPS reach origin)
+                          ▼
+              ┌────────────────────────┐
+              │    Load Balancer       │  ← Active-active, anycast IP
+              │  (L7, sticky sessions  │    Health check: /health every 5s
+              │   NOT needed — stateless)│
+              └───────┬──────┬─────────┘
+                      │      │
+              ┌───────┴┐   ┌─┴───────┐
+              │ App A  │   │  App B  │  ← Stateless Go or Node servers
+              └───┬────┘   └────┬────┘    Auto-scale: CPU > 60%
+                  │             │
+                  └──────┬──────┘
+                         │
+                         ▼
+              ┌────────────────────────┐
+              │     Redis Cluster      │  ← 3 shards, 1 replica each
+              │  code → long_url TTL   │    ~15% of codes are "hot"
+              │  4GB working set       │    and cover ~85% of traffic
+              └───────────┬────────────┘
+                          │ cache miss
+                          ▼
+              ┌────────────────────────┐
+              │   Postgres Primary     │  ← Writes only (12 QPS creates)
+              │   (short_urls table)   │
+              └───────────┬────────────┘
+                          │ async WAL streaming
+                    ┌─────┴──────┐
+                    │            │
+              ┌─────┴────┐  ┌────┴────┐
+              │ Replica 1│  │Replica 2│  ← Cache-miss reads go here
+              └──────────┘  └─────────┘    Spreading reads across 2 replicas
+
+WRITES (creates — 12 QPS):
+  Client → LB → App → Postgres Primary → generate code → return 201
+
+ANALYTICS (async, non-critical path):
+  Click event → Kafka topic "clicks" → Consumer writes to url_clicks table
+  Background job aggregates url_click_counts every 60 seconds.
+  (Why async? Because blocking the redirect on an analytics write would add
+   10-20ms latency for every redirect — not acceptable at our p99 target.)
+```
+
+## Bottlenecks and mitigations
+
+```
+Bottleneck 1: CDN cold start / cache miss storm
+  Scenario: A link goes viral. Millions of first-time visits in 60 seconds.
+  All hit the CDN cold (never cached). 1M requests reach origin in 60s (~16K QPS).
+  Mitigation:
+    A. "Dogpile lock" in Redis: first cache miss sets a distributed lock;
+       subsequent misses wait for the lock holder to populate the cache.
+    B. Staggered CDN TTLs with jitter so similar links don't expire simultaneously.
+
+Bottleneck 2: Redis single point of failure
+  Scenario: Primary Redis node fails during peak traffic.
+  All cache misses hit Postgres simultaneously.
+  Mitigation:
+    Redis Sentinel: 1 primary + 2 replicas. Automatic failover in < 30 seconds.
+    During failover, requests fall through to Postgres — acceptable at 12K QPS for 30s.
+
+Bottleneck 3: Analytics table write pressure
+  Scenario: 1B clicks/day = 11,574 writes/second to url_clicks.
+  Postgres handles ~10K writes/second with proper tuning. We are at the limit.
+  Mitigation:
+    Route click events to Kafka. Consumer batch-inserts to ClickHouse (column store)
+    optimized for append-only time-series data. Postgres never sees click writes.
+
+Bottleneck 4: Sequential code exposure
+  Scenario: Using row ID → base62 means codes are predictable. An attacker
+  can enumerate all active URLs by iterating through codes.
+  Mitigation:
+    Add a random salt to the ID before encoding: code = base62(id XOR SALT)
+    where SALT is a secret server-side constant. Codes are still unique (bijection)
+    but not sequentially guessable.
+    Alternative: switch to random codes (secrets.choice) with ON CONFLICT retry.
+```
+
+<SandboxExercise
+  language="python"
+  instructions="Implement the int_to_base62 and base62_to_int functions. Then verify that encode(decode(code)) == code for the examples provided. The BASE62_CHARS alphabet is given. Your encode function must produce exactly 7-character codes (left-pad with '0' if needed)."
+  initialCode={`BASE62_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+def int_to_base62(n: int, length: int = 7) -> str:
+"""Convert integer n to a base62 string padded to `length` characters.""" # TODO: implement this
+pass
+
+def base62_to_int(code: str) -> int:
+"""Convert a base62 string back to an integer.""" # TODO: implement this
+pass
+
+# Tests
+
+assert int_to_base62(1) == "0000001", f"Got {int_to_base62(1)}"
+assert int_to_base62(62) == "0000010", f"Got {int_to_base62(62)}"
+assert base62_to_int("0000001") == 1
+assert base62_to_int("0000010") == 62
+
+# Round-trip test
+
+for test_id in [1, 42, 1000, 999999, 1_000_000_000]:
+code = int_to_base62(test_id)
+recovered = base62_to_int(code)
+assert recovered == test_id, f"Round-trip failed for {test_id}: got {recovered}"
+print(f"ID {test_id:>12} → {code} → {recovered}")
+
+print("All tests passed!")`}
+  solution={`BASE62_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+def int_to_base62(n: int, length: int = 7) -> str:
+if n == 0:
+return "0" \* length
+chars = []
+while n > 0:
+chars.append(BASE62_CHARS[n % 62])
+n //= 62
+while len(chars) < length:
+chars.append("0")
+return "".join(reversed(chars))
+
+def base62_to_int(code: str) -> int:
+result = 0
+for ch in code:
+result = result \* 62 + BASE62_CHARS.index(ch)
+return result
+
+assert int_to_base62(1) == "0000001"
+assert int_to_base62(62) == "0000010"
+assert base62_to_int("0000001") == 1
+assert base62_to_int("0000010") == 62
+
+for test_id in [1, 42, 1000, 999999, 1_000_000_000]:
+code = int_to_base62(test_id)
+recovered = base62_to_int(code)
+assert recovered == test_id
+print(f"ID {test_id:>12} → {code} → {recovered}")
+
+print("All tests passed!")`}
+testCases={["int_to_base62(1) == '0000001'", "int_to_base62(62) == '0000010'", "Round-trip for all test IDs"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "The URL shortener uses HTTP 302 for redirects. A stakeholder asks to switch to 301 to 'save server load by using browser caching.' What is the correct response?",
+      options: [
+        "Accept the change — 301 is always more efficient than 302",
+        "Reject it — 301 caches permanently in browsers, so deactivated or updated links would continue redirecting to old destinations for affected users",
+        "Accept it only for links that have never been clicked before",
+        "Reject it — 301 is not supported on mobile browsers",
+      ],
+      correct: 1,
+      explanation:
+        "A 301 is cached by the browser with no expiry. Users who visited a link before it was deactivated would continue to be redirected — bypassing your server entirely. Click analytics would also stop working for those users. 302 keeps the server in the loop on every click.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Why is click event processing routed through Kafka rather than written directly to Postgres on each redirect?",
+      options: [
+        "Kafka is faster than Postgres for all types of writes",
+        "Writing to Postgres on every redirect would add database latency to the critical redirect path, violating the sub-50ms p99 target",
+        "Postgres cannot store more than 1 billion rows",
+        "Kafka automatically deduplicates click events",
+      ],
+      correct: 1,
+      explanation:
+        "The redirect path is latency-sensitive. Adding a synchronous database write to every redirect would increase p99 from ~10ms to ~30ms — a 3x increase that violates the SLA. Kafka decouples the fast redirect from the slower analytics write.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A URL shortener translates cleanly into the REDNAC framework: the 965:1 read:write ratio drives CDN + Redis caching as the primary scaling mechanism.
+- Base62 encoding over a sequential database ID produces short, URL-safe codes with guaranteed uniqueness and no collision risk.
+- HTTP 302 is correct for redirects that must support deactivation, URL updates, and click analytics; 301 permanently removes the server from the chain.
+- Token bucket rate limiting smooths burst traffic more effectively than fixed windows, and using Lua scripts in Redis makes the check atomic.
+- Decoupling analytics writes through a message queue preserves sub-50ms redirect latency while supporting 1B clicks/day write throughput.
+
+The next case study scales up the complexity: a notification system introduces fan-out, delivery guarantees, and multi-channel routing — problems that push beyond what simple caching and sharding solve.

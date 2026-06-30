@@ -122,7 +122,11 @@ function ProfileCard(): React.ReactElement {
   );
 }
 
-export function SettingsClient(): React.ReactElement {
+interface SettingsClientProps {
+  version: string;
+}
+
+export function SettingsClient({ version }: SettingsClientProps): React.ReactElement {
   const prefs = usePreferencesStore((s) => s.prefs);
   const update = usePreferencesStore((s) => s.update);
   const [confirmingClear, setConfirmingClear] = useState(false);
@@ -361,12 +365,26 @@ export function SettingsClient(): React.ReactElement {
 
       {/* ── About ──────────────────────────────────────────────────── */}
       <Section title="About">
-        <div className="text-xs text-[var(--color-text-secondary)]">
-          <p className="font-semibold text-[var(--color-text-primary)]">DURA · v0.1.0</p>
-          <p>Durwood Studios LLC · Open source · AGPLv3</p>
-          <p className="mt-2 flex gap-3">
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-base font-semibold text-[var(--color-text-primary)]">DURA</span>
+            <span className="rounded-full bg-[var(--color-accent)]/10 px-2.5 py-0.5 font-mono text-xs font-medium text-[var(--color-accent)]">
+              v{version}
+            </span>
+          </div>
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            Durwood Studios LLC · Open source · AGPLv3
+          </p>
+          <Link
+            href="/settings/changelog"
+            className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-3 py-2 text-xs font-medium text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+          >
+            <span aria-hidden="true">✦</span>
+            What&apos;s New in v{version}
+          </Link>
+          <p className="flex gap-3 text-xs">
             <Link
-              href="https://github.com/Durwood-Studios/Dura"
+              href="https://github.com/Durwood-studios/Dura"
               className="text-emerald-600 hover:underline dark:text-emerald-400"
               target="_blank"
               rel="noopener noreferrer"

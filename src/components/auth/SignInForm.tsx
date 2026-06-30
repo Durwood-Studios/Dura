@@ -160,12 +160,20 @@ export default function SignInForm(): React.ReactElement {
         </div>
 
         <div>
-          <label
-            htmlFor="sign-in-password"
-            className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]"
-          >
-            Password
-          </label>
+          <div className="mb-1.5 flex items-center justify-between">
+            <label
+              htmlFor="sign-in-password"
+              className="text-xs font-medium text-[var(--color-text-secondary)]"
+            >
+              Password
+            </label>
+            <Link
+              href="/auth/forgot-password"
+              className="text-xs text-emerald-400 underline underline-offset-2 hover:text-emerald-300"
+            >
+              Forgot password?
+            </Link>
+          </div>
           <input
             id="sign-in-password"
             type="password"

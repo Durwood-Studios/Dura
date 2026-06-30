@@ -1,0 +1,318 @@
+---
+title: "Model Checking with Alloy and TLC"
+description: "Compare TLA+/TLC and Alloy as complementary model-checking tools — use Alloy's relational logic to find structural flaws in data models and access control designs."
+phase: 7
+module: "7-5"
+order: 3
+estimatedMinutes: 18
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-2", "SE-4", "SE-6"]
+  swebok: ["Software Quality", "Software Design", "Software Security"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - alloy
+  - relational-logic
+  - signature
+  - predicate
+  - assertion
+  - counterexample
+  - scope
+  - sat-solver
+learningOutcomes:
+  - "Write an Alloy model using signatures, relations, and facts to describe a data structure or access control policy"
+  - "Express an assertion in Alloy and run the Alloy Analyzer to find counterexamples within a given scope"
+  - "Distinguish when to use Alloy (structural/relational properties) vs. TLA+ (temporal/behavioral properties)"
+  - "Interpret an Alloy counterexample instance to identify a flaw in a design"
+prerequisites:
+  - "TLA+ specification and TLC model checking (lesson 7-5-02)"
+  - "Relational algebra basics — relations, joins, closures"
+  - "Access control concepts — subjects, objects, permissions"
+  - "Set theory — membership, subset, union, intersection"
+---
+
+## Why this matters
+
+TLA+ excels at modeling _behavior over time_ — sequences of events, concurrent actions, state transitions. But many design flaws are not about time at all: they are about whether a data structure can represent an invalid state, whether an access control policy has a privilege escalation path, or whether a type system permits a malformed configuration. For these _structural_ questions, Alloy is the right tool. It uses relational logic and a SAT solver to find counterexamples to assertions about data models — in seconds, without requiring you to enumerate state manually.
+
+Understanding both Alloy and TLA+ gives you complementary lenses on correctness. A database schema that Alloy verifies cannot represent orphaned foreign keys, combined with a replication protocol that TLA+ verifies cannot lose acknowledged writes, is a system defended at two different levels. The discipline of using these tools also calibrates your intuition: when Alloy finds a counterexample to something you were sure was impossible, it reshapes how confidently you assert design properties in the future.
+
+## What Alloy models — structure, not sequence
+
+Consider a file system access control model. You want to verify: "No user can access a file unless they have explicit permission." You could write a test — create a user without permissions, try to access a file, assert denial. But what about permission inheritance? Groups? Recursive group membership? The structural relationships quickly become too complex for manual case analysis.
+
+Alloy lets you declare the _structure_ (users, groups, files, permissions as sets and relations) and then ask: "Is there any configuration of users and files — within a given size limit — where a user can access a file they should not be able to?" The SAT solver explores all configurations exhaustively up to the scope you specify.
+
+> **Alloy is just a constraint solver for data structures: you describe the rules, and it finds all configurations that satisfy (or violate) them within a bounded universe.**
+
+## Alloy syntax — signatures, facts, assertions
+
+The basic building blocks:
+
+```alloy
+-- A "sig" (signature) declares a set of atoms
+-- Like a type, but Alloy reasons about the members
+
+sig User {}          -- a set of users
+sig File {}          -- a set of files
+sig Permission {}    -- a set of permission tokens
+
+-- Relations are declared as fields on sigs
+sig Group {
+  members: set User  -- each Group has a set of User members
+}
+
+-- A "fact" is a constraint that is ALWAYS true — it restricts the universe
+fact NoEmptyGroups {
+  -- every group has at least one member
+  all g: Group | some g.members
+}
+
+-- A "pred" (predicate) is a named constraint you can invoke or check
+pred CanAccess(u: User, f: File) {
+  -- user u can access file f if there exists a permission that covers both
+  some p: Permission | p in u.permissions and f in p.files
+}
+
+-- An "assert" is a property you claim holds in ALL valid instances
+-- The Alloy Analyzer tries to FALSIFY it (find a counterexample)
+assert NoUnauthorizedAccess {
+  all u: User, f: File |
+    CanAccess[u, f] implies f in u.allowedFiles
+}
+
+-- "check" runs the assertion up to a given scope
+check NoUnauthorizedAccess for 5   -- check with at most 5 of each sig
+```
+
+## A complete access control model
+
+Here is a realistic Alloy model for a role-based access control (RBAC) system:
+
+```alloy
+module RBAC
+
+sig User {
+  roles: set Role         -- a user has zero or more roles
+}
+
+sig Role {
+  permissions: set Perm   -- a role grants zero or more permissions
+}
+
+sig Perm {
+  resource: one Resource  -- each permission is for exactly one resource
+}
+
+sig Resource {}
+
+-- Derived relation: what resources can a user access?
+-- (navigate the chain: user -> roles -> permissions -> resource)
+fun accessible(u: User): set Resource {
+  u.roles.permissions.resource
+}
+
+-- Fact: no cycles in role hierarchy (if you add role inheritance)
+-- (We keep this flat — no inheritance — so this is trivially satisfied)
+
+-- Assertion 1: If a user has no roles, they can access nothing
+assert NoRoleMeansNoAccess {
+  all u: User |
+    no u.roles implies no accessible[u]
+}
+
+-- Assertion 2: Two users with identical role sets access identical resources
+assert SameRolesSameAccess {
+  all u1, u2: User |
+    u1.roles = u2.roles implies accessible[u1] = accessible[u2]
+}
+
+-- Assertion 3: Removing a role never grants additional access
+-- (monotonicity: access shrinks as roles are removed)
+assert RemovingRoleReducesAccess {
+  all u: User, r: Role |
+    r in u.roles implies
+      -- the resources accessible after removing r are a subset of before
+      (u.roles - r).permissions.resource in accessible[u]
+}
+
+check NoRoleMeansNoAccess    for 6
+check SameRolesSameAccess    for 6
+check RemovingRoleReducesAccess for 6
+```
+
+When you run this in the Alloy Analyzer, it checks each assertion by feeding it to a SAT solver. For `NoRoleMeansNoAccess` and `SameRolesSameAccess`, it finds no counterexamples — the assertions hold for all configurations with up to 6 users, roles, permissions, and resources.
+
+## Reading an Alloy counterexample
+
+Suppose you modify the RBAC model to add role inheritance — a role can extend another role and inherit its permissions — but you make a mistake: inherited permissions are not propagated transitively. Alloy would find a counterexample like this:
+
+```
+Counterexample found for assertion RemovingRoleReducesAccess
+
+Instance:
+  User$0
+    roles: {Role$0, Role$1}
+
+  Role$0
+    permissions: {Perm$0}
+    extends: Role$1         <- inherits from Role$1
+
+  Role$1
+    permissions: {Perm$1}
+    extends: (none)
+
+  Perm$0 -> Resource$0
+  Perm$1 -> Resource$1
+
+  accessible(User$0) = {Resource$0, Resource$1}
+                       ^-- Role$0 directly, Role$1 via inheritance
+
+  After removing Role$0:
+    accessible(User$0) = {Resource$1}   <- Role$1 still present
+
+  After removing Role$1:
+    accessible(User$0) = {Resource$0, Resource$1}
+    ^-- BUG: removing Role$1 did not remove Resource$1
+    because Role$0 inherits from Role$1 but the accessible()
+    function does not follow the inheritance chain when Role$1 is removed
+```
+
+The counterexample shows a specific configuration — three roles, two resources — where removing a role actually leaves the user with access they should have lost. This is a privilege escalation bug in the inheritance logic, found before any code was written.
+
+## TLA+ vs. Alloy — when to use each
+
+| Concern                        | Better tool | Why                                                 |
+| ------------------------------ | ----------- | --------------------------------------------------- |
+| Concurrent state transitions   | TLA+        | Temporal operators model "before/after" steps       |
+| Protocol correctness over time | TLA+        | Invariants hold across all execution traces         |
+| Liveness ("eventually X")      | TLA+        | Temporal logic is built for this                    |
+| Data structure validity        | Alloy       | Relational logic is native                          |
+| Access control / authorization | Alloy       | Relations between subjects/objects are first-class  |
+| Type system or schema design   | Alloy       | Structural properties, no time axis needed          |
+| Both structure and behavior    | Both        | Use Alloy for the data model, TLA+ for the protocol |
+
+Neither tool is universally superior. Real distributed systems benefit from both: Alloy to verify the data model cannot represent invalid states, TLA+ to verify the protocol cannot reach invalid states.
+
+## Scope and completeness
+
+A key limitation: Alloy only checks assertions within a _scope_ — a bound on how many atoms of each signature can exist. `check NoRoleMeansNoAccess for 6` means: find a counterexample with at most 6 Users, 6 Roles, 6 Perms, and 6 Resources.
+
+This is called _bounded verification_. If no counterexample exists within scope 6, the assertion might still be violated at scope 100. In practice, for structural properties of most designs, small scopes (3-6) catch the vast majority of counterexamples because structural flaws tend to manifest with small witnesses.
+
+The <VocabTooltip slug="scope">scope</VocabTooltip> is a tradeoff: larger scopes catch more bugs but take exponentially longer. Alloy's small scope hypothesis — empirically validated — says that if a property has a counterexample at all, it almost always has one with fewer than 10 atoms per sig.
+
+## Practice
+
+<SandboxExercise
+  title="Write an Alloy assertion for a file ownership model"
+  description="A file system has Users, Files, and an 'owner' relation. Write an Alloy assertion that says: 'Every file has exactly one owner.' Then write a second assertion that a user can only delete files they own. Find the scope at which the Alloy Analyzer would check these."
+  language="alloy"
+  starterCode={`module FileSystem
+
+sig User {}
+
+sig File {
+owner: one User, -- 'one' means exactly one owner
+readers: set User -- readers can view but not delete
+}
+
+-- TODO: Write this assertion
+-- Every file has exactly one owner (this should be trivially true given the 'one' multiplicity)
+assert ExactlyOneOwner {
+all f: File | one f.owner
+}
+
+-- TODO: Write this assertion
+-- A user can delete a file only if they are the owner
+-- Hint: model "canDelete" as a predicate, then assert it implies ownership
+pred canDelete(u: User, f: File) {
+f.owner = u -- only the owner can delete
+}
+
+assert DeleteRequiresOwnership {
+all u: User, f: File |
+canDelete[u, f] implies f.owner = u
+}
+
+-- TODO: What scope should you check these with?
+check ExactlyOneOwner for 5
+check DeleteRequiresOwnership for 5`}
+  solution={`assert ExactlyOneOwner {
+all f: File | one f.owner -- 'one' multiplicity enforces this structurally
+}
+
+pred canDelete(u: User, f: File) {
+f.owner = u
+}
+
+assert DeleteRequiresOwnership {
+all u: User, f: File |
+canDelete[u, f] implies f.owner = u
+}
+
+check ExactlyOneOwner for 6
+check DeleteRequiresOwnership for 6`}
+hints={[
+"The 'one' keyword in 'owner: one User' already structurally enforces exactly one owner — your assertion should reflect that.",
+"canDelete is a predicate that returns true when u owns f. The assertion checks that this predicate implies the ownership relation.",
+"Start with scope 4 or 5 — Alloy will explore all configurations with that many Users and Files."
+]}
+/>
+
+## Check your understanding
+
+<Quiz>
+  {[
+    {
+      question:
+        "You write an Alloy assertion and run `check MyAssertion for 8`. The Alloy Analyzer reports 'No counterexample found.' What can you conclude?",
+      options: [
+        "The assertion is proven correct for all possible configurations",
+        "The assertion holds for all configurations with at most 8 atoms per signature",
+        "The SAT solver was unable to find a counterexample due to timeout",
+        "The assertion is a tautology and does not require checking",
+      ],
+      correctIndex: 1,
+      explanation:
+        "Alloy performs bounded verification — it checks all configurations within the specified scope. No counterexample at scope 8 means the assertion holds for those bounded universes, but does not constitute a proof for arbitrary-size configurations. The small scope hypothesis says this is usually sufficient to find bugs, but it is not a mathematical proof.",
+    },
+    {
+      question:
+        "You are designing a permission system where users can inherit permissions through group membership (groups can contain groups). Which tool is better suited to verify 'no user can access a resource they were not explicitly or transitively granted access to'?",
+      options: [
+        "TLA+ — because permission inheritance unfolds over time",
+        "Alloy — because this is a structural property about relations between entities",
+        "Both are equally suited — the choice is purely about preference",
+        "Neither — this requires a theorem prover like Coq",
+      ],
+      correctIndex: 1,
+      explanation:
+        "Permission inheritance is a structural/relational property — it is about the transitive closure of a relation (group membership) and its composition with another relation (resource access). There is no time axis. Alloy's relational logic handles transitive closure natively with the `^` (transitive closure) and `*` (reflexive transitive closure) operators.",
+    },
+    {
+      question: "In Alloy, what is the difference between a `fact` and an `assert`?",
+      options: [
+        "Facts are checked by the analyzer; asserts are assumed to be true",
+        "Facts are assumed true in all instances; asserts are properties the analyzer tries to falsify",
+        "Facts apply to signatures only; asserts apply to predicates only",
+        "There is no difference — both constrain the valid instances",
+      ],
+      correctIndex: 1,
+      explanation:
+        "A `fact` is a constraint that restricts which instances Alloy will even generate — it defines the 'rules of the universe.' An `assert` is a property you claim holds in all instances; Alloy tries to find a counterexample (an instance that satisfies all facts but violates the assert). If it finds one, your design has a flaw.",
+    },
+  ]}
+</Quiz>
+
+## What you learned
+
+- Alloy models _structure_ using relational logic — signatures declare entity types, fields declare relations between them, facts constrain which configurations are valid
+- Assertions express properties you claim hold in all valid instances; the Alloy Analyzer uses a SAT solver to find counterexamples within a specified scope
+- Alloy counterexamples are concrete instances — specific sets of atoms and relations — that directly expose the structural flaw in your design
+- Bounded verification means "no counterexample at scope N" is strong evidence but not a proof; the small scope hypothesis makes this practically useful for most design flaws
+- TLA+ handles temporal/behavioral properties; Alloy handles structural/relational properties — use both on complex systems
+
+The module now shifts from software verification to hardware architecture: the next lesson covers how GPUs are physically organized — SIMD lanes, warp schedulers, and the memory hierarchy — which is the foundation you need before writing GPU code.

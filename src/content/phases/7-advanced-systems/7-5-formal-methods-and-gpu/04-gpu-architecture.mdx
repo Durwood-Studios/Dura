@@ -1,0 +1,254 @@
+---
+title: "GPU Architecture — SIMD, Warps, Memory Hierarchy"
+description: "Learn how GPUs are physically organized — SIMD execution units, warp scheduling, and the memory hierarchy — so you can reason about why GPU programs are fast or slow."
+phase: 7
+module: "7-5"
+order: 4
+estimatedMinutes: 15
+difficulty: "advanced"
+standards:
+  cs2023: ["AR-2", "AR-4", "PD-2"]
+  swebok: ["Software Performance"]
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - simd
+  - warp
+  - thread-block
+  - streaming-multiprocessor
+  - shared-memory
+  - global-memory
+  - coalesced-access
+  - warp-divergence
+  - occupancy
+  - register-file
+learningOutcomes:
+  - "Explain how SIMD execution and warp scheduling allow a GPU to hide memory latency"
+  - "Describe the five levels of GPU memory hierarchy and the access latency of each"
+  - "Predict whether a given memory access pattern will result in coalesced or uncoalesced global memory reads"
+  - "Explain what warp divergence is and give an example of code that causes it"
+prerequisites:
+  - "CPU architecture — pipelines, cache hierarchy, branch prediction"
+  - "Concurrency concepts — threads, parallel execution"
+  - "Binary arithmetic — powers of 2, bit shifts, alignment"
+  - "C pointer arithmetic — arrays, memory layout"
+---
+
+## Why this matters
+
+A modern GPU has more than 10,000 arithmetic units. A modern CPU has 16. If you write GPU code without understanding how those units are organized, you can write a kernel that is technically parallel but runs slower than the equivalent CPU code — because you accessed memory in the wrong pattern, or branched inside a warp, or ran out of registers. Understanding GPU architecture is not optional background knowledge: it is the difference between a 10x speedup and a 0.1x slowdown.
+
+GPU programming is increasingly central to systems work that has nothing to do with graphics. Machine learning inference, scientific simulation, database operations, and even cryptographic workloads run on GPUs. Engineers who can reason about GPU performance at the hardware level — not just call library functions — are the ones who can optimize the 95th percentile latency that a library call cannot fix.
+
+## The fundamental problem GPUs solve
+
+A CPU is optimized for _latency_: get one instruction done as fast as possible. Large caches, out-of-order execution, branch predictors, and prefetchers all exist to reduce the time any single instruction waits. A CPU core can execute one instruction sequence at low latency.
+
+A GPU is optimized for _throughput_: get as many operations done per second as possible, even if each individual operation takes a long time. The insight is that memory latency — waiting hundreds of nanoseconds for DRAM — is unavoidable, but you can _hide_ it by running thousands of other computations while you wait.
+
+> **A GPU is a latency-hiding machine: it keeps thousands of work items in flight simultaneously, switching to a ready item whenever the current one is waiting for memory.**
+
+## SIMD — one instruction, many data
+
+The starting point is <VocabTooltip slug="simd">SIMD (Single Instruction, Multiple Data)</VocabTooltip>. Instead of one arithmetic unit that processes one value at a time, a GPU has 32 arithmetic units wired together that all execute the _same instruction_ on _different data elements_ simultaneously.
+
+On NVIDIA GPUs, this group of 32 threads executing in lockstep is called a <VocabTooltip slug="warp">warp</VocabTooltip>. AMD calls the equivalent a wavefront (64 threads). The key constraint: all 32 threads in a warp execute the same instruction at the same clock cycle. If thread 0 executes `ADD r1, r2, r3`, threads 1 through 31 also execute `ADD r1, r2, r3` — on their own copies of the registers.
+
+```
+CPU: one core processes one element
+  clock 1: process element [0]
+  clock 2: process element [1]
+  clock 3: process element [2]
+  ...
+  32 clocks to process 32 elements
+
+GPU warp: 32 threads execute simultaneously
+  clock 1: all 32 threads execute the same instruction on elements [0..31]
+  1 clock to process 32 elements — 32x throughput
+```
+
+## Streaming Multiprocessors — the GPU's physical cores
+
+A GPU die is divided into <VocabTooltip slug="streaming-multiprocessor">Streaming Multiprocessors (SMs)</VocabTooltip>, each containing multiple warp schedulers and sets of 32 arithmetic units. An NVIDIA A100 has 108 SMs. Each SM can hold many warps simultaneously — typically 32-64 warps — switching between them every cycle to hide latency.
+
+```
+A100 GPU (simplified):
+┌─────────────────────────────────────────────────────┐
+│  SM 0     SM 1     SM 2    ...    SM 107             │
+│ ┌──────┐ ┌──────┐ ┌──────┐       ┌──────┐           │
+│ │64    │ │64    │ │64    │       │64    │           │
+│ │warps │ │warps │ │warps │       │warps │           │
+│ │      │ │      │ │      │       │      │           │
+│ │32-way│ │32-way│ │32-way│       │32-way│           │
+│ │SIMD  │ │SIMD  │ │SIMD  │       │SIMD  │           │
+└─────────────────────────────────────────────────────┘
+  Total arithmetic units: 108 × 64 × 32 = ~221,000
+  (actual A100 has 6,912 CUDA cores organized this way)
+```
+
+When one warp is waiting for a memory load to return from DRAM (300-600 cycles), the SM's scheduler instantly switches to another warp that is ready to execute. The latency of the memory access is completely hidden — at the cost of needing enough concurrent warps to keep the scheduler occupied.
+
+## Warp divergence — the hidden cost of branches
+
+Because all 32 threads in a warp execute the same instruction, conditional branches require special handling. If some threads take the if-branch and others take the else-branch, the hardware must execute _both_ branches serially, masking off the threads that should not participate in each one.
+
+```c
+// This branch causes warp divergence if threads in a warp have different values of x
+if (x > 0) {
+    result = sqrt(x);      // threads where x > 0 are active
+                           // threads where x <= 0 are masked OFF (idle)
+} else {
+    result = 0.0f;         // now threads where x <= 0 are active
+                           // threads where x > 0 are masked OFF (idle)
+}
+// Effective throughput: 1/2 of peak (both branches execute serially)
+
+// No divergence: all threads take the same path
+// This happens naturally when the condition depends on thread index
+// structured so that the first 16 threads all go one way:
+if (threadIdx.x < 16) {
+    // warp 0 threads 0-15: all take this path → first half-warp
+    // warp 0 threads 16-31: all take else → second half-warp
+    // Modern GPUs can split the warp — some divergence but less than arbitrary branching
+}
+```
+
+<VocabTooltip slug="warp-divergence">Warp divergence</VocabTooltip> is one of the most common GPU
+performance pitfalls. The fix is to restructure algorithms so threads within a warp take the same
+path — often by sorting data before processing it, or by restructuring conditionals to depend on
+warp-aligned conditions.
+
+## The GPU memory hierarchy
+
+GPU memory has five distinct levels, each with dramatically different capacity and latency:
+
+```
+Level             Where          Size       Latency        Bandwidth
+─────────────────────────────────────────────────────────────────────
+Registers         On-chip SM     256 KB/SM  ~1 cycle       N/A (no load)
+Shared memory     On-chip SM     48-164 KB  ~5-10 cycles   ~10 TB/s
+L1 cache          On-chip SM     ~128 KB    ~20-30 cycles  ~10 TB/s
+L2 cache          On-chip        ~40 MB     ~100-200 cyc   ~4 TB/s
+Global memory     GDDR6X/HBM     16-80 GB   ~300-600 cyc   1-3 TB/s
+```
+
+**Registers** are the fastest and most private — each thread has its own register file. Registers do not require a load instruction; values in registers are already in the execution unit.
+
+**<VocabTooltip slug="shared-memory">Shared memory</VocabTooltip>** is on-chip SRAM, explicitly managed by the programmer. All threads in a _thread block_ share the same shared memory. Access is ~5-10 cycles — comparable to L1 cache — making it the key tool for reducing global memory traffic. The programmer allocates it explicitly in the kernel.
+
+**Global memory** is the large DRAM on the GPU card — the 16-80 GB you see in a GPU spec. All threads can access all of global memory, but at 300-600 cycle latency. Global memory is the bottleneck in most GPU workloads.
+
+## Coalesced memory access — the critical pattern
+
+When a warp of 32 threads reads from global memory, the hardware can merge ("coalesce") their individual loads into a small number of DRAM transactions — if the addresses they are accessing form a contiguous, aligned block.
+
+```c
+// COALESCED: thread i reads element i
+// 32 threads access addresses: base, base+4, base+8, ... base+124
+// Coalesced into ONE 128-byte DRAM transaction
+float val = global_array[threadIdx.x];   // optimal
+
+// UNCOALESCED: thread i reads element i * 32 (stride-32 access)
+// 32 threads access addresses: base, base+128, base+256, ... widely scattered
+// Requires 32 SEPARATE DRAM transactions — 32x the memory bandwidth
+float val = global_array[threadIdx.x * 32];   // terrible
+
+// UNCOALESCED: random access (scatter/gather)
+// Each thread reads from a different, unpredictable location
+float val = global_array[index_array[threadIdx.x]];  // worst case
+```
+
+<VocabTooltip slug="coalesced-access">Coalesced memory access</VocabTooltip> is often the single
+most important optimization in GPU programming. The A100 has 2 TB/s of global memory bandwidth;
+uncoalesced access can reduce effective bandwidth to 60 GB/s — a 30x penalty. Designing data layouts
+specifically for coalesced access is a core GPU programming skill.
+
+## Occupancy — keeping the SM busy
+
+<VocabTooltip slug="occupancy">Occupancy</VocabTooltip> is the ratio of active warps to the maximum
+warps an SM can support. Higher occupancy means more warps available to hide latency — but occupancy
+is bounded by three shared resources:
+
+1. **Registers**: each SM has a fixed register file (~65,536 registers). If a kernel uses many registers per thread, fewer warps fit simultaneously.
+2. **Shared memory**: shared among all active thread blocks on an SM. Larger shared memory allocations per block reduce how many blocks can co-exist.
+3. **Thread blocks**: SMs have a maximum number of concurrent thread blocks (typically 32).
+
+```
+Example: SM with 65,536 registers, max 2,048 threads (64 warps)
+
+Kernel A: 16 registers/thread
+  2,048 threads × 16 = 32,768 registers used
+  Fits: 64 warps → 100% occupancy → maximum latency hiding
+
+Kernel B: 64 registers/thread
+  2,048 threads × 64 = 131,072 registers needed — EXCEEDS capacity
+  GPU can only fit 1,024 threads = 32 warps → 50% occupancy
+  Less latency hiding → lower throughput even though code is the same
+```
+
+The NVIDIA Occupancy Calculator helps you estimate the tradeoff for your specific kernel. More registers per thread can make a kernel faster per thread (fewer spills to memory) but reduce overall throughput if it cuts occupancy in half.
+
+## Practice
+
+<Quiz>
+  {[
+    {
+      question:
+        "A warp of 32 threads executes the following code: `if (threadIdx.x % 2 == 0) { result = a * b; } else { result = a + b; }`. What happens at the hardware level?",
+      options: [
+        "The GPU executes the multiplication for even threads and addition for odd threads simultaneously",
+        "The GPU executes the multiplication first (even threads active, odd masked), then the addition (odd active, even masked)",
+        "The GPU picks one branch based on the majority of threads and applies it to all",
+        "The GPU raises a divergence exception and aborts the kernel",
+      ],
+      correctIndex: 1,
+      explanation:
+        "This is warp divergence. Since threads alternate even/odd within a warp, the warp must serialize: first execute the multiplication with even threads active and odd threads masked (idle), then execute the addition with odd threads active and even threads masked. Effective throughput is half of peak — both branches execute serially.",
+    },
+    {
+      question:
+        "Thread i accesses `global_array[i * 64]` in a warp. What is the memory access pattern?",
+      options: [
+        "Coalesced — 32 threads access 32 consecutive elements",
+        "Uncoalesced — threads access addresses that are 64 × 4 = 256 bytes apart",
+        "Coalesced — the stride is a power of 2, which the hardware handles efficiently",
+        "Shared memory — strides within 128 bytes are served by the L1 cache",
+      ],
+      correctIndex: 1,
+      explanation:
+        "A stride-64 access means the 32 threads in a warp read addresses that are 256 bytes apart (64 floats × 4 bytes). DRAM coalescing requires contiguous, aligned addresses. With 256-byte gaps between accesses, each thread's load becomes a separate DRAM transaction — 32 transactions instead of 1, consuming 32x the memory bandwidth of a coalesced access.",
+    },
+    {
+      question:
+        "You increase a kernel's use of shared memory from 8 KB to 64 KB per thread block. On an SM that supports 164 KB of shared memory total, what happens to occupancy?",
+      options: [
+        "Occupancy increases because more data is in fast shared memory",
+        "Occupancy is unaffected — shared memory usage does not limit thread count",
+        "Occupancy decreases because fewer thread blocks can fit simultaneously on the SM",
+        "Occupancy stays the same but latency hiding improves",
+      ],
+      correctIndex: 2,
+      explanation:
+        "Shared memory is partitioned among all active thread blocks on an SM. With 164 KB total and 64 KB per block, only 2 blocks (128 KB) can be active simultaneously; 36 KB is wasted. With 8 KB per block, up to 20 blocks could fit. Fewer active blocks means fewer active warps, which means less latency hiding and lower occupancy.",
+    },
+  ]}
+</Quiz>
+
+## Check your understanding
+
+<FillBlank
+  prompt="In GPU execution, a _______ is a group of 32 threads that execute the same instruction simultaneously. When threads within this group take different branches of a conditional, the hardware must execute both branches _______, masking off the inactive threads — an effect called _______."
+  blanks={["warp", "serially", "warp divergence"]}
+  hint="Think about the three key GPU terms introduced in this lesson: the execution grouping, what happens when branches differ, and what that phenomenon is called."
+/>
+
+## What you learned
+
+- GPUs optimize for throughput by running thousands of threads concurrently and using warp scheduling to hide the hundreds-of-cycle latency of global memory access
+- A warp (32 threads) is the atomic unit of GPU scheduling — all threads execute the same instruction simultaneously; branching within a warp causes serialization (warp divergence)
+- The memory hierarchy spans five levels from registers (~1 cycle) to global memory (~500 cycles); coalesced access — consecutive threads accessing consecutive addresses — is the most impactful single optimization
+- Shared memory is programmer-managed on-chip SRAM shared within a thread block; using it to stage global memory reads can reduce DRAM traffic by 10-100x
+- Occupancy (active warps / max warps) is constrained by registers, shared memory, and block count; more registers per thread means fewer concurrent warps and less latency hiding
+
+The next lesson puts this architecture knowledge to work: you will write actual CUDA kernels, allocate and use shared memory explicitly, and measure the performance difference between coalesced and uncoalesced memory access.

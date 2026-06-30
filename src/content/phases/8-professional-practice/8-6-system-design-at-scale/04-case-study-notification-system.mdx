@@ -1,0 +1,628 @@
+---
+title: "Case Study — Design a Notification System"
+description: "Design a scalable multi-channel notification system, tackling fan-out, delivery guarantees, and the read vs. write amplification trade-off."
+phase: 8
+module: "8-6"
+order: 4
+estimatedMinutes: 25
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-1", "SE-2", "SF-3"]
+  swebok: ["Software Design", "Software Requirements"]
+  bloom: "create"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - fan-out
+  - fan-out-on-write
+  - fan-out-on-read
+  - message-queue
+  - dead-letter-queue
+  - idempotency-key
+  - at-least-once-delivery
+  - exactly-once-delivery
+  - push-notification
+  - webhook
+learningOutcomes:
+  - "Produce a complete system design for a notification system covering requirements, estimates, data model, API, architecture, and bottlenecks"
+  - "Compare fan-out-on-write and fan-out-on-read and select the appropriate strategy given a follower-count distribution"
+  - "Design a message queue topology that handles channel routing (email, SMS, push) with per-channel retry policies"
+  - "Explain why idempotency keys are required when notifications can be retried after partial failure"
+  - "Identify three failure modes specific to notification delivery and propose a mitigation for each"
+prerequisites:
+  - "REDNAC framework (lesson 1)"
+  - "Message queues (what Kafka or RabbitMQ do)"
+  - "Caching with Redis (lesson 2)"
+  - "HTTP webhooks (POST to a URL on an event)"
+  - "Case study — URL shortener (lesson 3)"
+---
+
+## Why this matters
+
+Notifications are the nervous system of any product with social features — likes, follows, comments, alerts, payment confirmations. They seem deceptively simple: "just send a push when X happens." But at scale, notification systems expose every hard problem in distributed systems simultaneously: fan-out (one event triggers millions of deliveries), multi-channel routing (push vs. email vs. SMS), at-least-once delivery guarantees, deduplication, rate limiting per recipient, and the write amplification that comes when a celebrity with 50 million followers posts something.
+
+The notification system is a frequent system design interview question precisely because it requires you to make trade-offs that cannot be resolved by "add more cache." Working through it in full prepares you for any problem where event-driven fan-out and delivery guarantees intersect.
+
+## Requirements
+
+**Functional requirements (agreed scope for this interview):**
+
+1. When a trigger event occurs (new post, new follower, comment, like), send a notification to the relevant recipient(s).
+2. Support three delivery channels: in-app notification bell, email, and mobile push (APNs/FCM).
+3. Users can configure per-channel preferences (e.g., disable email for likes, keep push for mentions).
+4. Delivered notifications appear in an inbox with read/unread state.
+5. Notifications are delivered within 30 seconds of the triggering event for most users.
+
+**Out of scope:** SMS delivery, rich-media push cards, notification scheduling, A/B testing of notification copy.
+
+**Non-functional requirements:**
+
+- Scale: 500 million DAU. Each user generates on average 2 notification-triggering events per day (1 billion events/day).
+- Fan-out: the median user has 200 followers; the 99th percentile has 10,000 followers; celebrities have up to 50 million.
+- Latency: in-app notification visible in < 30 seconds for 99% of recipients.
+- Delivery guarantee: at-least-once for all channels. Duplicates are acceptable; missed notifications are not.
+- Durability: notification inbox retained for 90 days.
+
+## Capacity estimates
+
+```python
+# --- EVENT VOLUME ---
+DAU               = 500_000_000
+events_per_day    = DAU * 2                # 1,000,000,000 events/day
+events_per_second = events_per_day / 86_400  # ~11,574 events/sec
+
+# --- FAN-OUT VOLUME ---
+# Median recipient count per event: 200 followers
+# But the distribution is extremely skewed — celebrities dominate total volume.
+median_recipients   = 200
+fanout_per_sec_median = events_per_second * median_recipients  # ~2.3M deliveries/sec
+
+# --- STORAGE (notification inbox) ---
+# Each notification record: ~500 bytes (event_type, actor_id, target_id, content, timestamps)
+# Retained 90 days, then archived.
+# If 10% of events generate inbox records (deduplication + preference filtering):
+inbox_events_per_day   = events_per_day * 0.10   # 100M inbox writes/day
+inbox_record_bytes     = 500
+inbox_storage_per_day_gb = (inbox_events_per_day * inbox_record_bytes) / 1e9  # 50 GB/day
+inbox_storage_90d_tb   = inbox_storage_per_day_gb * 90 / 1000  # ~4.5 TB total inbox
+
+# --- READ VOLUME (inbox fetches) ---
+# Each DAU checks their inbox ~5x/day on average
+inbox_reads_per_day   = DAU * 5               # 2.5B reads/day
+inbox_reads_per_second = inbox_reads_per_day / 86_400  # ~29K QPS
+# Conclusion: inbox reads dominate; aggressively cache the unread count
+# and paginated inbox list per user.
+```
+
+The celebrity fan-out problem is the design crux. A single post by a 50M-follower celebrity triggers 50 million deliveries in seconds. No synchronous architecture survives this — fan-out must be asynchronous and throttled.
+
+## Data model
+
+```sql
+-- Notification events (the source of truth — what happened)
+CREATE TABLE notification_events (
+  id              BIGSERIAL PRIMARY KEY,
+  event_type      VARCHAR(64) NOT NULL,  -- 'new_follower', 'post_liked', 'comment', etc.
+  actor_id        BIGINT NOT NULL,       -- user who triggered the event
+  target_id       BIGINT NOT NULL,       -- user who RECEIVES the notification
+  reference_type  VARCHAR(32),           -- 'post', 'comment', 'user' — what the event is about
+  reference_id    BIGINT,
+  -- idempotency_key prevents duplicate rows when the producer retries on failure
+  idempotency_key VARCHAR(64) UNIQUE NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Notification inbox (per-user, denormalized for fast reads)
+-- Sharded by target_id — each shard owns a range of user IDs
+CREATE TABLE notification_inbox (
+  id              BIGSERIAL,
+  target_id       BIGINT NOT NULL,       -- recipient user
+  event_id        BIGINT NOT NULL REFERENCES notification_events(id),
+  is_read         BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (target_id, id)            -- clustered by recipient for fast pagination
+) PARTITION BY RANGE (target_id);       -- partition by user ID range
+
+-- Index for paginated inbox: "give me the 20 newest notifications for user 42"
+CREATE INDEX idx_inbox_user_time
+  ON notification_inbox(target_id, created_at DESC, is_read);
+
+-- User notification preferences
+CREATE TABLE notification_preferences (
+  user_id         BIGINT PRIMARY KEY,
+  email_enabled   BOOLEAN NOT NULL DEFAULT TRUE,
+  push_enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+  -- JSON allows per-event-type overrides without schema migration per new event type
+  -- e.g. {"post_liked": {"email": false, "push": true}}
+  channel_overrides JSONB NOT NULL DEFAULT '{}'
+);
+
+-- Delivery log: tracks per-channel delivery status for retry logic
+CREATE TABLE notification_delivery_log (
+  id              BIGSERIAL PRIMARY KEY,
+  event_id        BIGINT NOT NULL REFERENCES notification_events(id),
+  target_id       BIGINT NOT NULL,
+  channel         VARCHAR(16) NOT NULL,  -- 'push', 'email', 'in_app'
+  status          VARCHAR(16) NOT NULL,  -- 'pending', 'delivered', 'failed', 'bounced'
+  attempts        SMALLINT NOT NULL DEFAULT 0,
+  last_attempted  TIMESTAMPTZ,
+  delivered_at    TIMESTAMPTZ,
+  error_detail    TEXT
+);
+
+CREATE INDEX idx_delivery_retry
+  ON notification_delivery_log(status, last_attempted)
+  WHERE status IN ('pending', 'failed') AND attempts < 5;
+```
+
+## API design
+
+```
+POST /api/notifications/events
+  Purpose: Ingest a notification-triggering event (called by other services)
+  Auth:    Internal service token (mTLS between services)
+  Body:    {
+    "event_type": "post_liked",
+    "actor_id": 12345,
+    "target_id": 67890,
+    "reference_type": "post",
+    "reference_id": 99001,
+    "idempotency_key": "like-99001-12345-67890"
+  }
+  202:     { "event_id": 8844221 }   — accepted, processing is async
+  409:     { "error": "duplicate_event" }  — idempotency_key already seen
+
+GET /api/users/{user_id}/notifications
+  Purpose: Fetch paginated notification inbox
+  Auth:    Bearer token (self only)
+  Query:   ?cursor=<created_at>&limit=20&unread_only=false
+  200:     {
+    "items": [
+      { "id": 1, "event_type": "post_liked", "actor": {...}, "is_read": false, "created_at": "..." }
+    ],
+    "unread_count": 12,
+    "next_cursor": "2024-01-15T10:30:00Z"
+  }
+
+POST /api/users/{user_id}/notifications/read
+  Purpose: Mark notifications as read
+  Auth:    Bearer token (self only)
+  Body:    { "notification_ids": [1, 2, 3] }   — or { "mark_all": true }
+  200:     { "marked": 3 }
+
+PATCH /api/users/{user_id}/notification-preferences
+  Purpose: Update channel preferences
+  Auth:    Bearer token (self only)
+  Body:    { "push_enabled": false, "channel_overrides": { "post_liked": { "push": false } } }
+  200:     { "updated": true }
+```
+
+## Fan-out strategies
+
+The hardest problem in the notification system is the celebrity fan-out. Two fundamentally different approaches exist:
+
+> **Fan-out-on-write pushes deliveries to recipients at event creation time. Fan-out-on-read builds the inbox lazily when the recipient opens it. The right choice depends on your follower-count distribution.**
+
+```
+FAN-OUT-ON-WRITE (push model):
+  When @celebrity posts:
+    1. Write event to notification_events (1 write)
+    2. Enqueue 50M fan-out jobs (50M queue messages)
+    3. Workers process jobs: write to each follower's notification_inbox
+
+  ✓ Inbox reads are O(1) — just query your own pre-built inbox
+  ✓ Delivery latency is predictable (queue drains at known rate)
+  ✗ A single celebrity post creates 50M writes — massive write amplification
+  ✗ A user with 50M followers who posts, then immediately deletes,
+    still triggers 50M writes before the delete is processed
+
+FAN-OUT-ON-READ (pull model):
+  When @celebrity posts:
+    1. Write event to notification_events (1 write)
+    2. Store the event reference in a "celebrity feed" list
+
+  When any follower checks their inbox:
+    1. Query notification_events for all users they follow (expensive join)
+    2. Merge with their own inbox
+
+  ✓ No write amplification at event creation time
+  ✗ Inbox read is O(following_count) — reading from a user following 10K people
+    requires 10K lookups per inbox open
+  ✗ Latency for inbox rebuild grows with social graph size
+
+HYBRID (production standard):
+  Regular users (< 10K followers): fan-out-on-write (fast inbox reads)
+  Celebrity users (≥ 10K followers): fan-out-on-read (avoid write amplification)
+
+  Inbox read logic:
+    1. Fetch pre-written inbox entries (from followed non-celebrities)
+    2. Fetch recent events from celebrity feeds the user follows
+    3. Merge and sort by time
+    4. Cache the merged result for 30 seconds
+```
+
+## Architecture
+
+```python
+# Event ingestion service — receives events from upstream services
+# (post-service, like-service, follow-service, etc.)
+
+import json
+import hashlib
+from typing import Optional
+
+def ingest_event(
+    event_type: str,
+    actor_id: int,
+    target_id: int,
+    reference_type: Optional[str],
+    reference_id: Optional[int],
+    idempotency_key: str
+) -> dict:
+    """
+    Ingest a notification-triggering event.
+    Returns immediately (202 Accepted) — all heavy work is async.
+
+    Why idempotency_key? If the caller retries after a network timeout,
+    we must not insert a duplicate event. The UNIQUE constraint on
+    idempotency_key makes the INSERT idempotent at the database level.
+    """
+    try:
+        row = db.execute(
+            """
+            INSERT INTO notification_events
+              (event_type, actor_id, target_id, reference_type, reference_id, idempotency_key)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING id
+            """,
+            [event_type, actor_id, target_id, reference_type, reference_id, idempotency_key]
+        )
+        if not row:
+            # Idempotency_key collision — already processed, not an error
+            return {"status": "duplicate", "event_id": None}
+
+        event_id = row["id"]
+
+        # Publish to Kafka for async fan-out processing
+        # The message is small — just the event ID. Workers load full data from DB.
+        kafka_producer.send(
+            topic="notification.events.raw",
+            value=json.dumps({"event_id": event_id}),
+            key=str(target_id).encode()  # partition by recipient for ordering
+        )
+
+        return {"status": "accepted", "event_id": event_id}
+
+    except Exception as e:
+        # Ingest failures must be surfaced — callers will retry
+        raise RuntimeError(f"Failed to ingest event: {e}") from e
+```
+
+```
+ARCHITECTURE DIAGRAM:
+
+Post Service ──┐
+Like Service ──┤  POST /notifications/events
+Follow Service─┘         │
+                          ▼
+               ┌──────────────────────┐
+               │  Notification Ingest │  ← Validates, deduplicates, persists
+               │  (stateless, 20x)    │
+               └──────────┬───────────┘
+                           │
+                           ▼ Kafka: notification.events.raw (partitioned by target_id)
+               ┌──────────────────────┐
+               │  Fan-out Workers     │  ← Fan out to follower inboxes
+               │  (horizontal scale)  │    Regular users: write inbox rows
+               └──────────┬───────────┘    Celebrities: skip, stored as event only
+                           │
+                 ┌─────────┴──────────┐
+                 │                    │
+                 ▼                    ▼
+         Kafka: push.queue    Kafka: email.queue
+                 │                    │
+         ┌───────┴──────┐    ┌────────┴──────┐
+         │  Push Worker  │    │  Email Worker  │
+         │  (APNs/FCM)   │    │  (SendGrid)    │
+         └───────┬───────┘    └───────┬────────┘
+                 │                    │
+                 └─────────┬──────────┘
+                           │
+                           ▼
+               ┌──────────────────────┐
+               │  Delivery Log DB     │  ← Records attempt, status, retry schedule
+               └──────────────────────┘
+
+INBOX READ PATH:
+  Client GET /notifications → Load Balancer → Notification Read Service
+    → Check Redis cache (user:{id}:inbox:cursor:{cursor})
+    → Cache miss: query notification_inbox + merge celebrity feeds
+    → Cache hit: return cached page (TTL 30s)
+    → Always fetch unread_count from Redis counter (incremented on fan-out)
+```
+
+## Retry logic and dead-letter queues
+
+```python
+import time
+from enum import Enum
+
+class DeliveryChannel(str, Enum):
+    PUSH  = "push"
+    EMAIL = "email"
+    IN_APP = "in_app"
+
+# Exponential backoff schedule per channel
+# Push is cheap to retry; email carries sender reputation risk if over-retried
+RETRY_CONFIG = {
+    DeliveryChannel.PUSH:  {"max_attempts": 5, "backoff_seconds": [10, 30, 120, 600, 3600]},
+    DeliveryChannel.EMAIL: {"max_attempts": 3, "backoff_seconds": [60, 600, 7200]},
+    DeliveryChannel.IN_APP: {"max_attempts": 1, "backoff_seconds": []},  # in-app is best-effort
+}
+
+def process_push_delivery(event_id: int, target_id: int) -> None:
+    """Deliver a push notification with retry logic."""
+    log = get_or_create_delivery_log(event_id, target_id, DeliveryChannel.PUSH)
+    config = RETRY_CONFIG[DeliveryChannel.PUSH]
+
+    if log["attempts"] >= config["max_attempts"]:
+        # Exhausted retries — move to dead-letter queue for manual inspection
+        send_to_dead_letter_queue({
+            "event_id": event_id,
+            "target_id": target_id,
+            "channel": DeliveryChannel.PUSH,
+            "reason": "max_retries_exceeded"
+        })
+        update_delivery_status(log["id"], "failed")
+        return
+
+    try:
+        prefs = get_user_preferences(target_id)
+        if not prefs["push_enabled"]:
+            # User opted out — mark delivered (no actual delivery needed)
+            update_delivery_status(log["id"], "skipped_opted_out")
+            return
+
+        device_token = get_device_token(target_id)
+        if not device_token:
+            update_delivery_status(log["id"], "skipped_no_device")
+            return
+
+        # Build the push payload
+        payload = build_push_payload(event_id, target_id)
+
+        # Send via APNs/FCM — may raise on network error or invalid token
+        push_gateway.send(device_token=device_token, payload=payload)
+
+        update_delivery_status(log["id"], "delivered")
+
+    except DeviceTokenInvalidError:
+        # Token expired — delete it so we stop attempting
+        delete_device_token(target_id)
+        update_delivery_status(log["id"], "failed_invalid_token")
+
+    except Exception as e:
+        # Transient failure — schedule retry
+        attempt = log["attempts"]
+        if attempt < len(config["backoff_seconds"]):
+            delay = config["backoff_seconds"][attempt]
+            schedule_retry(event_id, target_id, DeliveryChannel.PUSH, delay_seconds=delay)
+        update_delivery_attempt(log["id"], error_detail=str(e))
+```
+
+## Bottlenecks and mitigations
+
+```
+Bottleneck 1: Celebrity fan-out write storm
+  Scenario: @celebrity with 50M followers posts. 50M inbox writes in seconds.
+  Mitigation:
+    Hybrid fan-out: celebrities (> 10K followers) never trigger inbox writes.
+    Followers' inbox reads merge pre-built rows + celebrity event feeds.
+    Fan-out workers for regular users drain at a controlled rate.
+
+Bottleneck 2: Push gateway rate limits
+  Scenario: APNs and FCM impose per-app rate limits.
+  At 2.3M push deliveries/sec we exceed any single gateway connection pool.
+  Mitigation:
+    Shard push workers by target_id range.
+    Each shard maintains its own connection pool to APNs/FCM.
+    Distribute across multiple registered sender IDs if platform allows.
+
+Bottleneck 3: Notification inbox table write pressure
+  Scenario: 1B fan-out writes/day to notification_inbox = 11,574 writes/sec.
+  Mitigation:
+    Partition notification_inbox by target_id (e.g., 256 partitions).
+    Each partition on its own Postgres instance (or Aurora shard).
+    Writes to different partitions never contend.
+
+Bottleneck 4: Duplicate notifications on retry
+  Scenario: Push worker sends push, APNs ACKs, but network fails before
+  the worker can record "delivered" in the log. Worker retries → duplicate push.
+  Mitigation:
+    Idempotency keys on push payloads — APNs and FCM both support apns-collapse-id
+    and collapse_key respectively. Collapse keys deduplicate at the gateway:
+    if the same collapse_key arrives twice, only one notification is delivered.
+
+Bottleneck 5: Unread count cache invalidation
+  Scenario: Unread count is shown in the app header. If derived from a DB
+  count(*) query, it hits the database on every page load for every user.
+  Mitigation:
+    Maintain a Redis counter per user: INCR user:{id}:unread_count on fan-out,
+    DECR (or reset) when the user marks notifications read.
+    Counter reads are O(1) and never touch the database.
+```
+
+<SandboxExercise
+  language="python"
+  instructions="Implement the fan_out function below. For each follower of actor_id, create an inbox entry and enqueue a push delivery job. The mock data layer is provided. Use the hybrid strategy: skip inbox writes for any actor with more than 10,000 followers (celebrity threshold). Print a summary of how many inbox writes and push jobs were created."
+  initialCode={`import json
+
+# --- Mock data layer ---
+
+# Returns list of follower user_ids for an actor
+
+def get_followers(actor_id: int) -> list[int]:
+followers_db = {
+1: list(range(1001, 1201)), # 200 followers — regular user
+2: list(range(2001, 12001)), # 10,000 followers — at threshold
+3: list(range(3001, 53001)), # 50,000 followers — celebrity
+}
+return followers_db.get(actor_id, [])
+
+# Returns number of followers (cheap count, used for celebrity check)
+
+def get_follower_count(actor_id: int) -> int:
+return len(get_followers(actor_id))
+
+# Mock queues
+
+inbox_writes = []
+push_jobs = []
+
+def write_inbox_entry(target_id: int, event_id: int) -> None:
+inbox_writes.append({"target_id": target_id, "event_id": event_id})
+
+def enqueue_push_job(target_id: int, event_id: int) -> None:
+push_jobs.append({"target_id": target_id, "event_id": event_id})
+
+# --- Implement this ---
+
+CELEBRITY_THRESHOLD = 10_000
+
+def fan_out(actor_id: int, event_id: int) -> dict:
+"""
+Fan out a notification event to all followers of actor_id.
+
+    Rules:
+    - If actor has <= CELEBRITY_THRESHOLD followers: write an inbox entry
+      AND enqueue a push job for each follower.
+    - If actor has > CELEBRITY_THRESHOLD followers (celebrity): skip inbox
+      writes (fan-out-on-read handles these). Still enqueue push jobs
+      (push delivery is not skipped for celebrities — only inbox writes are).
+    - Return a summary dict with keys: actor_id, follower_count, inbox_writes,
+      push_jobs, is_celebrity.
+    """
+    pass  # TODO: implement
+
+# Test all three actors
+
+for actor in [1, 2, 3]:
+inbox_writes.clear()
+push_jobs.clear()
+result = fan_out(actor_id=actor, event_id=9000 + actor)
+print(json.dumps(result, indent=2))`}
+  solution={`import json
+
+def get_followers(actor_id):
+followers_db = {
+1: list(range(1001, 1201)),
+2: list(range(2001, 12001)),
+3: list(range(3001, 53001)),
+}
+return followers_db.get(actor_id, [])
+
+def get_follower_count(actor_id):
+return len(get_followers(actor_id))
+
+inbox_writes = []
+push_jobs = []
+
+def write_inbox_entry(target_id, event_id):
+inbox_writes.append({"target_id": target_id, "event_id": event_id})
+
+def enqueue_push_job(target_id, event_id):
+push_jobs.append({"target_id": target_id, "event_id": event_id})
+
+CELEBRITY_THRESHOLD = 10_000
+
+def fan_out(actor_id: int, event_id: int) -> dict:
+followers = get_followers(actor_id)
+follower_count = len(followers)
+is_celebrity = follower_count > CELEBRITY_THRESHOLD
+
+    for follower_id in followers:
+        if not is_celebrity:
+            # Regular user: pre-write inbox entries for fast reads
+            write_inbox_entry(target_id=follower_id, event_id=event_id)
+        # Push jobs go out for all actors regardless of celebrity status
+        enqueue_push_job(target_id=follower_id, event_id=event_id)
+
+    return {
+        "actor_id": actor_id,
+        "follower_count": follower_count,
+        "inbox_writes": len(inbox_writes),
+        "push_jobs": len(push_jobs),
+        "is_celebrity": is_celebrity
+    }
+
+for actor in [1, 2, 3]:
+inbox_writes.clear()
+push_jobs.clear()
+result = fan_out(actor_id=actor, event_id=9000 + actor)
+print(json.dumps(result, indent=2))`}
+testCases={[
+"Actor 1 (200 followers): 200 inbox writes and 200 push jobs",
+"Actor 3 (50K followers, celebrity): 0 inbox writes, 50K push jobs",
+"is_celebrity is True only when follower_count > 10_000"
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "Your notification system uses fan-out-on-write for all users. A celebrity with 50 million followers posts content. What is the immediate consequence to your infrastructure?",
+      options: [
+        "50 million read queries hit the database simultaneously",
+        "50 million write jobs are enqueued and workers must process them rapidly, creating a write storm",
+        "The push gateway receives 50 million connections in parallel",
+        "The celebrity's post is delayed until fan-out is complete",
+      ],
+      correct: 1,
+      explanation:
+        "Fan-out-on-write means every follower's inbox gets a write job the moment the event is ingested. For a 50M-follower celebrity, this creates 50 million queued writes that workers must drain as fast as possible — a write storm that can saturate the queue and worker pool.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A push notification worker sends a push to APNs successfully but fails before it can record 'delivered' in the delivery log. On retry, the user receives a duplicate notification. Which mechanism directly prevents this at the push gateway level?",
+      options: [
+        "A dead-letter queue",
+        "An idempotency key / collapse key sent in the push payload",
+        "Exponential backoff on retries",
+        "Partitioning the delivery log by user ID",
+      ],
+      correct: 1,
+      explanation:
+        "APNs supports apns-collapse-id and FCM supports collapse_key. When two push messages with the same collapse key are delivered to the gateway, it deduplicates them and only delivers one to the device. This is the closest mechanism to exactly-once delivery that push gateways provide.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "The notification inbox shows a per-user unread count in the app header. Why is maintaining a Redis INCR counter preferable to running a COUNT(*) query on the database?",
+      options: [
+        "Redis cannot store more than 1 billion records",
+        "COUNT(*) on a partitioned table always returns incorrect results",
+        "A Redis INCR is O(1) per request versus a COUNT(*) that scans rows proportional to unread notification volume, at 29K QPS the database would be constantly scanning",
+        "The database does not support integer columns",
+      ],
+      correct: 2,
+      explanation:
+        "At 29K inbox reads per second, running COUNT(*) WHERE is_read = FALSE for each request would create enormous database scan load. A Redis atomic counter incremented on fan-out and decremented on read is O(1) and handled entirely in memory — the database never sees these requests.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A notification system's core difficulty is the celebrity fan-out problem: one event triggering millions of writes is unsustainable with pure fan-out-on-write.
+- The hybrid strategy — fan-out-on-write for regular users, fan-out-on-read for celebrities — balances write amplification against read-time merge cost.
+- Message queues with per-channel retry policies and dead-letter queues provide at-least-once delivery guarantees without synchronous blocking on the event ingest path.
+- Idempotency keys at the ingest layer and collapse keys at the push gateway layer together prevent duplicate notifications even when workers retry after partial failure.
+- Decoupling the unread count into a Redis counter removes an otherwise catastrophic database scan from every page load.
+
+The next lesson steps back from case studies to examine the foundational tension underlying every design decision in this module: the three-way trade-off between consistency, availability, and latency.

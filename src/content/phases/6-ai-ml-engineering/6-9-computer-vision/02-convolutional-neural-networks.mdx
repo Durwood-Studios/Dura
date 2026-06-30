@@ -1,0 +1,334 @@
+---
+title: "Convolutional Neural Networks"
+description: "How CNNs use learned filters to extract edges, textures, and objects from raw pixel grids."
+phase: 6
+module: "6-9"
+order: 2
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-3", "AI-4"]
+  swebok: ["Software Design", "Computing Foundations"]
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - convolution
+  - kernel
+  - feature-map
+  - pooling
+  - stride
+  - padding
+  - receptive-field
+  - batch-normalization
+  - relu
+learningOutcomes:
+  - "Explain how a convolutional filter slides across an image and produces a feature map"
+  - "Describe what pooling does to spatial dimensions and why it is used"
+  - "Trace the shape transformations through a simple CNN from input image to class prediction"
+  - "Identify the role of ReLU activation in allowing CNNs to learn non-linear patterns"
+  - "Write a minimal CNN in PyTorch and explain each layer's purpose"
+prerequisites:
+  - "Image representation as 3D arrays (lesson 6-9-01)"
+  - "Basic neural network concepts (neurons, weights, activation functions)"
+  - "Matrix multiplication"
+  - "Python and NumPy"
+---
+
+## Why this matters
+
+Before 2012, the best computer vision systems used hand-crafted features — engineers spent years designing filters for edges, corners, and textures. Then AlexNet won the ImageNet competition by a margin so large the computer vision community had to completely restart. The difference: convolutional neural networks discovered their own features from data.
+
+Understanding how CNNs work is not academic trivia. Every modern vision system — phone cameras, medical imaging, autonomous vehicles, security systems — is built on this architecture. When a CNN-based system fails, you need to know where in the pipeline to look. When you fine-tune a pretrained model, you need to understand which layers to freeze and which to retrain.
+
+## A sliding window that learns what to look for
+
+Imagine you are searching a photograph for the letter "E". You do not look at the whole image at once. You place a small template over one corner, check if the pixels there look like an "E", then slide the template one step right and check again. You slide it across every position in the image.
+
+That sliding template is a <VocabTooltip slug="kernel">kernel</VocabTooltip> (also called a filter). In a traditional image processing library, kernels are hand-designed — a Sobel filter for vertical edges, a Gaussian filter for blurring. In a CNN, the kernel values are learned from training data. The network figures out, from millions of examples, which patterns to look for.
+
+> **A convolution is a function that slides a small grid of learned numbers across an image, computing a weighted sum at each position.**
+
+The result of one kernel sliding across an entire image is a <VocabTooltip slug="feature-map">feature map</VocabTooltip>: a 2D grid where each value represents "how strongly did this kernel pattern appear at this location?"
+
+## How the math works
+
+A kernel is typically a small matrix — 3×3 is the most common size. For each position in the image, the kernel is placed on top of the corresponding patch of pixels, each pair is multiplied, and all products are summed into a single output value.
+
+```python
+import numpy as np
+
+def convolve2d(image: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    """
+    Manually convolve a single-channel image with a kernel.
+    This is the conceptual core of what nn.Conv2d does internally.
+    """
+    kh, kw = kernel.shape
+    ih, iw = image.shape
+    out_h = ih - kh + 1
+    out_w = iw - kw + 1
+    output = np.zeros((out_h, out_w))
+
+    for i in range(out_h):
+        for j in range(out_w):
+            # Extract the patch of image under the kernel
+            patch = image[i:i+kh, j:j+kw]
+            # Weighted sum — the "convolution" step
+            output[i, j] = np.sum(patch * kernel)
+
+    return output
+
+
+# A vertical edge detector — fires strongly where dark meets light
+vertical_edge_kernel = np.array([
+    [-1, 0, 1],
+    [-2, 0, 2],   # center row weighted more heavily
+    [-1, 0, 1],
+])
+
+# Synthetic image with a vertical edge in the middle
+test_image = np.zeros((6, 6))
+test_image[:, 3:] = 255  # right half is bright
+
+edges = convolve2d(test_image, vertical_edge_kernel)
+print(edges)  # high values appear at column 2 — the edge location
+```
+
+A real CNN learns dozens or hundreds of these kernels simultaneously. Early layers learn simple patterns (edges, gradients). Middle layers combine those into textures and shapes. Later layers combine shapes into object parts and full objects.
+
+## Shape arithmetic: tracking dimensions
+
+When a kernel slides across an image, the output is smaller than the input (unless you add <VocabTooltip slug="padding">padding</VocabTooltip> around the border). The formula for output size is:
+
+```
+output_size = floor((input_size + 2*padding - kernel_size) / stride) + 1
+```
+
+<VocabTooltip slug="stride">Stride</VocabTooltip> controls how many pixels the kernel jumps between
+positions. Stride 1 means slide one pixel at a time. Stride 2 means skip every other position,
+halving the output size.
+
+```python
+def output_size(input_size: int, kernel_size: int, padding: int, stride: int) -> int:
+    # This formula is critical — shape mismatches cause most CNN bugs
+    return (input_size + 2 * padding - kernel_size) // stride + 1
+
+# Standard 3x3 conv with same-padding (padding=1, stride=1) — preserves size
+print(output_size(224, kernel_size=3, padding=1, stride=1))   # 224
+
+# 3x3 conv with no padding, stride 1 — shrinks by 2
+print(output_size(224, kernel_size=3, padding=0, stride=1))   # 222
+
+# 3x3 conv with stride 2 — halves spatial dimensions
+print(output_size(224, kernel_size=3, padding=1, stride=2))   # 112
+```
+
+## Pooling: distilling spatial information
+
+After a convolution, you have a feature map saying "at position (x,y), how strongly was this pattern detected?" But exact positions are fragile — if a cat ear is at pixel (103, 87) instead of (104, 87), those are the same ear. You want position tolerance.
+
+<VocabTooltip slug="pooling">Max pooling</VocabTooltip> solves this by taking the maximum value in
+each non-overlapping window. A 2×2 max pool on a 112×112 feature map produces a 56×56 output — half
+the size, but keeping the strongest activation from each region. It forces the network to be
+slightly position-invariant.
+
+```python
+import torch
+import torch.nn as nn
+
+# Max pooling with a 2x2 window, stride 2 — halves both dimensions
+pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+feature_map = torch.randn(1, 64, 112, 112)  # batch=1, channels=64, H=112, W=112
+pooled = pool(feature_map)
+print(pooled.shape)  # torch.Size([1, 64, 56, 56])
+```
+
+## Activation functions: adding non-linearity
+
+A stack of linear convolutions would collapse into one linear operation — the depth would be useless. <VocabTooltip slug="relu">ReLU</VocabTooltip> (Rectified Linear Unit) breaks linearity by zeroing out negative values: `f(x) = max(0, x)`.
+
+Applied after every convolution, ReLU lets the network learn non-linear boundaries between classes. Without it, a 50-layer CNN is mathematically equivalent to a 1-layer one.
+
+```python
+# ReLU applied element-wise — negative activations become 0
+relu = nn.ReLU()
+activations = torch.tensor([-2.0, -0.5, 0.0, 1.0, 3.5])
+print(relu(activations))  # tensor([0., 0., 0., 1., 3.5])
+```
+
+## Building a complete CNN in PyTorch
+
+Here is a minimal CNN for classifying 32×32 images into 10 classes. Each layer is annotated with the shape transformation it performs:
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SimpleCNN(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+        # Block 1: 32x32x3 → 32x32x32
+        # 32 filters learn different edge/color patterns simultaneously
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)  # stabilizes training across the batch
+
+        # Pool: 32x32x32 → 16x16x32
+        self.pool1 = nn.MaxPool2d(2, 2)
+
+        # Block 2: 16x16x32 → 16x16x64
+        # Later layers learn combinations of earlier patterns (shapes, textures)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+
+        # Pool: 16x16x64 → 8x8x64
+        self.pool2 = nn.MaxPool2d(2, 2)
+
+        # Classifier head: flatten spatial dimensions, then linear layers
+        # 8 * 8 * 64 = 4096 features after flattening
+        self.fc1 = nn.Linear(8 * 8 * 64, 256)
+        self.dropout = nn.Dropout(0.5)  # random zeroing prevents memorization
+        self.fc2 = nn.Linear(256, 10)   # 10 output classes
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x starts as (batch, 3, 32, 32)
+        x = self.pool1(F.relu(self.bn1(self.conv1(x))))  # → (batch, 32, 16, 16)
+        x = self.pool2(F.relu(self.bn2(self.conv2(x))))  # → (batch, 64, 8, 8)
+        x = x.flatten(start_dim=1)                        # → (batch, 4096)
+        x = F.relu(self.fc1(x))                           # → (batch, 256)
+        x = self.dropout(x)
+        x = self.fc2(x)                                    # → (batch, 10)
+        return x  # raw logits — apply softmax for probabilities
+
+
+model = SimpleCNN()
+dummy_input = torch.randn(4, 3, 32, 32)  # batch of 4 images
+output = model(dummy_input)
+print(output.shape)  # torch.Size([4, 10])
+```
+
+## The <VocabTooltip slug="receptive-field">receptive field</VocabTooltip>: what each neuron "sees"
+
+A neuron in the first conv layer sees a 3×3 patch of the input image. A neuron in the second conv layer sees a 3×3 patch of the first layer's feature map — which corresponds to a 5×5 patch of the input. Stacking more layers increases the receptive field: deeper neurons integrate information from larger regions of the original image.
+
+This is why deep networks can recognize whole objects even though each individual kernel only looks at a small neighborhood.
+
+## Practice
+
+<SandboxExercise
+  language="python"
+  instructions="Implement the `conv_output_shapes` function that traces shape transformations through a list of CNN operations. Each operation is a dict with keys 'type' ('conv' or 'pool'), 'kernel', 'stride', and 'padding'. Return a list of (H, W, C) tuples for each stage."
+  initialCode={`def conv_output_shapes(
+    input_h: int,
+    input_w: int,
+    input_c: int,
+    ops: list[dict],
+) -> list[tuple[int, int, int]]:
+    """
+    Trace spatial shape through a sequence of conv/pool operations.
+
+    Args:
+        input_h, input_w, input_c: starting image dimensions
+        ops: list of dicts, each with:
+             type: 'conv' or 'pool'
+             kernel: int
+             stride: int
+             padding: int (0 for pool)
+             out_channels: int (only for conv)
+
+    Returns:
+        List of (H, W, C) tuples after each operation
+    """
+    # Your code here
+    pass
+
+# CIFAR-10 style network
+
+ops = [
+{"type": "conv", "kernel": 3, "stride": 1, "padding": 1, "out_channels": 32},
+{"type": "pool", "kernel": 2, "stride": 2, "padding": 0},
+{"type": "conv", "kernel": 3, "stride": 1, "padding": 1, "out_channels": 64},
+{"type": "pool", "kernel": 2, "stride": 2, "padding": 0},
+]
+
+shapes = conv_output_shapes(32, 32, 3, ops)
+for i, s in enumerate(shapes):
+print(f"After op {i+1}: {s}")`}
+  solution={`def conv_output_shapes(input_h, input_w, input_c, ops):
+h, w, c = input_h, input_w, input_c
+results = []
+for op in ops:
+k, s, p = op["kernel"], op["stride"], op["padding"]
+h = (h + 2*p - k) // s + 1
+w = (w + 2*p - k) // s + 1
+if op["type"] == "conv":
+c = op["out_channels"]
+results.append((h, w, c))
+return results
+
+ops = [
+{"type": "conv", "kernel": 3, "stride": 1, "padding": 1, "out_channels": 32},
+{"type": "pool", "kernel": 2, "stride": 2, "padding": 0},
+{"type": "conv", "kernel": 3, "stride": 1, "padding": 1, "out_channels": 64},
+{"type": "pool", "kernel": 2, "stride": 2, "padding": 0},
+]
+
+shapes = conv_output_shapes(32, 32, 3, ops)
+for i, s in enumerate(shapes):
+print(f"After op {i+1}: {s}")`}
+testCases={["shape after conv with same-padding preserved", "pool halves spatial dims", "out_channels updated by conv"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What does a convolutional kernel learn during training?",
+      options: [
+        "The exact pixel positions of objects in training images",
+        "A set of weights that fire strongly when a particular local pattern appears",
+        "The global average color of each class",
+        "The optimal image resolution for the task",
+      ],
+      correct: 1,
+      explanation:
+        "Each kernel learns a pattern detector — a small template that produces a high response when its learned pattern appears at any spatial position.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Why is ReLU used after every convolution layer?",
+      options: [
+        "It normalizes pixel values to [0, 1]",
+        "It reduces the number of parameters",
+        "It introduces non-linearity so the network can learn non-linear class boundaries",
+        "It speeds up pooling operations",
+      ],
+      correct: 2,
+      explanation:
+        "Without non-linear activations, stacked linear transformations collapse into one linear transformation. ReLU breaks this, enabling deep networks to represent complex functions.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A conv layer has input (batch=1, C=3, H=64, W=64), kernel_size=3, padding=1, stride=1, and 16 output filters. What is the output shape?",
+      options: ["(1, 16, 62, 62)", "(1, 16, 64, 64)", "(1, 3, 64, 64)", "(1, 16, 32, 32)"],
+      correct: 1,
+      explanation:
+        "With padding=1 and stride=1, a 3×3 kernel preserves spatial dimensions: (64+2*1-3)/1+1 = 64. 16 output channels from 16 filters.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A CNN slides learned kernels across an image, producing feature maps that represent how strongly each learned pattern appears at each spatial location.
+- Stacking convolution layers builds a hierarchy: early layers detect edges, later layers detect shapes and objects.
+- Max pooling reduces spatial dimensions and adds position tolerance by keeping only the strongest activation in each region.
+- ReLU activation is essential — without it, depth is mathematically useless because linear functions compose into linear functions.
+- You can predict the output shape of any conv/pool operation with the formula `(input + 2*padding - kernel) // stride + 1`.
+
+The next lesson shows how CNNs are extended to locate where objects are in an image — not just classify what is there — using architectures like <VocabTooltip slug="receptive-field">anchor-based</VocabTooltip> detectors and region proposal networks.

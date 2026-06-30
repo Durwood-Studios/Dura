@@ -1,0 +1,469 @@
+---
+title: "GDPR and Privacy Engineering"
+description: "Translate the General Data Protection Regulation's legal requirements into concrete architectural decisions — data minimization, purpose limitation, rights fulfillment, and breach notification — and build privacy into systems rather than bolting it on afterward."
+phase: 9
+module: "9-10"
+order: 3
+estimatedMinutes: 15
+difficulty: "advanced"
+standards:
+  cs2023: ["SE-6", "ITE-7", "SEC-5"]
+  swebok:
+    [
+      "Software Engineering Management",
+      "Software Requirements",
+      "Software Engineering Professional Practice",
+    ]
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - gdpr
+  - data-subject
+  - lawful-basis
+  - legitimate-interests
+  - data-controller
+  - data-processor
+  - data-protection-officer
+  - privacy-by-design
+  - data-minimization
+  - purpose-limitation
+  - right-to-erasure
+  - data-subject-access-request
+  - pseudonymization
+  - data-processing-agreement
+  - supervisory-authority
+learningOutcomes:
+  - "Identify the six lawful bases for processing personal data under GDPR and select the correct basis for common engineering scenarios"
+  - "Design a data architecture that implements data minimization and purpose limitation at the schema level"
+  - "Implement a right-to-erasure workflow that handles cascading deletion across databases, caches, backups, and third-party processors"
+  - "Write a breach notification assessment process that identifies whether a security incident triggers 72-hour supervisory authority notification"
+  - "Distinguish between a data controller and a data processor and explain the contractual obligations each creates"
+prerequisites:
+  - "The Compliance Landscape for Technology Companies"
+  - "Database fundamentals: schemas, foreign keys, indices"
+  - "Distributed systems basics: caches, message queues, event logs"
+  - "Basic understanding of personal data and privacy concepts"
+---
+
+## Why this matters
+
+The first GDPR fine that lands on a company is rarely for something dramatic. It is usually an access request that took 45 days instead of 30, a breach notification that went out in week 5 instead of week 1, or a marketing email sent to users who never consented to marketing. The regulation itself is not technically complex — it is architecturally complex. The data flows that need to be controlled, audited, and made erasable exist in dozens of places: your production database, your analytics pipeline, your email marketing tool, your customer support system, your backup tapes. Most GDPR violations happen because an engineer made a schema decision in 2019 that made a 2024 compliance requirement impossible to fulfill without a major migration.
+
+Privacy by design — the principle that privacy controls are built into the architecture from the start — is not a compliance slogan. It is the acknowledgment that retrofitting privacy into a mature system costs an order of magnitude more than building it in from the start. Every column you add to a user table, every analytics event you log, every third-party integration you add creates a GDPR obligation. Understanding those obligations at design time prevents the expensive rearchitecting that happens when you discover them at audit time.
+
+## What GDPR actually regulates
+
+Think about the relationship between a library and a library card holder. The library collects your name and address to issue your card. It records which books you borrow. It knows when you return them late. All of that data serves the purpose of running the library service. GDPR says: the library can collect and use that data for running the library. It cannot sell your reading history to advertisers. It cannot keep records forever after your membership lapses. And if you ask what data they hold about you, they must tell you — completely and within 30 days.
+
+> **GDPR is a contract between organizations and the people whose data they hold: you can use our data to provide the service we signed up for, but not beyond that, and we retain the right to see, correct, and delete it.**
+
+GDPR applies when:
+
+- You are established in the EU (regardless of where your users are)
+- You process data of EU residents (regardless of where you are established)
+- Processing involves offering goods or services to EU residents OR monitoring behavior of EU residents in the EU
+
+The territorial scope is broader than most non-EU companies realize. A US SaaS company serving German businesses is subject to GDPR even if it has no EU offices.
+
+## The six lawful bases — choosing correctly matters
+
+Every processing activity must have a lawful basis. Choosing the wrong one is not a technicality — it determines what rights data subjects can exercise and whether your processing was legal at all.
+
+| Basis                    | When to use                                                                                    | Key implication                                                                                         |
+| ------------------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **Consent**              | When you want to do something beyond the core service (marketing emails, behavioral analytics) | Data subjects can withdraw consent at any time; you must stop processing and can face deletion requests |
+| **Contract**             | Processing necessary to perform a contract with the data subject                               | Cannot be used for processing that goes beyond what the contract requires                               |
+| **Legal obligation**     | Compliance with EU/member state law requires the processing                                    | Narrow; cannot be stretched to justify commercial data use                                              |
+| **Vital interests**      | Life-or-death situations                                                                       | Essentially never applies in commercial software                                                        |
+| **Public task**          | Government and public authority processing                                                     | Does not apply to private companies                                                                     |
+| **Legitimate interests** | Processing that serves a genuine business need and is not overridden by data subject rights    | Must pass a three-part test; CANNOT be used as a catch-all to avoid consent                             |
+
+The most commonly misapplied basis is legitimate interests. Many companies list it for analytics, fraud detection, and marketing personalization without performing the required balancing test. The balancing test asks: (1) Is there a legitimate interest? (2) Is the processing necessary for that interest? (3) Do the data subject's interests override yours? If you cannot answer all three honestly, consent is the correct basis.
+
+## Privacy engineering at the schema level
+
+```sql
+-- Bad: A user table designed without privacy considerations
+-- This schema stores data indefinitely, mixes purposes,
+-- and makes right-to-erasure nearly impossible to fulfill correctly.
+
+CREATE TABLE users_bad (
+  id            UUID PRIMARY KEY,
+  email         TEXT NOT NULL,
+  name          TEXT NOT NULL,
+  -- Marketing data mixed with account data — different retention, different legal basis
+  utm_source    TEXT,
+  utm_campaign  TEXT,
+  -- Behavioral tracking — requires consent, stored forever, no deletion path
+  first_visit   TIMESTAMPTZ,
+  last_visit    TIMESTAMPTZ,
+  visit_count   INTEGER DEFAULT 0,
+  -- Sensitive inferences — no documented purpose, no consent
+  inferred_age_range  TEXT,
+  inferred_location   TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+  -- No soft-delete, no erasure timestamp, no retention policy
+);
+
+-- Good: Privacy-by-design schema separates purposes,
+-- implements soft-delete for erasure, and documents retention.
+
+CREATE TABLE users (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email         TEXT NOT NULL,  -- Required for account function (lawful basis: contract)
+  name          TEXT NOT NULL,  -- Required for account function (lawful basis: contract)
+  -- Erasure fields: when deleted, PII is zeroed, record becomes anonymous aggregate
+  deleted_at    TIMESTAMPTZ,    -- NULL = active, non-NULL = deleted
+  erasure_at    TIMESTAMPTZ,    -- When PII was actually cleared (for audit trail)
+  created_at    TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- Marketing consent is separate — different legal basis, different retention
+CREATE TABLE user_marketing_consent (
+  user_id       UUID NOT NULL REFERENCES users(id),
+  -- Consent must be granular: separate consent for each purpose
+  email_marketing   BOOLEAN NOT NULL DEFAULT FALSE,
+  behavioral_analytics BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Record WHEN consent was given and HOW (for proof of consent)
+  consented_at  TIMESTAMPTZ NOT NULL,
+  consent_version TEXT NOT NULL,  -- Which version of your consent language
+  ip_address    TEXT,             -- Evidence of consent collection
+  PRIMARY KEY (user_id)
+);
+
+-- Analytics events reference user_id but contain no PII directly.
+-- If user is erased, events become anonymous (user_id FK becomes orphaned
+-- and is set to NULL via ON DELETE SET NULL) — aggregate data preserved,
+-- individual tracking eliminated.
+CREATE TABLE analytics_events (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- ON DELETE SET NULL: event survives erasure, but becomes anonymous
+  user_id       UUID REFERENCES users(id) ON DELETE SET NULL,
+  event_type    TEXT NOT NULL,
+  event_data    JSONB,
+  created_at    TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+```
+
+## Implementing right-to-erasure correctly
+
+The right to erasure (Article 17) is where most engineering teams underestimate scope. It is not a single `DELETE FROM users WHERE id = $1`. It is a coordinated deletion across every system that holds data about this person.
+
+```typescript
+// Right-to-erasure orchestrator
+// Handles the full cascade: database, cache, email tools,
+// analytics platform, backup notification.
+//
+// Key design principle: erasure is a durable process that
+// must be retried if any step fails. Use an event-driven
+// pattern with a durable queue, not a synchronous API call.
+
+interface ErasureRequest {
+  userId: string;
+  requestId: string; // For audit trail
+  requestedAt: Date;
+  requestedBy: string; // The data subject or their authorized agent
+  deadline: Date; // 30 days from request; sooner if legally required
+}
+
+interface ErasureStep {
+  system: string;
+  status: "pending" | "complete" | "failed";
+  completedAt?: Date;
+  notes?: string;
+}
+
+async function executeErasure(request: ErasureRequest, db: DatabaseClient): Promise<ErasureStep[]> {
+  const steps: ErasureStep[] = [];
+
+  // Step 1: Core database — zero out PII, preserve anonymized record.
+  // Why preserve the record at all? For referential integrity with billing
+  // records, fraud prevention logs, and aggregate analytics. The record
+  // becomes anonymous, not deleted, so foreign key constraints survive.
+  try {
+    await db.query(
+      `
+      UPDATE users SET
+        email    = CONCAT('erased-', id, '@erased.invalid'),
+        name     = 'Erased User',
+        deleted_at = NOW(),
+        erasure_at = NOW()
+      WHERE id = $1
+    `,
+      [request.userId]
+    );
+
+    // Delete marketing consent separately — no reason to retain
+    await db.query(`DELETE FROM user_marketing_consent WHERE user_id = $1`, [request.userId]);
+
+    steps.push({ system: "postgresql-primary", status: "complete", completedAt: new Date() });
+  } catch (err) {
+    steps.push({ system: "postgresql-primary", status: "failed", notes: String(err) });
+    // Do not continue if primary database fails — log and retry
+    return steps;
+  }
+
+  // Step 2: Cache invalidation — stale PII in Redis cache must be cleared.
+  // Cache TTL is not an acceptable erasure mechanism: if TTL is 24 hours
+  // and a request comes in, you could serve PII for up to 24 hours post-erasure.
+  try {
+    const cacheKeys = [
+      `user:${request.userId}`,
+      `user:profile:${request.userId}`,
+      `user:session:${request.userId}:*`, // Pattern delete if supported
+    ];
+    await Promise.all(cacheKeys.map((key) => redisClient.del(key)));
+    steps.push({ system: "redis-cache", status: "complete", completedAt: new Date() });
+  } catch (err) {
+    steps.push({ system: "redis-cache", status: "failed", notes: String(err) });
+    // Cache failure is non-blocking but must be retried — log to erasure queue
+  }
+
+  // Step 3: Email marketing platform.
+  // Most providers (SendGrid, Mailchimp, HubSpot) have a "suppress and delete"
+  // API endpoint — suppress prevents re-adding, delete removes the record.
+  try {
+    await emailPlatform.suppressAndDelete({ email: request.userId });
+    steps.push({ system: "sendgrid", status: "complete", completedAt: new Date() });
+  } catch (err) {
+    steps.push({ system: "sendgrid", status: "failed", notes: String(err) });
+  }
+
+  // Step 4: Notify backup process.
+  // Backups cannot be selectively edited, but you must document that:
+  // (a) the erasure was performed in live systems, and
+  // (b) backup restore procedures will re-apply erasures before going live.
+  // This is the GDPR-accepted practice for backup handling.
+  await recordErasureForBackupReconciliation(request.requestId, request.userId);
+  steps.push({ system: "backup-reconciliation-log", status: "complete", completedAt: new Date() });
+
+  // Step 5: Third-party processors.
+  // Your Data Processing Agreements require processors to honor erasure
+  // requests within their systems. Most major processors have APIs.
+  // Less mature processors require manual email — document and track.
+  for (const processor of await getActiveDataProcessors(request.userId)) {
+    try {
+      await processor.requestErasure(request.userId, request.requestId);
+      steps.push({ system: processor.name, status: "complete", completedAt: new Date() });
+    } catch (err) {
+      steps.push({ system: processor.name, status: "failed", notes: String(err) });
+    }
+  }
+
+  // Audit log: record that erasure was performed.
+  // This log itself is retained (it does not contain the erased PII)
+  // for demonstrating GDPR compliance.
+  await db.query(
+    `
+    INSERT INTO gdpr_erasure_audit
+      (request_id, user_id, requested_at, completed_at, steps_completed, steps_failed)
+    VALUES ($1, $2, $3, $4, $5, $6)
+  `,
+    [
+      request.requestId,
+      request.userId,
+      request.requestedAt,
+      new Date(),
+      steps.filter((s) => s.status === "complete").length,
+      steps.filter((s) => s.status === "failed").length,
+    ]
+  );
+
+  return steps;
+}
+```
+
+## Breach notification: the 72-hour clock
+
+Article 33 requires notifying your supervisory authority within 72 hours of becoming aware of a personal data breach — "where feasible." Article 34 requires notifying affected data subjects when the breach is likely to result in a high risk to their rights and freedoms. Most engineering teams are unprepared for how short 72 hours actually is when you factor in incident detection, investigation, and the time to write a coherent notification.
+
+A breach notification assessment should answer four questions:
+
+1. **Did a breach occur?** A breach is any unauthorized access, disclosure, alteration, or destruction of personal data. A bug that exposed one user's data to another user for 10 minutes is a breach. A misconfigured S3 bucket that was publicly accessible for 6 hours is a breach.
+
+2. **What categories of data were affected?** The severity assessment depends on data type. Health data, financial data, and location data trigger higher-risk assessments.
+
+3. **Does the breach need supervisory authority notification?** Required unless the breach is unlikely to result in a risk to individuals' rights and freedoms. Encrypted data stolen where the attacker lacks the key generally does not require notification. Plaintext PII exfiltrated requires notification.
+
+4. **Does the breach need data subject notification?** Required when the breach is likely to result in a HIGH risk. This is a higher bar than supervisory authority notification. Use a documented risk matrix with your DPO.
+
+<SandboxExercise language="javascript">
+{`// GDPR Breach Notification Assessment
+// When a security incident occurs, this decision tree determines
+// whether and what notifications are required.
+
+function assessBreachNotification(incident) {
+// incident: {
+// affectedDataSubjects: number,
+// dataCategories: string[], // 'PII', 'health', 'financial', 'location', etc.
+// isEncrypted: boolean, // Was the data encrypted with keys attacker lacks?
+// accessDuration: number, // Hours of unauthorized access
+// accessType: string, // 'exfiltration' | 'access' | 'modification' | 'destruction'
+// isContained: boolean, // Has the breach been stopped?
+// }
+
+const sensitiveCategories = ['health', 'financial', 'biometric', 'children', 'criminal'];
+const hasSensitiveData = incident.dataCategories.some(c =>
+sensitiveCategories.includes(c)
+);
+
+// Step 1: Determine if this is a reportable breach at all.
+// Encrypted data (keys not compromised) is generally NOT reportable.
+if (incident.isEncrypted && incident.accessType === 'exfiltration') {
+return {
+supervisoryAuthorityRequired: false,
+dataSubjectRequired: false,
+rationale:
+"Data was encrypted and attacker lacks decryption key. " +
+"Breach is unlikely to result in risk to individuals. " +
+"Document internally and monitor for key compromise.",
+hoursRemaining: null,
+};
+}
+
+// Step 2: Determine supervisory authority notification (72 hours from awareness)
+// Required unless breach is unlikely to result in risk to individuals.
+const riskScore = calculateRiskScore(incident, hasSensitiveData);
+const supervisoryRequired = riskScore > 2; // Low risk = no notification
+
+// Step 3: Determine data subject notification
+// Required only for HIGH risk — a higher bar than supervisory notification
+const dataSubjectRequired = riskScore >= 7;
+
+// Step 4: Calculate time remaining (breach assessment starts from awareness, not occurrence)
+const awarenessTime = new Date(); // In practice: when incident was confirmed
+const deadline72h = new Date(awarenessTime.getTime() + 72 _ 60 _ 60 _ 1000);
+const hoursRemaining = (deadline72h - awarenessTime) / (1000 _ 60 \* 60);
+
+return {
+supervisoryAuthorityRequired: supervisoryRequired,
+dataSubjectRequired,
+riskScore,
+riskLevel: riskScore <= 2 ? 'low' : riskScore <= 6 ? 'medium' : 'high',
+deadlineISO: supervisoryRequired ? deadline72h.toISOString() : null,
+hoursRemaining: supervisoryRequired ? Math.round(hoursRemaining) : null,
+rationale: buildRationale(incident, riskScore, hasSensitiveData),
+immediateActions: [
+"Contain the breach if not already done",
+"Preserve all logs and forensic evidence",
+"Engage DPO immediately",
+supervisoryRequired ? "Begin drafting supervisory authority notification" : "Document risk assessment",
+dataSubjectRequired ? "Prepare data subject notification language" : null,
+].filter(Boolean),
+};
+}
+
+function calculateRiskScore(incident, hasSensitiveData) {
+let score = 0;
+
+// Data sensitivity
+if (hasSensitiveData) score += 3;
+else if (incident.dataCategories.includes('PII')) score += 2;
+
+// Number of affected individuals
+if (incident.affectedDataSubjects > 10000) score += 3;
+else if (incident.affectedDataSubjects > 100) score += 2;
+else score += 1;
+
+// Access type severity
+const typeSeverity = {
+'exfiltration': 3,
+'modification': 2,
+'access': 1,
+'destruction': 3,
+};
+score += typeSeverity[incident.accessType] || 1;
+
+// Not yet contained = ongoing risk
+if (!incident.isContained) score += 2;
+
+return score;
+}
+
+function buildRationale(incident, score, hasSensitiveData) {
+const factors = [];
+if (hasSensitiveData) factors.push('sensitive data categories involved');
+if (incident.affectedDataSubjects > 1000)
+factors.push(\`\${incident.affectedDataSubjects.toLocaleString()} individuals affected\`);
+if (!incident.isContained) factors.push('breach not yet contained');
+if (incident.accessType === 'exfiltration')
+factors.push('data was exfiltrated (not just accessed)');
+return factors.length
+? 'Risk elevated by: ' + factors.join('; ')
+: 'Risk factors are limited';
+}
+
+// Test with a realistic scenario:
+// A SQL injection vulnerability was exploited, exposing 8,000 user records
+// including names, emails, and encrypted payment tokens. Breach is now contained.
+const assessment = assessBreachNotification({
+affectedDataSubjects: 8000,
+dataCategories: ['PII', 'financial'],
+isEncrypted: false, // PII was not encrypted (only payment tokens were)
+accessDuration: 4,
+accessType: 'exfiltration',
+isContained: true,
+});
+
+console.log("GDPR Breach Assessment");
+console.log("======================");
+console.log("Supervisory Authority Notification Required:", assessment.supervisoryAuthorityRequired);
+console.log("Data Subject Notification Required:", assessment.dataSubjectRequired);
+console.log("Risk Level:", assessment.riskLevel, "(score:", assessment.riskScore + ")");
+if (assessment.deadlineISO) {
+console.log("72-Hour Deadline:", assessment.deadlineISO);
+console.log("Hours Remaining:", assessment.hoursRemaining);
+}
+console.log("\\nRationale:", assessment.rationale);
+console.log("\\nImmediate Actions:");
+assessment.immediateActions.forEach(a => console.log(" •", a));`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Your SaaS platform sends product update emails to all users. The legal team suggests using 'legitimate interests' as the lawful basis to avoid collecting consent. What is the correct analysis?"
+  options={[
+    "Legitimate interests is valid for product updates — they benefit users, so interests are balanced",
+    "Legitimate interests requires a three-part test: genuine interest, necessity, and balancing against data subject interests. Marketing emails typically fail the balancing test, and most EU supervisory authorities require consent for direct marketing.",
+    "Consent is never required for transactional or product emails — only promotional emails need consent",
+    "Legitimate interests can be used for any processing that is not clearly harmful to users",
+  ]}
+  answer={1}
+  explanation="Legitimate interests is not a catch-all. For direct marketing to individuals, Recital 47 acknowledges legitimate interests can apply to direct marketing but ONLY after performing the three-part balancing test. Most EU data protection authorities have issued guidance that email marketing to individuals requires consent. Using legitimate interests to avoid consent collection is a common GDPR violation."
+/>
+
+<Quiz
+  question="A user submits a right-to-erasure request. You delete their record from your PostgreSQL database. Three months later, your company restores from a backup after a data corruption incident. The user's record reappears in the restored database. What should your process have included?"
+  options={[
+    "Nothing — backup restoration is a legal exception to erasure obligations",
+    "A backup reconciliation log that flags erased users, so erasure is re-applied after any backup restoration before the database goes live",
+    "Deleting all backups older than the erasure date",
+    "Notifying the user that their data may reappear in backups and getting their acceptance",
+  ]}
+  answer={1}
+  explanation="GDPR acknowledges that backup media cannot be selectively edited. The accepted practice is to maintain an erasure log, and any backup restoration must re-apply all pending erasures before the restored data is used. Deleting all backups would be operationally catastrophic and is not required. User 'acceptance' is not a recognized exception to erasure obligations."
+/>
+
+<Quiz
+  question="You discover at 2pm Tuesday that an API bug exposed customer profile data to other customers for approximately 6 hours last Thursday. When does the 72-hour supervisory authority notification clock start?"
+  options={[
+    "Last Thursday at the time the bug was introduced",
+    "Last Thursday when the 6-hour exposure began",
+    "Now — Tuesday at 2pm, when you became aware of the breach",
+    "When the bug was fixed, since that's when the incident was resolved",
+  ]}
+  answer={2}
+  explanation="Article 33 GDPR requires notification 'without undue delay and, where feasible, not later than 72 hours after having become aware of it.' The clock starts from awareness — Tuesday at 2pm. The fact that the breach occurred Thursday is relevant to the notification content but does not reset the clock. You have until Friday at 2pm."
+/>
+
+## What you learned
+
+- GDPR requires a documented lawful basis for every processing activity; legitimate interests is not a catch-all — direct marketing to individuals requires consent in most EU jurisdictions
+- Privacy-by-design means separating data by purpose at the schema level: mixing marketing analytics with account data in the same table creates GDPR compliance debt that is expensive to unwind
+- Right-to-erasure is a cascading operation across the production database, caches, email platforms, analytics tools, and third-party processors — it requires a durable, retryable process with an audit trail, not a simple DELETE query
+- The 72-hour supervisory authority notification clock starts when you become aware of the breach, not when it occurred — breach response procedures must include an immediate assessment workflow
+
+The next lesson scales from specific frameworks to building a comprehensive information security program that makes these individual requirements manageable across the organization.

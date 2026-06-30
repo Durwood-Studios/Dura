@@ -1,0 +1,353 @@
+---
+title: "Async and Event Loops"
+description: "Learn how a single thread can handle thousands of concurrent I/O operations using non-blocking I/O and an event loop — no mutexes required."
+phase: 5
+module: "5-5"
+order: 3
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["OS-2", "PD-1", "SE-6"]
+  swebok: ["Computing Fundamentals", "Software Construction"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - blocking-io
+  - non-blocking-io
+  - event-loop
+  - callback
+  - promise
+  - async-await
+  - coroutine
+  - epoll
+learningOutcomes:
+  - "Explain why a thread blocks during I/O and why that wastes CPU time when handling many concurrent connections"
+  - "Describe the event loop's role in multiplexing many I/O operations onto a single OS thread"
+  - "Rewrite a callback-based async function using async/await syntax"
+  - "Distinguish between I/O-bound concurrency (where event loops excel) and CPU-bound parallelism (where they do not help)"
+  - "Explain why Node.js can handle 10,000 concurrent connections with a single thread while a thread-per-connection server cannot"
+prerequisites:
+  - "Understanding of threads and processes (Lesson 1 of this module)"
+  - "Familiarity with functions and callbacks in JavaScript or Python"
+  - "Basic understanding of network I/O (making HTTP requests, reading files)"
+---
+
+## Why this matters
+
+Thread-per-connection is the intuitive model for handling concurrent network requests: each incoming connection gets its own thread. It works until you try to handle 10,000 simultaneous connections. At that scale, you've allocated 10,000 stacks (each 1–8 MB), scheduled 10,000 threads, and most of them are sleeping, waiting for network I/O that hasn't arrived yet. Your server is spending its CPU time managing threads that aren't doing work.
+
+This is the C10K problem — serving 10,000 concurrent clients — and it was unsolved in the late 1990s. The solution was a fundamentally different concurrency model: event-driven I/O with a single-threaded event loop. Node.js, Nginx, Redis, and Python's asyncio all use it. Understanding how it works explains why these tools scale the way they do and what their limitations are.
+
+## The waiting room problem
+
+Imagine you run a restaurant and you have 50 tables. In one staffing model, you assign one waiter per table: 50 waiters. Most of the time, each waiter is standing by their table doing nothing — waiting for the customer to decide what to order, waiting for the kitchen to prepare the food. Ninety percent of their working time is idle.
+
+In a better model, one skilled expediter handles all 50 tables. They're always moving: taking order from table 3, delivering food to table 7, refilling water at table 12. When any table needs attention, they respond. They never wait — when nothing is ready, they check what's next.
+
+An event loop is the expediter. The tables are I/O operations (network reads, file reads, timer expirations). The expediter's "check what's next" is a syscall to `epoll` or `kqueue` that returns the set of file descriptors that are ready to be read or written right now.
+
+> **An event loop is a single thread that repeatedly asks the OS "which I/O operations are ready?" and dispatches the corresponding callbacks.**
+
+## What blocking I/O actually does to a thread
+
+When a thread calls `read()` on a socket and no data has arrived yet, the OS suspends the thread. The thread's state is saved, it's moved off the CPU's run queue, and it won't execute again until the data arrives. The CPU is free to run other threads — but the blocked thread is wasting its stack space and kernel bookkeeping.
+
+```c
+// Blocking read — thread suspends here until data arrives or connection closes
+ssize_t bytes = read(socket_fd, buffer, sizeof(buffer));
+// Thread resumes here when the OS has data ready
+```
+
+With non-blocking I/O, the `read()` call returns immediately even if no data is available. Instead of blocking, it returns an error code (`EAGAIN` or `EWOULDBLOCK`) meaning "try again later — data isn't ready yet."
+
+```c
+// Set socket to non-blocking mode
+fcntl(socket_fd, F_SETFL, O_NONBLOCK);
+
+// Non-blocking read — returns immediately whether or not data is available
+ssize_t bytes = read(socket_fd, buffer, sizeof(buffer));
+if (bytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+    // No data yet — don't block, go do something else
+    // Register this fd with epoll so we're notified when data arrives
+}
+```
+
+The event loop uses a system call like `epoll_wait` (Linux) or `kqueue` (macOS/BSD) to efficiently monitor thousands of file descriptors at once and return only the ones that are ready. This is the OS-level mechanism that makes single-threaded high-concurrency possible.
+
+## The event loop in JavaScript (Node.js)
+
+Node.js runs your JavaScript in a single thread on top of libuv, a C library that wraps the OS's async I/O mechanisms. The event loop is the central mechanism:
+
+```
+┌─────────────────────────────────────────────────────┐
+│                     Event Loop                       │
+│                                                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
+│  │  timers  │→ │  poll    │→ │  check (setImm.) │  │
+│  │setTimeout│  │ I/O ready│  │                  │  │
+│  │setInterval│  │ callbacks│  │                  │  │
+│  └──────────┘  └──────────┘  └──────────────────┘  │
+│                                                      │
+│  JavaScript call stack always empty between phases   │
+└─────────────────────────────────────────────────────┘
+```
+
+The critical rule: **JavaScript runs to completion**. When a callback fires, it runs uninterrupted until it returns. No other JavaScript runs in parallel. There are no race conditions because there is no parallel execution.
+
+```javascript
+// This runs in Node.js — one thread, but handling three "concurrent" HTTP requests
+
+import http from "http";
+
+const server = http.createServer((req, res) => {
+  // This callback fires when a request arrives.
+  // The I/O (reading the request body, writing the response)
+  // is done asynchronously — this thread never blocks waiting for network.
+
+  // Simulate reading from a database (non-blocking I/O)
+  setTimeout(() => {
+    // This callback fires when the "database query" completes.
+    // Meanwhile, the event loop can handle OTHER incoming requests.
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Hello from single-threaded Node.js\n");
+  }, 10); // pretend 10ms DB query
+});
+
+server.listen(3000, () => {
+  console.log("Serving on port 3000");
+  // If 10,000 clients connect simultaneously, each gets a callback scheduled.
+  // All 10,000 are "in flight" concurrently, but only ONE runs at a time.
+});
+```
+
+## Promises and async/await
+
+Callbacks work but nest deeply and become hard to read. Promises represent a future value. `async/await` is syntax that makes promise-based code look synchronous.
+
+```javascript
+// Callback style — the "pyramid of doom"
+function fetchUserProfile(userId, callback) {
+  getUser(userId, (err, user) => {
+    if (err) return callback(err);
+    getPosts(user.id, (err, posts) => {
+      if (err) return callback(err);
+      getComments(posts[0].id, (err, comments) => {
+        if (err) return callback(err);
+        callback(null, { user, posts, comments });
+      });
+    });
+  });
+}
+
+// Promise style — flat chaining, better error handling
+function fetchUserProfile(userId) {
+  return getUser(userId)
+    .then((user) => getPosts(user.id).then((posts) => ({ user, posts })))
+    .then(({ user, posts }) =>
+      getComments(posts[0].id).then((comments) => ({ user, posts, comments }))
+    );
+}
+
+// async/await — reads like synchronous code, runs asynchronously
+async function fetchUserProfile(userId) {
+  // await suspends THIS coroutine and yields control back to the event loop.
+  // The thread is NOT blocked — it can run other callbacks while we "wait".
+  const user = await getUser(userId);
+  const posts = await getPosts(user.id);
+  const comments = await getComments(posts[0].id);
+  return { user, posts, comments };
+}
+
+// Parallel async operations — don't await sequentially when ops are independent
+async function fetchUserProfileParallel(userId) {
+  const user = await getUser(userId);
+
+  // Promise.all starts both operations at once — doesn't wait for posts before starting comments
+  const [posts, followers] = await Promise.all([getPosts(user.id), getFollowers(user.id)]);
+  return { user, posts, followers };
+}
+```
+
+## Python asyncio
+
+Python's `asyncio` uses the same event loop concept with `async def` and `await`:
+
+```python
+import asyncio
+import aiohttp  # async HTTP client — regular requests would block the event loop
+
+async def fetch_data(session: aiohttp.ClientSession, url: str) -> dict:
+    # await yields control to the event loop until the HTTP response arrives.
+    # The event loop can process other coroutines during this wait.
+    async with session.get(url) as response:
+        return await response.json()
+
+async def fetch_all(urls: list[str]) -> list[dict]:
+    async with aiohttp.ClientSession() as session:
+        # asyncio.gather runs all coroutines concurrently — like Promise.all
+        # All HTTP requests are in flight at the same time, but only one
+        # callback runs at a time (single-threaded model)
+        tasks = [fetch_data(session, url) for url in urls]
+        return await asyncio.gather(*tasks)
+
+async def main() -> None:
+    urls = [
+        "https://jsonplaceholder.typicode.com/todos/1",
+        "https://jsonplaceholder.typicode.com/todos/2",
+        "https://jsonplaceholder.typicode.com/todos/3",
+    ]
+    results = await fetch_all(urls)
+    for r in results:
+        print(r["title"])
+
+asyncio.run(main())
+```
+
+## The CPU-bound trap
+
+Event loops excel at I/O-bound concurrency. They are terrible for CPU-bound work.
+
+```python
+import asyncio
+
+async def cpu_bound_mistake() -> None:
+    # This blocks the ENTIRE event loop for however long it takes.
+    # While this runs, no other callbacks can fire — including health checks,
+    # incoming requests, or timeout handlers.
+    result = sum(range(100_000_000))  # 100M iterations on the main thread
+    return result
+
+# The fix for CPU-bound work: run it in a thread pool (or process pool)
+# so the event loop thread stays free to handle I/O
+async def cpu_bound_correct() -> None:
+    loop = asyncio.get_event_loop()
+    # run_in_executor offloads to a thread pool — the event loop isn't blocked
+    result = await loop.run_in_executor(None, lambda: sum(range(100_000_000)))
+    return result
+```
+
+| Workload type                            | Best tool                                     | Why                                        |
+| ---------------------------------------- | --------------------------------------------- | ------------------------------------------ |
+| I/O bound (network, disk)                | Event loop (async/await)                      | Thread never really waits — OS handles I/O |
+| CPU bound (encryption, image processing) | Thread pool or process pool                   | Need actual parallel CPU cores             |
+| Mixed                                    | Async I/O + thread/process pool for CPU parts | Combine both models                        |
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// Simulate an event loop and see how async operations are ordered.
+// This exercise uses setTimeout to represent any I/O operation.
+
+// Question: In what ORDER do these messages print?
+// Predict before running.
+
+console.log("1: Script starts (synchronous)");
+
+setTimeout(() => {
+console.log("4: Timer A fires (100ms)");
+}, 100);
+
+setTimeout(() => {
+console.log("3: Timer B fires (0ms) — still async, runs after sync code");
+}, 0);
+
+Promise.resolve().then(() => {
+// Microtasks (Promise callbacks) run BEFORE the next event loop iteration
+console.log("2b: Promise microtask — runs after current sync code, before timers");
+});
+
+console.log("2a: Script ends (synchronous)");
+
+// Expected order:
+// 1: Script starts
+// 2a: Script ends
+// 2b: Promise microtask
+// 3: Timer B (0ms)
+// 4: Timer A (100ms)
+
+// Now write your own: create a function that returns a Promise
+// that resolves after N milliseconds (like a database query delay)
+
+function delay(ms) {
+return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Async function using the delay utility
+async function simulateDbQuery(queryName, ms) {
+console.log(\`Starting query: \${queryName}\`);
+await delay(ms);
+console.log(\`Completed query: \${queryName} (\${ms}ms)\`);
+return { query: queryName, duration: ms };
+}
+
+// Run two queries concurrently vs. sequentially
+async function main() {
+console.log("\\n--- Sequential (total ~150ms) ---");
+await simulateDbQuery("users", 100);
+await simulateDbQuery("posts", 50);
+
+console.log("\\n--- Concurrent (total ~100ms) ---");
+// Promise.all fires both simultaneously — total time = max(100, 50) not 100+50
+await Promise.all([
+simulateDbQuery("users-parallel", 100),
+simulateDbQuery("posts-parallel", 50),
+]);
+
+console.log("Done");
+}
+
+main();
+`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Why can Node.js handle 10,000 concurrent connections on a single thread without running out of memory as quickly as a thread-per-connection server would?"
+  options={[
+    "Node.js uses a special memory allocator that compresses thread stacks",
+    "Node.js threads share a heap so each connection requires no additional memory",
+    "The event loop model does not allocate a stack per connection — callbacks share the single thread's stack sequentially, never simultaneously",
+    "Node.js automatically creates threads only when memory is available",
+  ]}
+  answer={2}
+  explanation="In an event loop model, there is one thread and one call stack. Connections are represented as state in the heap (not as separate stacks), and callbacks run sequentially on demand. A thread-per-connection model allocates 1-8MB of stack per connection, so 10,000 connections means 10-80GB of stack memory."
+/>
+<Quiz
+  question="You have an async Python function that computes a cryptographic hash of a large file. You call it with await inside an async web handler. What happens?"
+  options={[
+    "The computation runs in parallel on a separate CPU core automatically",
+    "The computation blocks the event loop thread, preventing all other requests from being handled until it finishes",
+    "Python asyncio automatically offloads CPU work to a thread pool",
+    "The computation is split into chunks and interleaved with other coroutines",
+  ]}
+  answer={1}
+  explanation="async/await does not make CPU-bound work concurrent — it only allows the event loop to run other I/O callbacks while THIS coroutine is waiting for I/O. CPU computation runs on the event loop thread and blocks it. To offload CPU work, you must explicitly use run_in_executor() or a process pool."
+/>
+<Quiz
+  question="What is the key reason event-loop concurrency avoids race conditions that thread-based concurrency must manage with mutexes?"
+  options={[
+    "Event loops use immutable data structures",
+    "Event loops run on multiple CPU cores that each have their own memory",
+    "JavaScript and Python callbacks run to completion — no other code runs between two lines of a callback",
+    "Event loops prevent sharing memory between operations",
+  ]}
+  answer={2}
+  explanation="In an event loop, each callback runs to completion before any other callback fires. There is no preemption mid-callback. This means that within a single callback, shared state cannot be modified by another concurrent operation — so you don't need mutexes for operations that complete within one callback turn."
+/>
+<FillBlank
+  question="The OS system call that efficiently monitors thousands of file descriptors on Linux and returns only the ones that are ready for I/O is called ___."
+  answer="epoll"
+/>
+
+## What you learned
+
+- A blocking I/O call suspends the calling thread until data arrives; with thousands of connections, this wastes enormous amounts of CPU and memory on idle threads
+- An event loop uses **non-blocking I/O** and an OS multiplexing syscall (`epoll`, `kqueue`) to monitor many file descriptors and dispatch only callbacks for ready operations
+- JavaScript's event loop guarantees **run-to-completion**: a callback runs entirely before the next fires — this eliminates most race conditions without mutexes
+- `async/await` is syntactic sugar over Promises/coroutines; `await` yields the event loop thread and resumes when the awaited operation completes
+- Event loops excel at **I/O-bound concurrency** but block on **CPU-bound work** — CPU-heavy operations must be offloaded to a thread pool or process pool
+
+The next lesson goes deeper into hardware: when even mutexes are too slow, how do lock-free data structures and CPU atomic operations provide synchronization without blocking threads at all.

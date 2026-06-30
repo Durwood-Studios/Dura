@@ -1,0 +1,530 @@
+---
+title: "Computer Vision in Production"
+description: "Latency budgets, model optimization, distribution shift, and the failure modes that only appear in the real world."
+phase: 6
+module: "6-9"
+order: 4
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-5", "SE-3"]
+  swebok: ["Software Quality", "Software Maintenance", "Software Testing"]
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - distribution-shift
+  - latency-budget
+  - model-quantization
+  - onnx
+  - tensorrt
+  - precision-recall
+  - mean-average-precision
+  - edge-inference
+  - batch-inference
+learningOutcomes:
+  - "Analyze a CV deployment scenario and identify which optimization technique addresses its bottleneck"
+  - "Explain distribution shift and describe two concrete strategies to detect it before users do"
+  - "Compare batch inference vs real-time inference and select the appropriate pattern for a given use case"
+  - "Interpret a precision-recall curve to make a confidence threshold decision for a production deployment"
+  - "Identify the three most common production failure modes in CV systems and explain their root causes"
+prerequisites:
+  - "Object detection fundamentals (lesson 6-9-03)"
+  - "Basic ML concepts: training, validation, test sets"
+  - "Familiarity with APIs and web services"
+  - "Basic statistics: mean, variance, distributions"
+---
+
+## Why this matters
+
+A computer vision model that works on your laptop dataset is not a product. The gap between "it achieves 95% accuracy on the test set" and "it works reliably in production" is where most CV projects fail — and where the interesting engineering problems live.
+
+This lesson teaches you to think like the engineer responsible for what happens after deployment. You will learn to anticipate the failure modes that only appear in the real world, choose the right optimization technique for the actual bottleneck, and design monitoring that catches problems before customers do.
+
+## The three production failure modes
+
+Before optimizing anything, understand what breaks CV systems in production:
+
+**1. Distribution shift.** Your model was trained on images from Camera A under office lighting. Your customer deploys it on Camera B in a warehouse. The pixel distribution changed; the model was not told. This is the single most common cause of accuracy collapse after deployment.
+
+**2. Latency mismatch.** Your model achieves excellent accuracy in a batch evaluation. In production, it must process a 1080p frame in under 33ms to keep up with a 30fps camera. The model is technically correct but practically unusable.
+
+**3. Edge cases that never appeared in training.** A person wearing a reflective vest. A car whose color is poorly represented in the training set. Snow accumulation on the camera lens. These are not bugs — they are gaps in the training distribution, and they require systematic identification, not one-off fixes.
+
+> **Production CV engineering is mostly data work and systems work. Model architecture work is 20% of the job at most.**
+
+## Distribution shift: detecting it before users do
+
+<VocabTooltip slug="distribution-shift">Distribution shift</VocabTooltip> means the real-world data
+distribution at inference time differs from the training distribution. It is invisible until
+something goes wrong.
+
+Two detection strategies:
+
+**1. Monitor model confidence distributions.** A model that was trained well produces confident predictions on familiar inputs. When confidence scores suddenly shift toward the 0.4–0.6 range (uncertain), the data changed.
+
+```python
+import numpy as np
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class ConfidenceMonitor:
+    """
+    Sliding-window monitor for detecting shifts in model confidence distribution.
+    A significant drop in average confidence is a leading indicator of distribution shift.
+    """
+    window_size: int = 1000
+    alert_threshold: float = 0.15  # alert if mean drops by more than 15 percentage points
+    _baseline_mean: Optional[float] = field(default=None, repr=False)
+    _window: deque = field(default_factory=lambda: deque(maxlen=1000), repr=False)
+
+    def record(self, confidence: float) -> Optional[str]:
+        """
+        Record a prediction confidence score.
+        Returns an alert string if distribution shift is detected, else None.
+        """
+        self._window.append(confidence)
+
+        # Wait for enough samples before establishing a baseline
+        if len(self._window) < self.window_size // 2:
+            return None
+
+        current_mean = np.mean(self._window)
+
+        if self._baseline_mean is None:
+            # Set baseline on first full window
+            self._baseline_mean = current_mean
+            return None
+
+        drop = self._baseline_mean - current_mean
+        if drop > self.alert_threshold:
+            return (
+                f"ALERT: confidence drop of {drop:.2%}. "
+                f"Baseline={self._baseline_mean:.3f}, current={current_mean:.3f}. "
+                f"Likely distribution shift — check camera/lighting."
+            )
+        return None
+
+
+monitor = ConfidenceMonitor(window_size=500, alert_threshold=0.15)
+
+# Simulate normal operation then a degraded environment
+for _ in range(500):
+    alert = monitor.record(np.random.normal(0.82, 0.08))  # healthy predictions
+    if alert:
+        print(alert)
+
+for i in range(200):
+    alert = monitor.record(np.random.normal(0.55, 0.12))  # degraded environment
+    if alert:
+        print(alert)
+        break
+```
+
+**2. Shadow-deploy a data logger.** For 5% of inference requests, save the raw image (with no PII). Review weekly. You will catch lens contamination, lighting changes, and new object types before they affect the full traffic.
+
+## Latency budgets and optimization techniques
+
+A 30fps video feed allows 33ms per frame. If your model takes 80ms, you have a problem. Your options, in order of implementation cost:
+
+| Technique                                                                                        | Speedup            | Quality impact                  | Implementation effort |
+| ------------------------------------------------------------------------------------------------ | ------------------ | ------------------------------- | --------------------- |
+| Reduce input resolution                                                                          | 2–4×               | Moderate (misses small objects) | Trivial               |
+| Switch to smaller model (YOLOv8n vs x)                                                           | 5–14×              | Significant                     | Low                   |
+| <VocabTooltip slug="model-quantization">INT8 quantization</VocabTooltip>                         | 2–4×               | Minor (< 1% mAP loss)           | Medium                |
+| <VocabTooltip slug="tensorrt">TensorRT</VocabTooltip> optimization                               | 3–6×               | Minimal                         | Medium                |
+| Frame skip (process every Nth frame)                                                             | N×                 | Task-dependent                  | Low                   |
+| <VocabTooltip slug="edge-inference">Edge deployment</VocabTooltip> (NVIDIA Jetson, Google Coral) | Avoids network RTT | None                            | High                  |
+
+Quantization converts model weights from float32 (4 bytes per value) to int8 (1 byte) with minimal accuracy loss. A 25MB model becomes ~6MB; inference becomes 2–4× faster because integer arithmetic is cheaper and cache utilization improves.
+
+```python
+import torch
+from ultralytics import YOLO
+
+def export_optimized(
+    model_path: str,
+    target_format: str = "onnx",
+    input_size: tuple[int, int] = (640, 640),
+) -> str:
+    """
+    Export a trained YOLO model to an optimized format.
+
+    Args:
+        model_path: path to .pt weights file
+        target_format: 'onnx', 'engine' (TensorRT), 'coreml', 'tflite'
+        input_size: (H, W) — smaller = faster but misses small objects
+
+    Returns:
+        Path to exported model
+    """
+    model = YOLO(model_path)
+
+    # Export — ultralytics handles quantization and graph optimization
+    # half=True uses float16 (2x smaller than float32, nearly same accuracy)
+    exported_path = model.export(
+        format=target_format,
+        imgsz=input_size,
+        half=True,           # float16 precision — 2x faster on modern GPUs
+        simplify=True,       # remove redundant ONNX ops
+        dynamic=False,       # fixed batch size = better optimization
+    )
+
+    return str(exported_path)
+```
+
+## Batch vs real-time inference
+
+Choosing the wrong inference pattern wastes either latency (real-time for batch work) or throughput (batch for real-time work).
+
+**Real-time inference:** process each frame/image as it arrives, within a fixed time budget. Required for autonomous vehicles, robotics, live security feeds. Use a single-GPU worker with a request queue.
+
+**<VocabTooltip slug="batch-inference">Batch inference</VocabTooltip>:** collect N images, process them together, return results. GPUs are dramatically more efficient when processing images in parallel — batch size 32 often runs nearly as fast as batch size 1 on modern hardware.
+
+```python
+import asyncio
+from dataclasses import dataclass
+from typing import Any
+
+@dataclass
+class InferenceRequest:
+    image_id: str
+    image_data: bytes
+    future: asyncio.Future
+
+class BatchInferenceServer:
+    """
+    Accumulate individual requests and flush as a batch.
+    Improves GPU utilization from ~20% (serial) to ~85%+ (batched).
+    """
+
+    def __init__(self, model: Any, max_batch_size: int = 32, max_wait_ms: float = 50.0) -> None:
+        self.model = model
+        self.max_batch_size = max_batch_size
+        self.max_wait_ms = max_wait_ms
+        self._queue: list[InferenceRequest] = []
+        self._lock = asyncio.Lock()
+
+    async def predict(self, image_id: str, image_data: bytes) -> dict:
+        """Submit one image; await its result from the next batch flush."""
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future = loop.create_future()
+        request = InferenceRequest(image_id=image_id, image_data=image_data, future=future)
+
+        async with self._lock:
+            self._queue.append(request)
+            if len(self._queue) >= self.max_batch_size:
+                await self._flush_batch()
+
+        return await future
+
+    async def _flush_batch(self) -> None:
+        """Process all queued requests as a single batch."""
+        if not self._queue:
+            return
+
+        batch = self._queue[:self.max_batch_size]
+        self._queue = self._queue[self.max_batch_size:]
+
+        # Run model on entire batch — one GPU kernel launch, not N
+        images = [req.image_data for req in batch]
+        results = self.model.batch_predict(images)  # hypothetical batch API
+
+        # Return results to each awaiting caller
+        for req, result in zip(batch, results):
+            if not req.future.done():
+                req.future.set_result(result)
+```
+
+## Precision, recall, and the confidence threshold decision
+
+Before deploying, you must choose a confidence threshold. This is not a technical decision — it is a product decision about which mistakes are worse.
+
+<VocabTooltip slug="precision-recall">Precision</VocabTooltip> = of all boxes the model reported,
+what fraction were correct? Recall = of all real objects in the images, what fraction did the model
+find?
+
+Lowering the confidence threshold increases recall (finds more real objects) but decreases precision (reports more false positives). Raising it increases precision but misses more real objects.
+
+```python
+def evaluate_threshold(
+    predictions: list[dict],    # each has 'confidence', 'is_true_positive'
+    threshold: float,
+) -> dict[str, float]:
+    """
+    Compute precision and recall at a given confidence threshold.
+
+    A true positive: model predicted an object and IoU with ground truth > 0.5.
+    A false positive: model predicted an object but it was wrong or a duplicate.
+    A false negative: a real object existed but no prediction with conf >= threshold covered it.
+    """
+    above = [p for p in predictions if p["confidence"] >= threshold]
+    true_positives = sum(1 for p in above if p["is_true_positive"])
+    false_positives = len(above) - true_positives
+
+    # False negatives require knowing total ground-truth objects
+    total_ground_truth = sum(1 for p in predictions if p["is_true_positive"]) + \
+                         sum(1 for p in predictions if p.get("is_false_negative", False))
+
+    false_negatives = total_ground_truth - true_positives
+
+    precision = true_positives / (true_positives + false_positives) if above else 1.0
+    recall = true_positives / (true_positives + false_negatives) if total_ground_truth else 0.0
+
+    return {
+        "threshold": threshold,
+        "precision": precision,
+        "recall": recall,
+        "f1": 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0,
+    }
+
+
+# Evaluate multiple thresholds to build a precision-recall curve
+thresholds = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+# Simulated predictions — in production, these come from running your model on a val set
+import random
+random.seed(42)
+predictions = [
+    {
+        "confidence": random.uniform(0.3, 0.99),
+        "is_true_positive": random.random() > 0.25,  # 75% of predictions are correct
+    }
+    for _ in range(500)
+]
+
+print(f"{'Threshold':>10} {'Precision':>10} {'Recall':>10} {'F1':>8}")
+for t in thresholds:
+    metrics = evaluate_threshold(predictions, t)
+    print(
+        f"{metrics['threshold']:>10.1f} "
+        f"{metrics['precision']:>10.3f} "
+        f"{metrics['recall']:>10.3f} "
+        f"{metrics['f1']:>8.3f}"
+    )
+```
+
+**Decision framework for threshold selection:**
+
+- **False positives are cheap, false negatives are dangerous** (e.g., medical screening): set threshold low, maximize recall.
+- **False positives are expensive, false negatives are tolerable** (e.g., security alert fatigue): set threshold high, maximize precision.
+- **Both matter equally:** optimize for F1 score.
+
+## Practice
+
+<SandboxExercise
+  language="python"
+  instructions="You are analyzing a production CV deployment. Given a dictionary of system metrics, implement `diagnose_cv_system` that returns a list of identified issues with recommended fixes. The metrics include: avg_confidence (float), p99_latency_ms (float), false_positive_rate (float), frames_per_second (float), and target_fps (float)."
+  initialCode={`def diagnose_cv_system(metrics: dict) -> list[dict]:
+    """
+    Analyze production CV system metrics and return a list of issues.
+
+    Each issue should be a dict with:
+        - 'severity': 'critical' | 'warning' | 'info'
+        - 'issue': short description of the problem
+        - 'recommendation': concrete next step
+
+    Args:
+        metrics: dict with keys:
+            avg_confidence (float, 0-1): mean prediction confidence
+            p99_latency_ms (float): 99th-percentile inference latency in ms
+            false_positive_rate (float, 0-1): fraction of predictions that are wrong
+            frames_per_second (float): actual throughput
+            target_fps (float): required throughput
+
+    Returns:
+        List of issue dicts, sorted by severity (critical first).
+    """
+    # Your code here
+    pass
+
+# Test case 1: distribution shift + latency problem
+
+metrics_1 = {
+"avg_confidence": 0.48, # unhealthy — was 0.82 at launch
+"p99_latency_ms": 95.0, # exceeds 33ms budget for 30fps
+"false_positive_rate": 0.18,
+"frames_per_second": 11.2,
+"target_fps": 30.0,
+}
+
+# Test case 2: healthy system
+
+metrics_2 = {
+"avg_confidence": 0.81,
+"p99_latency_ms": 28.0,
+"false_positive_rate": 0.04,
+"frames_per_second": 31.5,
+"target_fps": 30.0,
+}
+
+issues_1 = diagnose_cv_system(metrics_1)
+issues_2 = diagnose_cv_system(metrics_2)
+
+print("System 1 issues:")
+for issue in issues_1:
+print(f" [{issue['severity'].upper()}] {issue['issue']}")
+print(f" → {issue['recommendation']}")
+
+print(f"\\nSystem 2 issues: {len(issues_2)} (expected: 0 or 1 info)")`}
+  solution={`def diagnose_cv_system(metrics: dict) -> list[dict]:
+issues = []
+
+    # Confidence below 0.6 strongly suggests distribution shift
+    if metrics["avg_confidence"] < 0.6:
+        issues.append({
+            "severity": "critical",
+            "issue": f"Low average confidence ({metrics['avg_confidence']:.2f}) — likely distribution shift",
+            "recommendation": "Audit recent input images vs training distribution; check camera/lighting conditions",
+        })
+    elif metrics["avg_confidence"] < 0.7:
+        issues.append({
+            "severity": "warning",
+            "issue": f"Declining confidence ({metrics['avg_confidence']:.2f})",
+            "recommendation": "Review last week's prediction logs for unusual inputs",
+        })
+
+    # Latency: compute budget from target fps
+    budget_ms = 1000.0 / metrics["target_fps"]
+    if metrics["p99_latency_ms"] > budget_ms:
+        ratio = metrics["p99_latency_ms"] / budget_ms
+        issues.append({
+            "severity": "critical" if ratio > 2 else "warning",
+            "issue": f"p99 latency {metrics['p99_latency_ms']:.0f}ms exceeds {budget_ms:.0f}ms budget ({ratio:.1f}x over)",
+            "recommendation": "Try INT8 quantization or switch to a smaller model variant (e.g., YOLOv8n)",
+        })
+
+    # FPS shortfall
+    fps_ratio = metrics["frames_per_second"] / metrics["target_fps"]
+    if fps_ratio < 0.8:
+        issues.append({
+            "severity": "critical",
+            "issue": f"Throughput {metrics['frames_per_second']:.1f}fps is {fps_ratio:.0%} of target {metrics['target_fps']:.0f}fps",
+            "recommendation": "Enable batch inference or add a second GPU worker",
+        })
+
+    # High false positive rate → threshold too low
+    if metrics["false_positive_rate"] > 0.15:
+        issues.append({
+            "severity": "warning",
+            "issue": f"High false positive rate ({metrics['false_positive_rate']:.0%})",
+            "recommendation": "Raise confidence threshold; re-evaluate precision-recall tradeoff on validation set",
+        })
+
+    # Sort: critical first
+    severity_order = {"critical": 0, "warning": 1, "info": 2}
+    issues.sort(key=lambda x: severity_order[x["severity"]])
+    return issues
+
+metrics_1 = {
+"avg_confidence": 0.48,
+"p99_latency_ms": 95.0,
+"false_positive_rate": 0.18,
+"frames_per_second": 11.2,
+"target_fps": 30.0,
+}
+
+metrics_2 = {
+"avg_confidence": 0.81,
+"p99_latency_ms": 28.0,
+"false_positive_rate": 0.04,
+"frames_per_second": 31.5,
+"target_fps": 30.0,
+}
+
+issues_1 = diagnose_cv_system(metrics_1)
+issues_2 = diagnose_cv_system(metrics_2)
+
+print("System 1 issues:")
+for issue in issues_1:
+print(f" [{issue['severity'].upper()}] {issue['issue']}")
+print(f" → {issue['recommendation']}")
+
+print(f"\\nSystem 2 issues: {len(issues_2)} (expected: 0 or 1 info)")`}
+testCases={["low confidence triggers distribution shift alert", "latency over budget flagged", "healthy system returns no critical issues"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "A CV model achieves 94% accuracy on your test set but drops to 61% in production after 3 months. What is the most likely cause?",
+      options: [
+        "The model overfitted to the test set",
+        "Distribution shift — production data now differs from training data (e.g., new camera, lighting, seasonal changes)",
+        "A bug was introduced in the inference code",
+        "The model needs more layers",
+      ],
+      correct: 1,
+      explanation:
+        "Accuracy collapse weeks to months after deployment without code changes is the signature of distribution shift. Test set accuracy doesn't drop because the test set didn't change.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "You need to deploy a person-detection model for a security system. False positives (false alarms) cause expensive guard dispatch. False negatives (missing intruders) are a major risk. Which threshold strategy is correct?",
+      options: [
+        "Maximize recall at all costs — never miss an intruder",
+        "Maximize precision at all costs — never false alarm",
+        "Choose the threshold that maximizes F1 score, balancing both mistake types",
+        "Set threshold to 0.5 arbitrarily",
+      ],
+      correct: 2,
+      explanation:
+        "When both false positives and false negatives have significant cost, F1 (harmonic mean of precision and recall) is the right optimization target. A domain expert should review the resulting precision-recall tradeoff.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your model runs at 11fps on the production server but the camera is 30fps. You have a budget of 2 engineering days. Which option is most likely to get you to 30fps fastest?",
+      options: [
+        "Redesign the model architecture from scratch",
+        "Reduce input resolution and switch to a smaller YOLO variant",
+        "Add more training data and retrain",
+        "Upgrade to a better GPU",
+      ],
+      correct: 1,
+      explanation:
+        "Reducing input resolution and choosing a smaller model variant (e.g., YOLOv8x → YOLOv8n) are 2-line code changes that can provide 5–14× speedup. Architecture redesign and retraining take weeks.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Why is INT8 quantization so effective at reducing latency without significant accuracy loss?",
+      options: [
+        "It removes half the model layers",
+        "It trains the model on a smaller dataset",
+        "Integer arithmetic is cheaper than floating-point; 8-bit values use 4× less memory, improving cache efficiency",
+        "It increases the batch size automatically",
+      ],
+      correct: 2,
+      explanation:
+        "Modern CPUs and GPUs have dedicated integer arithmetic units that are faster and more energy-efficient than floating-point units. 8-bit weights use 4× less memory than 32-bit, fitting more of the model in cache and improving throughput.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="When model confidence scores drift toward the uncertain range (0.4–0.6), this is a leading indicator of ___ ___. To reduce GPU inference latency by 2–4× with less than 1% accuracy loss, apply INT8 ___. When both false positives and false negatives have high cost, optimize for the ___ score."
+  answers={["distribution shift", "quantization", "F1"]}
+  hints={[
+    "The production data no longer matches training data.",
+    "Convert float32 weights to 8-bit integers.",
+    "Harmonic mean of precision and recall.",
+  ]}
+/>
+
+## What you learned
+
+- The three dominant production failure modes are distribution shift, latency mismatch, and edge cases absent from training data — not model architecture problems.
+- Distribution shift can be detected proactively by monitoring confidence score distributions; a drift toward uncertain scores is an early warning signal.
+- INT8 quantization and switching to smaller model variants are the fastest paths to latency improvement — both are low-effort, high-impact changes.
+- Batch inference dramatically improves GPU utilization; use it for non-real-time workloads.
+- Confidence threshold selection is a product decision: lower threshold increases recall (find more objects), higher threshold increases precision (fewer false alarms); F1 balances both when mistakes are equally costly.
+
+You now have the foundation to work across the full computer vision stack: from understanding pixels and CNNs, to applying object detection algorithms, to deploying and maintaining vision systems that stay reliable as the real world changes around them.

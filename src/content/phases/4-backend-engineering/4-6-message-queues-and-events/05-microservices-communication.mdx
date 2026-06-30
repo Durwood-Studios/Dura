@@ -1,0 +1,559 @@
+---
+title: "Microservices Communication Patterns"
+description: "Analyze synchronous, asynchronous, and event-driven communication strategies between microservices — and choose the right pattern based on consistency, latency, and failure tolerance requirements."
+phase: 4
+module: "4-6"
+order: 5
+estimatedMinutes: 20
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-4", "SE-7", "SF-3", "OS-5"]
+  swebok: ["Software Design", "Software Architecture", "Software Quality"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - synchronous-communication
+  - asynchronous-communication
+  - service-mesh
+  - api-gateway
+  - saga-pattern
+  - choreography
+  - orchestration
+  - idempotency
+  - circuit-breaker
+  - distributed-transaction
+learningOutcomes:
+  - "Classify a given inter-service interaction as synchronous or asynchronous and justify the choice based on latency and consistency requirements"
+  - "Implement the Saga pattern using both choreography and orchestration styles to manage a distributed transaction across three or more services"
+  - "Write an idempotent message handler that safely processes duplicate messages without corrupting state"
+  - "Identify the failure modes in a direct HTTP call chain between microservices and apply a circuit-breaker to prevent cascading failures"
+  - "Compare API gateway, service mesh, and event bus as communication infrastructure, and select the appropriate layer for a given concern"
+prerequisites:
+  - message-queue
+  - producer
+  - consumer
+  - kafka-topic
+  - at-least-once-delivery
+  - amqp
+  - event-sourcing
+  - cqrs
+  - http-request-response
+  - api-basics
+  - async-await
+---
+
+## Why this matters
+
+Splitting a monolith into microservices solves real problems — independent deployability, team autonomy, targeted scaling. But it immediately introduces a harder problem: how do those services talk to each other? Every choice you make about communication carries trade-offs in latency, consistency, operational complexity, and failure behavior. Get it wrong and you end up with a distributed monolith: all the operational overhead of many services with none of the isolation benefits. Get it right and each service can fail, scale, and evolve independently.
+
+This lesson brings together everything you have learned about queues, Kafka, RabbitMQ, and event sourcing and shows you how they fit into the broader map of microservice communication strategies. You will learn when a synchronous HTTP call is correct, when an event on a queue is the right path, how to manage a business transaction that spans multiple services without a distributed database lock, and how to protect your system when any service in the chain is having a bad day. These are the decisions that separate an architecture that holds up in production from one that collapses under its own weight.
+
+## The fundamental choice: synchronous vs. asynchronous
+
+Think about how you communicate in real life. A phone call is synchronous: you call, you wait, you get an answer before you can continue. A letter is asynchronous: you write, you drop it in the box, and you go about your day while the postal system delivers it whenever it can.
+
+Every inter-service call you write is one or the other. The choice is not about preference — it follows directly from what the caller needs:
+
+- **If the caller needs the result to continue**, the call must be synchronous.
+- **If the caller can continue without the result**, the call should be asynchronous.
+
+> **Synchronous communication is a phone call. Asynchronous communication is dropping a letter. Use the phone when you cannot move forward without an answer. Use a letter when the work can happen after you hang up.**
+
+The engineering reality is that most operations in a microservice system fall into the second category, but most developers default to HTTP calls as if everything were the first.
+
+## Synchronous communication: when and how
+
+Synchronous communication — HTTP REST, gRPC — is appropriate for:
+
+- **Read operations that gate rendering** — fetching a user's profile to display a page
+- **Operations where the caller needs validation** — checking inventory before accepting a payment
+- **Low-latency requirements** — autocomplete, auth token validation, session checks
+
+```typescript
+// gRPC synchronous call — correct when the caller CANNOT proceed without
+// knowing whether the inventory check succeeded
+async function reserveInventory(productId: string, quantity: number): Promise<ReservationResult> {
+  // The checkout service calls inventory synchronously because a failed
+  // reservation must block the checkout — we cannot charge and then discover
+  // the item is out of stock.
+  const response = await inventoryClient.reserve({
+    productId,
+    quantity,
+    // Idempotency key: if the network drops after the reservation succeeds
+    // but before we get the response, retrying with the same key is safe.
+    idempotencyKey: `checkout-${orderId}`,
+  });
+
+  if (!response.success) {
+    throw new InsufficientInventoryError(productId, quantity);
+  }
+
+  return response;
+}
+```
+
+The danger with synchronous calls is the chain problem. Each service waits for its downstream service. If you have five services in a call chain and each has P99 latency of 50ms, your end-to-end P99 is 250ms — and that is before any retries, before any network jitter. More critically, if any service in the chain returns an error, the entire chain fails. This is where the <VocabTooltip slug="circuit-breaker">circuit breaker</VocabTooltip> pattern becomes essential.
+
+### Circuit breaker: protecting the caller from a failing downstream
+
+A circuit breaker wraps a synchronous call. It tracks recent failure rates. When failures exceed a threshold, the circuit "opens" — subsequent calls fail immediately without even attempting the downstream call, giving the struggling service time to recover.
+
+```typescript
+class CircuitBreaker {
+  private failures = 0;
+  private lastFailureTime = 0;
+  private state: "closed" | "open" | "half-open" = "closed";
+
+  // Thresholds are tuned per service based on observed failure patterns —
+  // too sensitive and you open the circuit on transient blips; too lenient
+  // and you let cascading failures propagate for too long.
+  constructor(
+    private readonly failureThreshold = 5,
+    private readonly recoveryTimeMs = 30_000
+  ) {}
+
+  async call<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.state === "open") {
+      // Don't even try — fail fast so the caller can use a fallback.
+      // Periodically allow one probe request to test recovery.
+      if (Date.now() - this.lastFailureTime > this.recoveryTimeMs) {
+        this.state = "half-open";
+      } else {
+        throw new CircuitOpenError("Circuit is open — service unavailable");
+      }
+    }
+
+    try {
+      const result = await fn();
+      // A successful call in half-open state means the service has recovered.
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  private onSuccess(): void {
+    this.failures = 0;
+    this.state = "closed";
+  }
+
+  private onFailure(): void {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+    if (this.failures >= this.failureThreshold) {
+      this.state = "open";
+    }
+  }
+}
+
+// Usage: wrap any synchronous downstream call with the breaker
+const inventoryBreaker = new CircuitBreaker(5, 30_000);
+
+async function checkInventory(productId: string): Promise<InventoryStatus> {
+  return inventoryBreaker.call(() => inventoryClient.check(productId));
+}
+```
+
+## Asynchronous communication: events and queues
+
+When a service can fire and forget — or when coupling to the downstream service's availability would be unacceptable — asynchronous messaging via a queue or event bus is the right tool. You have already seen this with Kafka and RabbitMQ. The architectural question here is not which tool to use but which _pattern_ governs how services coordinate.
+
+### Choreography: services react to events independently
+
+In choreography, there is no central coordinator. Each service listens for events it cares about and reacts by publishing its own events. The workflow emerges from the interactions — no service knows the full picture.
+
+```typescript
+// ORDER SERVICE: only knows about orders
+async function createOrder(orderData: OrderInput): Promise<Order> {
+  const order = await db.orders.create({ ...orderData, status: "pending" });
+
+  // Publish a fact — "this order was placed" — and move on.
+  // The order service does NOT know what happens next.
+  await eventBus.publish("order.placed", {
+    orderId: order.id,
+    userId: orderData.userId,
+    items: orderData.items,
+    total: orderData.total,
+  });
+
+  return order;
+}
+
+// PAYMENT SERVICE: listens for orders, reacts independently
+eventBus.subscribe("order.placed", async (event: OrderPlacedEvent) => {
+  const charge = await paymentGateway.charge({
+    userId: event.userId,
+    amount: event.total,
+    idempotencyKey: `payment-${event.orderId}`,
+  });
+
+  // Publish a new fact — the payment service does NOT call the order service back.
+  await eventBus.publish(charge.success ? "payment.succeeded" : "payment.failed", {
+    orderId: event.orderId,
+    chargeId: charge.id,
+  });
+});
+
+// ORDER SERVICE reacts to payment outcome — it never called payment directly
+eventBus.subscribe("payment.succeeded", async (event: PaymentSucceededEvent) => {
+  await db.orders.update(event.orderId, { status: "confirmed" });
+  await eventBus.publish("order.confirmed", { orderId: event.orderId });
+});
+
+eventBus.subscribe("payment.failed", async (event: PaymentFailedEvent) => {
+  await db.orders.update(event.orderId, { status: "payment_failed" });
+});
+```
+
+Choreography excels when services are genuinely independent — each can be built, deployed, and scaled by a separate team without coordinating with others. The trade-off is observability: tracing a transaction that spans five services communicating via events requires distributed tracing infrastructure, because no single place knows the full workflow.
+
+### Orchestration: a coordinator manages the workflow
+
+In orchestration, one service — the orchestrator — knows the full workflow and explicitly commands each step, collecting results and deciding what to do next.
+
+```typescript
+// ORDER ORCHESTRATOR: knows the complete workflow and drives each step
+class OrderOrchestrator {
+  async processOrder(orderId: string): Promise<void> {
+    const order = await this.db.orders.findById(orderId);
+
+    // Step 1: reserve inventory (synchronous — we need the result to continue)
+    const reservation = await this.inventoryClient.reserve(order.items);
+    if (!reservation.success) {
+      await this.db.orders.update(orderId, { status: "inventory_failed" });
+      return;
+    }
+
+    // Step 2: charge payment (synchronous — must know outcome before shipping)
+    const payment = await this.paymentClient.charge({
+      userId: order.userId,
+      amount: order.total,
+      idempotencyKey: `order-payment-${orderId}`,
+    });
+
+    if (!payment.success) {
+      // Compensating transaction: release the inventory we just reserved
+      await this.inventoryClient.release(reservation.reservationId);
+      await this.db.orders.update(orderId, { status: "payment_failed" });
+      return;
+    }
+
+    // Step 3: trigger fulfillment (asynchronous — we don't need to wait)
+    await this.eventBus.publish("fulfillment.requested", {
+      orderId,
+      reservationId: reservation.reservationId,
+      paymentId: payment.id,
+    });
+
+    await this.db.orders.update(orderId, { status: "confirmed" });
+  }
+}
+```
+
+Orchestration makes the workflow explicit and testable in one place. The orchestrator is also the single point of failure — if it goes down, no new orders process. Choose orchestration when the workflow is complex, when you need to reason about it as a unit, or when compensating transaction logic would be too scattered across choreographed services.
+
+## The Saga pattern: distributed transactions without a two-phase commit
+
+A <VocabTooltip slug="distributed-transaction">distributed transaction</VocabTooltip> across microservices cannot use a database lock — each service owns its own database. The Saga pattern solves this by breaking a transaction into a sequence of local transactions, each of which publishes an event or message to trigger the next step. If any step fails, the saga executes _compensating transactions_ to undo the work already done.
+
+```typescript
+// Saga state machine — each transition is a local transaction + event publication.
+// If any step fails, we walk backward through compensating transactions.
+type SagaStep = {
+  action: () => Promise<void>;
+  compensate: () => Promise<void>;
+};
+
+class OrderSaga {
+  private readonly steps: SagaStep[] = [];
+  private readonly executedSteps: SagaStep[] = [];
+
+  constructor(private readonly order: Order) {
+    // Steps are defined in order. Each compensate() undoes its action().
+    this.steps = [
+      {
+        action: async () => {
+          this.order.reservationId = await inventoryService.reserve(order.items);
+        },
+        // If a later step fails, release the reservation
+        compensate: async () => {
+          await inventoryService.release(this.order.reservationId!);
+        },
+      },
+      {
+        action: async () => {
+          this.order.paymentId = await paymentService.charge({
+            userId: order.userId,
+            amount: order.total,
+            idempotencyKey: `saga-${order.id}`,
+          });
+        },
+        // If a later step fails, issue a refund
+        compensate: async () => {
+          await paymentService.refund(this.order.paymentId!);
+        },
+      },
+      {
+        action: async () => {
+          await shippingService.schedulePickup(order.id, order.address);
+        },
+        compensate: async () => {
+          await shippingService.cancelPickup(order.id);
+        },
+      },
+    ];
+  }
+
+  async execute(): Promise<void> {
+    for (const step of this.steps) {
+      try {
+        await step.action();
+        // Track which steps succeeded so we know what to compensate on failure
+        this.executedSteps.unshift(step);
+      } catch (error) {
+        // Roll back all completed steps in reverse order
+        await this.compensate();
+        throw error;
+      }
+    }
+  }
+
+  private async compensate(): Promise<void> {
+    for (const step of this.executedSteps) {
+      try {
+        await step.compensate();
+      } catch (compensationError) {
+        // Log but continue — partial compensation is better than none.
+        // In production, this requires a dead-letter queue and human review.
+        console.error("Compensation failed — manual intervention required", {
+          orderId: this.order.id,
+          error: compensationError,
+        });
+      }
+    }
+  }
+}
+```
+
+## Idempotency: the requirement you cannot skip
+
+In any asynchronous system, messages can be delivered more than once. Network failures, consumer restarts, and at-least-once delivery guarantees mean your message handlers _will_ see the same message multiple times. An idempotent handler produces the same result whether it processes a message once or a hundred times.
+
+```typescript
+// NON-idempotent: double-processing charges the customer twice
+async function handlePaymentRequested(event: PaymentRequestedEvent) {
+  await paymentGateway.charge({
+    userId: event.userId,
+    amount: event.amount,
+    // No idempotency key — every call to the gateway creates a new charge
+  });
+}
+
+// IDEMPOTENT: the idempotency key ensures the gateway treats retries
+// as the same request, not new ones. Most payment gateways and APIs
+// support this pattern natively.
+async function handlePaymentRequestedIdempotent(event: PaymentRequestedEvent) {
+  // Check our own idempotency store first — if we already processed this
+  // event successfully, return the cached result without hitting the gateway.
+  const cached = await idempotencyStore.get(event.id);
+  if (cached) {
+    return cached.result;
+  }
+
+  const result = await paymentGateway.charge({
+    userId: event.userId,
+    amount: event.amount,
+    // The event ID is stable across retries — the gateway returns the
+    // original result instead of creating a new charge.
+    idempotencyKey: event.id,
+  });
+
+  // Store the result so future duplicates skip the gateway entirely.
+  // TTL matches your message retention policy — no need to keep forever.
+  await idempotencyStore.set(event.id, { result }, { ttlSeconds: 86_400 });
+
+  return result;
+}
+```
+
+## Communication infrastructure: where things live
+
+Three layers of infrastructure govern how microservices communicate. They are not competing options — they solve different problems and are often used together:
+
+| Layer            | What it does                                                                  | When to use it                                 |
+| ---------------- | ----------------------------------------------------------------------------- | ---------------------------------------------- |
+| **API Gateway**  | Single entry point for external clients; handles auth, rate limiting, routing | External traffic from browsers and mobile apps |
+| **Service Mesh** | mTLS, retries, circuit breaking, observability between services               | Internal synchronous service-to-service calls  |
+| **Event Bus**    | Durable asynchronous messaging; Kafka or RabbitMQ                             | Internal async events, fan-out, workflow steps |
+
+An API gateway (Kong, AWS API Gateway, Nginx) is not for internal service-to-service calls — it is for traffic arriving from outside your cluster. A service mesh (Istio, Linkerd) handles the cross-cutting concerns (mTLS encryption, automatic retries, distributed tracing) for internal synchronous calls without you wiring them into application code. The event bus handles asynchronous work. Each layer adds operational complexity; only adopt what your system's reliability requirements justify.
+
+## Practice
+
+<SandboxExercise
+  title="Implement a Choreography-Based Order Saga"
+  description="You have three services connected by an in-process event bus. Implement event handlers so that: (1) OrderService publishes 'order.placed' when an order is created; (2) PaymentService listens and publishes 'payment.succeeded' or 'payment.failed'; (3) FulfillmentService listens to 'payment.succeeded' and publishes 'order.fulfilled'; (4) OrderService listens to both 'payment.failed' and 'order.fulfilled' to update order status. All handlers must be idempotent."
+  starterCode={`// Simple in-process event bus — same interface as Kafka/RabbitMQ consumers
+const eventBus = {
+  handlers: new Map<string, Array<(event: unknown) => Promise<void>>>(),
+
+subscribe(event: string, handler: (event: unknown) => Promise<void>) {
+if (!this.handlers.has(event)) this.handlers.set(event, [])
+this.handlers.get(event)!.push(handler)
+},
+
+async publish(event: string, payload: unknown) {
+const handlers = this.handlers.get(event) ?? []
+await Promise.all(handlers.map((h) => h(payload)))
+},
+}
+
+// Idempotency store (in-memory for this exercise)
+const processedEvents = new Set<string>()
+
+// --- ORDER SERVICE ---
+async function createOrder(orderId: string, userId: string, total: number) {
+console.log(\`Order \${orderId} created\`)
+// TODO: publish 'order.placed' event
+}
+
+// TODO: subscribe to 'payment.failed' and 'order.fulfilled'
+// to update order status. Must be idempotent.
+
+// --- PAYMENT SERVICE ---
+// TODO: subscribe to 'order.placed'
+// Charge payment (call simulatePayment below) and publish result.
+// Must be idempotent — use processedEvents to guard against duplicates.
+
+// --- FULFILLMENT SERVICE ---
+// TODO: subscribe to 'payment.succeeded'
+// Schedule pickup (call simulateFulfillment below) and publish 'order.fulfilled'.
+
+// Simulated external services
+async function simulatePayment(orderId: string, amount: number) {
+return amount < 500 ? { success: true, chargeId: \`ch\_\${orderId}\` } : { success: false }
+}
+
+async function simulateFulfillment(orderId: string) {
+return { trackingId: \`track\_\${orderId}\` }
+}
+
+// Test it
+await createOrder('ord_001', 'user_42', 99.99) // Should succeed
+await createOrder('ord_002', 'user_43', 999.99) // Should fail payment
+`}
+  solution={`const eventBus = {
+handlers: new Map<string, Array<(event: unknown) => Promise<void>>>(),
+subscribe(event: string, handler: (event: unknown) => Promise<void>) {
+if (!this.handlers.has(event)) this.handlers.set(event, [])
+this.handlers.get(event)!.push(handler)
+},
+async publish(event: string, payload: unknown) {
+const handlers = this.handlers.get(event) ?? []
+await Promise.all(handlers.map((h) => h(payload)))
+},
+}
+
+const processedEvents = new Set<string>()
+const orderStatuses = new Map<string, string>()
+
+// ORDER SERVICE
+async function createOrder(orderId: string, userId: string, total: number) {
+orderStatuses.set(orderId, 'pending')
+console.log(\`Order \${orderId} created (status: pending)\`)
+await eventBus.publish('order.placed', { orderId, userId, total })
+}
+
+eventBus.subscribe('payment.failed', async (event: unknown) => {
+const { orderId, eventId } = event as { orderId: string; eventId: string }
+if (processedEvents.has(eventId)) return
+processedEvents.add(eventId)
+orderStatuses.set(orderId, 'payment_failed')
+console.log(\`Order \${orderId} status: payment_failed\`)
+})
+
+eventBus.subscribe('order.fulfilled', async (event: unknown) => {
+const { orderId, eventId } = event as { orderId: string; eventId: string }
+if (processedEvents.has(eventId)) return
+processedEvents.add(eventId)
+orderStatuses.set(orderId, 'fulfilled')
+console.log(\`Order \${orderId} status: fulfilled\`)
+})
+
+// PAYMENT SERVICE
+eventBus.subscribe('order.placed', async (event: unknown) => {
+const { orderId, userId, total } = event as { orderId: string; userId: string; total: number }
+const eventId = \`payment-\${orderId}\`
+if (processedEvents.has(eventId)) return
+processedEvents.add(eventId)
+
+const result = await simulatePayment(orderId, total)
+if (result.success) {
+await eventBus.publish('payment.succeeded', { orderId, chargeId: result.chargeId, eventId: \`ps-\${orderId}\` })
+} else {
+await eventBus.publish('payment.failed', { orderId, eventId: \`pf-\${orderId}\` })
+}
+})
+
+// FULFILLMENT SERVICE
+eventBus.subscribe('payment.succeeded', async (event: unknown) => {
+const { orderId } = event as { orderId: string }
+const eventId = \`fulfillment-\${orderId}\`
+if (processedEvents.has(eventId)) return
+processedEvents.add(eventId)
+
+const { trackingId } = await simulateFulfillment(orderId)
+console.log(\`Order \${orderId} pickup scheduled, tracking: \${trackingId}\`)
+await eventBus.publish('order.fulfilled', { orderId, trackingId, eventId: \`of-\${orderId}\` })
+})
+
+async function simulatePayment(orderId: string, amount: number) {
+return amount < 500 ? { success: true, chargeId: \`ch*\${orderId}\` } : { success: false }
+}
+async function simulateFulfillment(orderId: string) {
+return { trackingId: \`track*\${orderId}\` }
+}
+
+await createOrder('ord_001', 'user_42', 99.99)
+await createOrder('ord_002', 'user_43', 999.99)
+`}
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A checkout service calls an inventory service synchronously over HTTP. The inventory service is experiencing high load and responds in 8 seconds instead of the usual 200ms. What happens to the checkout service under this failure mode, and what pattern addresses it?"
+  choices={[
+    "The checkout service returns immediately because HTTP calls are non-blocking by default",
+    "The checkout service accumulates in-flight requests waiting for inventory responses, exhausting its thread pool or connection pool, causing it to fail too — a circuit breaker prevents this by failing fast once the failure rate exceeds a threshold",
+    "The checkout service retries automatically and the inventory service recovers on its own",
+    "The load balancer detects the slow responses and routes checkout traffic away from inventory automatically",
+  ]}
+  correct={1}
+  explanation="Without a circuit breaker, slow responses from a downstream service consume threads or connections in the caller. When all connections are held waiting for slow responses, new requests queue up and the caller's latency rises to match the downstream service's — the failure cascades. A circuit breaker tracks the failure rate and, once it exceeds a threshold, fails subsequent calls immediately (without hitting the downstream service), giving the downstream service time to recover and protecting the caller's resources."
+/>
+
+<Quiz
+  question="An order service publishes an 'order.placed' event. Due to a consumer restart, the payment service processes this event twice. The payment handler calls the payment gateway each time it receives the event, resulting in two charges. Which change fixes this?"
+  choices={[
+    "Switch from at-least-once to at-most-once delivery so duplicates never occur",
+    "Add an idempotency key derived from the event ID to the gateway call, and check a local store before processing so duplicate events return the cached result without re-charging",
+    "Use a distributed lock so only one consumer processes any given event at a time",
+    "Process events synchronously instead of asynchronously to eliminate duplicates",
+  ]}
+  correct={1}
+  explanation="At-most-once delivery solves duplicates by potentially losing messages — a worse trade-off for payments. A distributed lock prevents parallel processing but not sequential duplicate delivery. Synchronous processing doesn't eliminate duplicates; it changes when they occur. The correct fix is idempotency: the payment gateway treats calls with the same idempotency key as the same request, and the local idempotency store lets the handler skip gateway calls for already-processed events. This gives you at-least-once delivery (no lost messages) with exactly-once business effect."
+/>
+
+## What you learned
+
+- Synchronous calls (HTTP, gRPC) are correct when the caller needs the result to continue; asynchronous messaging is correct when work can happen after the response — defaulting to synchronous when async is sufficient creates unnecessary coupling
+- The circuit breaker pattern protects a service from cascading failures by failing fast when a downstream service's error rate exceeds a threshold, giving both the caller and the downstream service time to recover
+- Choreography lets services react to events independently (high autonomy, complex observability); orchestration puts workflow logic in one coordinator (explicit, testable, single point of failure) — the right choice depends on team structure and workflow complexity
+- The Saga pattern manages distributed transactions by executing a sequence of local transactions paired with compensating transactions that undo completed steps if any later step fails
+- Idempotent handlers are not optional in any messaging system — at-least-once delivery guarantees mean duplicate messages will arrive, and handlers that are not idempotent will corrupt state in production
+
+With message queues, event sourcing, CQRS, and communication patterns now in your toolkit, you are equipped to design backend systems that stay resilient, observable, and independently deployable as they grow.

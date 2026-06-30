@@ -1,0 +1,450 @@
+---
+title: "Bootloader Design — Flash Layout, Dual-Bank, Signature Verification"
+description: "How bootloaders partition flash, implement dual-bank failsafe OTA, and enforce cryptographic signature verification before executing application images."
+phase: 10
+module: "10-10"
+order: 1
+estimatedMinutes: 25
+difficulty: "advanced"
+prerequisites:
+  - "e-1-c-toolchain-arm-cortex-m"
+  - "e-2-bare-metal-c"
+  - "e-3-interrupts-and-dma"
+standards:
+  cs2023:
+    - "SE-Implementation"
+    - "SE-Quality"
+    - "SF-Foundations"
+  swebok:
+    - "Software Construction"
+    - "Software Configuration Management"
+    - "Software Security"
+  bloom: "analyze"
+  sfia: 2
+  dreyfus: "proficient"
+vocabulary:
+  - bootloader
+  - flash-layout
+  - dual-bank-flash
+  - ota-update
+  - image-signature
+  - vector-table-relocation
+  - crc32
+  - ed25519
+  - application-descriptor
+  - bank-swap
+learningOutcomes:
+  - "Partition flash memory into bootloader, application A, application B, and descriptor regions with a linker script"
+  - "Trace the dual-bank OTA update flow from download through bank swap through reboot"
+  - "Identify where signature verification sits in the boot sequence and explain why it must precede vector-table relocation"
+  - "Analyze a broken bootloader that skips verification and describe the attack vector it exposes"
+  - "Write a C function that reads an application descriptor, validates the CRC, and jumps to the application if all checks pass"
+---
+
+## Why this matters
+
+Every device in the field eventually needs a firmware update. The mechanism that makes that safe — a bootloader — is also the first code that runs after reset. If the bootloader has bugs, the device bricks. If it has security holes, every device in your fleet becomes a remote code execution target. Industrial controllers, medical devices, consumer IoT, automotive ECUs: they all run a bootloader, and the decisions you make in its design propagate for the entire product lifetime.
+
+The economic stakes are real. A failed OTA update on a device without a failsafe dual-bank architecture means a truck roll or a product recall. A bootloader that executes unsigned firmware means an attacker who intercepts a firmware update channel can own every device in your fleet simultaneously. These are not theoretical risks — they are the documented root cause of real product recalls and CVEs. Understanding how to design a bootloader correctly is one of the highest-leverage embedded skills you can have.
+
+---
+
+## The problem a bootloader solves
+
+Imagine you ship a physical safe with a combination lock. The combination is welded into the metal at the factory. Later you discover the combination is wrong. There is no way to change it without physically opening the safe — which destroys the security.
+
+A microcontroller without a bootloader has the same problem. Flash is the combination: the application image baked in at production. To change it, a programmer must be physically attached. Bootloaders are the mechanism that lets the safe change its own combination — over a network, over UART, over BLE — while maintaining the security and reliability guarantees that make a safe worth having.
+
+> **A bootloader is just a small, trusted program that runs before the application, decides whether the application is trustworthy and valid, and either jumps to it or refuses to.**
+
+---
+
+## Flash layout — the foundation
+
+Before writing a line of bootloader code, you must decide how flash is partitioned. This is a hardware-constrained design problem: flash on a Cortex-M device has a fixed size, a fixed erase granularity (sectors, not bytes), and a fixed location. The layout you choose determines which OTA strategies are even possible.
+
+A minimal dual-bank layout on a 512 KB flash device:
+
+```
+Flash (0x08000000 — 0x0807FFFF, 512 KB)
+
+┌──────────────────────────────────┐ 0x08000000
+│  Bootloader (64 KB)              │ — Starts at reset vector; must NEVER be updated
+│  Signature public key embedded   │
+│  Interrupt vectors at top        │
+├──────────────────────────────────┤ 0x08010000
+│  Application Descriptor A (256B) │ — Magic, version, CRC, image length, signature
+├──────────────────────────────────┤ 0x08010100
+│  Application Image A (192 KB)    │ — The currently running application
+│  Starts with its own vector table│
+├──────────────────────────────────┤ 0x08040100
+│  Application Descriptor B (256B) │ — Same format; describes the candidate image
+├──────────────────────────────────┤ 0x08040200
+│  Application Image B (192 KB)    │ — The pending update, or a backup
+├──────────────────────────────────┤ 0x08070200
+│  Persistent State (32 KB)        │ — Boot counter, selected bank, update flags
+└──────────────────────────────────┘ 0x0807FFFF
+```
+
+The layout is expressed as a linker script so the compiler and linker enforce it:
+
+```ld
+/* bootloader.ld — linker script for the bootloader image only */
+MEMORY
+{
+    /* Bootloader occupies the first 64K of flash */
+    FLASH_BOOT (rx)  : ORIGIN = 0x08000000, LENGTH = 64K
+
+    /* RAM is not partitioned — bootloader and app share it at different times */
+    RAM (xrw)        : ORIGIN = 0x20000000, LENGTH = 128K
+}
+
+SECTIONS
+{
+    .isr_vector :
+    {
+        KEEP(*(.isr_vector))    /* Vector table MUST be at flash origin */
+    } > FLASH_BOOT
+
+    .text :
+    {
+        *(.text*)
+        *(.rodata*)             /* Public key lives here as a const array */
+    } > FLASH_BOOT
+
+    /* ... .data, .bss sections for bootloader's own RAM use ... */
+}
+```
+
+A separate `app_a.ld` for the application sets `FLASH (rx) : ORIGIN = 0x08010100, LENGTH = 192K`. The application never needs to know about the bootloader or the other bank.
+
+---
+
+## Application descriptor — the trust contract
+
+The bootloader needs to know whether an image is valid before jumping to it. Raw flash bytes tell you nothing. An **application descriptor** is a small, fixed-format struct written at a known address (the 256 bytes before each image) that the bootloader reads first:
+
+```c
+/* app_descriptor.h — shared between bootloader and application build */
+
+#define APP_MAGIC    0xDEADC0DE    /* Arbitrary sentinel, must not appear by chance */
+#define APP_DESC_VERSION 1
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;            /* Must equal APP_MAGIC */
+    uint32_t version;          /* Monotonically increasing app version number */
+    uint32_t image_length;     /* Byte count of the application image */
+    uint32_t crc32;            /* CRC-32 over the application image bytes */
+    uint8_t  ed25519_sig[64];  /* Ed25519 signature over (magic|version|length|crc32) */
+    uint8_t  reserved[168];    /* Pad to 256 bytes */
+} AppDescriptor;
+
+/* Addresses defined by the linker scripts */
+#define APP_A_DESC_ADDR   ((const AppDescriptor *)0x08010000)
+#define APP_A_IMAGE_ADDR  (0x08010100)
+#define APP_B_DESC_ADDR   ((const AppDescriptor *)0x08040200)
+#define APP_B_IMAGE_ADDR  (0x08040300)
+```
+
+The bootloader's verification sequence must be:
+
+1. Check `magic` — reject immediately if wrong (avoids reading garbage flash).
+2. Validate `crc32` over the image bytes — detects bit errors and incomplete writes.
+3. Verify the Ed25519 signature — proves the image was created by the private key holder.
+4. Only then: relocate the vector table and jump.
+
+Order matters here. Signature verification is computationally heavier than a CRC check, so you do the cheap structural check (magic, CRC) first to fast-fail on corrupt flash without burning cycles on crypto. But signature verification MUST happen before any jump — a valid CRC proves integrity (no corruption), but only a valid signature proves authenticity (no malicious substitution).
+
+---
+
+## The boot decision and dual-bank swap
+
+At reset, the bootloader runs this logic:
+
+```c
+/* boot.c — bootloader entry point after startup.s */
+
+#include "app_descriptor.h"
+#include "crypto.h"   /* ed25519_verify(), using the public key in .rodata */
+#include "crc.h"      /* crc32_compute() */
+#include "flash.h"    /* flash_read_persistent_state(), flash_write_persistent_state() */
+
+/* Public key compiled into the bootloader at build time — never in RAM, never writable */
+static const uint8_t PUBLIC_KEY[32] __attribute__((section(".rodata.pubkey"))) = {
+    /* 32 bytes of the Ed25519 public key corresponding to the private signing key */
+    0xAB, 0xCD, /* ... rest of key bytes ... */
+};
+
+typedef enum { BANK_A = 0, BANK_B = 1 } Bank;
+
+static bool verify_image(const AppDescriptor *desc, uint32_t image_base) {
+    /* Step 1: structural sentinel — avoids misinterpreting erased flash (0xFF...FF) */
+    if (desc->magic != APP_MAGIC) {
+        return false;
+    }
+
+    /* Step 2: integrity — make sure flash write completed without corruption */
+    uint32_t computed = crc32_compute((const uint8_t *)image_base, desc->image_length);
+    if (computed != desc->crc32) {
+        return false;
+    }
+
+    /* Step 3: authenticity — only images signed with our private key are executable.
+       An attacker with a valid CRC but no signing key fails here. */
+    uint8_t msg[16];
+    memcpy(msg + 0,  &desc->magic,        4);
+    memcpy(msg + 4,  &desc->version,      4);
+    memcpy(msg + 8,  &desc->image_length, 4);
+    memcpy(msg + 12, &desc->crc32,        4);
+    return ed25519_verify(PUBLIC_KEY, msg, sizeof(msg), desc->ed25519_sig);
+}
+
+static void jump_to_app(uint32_t image_base) {
+    /* The application's vector table is at image_base.
+       Cortex-M VTOR (Vector Table Offset Register) redirects exception handling. */
+    SCB->VTOR = image_base;
+
+    /* Stack pointer is the first word; reset handler is the second. */
+    uint32_t app_sp     = *(volatile uint32_t *)(image_base + 0);
+    uint32_t app_entry  = *(volatile uint32_t *)(image_base + 4);
+
+    /* Set the stack pointer before calling the application's reset handler */
+    __set_MSP(app_sp);
+
+    /* Typecast to a function pointer and call — this does NOT return */
+    void (*app_reset_handler)(void) = (void (*)(void))app_entry;
+    app_reset_handler();
+
+    /* Should never reach here; loop if we do (defense in depth) */
+    while (1) { }
+}
+
+void bootloader_main(void) {
+    PersistentState state = flash_read_persistent_state();
+
+    /* Increment boot counter — if we reboot 3 times without confirming a new image,
+       fall back to the previously known-good bank */
+    state.boot_counter++;
+    if (state.boot_counter >= 3 && state.pending_update) {
+        /* The candidate image caused repeated reboot loops — roll back */
+        state.active_bank   = (state.active_bank == BANK_A) ? BANK_B : BANK_A;
+        state.pending_update = false;
+        state.boot_counter   = 0;
+    }
+    flash_write_persistent_state(&state);
+
+    /* Try the active bank first */
+    const AppDescriptor *primary_desc  = (state.active_bank == BANK_A)
+                                         ? APP_A_DESC_ADDR : APP_B_DESC_ADDR;
+    uint32_t primary_base = (state.active_bank == BANK_A)
+                            ? APP_A_IMAGE_ADDR : APP_B_IMAGE_ADDR;
+
+    if (verify_image(primary_desc, primary_base)) {
+        jump_to_app(primary_base);
+        /* jump_to_app does not return */
+    }
+
+    /* Primary bank failed verification — try the other bank before giving up */
+    const AppDescriptor *fallback_desc  = (state.active_bank == BANK_A)
+                                          ? APP_B_DESC_ADDR : APP_A_DESC_ADDR;
+    uint32_t fallback_base = (state.active_bank == BANK_A)
+                             ? APP_B_IMAGE_ADDR : APP_A_IMAGE_ADDR;
+
+    if (verify_image(fallback_desc, fallback_base)) {
+        jump_to_app(fallback_base);
+    }
+
+    /* Both banks failed — enter recovery mode (blink LED, wait for serial flash tool) */
+    recovery_mode_enter();
+}
+```
+
+The `boot_counter` + rollback pattern is critical. If the new image causes a hard fault, watchdog reset, or assertion failure before the application confirms itself as healthy (by clearing `pending_update`), the bootloader detects the repeated reboot loop and rolls back. The application must call a "commit this image" function during startup to confirm it is healthy.
+
+---
+
+## Vector table relocation — the detail that bricks devices
+
+The Cortex-M vector table lives at address `0x00000000` by default, aliased to flash. When the bootloader jumps to an application at a non-zero address, the application's vector table is no longer at address 0. Without relocation, any interrupt the application takes will call bootloader ISR handlers — or, worse, whatever is in the bootloader's table. This causes silent misbehavior that is extremely hard to debug.
+
+`SCB->VTOR = image_base` is the one-line fix. The Vector Table Offset Register tells the Cortex-M core where the active vector table is. The bootloader sets this to the application's base address before the jump. The application itself may also set it in its `SystemInit()` or startup code — this is redundant but harmless.
+
+A device that bricks after a firmware update but works after full factory flash almost always has a VTOR bug.
+
+---
+
+## Practice
+
+<SandboxExercise
+  title="Bootloader verification function"
+  description="The function below is a simplified bootloader image verifier. It has one critical security flaw: it checks the CRC but skips signature verification when the version number is 0 (interpreted as 'factory image, skip crypto'). Identify the flaw, explain what attack it enables, and rewrite verify_image_safe() to fix it."
+  language="c"
+  initialCode={`#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+
+#define APP_MAGIC 0xDEADC0DE
+
+typedef struct {
+uint32_t magic;
+uint32_t version;
+uint32_t image_length;
+uint32_t crc32;
+uint8_t ed25519_sig[64];
+} AppDescriptor;
+
+/_ Assume these are implemented correctly elsewhere _/
+extern uint32_t crc32_compute(const uint8_t *data, uint32_t length);
+extern bool ed25519_verify(const uint8_t *pubkey, const uint8_t *msg,
+uint32_t msg_len, const uint8_t *sig);
+extern const uint8_t PUBLIC_KEY[32];
+
+/_ FLAWED implementation — find the bug _/
+bool verify_image_flawed(const AppDescriptor \*desc, uint32_t image_base) {
+if (desc->magic != APP_MAGIC) {
+return false;
+}
+
+    uint32_t crc = crc32_compute((const uint8_t *)image_base, desc->image_length);
+    if (crc != desc->crc32) {
+        return false;
+    }
+
+    /* BUG: version == 0 skips signature check, intended for "factory images" */
+    if (desc->version == 0) {
+        return true;   /* <-- what attack does this enable? */
+    }
+
+    uint8_t msg[16];
+    memcpy(msg + 0,  &desc->magic,        4);
+    memcpy(msg + 4,  &desc->version,      4);
+    memcpy(msg + 8,  &desc->image_length, 4);
+    memcpy(msg + 12, &desc->crc32,        4);
+    return ed25519_verify(PUBLIC_KEY, msg, sizeof(msg), desc->ed25519_sig);
+
+}
+
+/\* TODO: Write verify_image_safe() that fixes the security flaw.
+Requirements:
+
+- Must verify the signature on ALL images regardless of version.
+- Must check magic and CRC before signature (fail-fast order).
+- Must have no version-based bypass paths.
+  */
+  bool verify_image_safe(const AppDescriptor *desc, uint32_t image_base) {
+  /_ Your implementation here _/
+  return false;
+  }
+  `}
+  solution={`/\* FLAW ANALYSIS:
+  version == 0 bypasses the Ed25519 signature check. An attacker who can write
+  to flash (via a physical JTAG connection, a compromised update channel that
+  doesn't yet validate TLS, or a supply-chain attack) can construct a descriptor
+  with version=0 and any arbitrary payload. The CRC will be valid (they computed
+  it over the malicious image), so the only gate they need to bypass is the
+  signature — and the version==0 path skips it entirely.
+
+This is a "debug backdoor" that ships to production. The fix: remove the bypass.
+EVERY image must be signed. Factory images are signed at the factory. There are
+no exceptions.
+\*/
+
+bool verify_image_safe(const AppDescriptor _desc, uint32_t image_base) {
+/_ Check magic first — fast rejection for erased or corrupt flash \*/
+if (desc->magic != APP_MAGIC) {
+return false;
+}
+
+    /* Check CRC before crypto — cheaper operation, catches incomplete writes */
+    uint32_t crc = crc32_compute((const uint8_t *)image_base, desc->image_length);
+    if (crc != desc->crc32) {
+        return false;
+    }
+
+    /* Signature verification on ALL images — no version bypass, no exceptions.
+       The message covers all four integrity-critical fields. An attacker who
+       modifies any field (including crafting a version==0 descriptor) would
+       need the private key to produce a valid signature. */
+    uint8_t msg[16];
+    memcpy(msg + 0,  &desc->magic,        4);
+    memcpy(msg + 4,  &desc->version,      4);
+    memcpy(msg + 8,  &desc->image_length, 4);
+    memcpy(msg + 12, &desc->crc32,        4);
+    return ed25519_verify(PUBLIC_KEY, msg, sizeof(msg), desc->ed25519_sig);
+
+}
+`}
+/>
+
+---
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A bootloader verifies the CRC of a firmware image and the CRC matches. An engineer concludes the image is safe to execute. What critical property does a valid CRC NOT provide?",
+      options: [
+        "Integrity — CRC proves the bytes were not corrupted in transit",
+        "Authenticity — a valid CRC proves the image was not corrupted, but it does not prove who created it. An attacker who controls the update channel can construct a malicious image with a perfectly valid CRC. Only a cryptographic signature tied to a private key the attacker does not possess proves the image came from the legitimate firmware author.",
+        "Version ordering — CRC does not encode version numbers",
+        "Flash alignment — CRC does not check sector alignment",
+      ],
+      correct: 1,
+      explanation:
+        "CRC is an integrity check (detects accidental corruption) not an authenticity check (proves origin). An attacker can compute a correct CRC over malicious bytes as easily as the firmware author can over legitimate bytes. Ed25519 or ECDSA signatures require possession of the private key — they provide authenticity. Both checks serve different threat models and both are required in a secure bootloader.",
+    },
+    {
+      question:
+        "A device running a dual-bank bootloader receives an OTA update. After installing the update to Bank B and rebooting, the device crashes immediately on startup and reboots into the bootloader again. This happens three times in a row. What should the bootloader do on the fourth boot, and why?",
+      options: [
+        "Keep trying Bank B — the update may eventually succeed",
+        "Enter recovery mode permanently and wait for serial reflash",
+        "Roll back to Bank A (the previously confirmed image) and clear the pending-update flag. The boot counter pattern detects that a candidate image is causing a reboot loop before the application can confirm itself as healthy. Three failed attempts is a reasonable threshold to declare the update failed. Rolling back restores service automatically without a truck roll — the device recovers to the last known-good state and the fleet operator is notified to investigate the failed update.",
+        "Erase Bank B and halt",
+      ],
+      correct: 2,
+      explanation:
+        "The canonical dual-bank OTA pattern: new image writes to the inactive bank, bootloader switches to it on next boot, application runs and confirms health by clearing the pending-update flag. If the application cannot confirm (because it crashes before reaching that code), the bootloader detects the reboot loop via a boot counter in persistent state and rolls back. This provides automatic recovery without physical access — the defining property that makes field OTA updates practical for devices that may be geographically distributed.",
+    },
+    {
+      question:
+        "An engineer sets SCB->VTOR = APP_A_IMAGE_ADDR before jumping to the application. Another engineer says this line is unnecessary because the application's startup code sets VTOR anyway. Who is correct?",
+      options: [
+        "The second engineer — VTOR is set by startup code, so the bootloader line is redundant and can be removed",
+        "The first engineer — setting VTOR before the jump is mandatory. The first word at the image base is the initial stack pointer; the second word is the reset handler address. When the bootloader calls the reset handler, the CPU is already executing application code. If an interrupt fires between the jump and the VTOR write in the application's SystemInit, the CPU uses the WRONG vector table (still pointing to the bootloader's). On Cortex-M, an interrupt with the wrong VTOR either calls a bootloader handler (silent misbehavior) or dereferences an invalid address (HardFault). The bootloader MUST set VTOR before the jump; the application setting it again in SystemInit is a harmless belt-and-suspenders addition, not a reason to remove the bootloader's line.",
+        "Both are wrong — VTOR is set automatically by the hardware on reset",
+        "Neither matters — VTOR only affects ARM TrustZone configurations",
+      ],
+      correct: 1,
+      explanation:
+        "VTOR must be set before ANY interrupt can fire in the new execution context. There is a window between the bootloader's jump and the application's SystemInit where interrupts could arrive — especially if any peripherals were left enabled by the bootloader. Setting VTOR in the bootloader before the jump closes this window. The application's redundant VTOR write does no harm. The classic failure mode — device works fine with the programmer attached, bricks after OTA — is often a VTOR race where a timer or watchdog interrupt fires in the window and calls a bootloader handler that no longer makes sense.",
+    },
+    {
+      question:
+        "An OTA system downloads firmware to Bank B over BLE. The download completes and the CRC and signature both pass. What must happen BEFORE the bootloader switches the active bank to B on the next reboot?",
+      options: [
+        "Nothing — the verifications already confirm the image is safe to boot",
+        "The image must be decrypted from its transport encoding",
+        "The persistent state record (active_bank, pending_update, boot_counter) must be written to flash atomically BEFORE reboot. The bank switch is enacted by the bootloader reading persistent state on the next power-on. If the device loses power between 'verification passed' and 'persistent state written', it reboots to Bank A (the old image) — which is the correct behavior. The update is only committed when persistent state is durably written. Additionally, the boot counter should be initialized to 0 (or a small value) so the rollback watchdog can detect a crash loop if Bank B turns out to be buggy at runtime despite passing static verification.",
+        "The BLE connection must be closed to prevent partial re-download",
+      ],
+      correct: 2,
+      explanation:
+        "The persistent state write is the commit point of the update transaction. Before that write, the device is still running Bank A and will continue to do so through any number of power losses. After that write, the bootloader will attempt Bank B on next boot. The boot counter reset arms the rollback watchdog — if Bank B crashes before confirming itself healthy, the bootloader will eventually give up and roll back. This is the same atomicity discipline required for any durable state machine: define the exact moment the state transitions, and make sure a power loss before that moment is recoverable.",
+    },
+  ]}
+/>
+
+---
+
+## What you learned
+
+- Flash partitioning for dual-bank OTA requires deliberate linker script design: bootloader, descriptor A, image A, descriptor B, image B, and persistent state each occupy defined, non-overlapping flash regions that match the erase granularity.
+- A secure bootloader verifies images in order: magic sentinel (fast-fail on erased flash) → CRC (integrity, detects corruption) → Ed25519 signature (authenticity, defeats injection attacks). Skipping any step is a security regression.
+- Vector table relocation via `SCB->VTOR` must happen before the jump to the application, not after, to close the interrupt-delivery race window between the two code regions.
+- The boot counter in persistent state implements a rollback watchdog: if the application crashes before confirming itself healthy, the bootloader rolls back automatically, restoring the device to service without physical access.
+- A version-based signature bypass is an authentication hole regardless of intent — every image, including factory images, must carry a valid signature.
+
+The next module in this path covers the OTA transport layer: how a device securely discovers, downloads, and authenticates a firmware update over BLE, MQTT, or HTTPS before handing off to the bootloader described here.

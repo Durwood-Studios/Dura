@@ -1,0 +1,373 @@
+---
+title: "Event Sourcing and CQRS"
+description: "Analyze how storing state as an immutable sequence of events — rather than current values — enables time travel, audit logs, and independently scalable read and write models."
+phase: 4
+module: "4-6"
+order: 4
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-4", "SE-7", "SF-3"]
+  swebok: ["Software Design", "Software Architecture"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - event-sourcing
+  - cqrs
+  - aggregate
+  - event-store
+  - projection
+  - command
+  - event-replay
+  - read-model
+  - write-model
+learningOutcomes:
+  - "Reconstruct the current state of a system by replaying an immutable event log, and write code that demonstrates this derivation"
+  - "Distinguish between a command (intent) and an event (fact) and explain why events must never be mutated"
+  - "Implement a projection that builds a denormalized read model from a stream of domain events"
+  - "Identify scenarios where Event Sourcing adds complexity without proportionate value, and articulate the trade-offs"
+prerequisites:
+  - message-queue
+  - kafka-topic
+  - kafka-offset
+  - event-replay
+  - async-await
+  - database-basics
+---
+
+## Why this matters
+
+Every database you have ever worked with stores the current state of data — the row contains what the value is _right now_. But that design throws away information you did not know you would need. When a bank account shows a balance of $847, how did it get there? Which deposits and withdrawals happened? When exactly? Who authorized them? A traditional database cannot answer those questions without a separate audit log that most applications bolt on as an afterthought.
+
+Event Sourcing turns this inside out: the events _are_ the database. The current balance is derived by replaying history, not stored directly. This sounds like a performance penalty until you realize what it unlocks: complete audit trails by default, the ability to replay history to a different point in time to debug production issues, and the freedom to build new read-optimized views of your data without changing the write path. CQRS — Command Query Responsibility Segregation — is the natural partner: separate models for writing and reading let each be optimized independently. Together, these patterns appear in trading systems, healthcare records, and any domain where "what happened and when" is as important as "what is the current value."
+
+## The core inversion: state as a derivative of history
+
+In a conventional system, state is primary and history is optional:
+
+```sql
+-- The "current state" model: one row per account, history discarded
+UPDATE accounts SET balance = balance + 500 WHERE id = 'acc-123';
+-- Previous balance? Gone. Who made this change? Not recorded.
+-- When exactly? Only if you added a trigger. Why? Never stored.
+```
+
+In Event Sourcing, history is primary and state is derived:
+
+```javascript
+// The event store: append-only, immutable, complete history
+const events = [
+  {
+    type: "AccountOpened",
+    accountId: "acc-123",
+    initialDeposit: 1000,
+    at: "2026-01-10T09:00:00Z",
+    by: "user-456",
+  },
+  {
+    type: "MoneyWithdrawn",
+    accountId: "acc-123",
+    amount: 200,
+    at: "2026-01-15T14:22:00Z",
+    by: "user-456",
+  },
+  {
+    type: "MoneyDeposited",
+    accountId: "acc-123",
+    amount: 500,
+    at: "2026-01-20T11:05:00Z",
+    by: "user-789",
+  },
+  {
+    type: "MoneyWithdrawn",
+    accountId: "acc-123",
+    amount: 453,
+    at: "2026-01-22T08:00:00Z",
+    by: "user-456",
+  },
+];
+
+// Current state is always derived by replaying events — never stored directly
+function reconstructAccount(events) {
+  return events.reduce(
+    (state, event) => {
+      switch (event.type) {
+        case "AccountOpened":
+          return { ...state, balance: event.initialDeposit, status: "open" };
+        case "MoneyDeposited":
+          return { ...state, balance: state.balance + event.amount };
+        case "MoneyWithdrawn":
+          return { ...state, balance: state.balance - event.amount };
+        default:
+          // Unknown events are ignored — forward compatibility
+          return state;
+      }
+    },
+    { balance: 0, status: null }
+  );
+}
+
+const account = reconstructAccount(events);
+// { balance: 847, status: 'open' }
+// And we have complete history, who made each change, and when — for free.
+```
+
+> **Event Sourcing says: never store what the state is — store what happened. Current state is always a derivative of history.**
+
+## Commands versus events: intent versus fact
+
+The CQRS separation becomes clear when you distinguish the two types of messages in an event-sourced system:
+
+A **command** is an _intent_ — something a user or service wants to happen. Commands can be rejected. `WithdrawMoney { accountId: 'acc-123', amount: 5000 }` might be rejected if the balance is only $847.
+
+An **event** is a _fact_ — something that already happened and cannot be undone. `MoneyWithdrawn { accountId: 'acc-123', amount: 200, at: '...' }` describes history. Events are immutable by definition. You never edit or delete them.
+
+```typescript
+// COMMANDS — intent, can fail validation
+interface WithdrawMoneyCommand {
+  accountId: string;
+  amount: number;
+  requestedBy: string;
+}
+
+// EVENTS — facts, always past tense, never mutated
+interface MoneyWithdrawnEvent {
+  type: "MoneyWithdrawn";
+  accountId: string;
+  amount: number;
+  newBalance: number; // snapshot helps avoid replaying all history on every read
+  occurredAt: string;
+  authorizedBy: string;
+}
+
+// The command handler validates and decides whether to emit an event
+async function handleWithdrawMoney(
+  command: WithdrawMoneyCommand,
+  eventStore: EventStore
+): Promise<MoneyWithdrawnEvent> {
+  // Load current state by replaying this account's event history
+  const history = await eventStore.getEvents(command.accountId);
+  const account = reconstructAccount(history);
+
+  // Validate the command against current state
+  if (account.balance < command.amount) {
+    throw new Error(`Insufficient funds: balance ${account.balance}, requested ${command.amount}`);
+  }
+  if (account.status !== "open") {
+    throw new Error("Cannot withdraw from a closed account");
+  }
+
+  // Emit the event — this is the "write" in CQRS
+  const event: MoneyWithdrawnEvent = {
+    type: "MoneyWithdrawn",
+    accountId: command.accountId,
+    amount: command.amount,
+    newBalance: account.balance - command.amount,
+    occurredAt: new Date().toISOString(),
+    authorizedBy: command.requestedBy,
+  };
+
+  await eventStore.append(command.accountId, event);
+  return event;
+}
+```
+
+## Projections: building read models from events
+
+Replaying hundreds of events every time you need to display an account balance is expensive. Projections solve this by subscribing to the event stream and maintaining a denormalized, read-optimized view:
+
+```javascript
+// A projection is a subscriber that builds and updates a read model
+// Every time a relevant event arrives, the projection updates its view
+
+class AccountBalanceProjection {
+  constructor(readDatabase) {
+    this.db = readDatabase;
+  }
+
+  // Called for every event as it is appended to the event store
+  async apply(event) {
+    switch (event.type) {
+      case "AccountOpened":
+        // Build the initial read model row when an account is created
+        await this.db.upsert("account_balances", {
+          accountId: event.accountId,
+          balance: event.initialDeposit,
+          lastActivityAt: event.at,
+          transactionCount: 1,
+        });
+        break;
+
+      case "MoneyDeposited":
+      case "MoneyWithdrawn": {
+        const delta = event.type === "MoneyDeposited" ? event.amount : -event.amount;
+        // Increment the denormalized balance — no need to replay all history
+        await this.db.query(
+          `UPDATE account_balances
+           SET balance = balance + $1, last_activity_at = $2, transaction_count = transaction_count + 1
+           WHERE account_id = $3`,
+          [delta, event.occurredAt, event.accountId]
+        );
+        break;
+      }
+    }
+  }
+}
+
+// A CQRS query handler reads ONLY from the projection — never from the event store
+async function getAccountBalance(accountId) {
+  // Fast O(1) lookup — the projection has already done the work
+  return db.query("SELECT balance FROM account_balances WHERE account_id = $1", [accountId]);
+}
+```
+
+The key insight: you can build multiple projections from the same event stream, each optimized for a different query. A `MonthlySpendingProjection` builds a different view of the same events than the `AccountBalanceProjection`. If you discover a new query you need, you create a new projection and replay all historical events to populate it — without touching the write model at all.
+
+## Event replay: debugging and recovery in production
+
+One of the most powerful properties of event-sourced systems is the ability to replay history:
+
+```javascript
+// Replay events up to a specific point in time to debug a production issue.
+// "What was the account state at 3:47 PM on January 20th, just before the complaint?"
+async function replayToPoint(accountId, cutoffTimestamp) {
+  const allEvents = await eventStore.getEvents(accountId);
+  const relevantEvents = allEvents.filter((e) => e.occurredAt <= cutoffTimestamp);
+  return reconstructAccount(relevantEvents);
+}
+
+// Rebuild an entire projection from scratch — useful when you add a new
+// field to the read model or fix a bug in projection logic
+async function rebuildProjection(projection) {
+  await projection.truncate(); // clear the existing read model
+
+  // Replay every event in chronological order
+  for await (const event of eventStore.streamAll()) {
+    await projection.apply(event);
+  }
+}
+```
+
+## When NOT to use Event Sourcing
+
+Event Sourcing adds complexity. Evaluate it honestly:
+
+**Good fit:** financial transactions, order management, inventory, healthcare records, legal compliance, any domain where audit trails are required or replay is valuable.
+
+**Poor fit:** simple CRUD applications (user profiles, blog posts, settings), high-frequency sensor data without meaningful history semantics, teams without domain modeling experience. The additional concepts — aggregates, projections, eventual consistency between write and read models — are real costs that must be justified by real requirements.
+
+```
+Trade-off summary:
+
+Event Sourcing ADDS:
+  ✓ Complete audit trail
+  ✓ Time-travel debugging
+  ✓ Ability to build new views from history
+  ✓ Natural integration with message queues
+
+Event Sourcing COSTS:
+  ✗ Eventual consistency (read model lags write model)
+  ✗ Increased complexity (projections, snapshots, schema evolution)
+  ✗ Event schema versioning becomes critical infrastructure
+  ✗ Harder to query arbitrary historical data (no SQL JOINs over events)
+```
+
+## Practice
+
+<SandboxExercise
+  title="Implement a projection for order statistics"
+  description="An e-commerce event store emits OrderPlaced and OrderCancelled events. Build a projection that maintains a real-time statistics read model with: totalOrders, cancelledOrders, and totalRevenue. The projection must handle replays correctly (idempotent applies)."
+  template={`
+// Events arrive in this format:
+// { type: 'OrderPlaced',    orderId: 'ord-1', amount: 99.99,  at: '...' }
+// { type: 'OrderCancelled', orderId: 'ord-1', amount: 99.99,  at: '...' }
+
+class OrderStatisticsProjection {
+constructor() {
+this.stats = { totalOrders: 0, cancelledOrders: 0, totalRevenue: 0 }
+this.processedOrderIds = new Set() // prevent double-counting on replay
+}
+
+apply(event) {
+// YOUR CODE HERE:
+// Handle OrderPlaced: increment totalOrders, add amount to totalRevenue
+// Handle OrderCancelled: increment cancelledOrders, subtract amount from totalRevenue
+// Use processedOrderIds to ensure idempotency on replay
+}
+
+getStats() {
+return { ...this.stats }
+}
+}
+
+// Test it
+const projection = new OrderStatisticsProjection()
+projection.apply({ type: 'OrderPlaced', orderId: 'ord-1', amount: 100 })
+projection.apply({ type: 'OrderPlaced', orderId: 'ord-2', amount: 50 })
+projection.apply({ type: 'OrderCancelled', orderId: 'ord-1', amount: 100 })
+// Replay: same events again (should not double-count)
+projection.apply({ type: 'OrderPlaced', orderId: 'ord-1', amount: 100 })
+projection.apply({ type: 'OrderPlaced', orderId: 'ord-2', amount: 50 })
+projection.apply({ type: 'OrderCancelled', orderId: 'ord-1', amount: 100 })
+
+console.log(projection.getStats())
+// Should be: { totalOrders: 2, cancelledOrders: 1, totalRevenue: 50 }
+`}
+  solution={`
+apply(event) {
+const key = \`\${event.type}:\${event.orderId}\`
+if (this.processedOrderIds.has(key)) return // idempotent replay guard
+
+this.processedOrderIds.add(key)
+
+switch (event.type) {
+case 'OrderPlaced':
+this.stats.totalOrders++
+this.stats.totalRevenue += event.amount
+break
+case 'OrderCancelled':
+this.stats.cancelledOrders++
+this.stats.totalRevenue -= event.amount
+break
+}
+}
+`}
+hint="The idempotency key should be unique per event occurrence. Combining the event type and orderId ensures that replaying the same OrderPlaced for the same order doesn't count it twice."
+/>
+
+## Check your understanding
+
+<Quiz
+  question="Your event store has 500 events for a given account. Replaying all 500 events on every balance check is too slow. What is the standard solution in Event Sourcing systems?"
+  choices={[
+    "Delete old events once they are more than 30 days old",
+    "Store snapshots of computed state at regular intervals, then replay only events after the snapshot",
+    "Move to a traditional database for accounts — Event Sourcing doesn't support this scale",
+    "Add an index to the event store so replay is O(log n) instead of O(n)",
+  ]}
+  correct={1}
+  explanation="Snapshots are the standard solution: periodically serialize the computed state (e.g., every 100 events) and store it alongside the event log. On the next read, load the most recent snapshot and replay only the events that occurred after it — often just a handful rather than hundreds."
+/>
+
+<Quiz
+  question="A developer wants to fix a bug in their OrderStatisticsProjection that caused totalRevenue to be calculated incorrectly for the past 3 months. In an Event Sourced system, how do they correct the historical data?"
+  choices={[
+    "Write a SQL UPDATE to fix all affected rows in the read model",
+    "Edit the original events to reflect the corrected amounts",
+    "Fix the projection logic, then replay all historical events to rebuild the read model from scratch",
+    "This is impossible in Event Sourcing — events cannot be corrected",
+  ]}
+  correct={2}
+  explanation="Events are immutable facts — they are never edited. But projections are disposable derived views. Fix the bug in the projection code, truncate the read model, and replay the full event history. The projection rebuilds correctly because the source events are intact. This is one of Event Sourcing's most powerful properties."
+/>
+
+## What you learned
+
+- Event Sourcing stores state as an immutable sequence of facts (events) rather than mutable current values — current state is always derived by replaying history
+- Commands express intent and can be rejected; events are facts about what happened and are never mutated
+- Projections subscribe to the event stream and maintain denormalized read models optimized for specific queries, separating read and write concerns (CQRS)
+- Replaying events enables time-travel debugging, audit logs, and rebuilding projections after logic changes — without any data migration
+- Event Sourcing is most valuable in domains with audit requirements or complex historical queries; it adds real complexity that must be justified by real requirements
+
+In the next lesson you will zoom out to see how services that use all these messaging tools — Kafka, RabbitMQ, event streams — communicate at the microservice architecture level, and the patterns that prevent common distributed system failures.

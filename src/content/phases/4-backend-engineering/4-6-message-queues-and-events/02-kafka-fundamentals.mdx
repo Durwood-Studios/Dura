@@ -1,0 +1,258 @@
+---
+title: "Kafka Fundamentals — Topics, Partitions, Consumer Groups"
+description: "Learn how Kafka's distributed commit log provides ordered, durable, and horizontally scalable event streaming through topics, partitions, offsets, and consumer groups."
+phase: 4
+module: "4-6"
+order: 2
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-4", "SF-3", "OS-5"]
+  swebok: ["Software Design", "Software Architecture"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - kafka-topic
+  - kafka-partition
+  - kafka-offset
+  - consumer-group
+  - kafka-broker
+  - kafka-producer
+  - kafka-consumer
+  - retention-policy
+  - at-least-once-delivery
+learningOutcomes:
+  - "Write producer and consumer code that publishes to and reads from a Kafka topic using the kafkajs library"
+  - "Explain how partitions enable parallel consumption and why partition count determines maximum consumer parallelism"
+  - "Configure a consumer group so that multiple instances of a service share the message load without processing duplicates"
+  - "Describe what a Kafka offset is and explain how committing offsets provides at-least-once delivery guarantees"
+prerequisites:
+  - message-queue
+  - producer
+  - consumer
+  - decoupling
+  - nodejs-basics
+  - async-await
+---
+
+## Why this matters
+
+Kafka is not just another message queue. It is the technology that made real-time data pipelines practical at internet scale — LinkedIn built it to handle billions of events per day, and it now processes more than a trillion messages per day at companies like Uber, Airbnb, and Twitter. More importantly, Kafka fundamentally changed how engineers think about data: instead of requesting data when you need it, you react to events as they happen. Once you understand Kafka's core model, you will be able to build systems that process real-time feeds, synchronize distributed databases, audit every change in your application, and replay history to recover from bugs.
+
+The concepts here — topics, partitions, offsets, and consumer groups — recur across every Kafka-based system you will ever build or join. Getting these right is what separates a Kafka deployment that scales gracefully from one that becomes a reliability nightmare six months after launch.
+
+## The commit log: Kafka's foundational idea
+
+Picture a notebook where you can only append new entries to the bottom. You never erase anything. Anyone can open the notebook to any page and read forward. Multiple people can hold different bookmarks at different positions — one reader is on page 5, another is on page 47 — and they never interfere with each other. When you fill one notebook, you start another, and eventually you throw away the oldest ones according to a retention schedule.
+
+That notebook is a Kafka **topic**. Every message ever published to a topic is durably stored in order. Consumers read at their own position and never delete messages just by reading them. This is the inversion that makes Kafka powerful: in a traditional queue, a message disappears after consumption. In Kafka, messages persist according to a configurable **retention policy** (e.g., "keep 7 days of data"). A consumer that crashed and restarted three hours ago can replay everything it missed.
+
+> **A Kafka topic is an append-only distributed log. Producers append; consumers read; nothing is removed on read.**
+
+## Topics, partitions, and offsets
+
+A single machine cannot store an infinite log or serve an infinite number of readers. Kafka solves this by splitting each topic into **partitions** — independent ordered sub-logs that live on different **broker** (server) machines.
+
+```
+Topic: "order.placed"
+┌─────────────────────────────────────────────────────────────────┐
+│  Partition 0   [msg0] [msg1] [msg3] [msg6] [msg9]  → offset 4  │
+│  Partition 1   [msg2] [msg4] [msg7] [msg10]         → offset 3  │
+│  Partition 2   [msg5] [msg8] [msg11]                → offset 2  │
+└─────────────────────────────────────────────────────────────────┘
+   Broker A          Broker B          Broker C
+```
+
+Within a partition, messages are strictly ordered. Across partitions, there is no global ordering guarantee — this is the trade-off for scalability. If you need messages from the same entity (same user, same order) to always be processed in order, route them to the same partition using a **partition key** (typically the entity ID).
+
+Each message's position within a partition is its **offset** — a monotonically increasing integer starting at 0. Consumers track their position by storing offsets. When a consumer processes message at offset 42 and records ("commits") that offset, it is saying: "I have successfully processed everything up to and including 42. If I restart, start me at 43."
+
+## Consumer groups: parallel processing without duplicate work
+
+The partition model is what makes scaling consumers elegant. A **consumer group** is a set of consumer instances that cooperate to consume all partitions of a topic. Kafka guarantees that each partition is assigned to exactly one consumer in a group at a time.
+
+```
+Topic "order.placed": 3 partitions
+
+Consumer Group "warehouse-service":
+  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+  │ Instance A  │   │ Instance B  │   │ Instance C  │
+  │ Partition 0 │   │ Partition 1 │   │ Partition 2 │
+  └─────────────┘   └─────────────┘   └─────────────┘
+  Each instance handles 1/3 of the message load.
+
+If Instance B crashes, Kafka reassigns Partition 1 to A or C (rebalance).
+If you add a 4th instance, it sits idle — no free partitions to assign.
+```
+
+This is why partition count is a design decision: it sets the **maximum parallelism** for any consumer group. A topic with 3 partitions can never have more than 3 active consumers per group, regardless of how many instances you run.
+
+Multiple groups can consume the same topic independently. A "warehouse-service" group and an "email-service" group each receive every message — they have separate offset tracking and never interfere.
+
+## Writing producer and consumer code
+
+The `kafkajs` library provides idiomatic async/await Kafka client code for Node.js:
+
+```javascript
+import { Kafka } from "kafkajs";
+
+// Connect to the cluster — in production this is multiple brokers for redundancy
+const kafka = new Kafka({
+  clientId: "order-service",
+  brokers: ["kafka-broker-1:9092", "kafka-broker-2:9092"],
+});
+
+const producer = kafka.producer();
+
+async function publishOrderPlaced(order) {
+  await producer.connect();
+
+  await producer.send({
+    topic: "order.placed",
+    messages: [
+      {
+        // Partition key: ensures all events for the same order land on
+        // the same partition, preserving per-order ordering.
+        key: order.id,
+        value: JSON.stringify({
+          orderId: order.id,
+          userId: order.userId,
+          total: order.total,
+          timestamp: Date.now(),
+        }),
+      },
+    ],
+  });
+}
+```
+
+```javascript
+import { Kafka } from "kafkajs";
+
+const kafka = new Kafka({
+  clientId: "warehouse-service",
+  brokers: ["kafka-broker-1:9092", "kafka-broker-2:9092"],
+});
+
+const consumer = kafka.consumer({
+  // groupId ties this instance to the consumer group.
+  // All instances with the same groupId share the partition load.
+  groupId: "warehouse-service",
+});
+
+async function startWarehouseConsumer() {
+  await consumer.connect();
+  await consumer.subscribe({
+    topic: "order.placed",
+    // fromBeginning: true replays all historical messages on first start.
+    // Use false (default) to only consume messages published after startup.
+    fromBeginning: false,
+  });
+
+  await consumer.run({
+    eachMessage: async ({ topic, partition, message }) => {
+      const order = JSON.parse(message.value.toString());
+
+      // Do the actual work
+      await warehouseDB.queueForPicking(order);
+
+      // Kafka auto-commits the offset after eachMessage resolves.
+      // If this function throws, the message is NOT committed and will
+      // be redelivered — this is the "at-least-once" guarantee.
+      console.log(`Processed order ${order.orderId} from partition ${partition}`);
+    },
+  });
+}
+```
+
+## At-least-once delivery and idempotency
+
+Kafka's offset-commit model gives you **at-least-once delivery**: a message is processed at least once, but if your consumer crashes after processing but before committing the offset, it will process the same message again after restart.
+
+This means your consumers must be **idempotent** — processing the same message twice must produce the same result as processing it once:
+
+```javascript
+// BAD: not idempotent — charging twice if the consumer crashes after
+// the charge but before the offset commits
+async function processPayment(message) {
+  const { orderId, amount } = JSON.parse(message.value.toString());
+  await stripe.charge(amount); // charges the card
+  // If we crash here, we re-process and charge again
+}
+
+// GOOD: idempotent — check before acting, or use the orderId as
+// an idempotency key in the payment provider's API
+async function processPayment(message) {
+  const { orderId, amount } = JSON.parse(message.value.toString());
+
+  // Stripe's idempotency key ensures a second call with the same key
+  // returns the original charge rather than creating a new one
+  await stripe.charge(amount, { idempotencyKey: `order-${orderId}` });
+}
+```
+
+## Practice
+
+<SandboxExercise
+  title="Partition key selection"
+  description="You are building a Kafka producer for a chat application. Messages must be delivered in order within each conversation, but different conversations can be processed in parallel. Fill in the partition key so that all messages in the same conversation land on the same partition."
+  template={`
+import { Kafka } from 'kafkajs'
+
+const kafka = new Kafka({ clientId: 'chat', brokers: ['localhost:9092'] })
+const producer = kafka.producer()
+
+async function sendChatMessage(message) {
+await producer.send({
+topic: 'chat.messages',
+messages: [{
+key: /* YOUR CODE HERE — what should the partition key be? */,
+value: JSON.stringify({
+conversationId: message.conversationId,
+senderId: message.senderId,
+text: message.text,
+sentAt: Date.now(),
+}),
+}],
+})
+}
+`}
+  solution={`key: message.conversationId`}
+hint="The partition key determines which partition a message goes to. Messages with the same key always go to the same partition, giving you ordering per key. What identifies a 'conversation'?"
+/>
+
+## Check your understanding
+
+<Quiz
+  question="A topic has 4 partitions. Your consumer group starts 6 instances. How many instances will be actively consuming messages?"
+  choices={[
+    "All 6 — Kafka load-balances across all available consumers",
+    "4 — partition count caps the parallelism; 2 instances will be idle",
+    "1 — Kafka assigns all partitions to the group leader",
+    "6 — each instance gets a fraction of each partition",
+  ]}
+  correct={1}
+  explanation="Each partition is assigned to exactly one consumer in a group. With 4 partitions and 6 consumers, 4 consumers each own one partition and 2 sit idle. To use all 6, you would need at least 6 partitions."
+/>
+
+<Quiz
+  question="Your consumer processes a message and calls an external payment API, but then crashes before committing the Kafka offset. When it restarts, what happens?"
+  choices={[
+    "The message is gone — Kafka deleted it after the first delivery",
+    "Kafka detects the crash and skips that message automatically",
+    "The consumer re-reads the uncommitted message and processes it again",
+    "The partition is locked until an operator manually resets the offset",
+  ]}
+  correct={2}
+  explanation="Because the offset was never committed, Kafka's position record for this consumer still points to that message. On restart, the consumer re-reads from the last committed offset — re-delivering the message. This is 'at-least-once' delivery, which is why consumers must be idempotent."
+/>
+
+## What you learned
+
+- A Kafka topic is an append-only distributed log split into partitions, each holding an ordered sequence of messages identified by offsets
+- Partition count sets the maximum consumer parallelism for any consumer group — more partitions allow more parallel consumers
+- A consumer group distributes partition ownership across its members so that each partition is processed by exactly one consumer at a time, with automatic rebalancing on failure
+- Kafka provides at-least-once delivery through offset commits — uncommitted messages are redelivered after consumer restarts, making idempotent consumers essential
+
+Next, you will explore RabbitMQ and the AMQP protocol — a different messaging model optimized for traditional task queues, routing, and patterns where a message must be consumed by exactly one worker and then disappear.

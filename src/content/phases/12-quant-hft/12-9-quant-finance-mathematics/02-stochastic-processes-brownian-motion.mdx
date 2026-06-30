@@ -1,0 +1,285 @@
+---
+title: "Stochastic Processes and Brownian Motion"
+description: "How random processes evolve over continuous time: Wiener processes, geometric Brownian motion, Itô's lemma, and the continuous-time framework that underlies all modern derivatives pricing."
+phase: 12
+module: "12-9"
+order: 2
+estimatedMinutes: 18
+difficulty: "intermediate"
+prerequisites:
+  - "12-9-01-probability-and-statistics"
+standards:
+  cs2023:
+    - "DS/ProbabilityAndStatistics"
+    - "AL/FundamentalsOfDataScienceAndML"
+  swebok:
+    - "mathematical-foundations"
+  bloom: "understand"
+  sfia: 2
+  dreyfus: "proficient"
+vocabulary:
+  - stochastic-process
+  - wiener-process
+  - brownian-motion
+  - geometric-brownian-motion
+  - drift
+  - diffusion
+  - ito-lemma
+  - sde
+  - markov-property
+  - martingale
+  - mean-reversion
+  - ornstein-uhlenbeck
+  - monte-carlo-simulation
+  - path-dependence
+learningOutcomes:
+  - "Describe what a Wiener process is and state its four defining properties"
+  - "Write the stochastic differential equation for Geometric Brownian Motion and identify the drift and diffusion terms"
+  - "Simulate a GBM price path in code using the Euler-Maruyama discretization"
+  - "State Itô's lemma informally and explain why it differs from ordinary calculus chain rule"
+  - "Distinguish between mean-reverting and trending processes and name a real-world example of each"
+---
+
+## Why this matters
+
+Options, futures, swaps, and virtually every derivative instrument have a price that depends on _how a random variable evolves through time_. You cannot price an option on a stock if you do not have a model for how the stock price moves. Stochastic processes are that model — they are the language that connects probability theory to the continuous-time world of financial markets.
+
+Every derivatives desk, every options market maker, every volatility trader works inside this framework. The Black-Scholes formula (the next lesson) is a _consequence_ of the machinery here. Understanding why Black-Scholes works — and where it breaks — requires understanding the process model it assumes. This lesson builds the continuous-time intuition you need to understand, use, and critique that model.
+
+## Randomness that moves through time
+
+Imagine watching a pollen grain suspended in water under a microscope. It jitters — constantly, unpredictably, in every direction — because water molecules are bumping it from all sides. The path it traces has no memory: where it goes next has nothing to do with the direction it just came from. Yet on average, over many observations, you can describe how far it wanders.
+
+This is Brownian motion, named after Robert Brown who observed it in 1827. Albert Einstein gave it a mathematical description in 1905. In 1923, Norbert Wiener formalized it as a mathematical object. And in 1973, Fischer Black, Myron Scholes, and Robert Merton used it to price options.
+
+> **Mental model: a stochastic process is a random variable indexed by time.**
+> _Brownian motion is the simplest process where the future is genuinely unpredictable from the past, yet the statistics of movement are fully known._
+
+## The Wiener process
+
+A <VocabTooltip slug="wiener-process">Wiener process</VocabTooltip> W(t) has four properties:
+
+1. **W(0) = 0** — it starts at zero
+2. **Independent increments** — W(t) − W(s) is independent of W(u) for u ≤ s (no memory)
+3. **Normal increments** — W(t) − W(s) ~ N(0, t − s) for s < t
+4. **Continuous paths** — the path t → W(t) is continuous (no jumps)
+
+Property 3 is the key one for intuition: the movement over any time interval is normally distributed with variance _proportional to the length of the interval_.
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def simulate_wiener_process(T: float, n_steps: int, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Simulate a standard Wiener process W(t) by summing normal increments.
+
+    Each increment dW ~ N(0, dt) because variance scales with time.
+    We use sqrt(dt) * normal(0,1) because std(a*X) = a*std(X).
+    """
+    np.random.seed(seed)
+    dt = T / n_steps
+    times = np.linspace(0, T, n_steps + 1)
+
+    # Draw independent increments: dW_i ~ N(0, dt)
+    increments = np.sqrt(dt) * np.random.randn(n_steps)
+
+    # Cumulative sum gives the path W(t) = sum of increments up to time t
+    path = np.concatenate([[0], np.cumsum(increments)])
+
+    return times, path
+
+times, W = simulate_wiener_process(T=1.0, n_steps=252)
+print(f"W(0) = {W[0]:.4f}")          # always 0
+print(f"W(1) ~ N(0,1): {W[-1]:.4f}") # final value ~ N(0,1)
+print(f"Theoretical std: {1.0:.4f}, Actual path endpoint: {W[-1]:.4f}")
+```
+
+## Geometric Brownian Motion: the stock price model
+
+A plain Wiener process can go negative. Stock prices cannot. <VocabTooltip slug="geometric-brownian-motion">Geometric Brownian Motion</VocabTooltip> (GBM) fixes this by modeling _log-prices_ as a Wiener process with drift.
+
+The <VocabTooltip slug="sde">stochastic differential equation</VocabTooltip> (SDE) for GBM is:
+
+$$dS = \mu S \, dt + \sigma S \, dW$$
+
+Where:
+
+- S is the price
+- μ is the <VocabTooltip slug="drift">drift</VocabTooltip> (expected return per unit time)
+- σ is the <VocabTooltip slug="diffusion">diffusion</VocabTooltip> coefficient (volatility)
+- dW is a Wiener increment ~ N(0, dt)
+
+```python
+def simulate_gbm(
+    S0: float,
+    mu: float,
+    sigma: float,
+    T: float,
+    n_steps: int,
+    n_paths: int = 1,
+    seed: int = 42
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Euler-Maruyama discretization of GBM.
+
+    The exact solution is S(t) = S0 * exp((mu - 0.5*sigma^2)*t + sigma*W(t)).
+    The -0.5*sigma^2 term is Itô's correction — it appears because
+    variance of a log-normal process "steals" from the mean.
+    """
+    np.random.seed(seed)
+    dt = T / n_steps
+    times = np.linspace(0, T, n_steps + 1)
+
+    # Exact discretization: use the analytic solution at each step
+    # This is more accurate than naive Euler on GBM
+    log_returns = (mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * np.random.randn(n_paths, n_steps)
+
+    # Build price paths by exponentiating cumulative log returns
+    log_paths = np.hstack([np.zeros((n_paths, 1)), np.cumsum(log_returns, axis=1)])
+    price_paths = S0 * np.exp(log_paths)
+
+    return times, price_paths
+
+# S&P 500-like parameters: 10% annual return, 20% annual vol, 1-year horizon
+times, paths = simulate_gbm(S0=100, mu=0.10, sigma=0.20, T=1.0, n_steps=252, n_paths=1000)
+
+final_prices = paths[:, -1]
+print(f"Mean final price:   ${final_prices.mean():.2f}  (theoretical: ${100 * np.exp(0.10):.2f})")
+print(f"Median final price: ${np.median(final_prices):.2f}  (theoretical: ${100 * np.exp(0.10 - 0.5*0.04):.2f})")
+# Mean > median because GBM is log-normal — right-skewed
+```
+
+## Itô's lemma: calculus for random processes
+
+In ordinary calculus, if f(x) is a smooth function and x changes by dx, then df = f'(x) dx. This is the chain rule.
+
+For stochastic processes, there is an extra term. <VocabTooltip slug="ito-lemma">Itô's lemma</VocabTooltip> says that for a function f(S, t) where S follows GBM:
+
+$$df = \frac{\partial f}{\partial t} dt + \frac{\partial f}{\partial S} dS + \frac{1}{2} \frac{\partial^2 f}{\partial S^2} (dS)^2$$
+
+The extra term — the second partial derivative times (dS)² — appears because dW² = dt for a Wiener process. This is not zero the way (dx)² → 0 in ordinary calculus. It is this term that generates the -0.5σ² correction in the GBM exact solution.
+
+```python
+# Demonstration: Itô correction in action
+# Apply log(S) to GBM: what process does log(S) follow?
+
+# By Itô's lemma with f(S) = log(S):
+# d(log S) = (1/S) dS - (1/2)(1/S^2)(dS)^2
+# Substituting dS = mu*S*dt + sigma*S*dW:
+# d(log S) = mu*dt + sigma*dW - (1/2)*sigma^2*dt
+#           = (mu - 0.5*sigma^2)*dt + sigma*dW
+
+# This is the reason the exact GBM solution has (mu - 0.5*sigma^2)*T in the exponent
+mu, sigma = 0.10, 0.20
+T = 1.0
+
+ito_drift    = mu - 0.5 * sigma**2   # drift of log(S)
+naive_drift  = mu                    # what you would get without Itô correction
+
+print(f"Drift of log(S) via Itô:   {ito_drift:.4f}")
+print(f"Naive drift (wrong):       {naive_drift:.4f}")
+print(f"Difference (Itô correction): {naive_drift - ito_drift:.4f} = 0.5 * sigma^2")
+```
+
+## Mean-reverting processes
+
+Not everything drifts randomly. Interest rates and volatility tend to pull back toward a long-run mean. The <VocabTooltip slug="ornstein-uhlenbeck">Ornstein-Uhlenbeck</VocabTooltip> process captures this:
+
+$$dX = \theta(\mu - X) \, dt + \sigma \, dW$$
+
+The θ(μ − X) term is a restoring force: when X > μ, the drift is negative; when X < μ, the drift is positive.
+
+```python
+def simulate_ou_process(
+    X0: float,
+    theta: float,  # speed of mean reversion
+    mu: float,     # long-run mean
+    sigma: float,  # volatility
+    T: float,
+    n_steps: int,
+    seed: int = 42
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Simulate Ornstein-Uhlenbeck via Euler-Maruyama.
+    Used for: interest rate models (Vasicek), volatility models, pairs trading spreads.
+    """
+    np.random.seed(seed)
+    dt = T / n_steps
+    times = np.linspace(0, T, n_steps + 1)
+    path = np.zeros(n_steps + 1)
+    path[0] = X0
+
+    for i in range(n_steps):
+        dW = np.sqrt(dt) * np.random.randn()
+        # Restoring force pulls X back toward mu
+        path[i + 1] = path[i] + theta * (mu - path[i]) * dt + sigma * dW
+
+    return times, path
+
+# Simulate an interest rate following Vasicek model
+times, rate = simulate_ou_process(X0=0.05, theta=2.0, mu=0.03, sigma=0.01, T=5.0, n_steps=1260)
+print(f"Initial rate: {rate[0]:.3f}")
+print(f"Final rate:   {rate[-1]:.3f}")
+print(f"Long-run mean: 0.030")
+```
+
+<Quiz
+  question="In GBM, the exact solution is S(t) = S₀ × exp((μ − 0.5σ²)t + σW(t)). Why is the drift term (μ − 0.5σ²) rather than μ?"
+  options={[
+    { label: "Because σ² represents the risk-free rate that must be subtracted", correct: false },
+    {
+      label:
+        "Because Itô's lemma adds a second-order correction term when applying log() to a stochastic process",
+      correct: true,
+    },
+    {
+      label: "Because μ is the log-return and must be converted to a price return",
+      correct: false,
+    },
+    {
+      label: "Because negative drift is required for the price to remain positive",
+      correct: false,
+    },
+  ]}
+  explanation="Itô's lemma adds the term −0.5σ² when you apply f(x) = log(x) to a GBM. In ordinary calculus the (dS)² term vanishes, but for stochastic processes dW² = dt (not zero), producing the correction. Without it, the expected log-price would be too high — log-normal distributions have a gap between mean and median that exactly equals this correction."
+/>
+
+## Check your understanding
+
+<Quiz
+  question="Which property of the Wiener process ensures it has NO memory of past movements?"
+  options={[
+    { label: "Continuous paths", correct: false },
+    { label: "W(0) = 0", correct: false },
+    { label: "Independent increments", correct: true },
+    { label: "Normal increments with variance proportional to time", correct: false },
+  ]}
+  explanation="The independent increments property is the formal statement of the Markov property for Brownian motion: the future movement W(t) − W(s) is independent of anything that happened before time s. This is what makes it a valid model for price changes in an efficient market where past prices contain no predictive information."
+/>
+
+<Quiz
+  question="An interest rate model uses an Ornstein-Uhlenbeck process with θ = 5, μ = 0.04. The current rate is 0.08. What happens to the drift at this point?"
+  options={[
+    { label: "The drift is positive, pushing the rate higher", correct: false },
+    { label: "The drift is negative, pulling the rate back toward 0.04", correct: true },
+    { label: "The drift is zero because the rate is at twice the mean", correct: false },
+    { label: "The drift is determined only by σ, not by the current level", correct: false },
+  ]}
+  explanation="The OU drift term is θ(μ − X). With θ = 5, μ = 0.04, X = 0.08: drift = 5 × (0.04 − 0.08) = −0.20. Negative drift means the rate is being pulled down toward the long-run mean of 4%. This is the mean-reversion mechanism."
+/>
+
+## What you learned
+
+- A <VocabTooltip slug="wiener-process">Wiener process</VocabTooltip> has independent, normally distributed increments and continuous paths — these properties make it the correct model for efficient-market price changes
+- <VocabTooltip slug="geometric-brownian-motion">Geometric Brownian Motion</VocabTooltip> models
+  stock prices by applying drift and diffusion to the *log* of the price, ensuring prices stay
+  positive
+- The exact GBM solution contains the Itô correction −0.5σ²t because variance of a log-normal process shifts the mean in a way ordinary calculus does not predict
+- <VocabTooltip slug="ito-lemma">Itô's lemma</VocabTooltip> is the chain rule for stochastic
+  processes, with an extra second-order term that survives because dW² = dt
+- <VocabTooltip slug="ornstein-uhlenbeck">Ornstein-Uhlenbeck</VocabTooltip> processes model
+  mean-reverting quantities like interest rates and volatility; they are also the foundation for
+  pairs trading models
+
+The next lesson applies this continuous-time framework to the most famous result in quantitative finance: the Black-Scholes formula and the Greeks that every options trader monitors in real time.

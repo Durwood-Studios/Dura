@@ -1,0 +1,309 @@
+---
+title: "A Framework for System Design Interviews"
+description: "A repeatable, structured approach to system design questions that communicates senior-level thinking under pressure."
+phase: 8
+module: "8-6"
+order: 1
+estimatedMinutes: 12
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1", "SE-3"]
+  swebok: ["Software Design", "Software Engineering Management"]
+  bloom: "understand"
+  sfia: 5
+  dreyfus: "competent"
+vocabulary:
+  - functional-requirements
+  - non-functional-requirements
+  - capacity-estimation
+  - api-contract
+  - high-level-design
+  - bottleneck
+learningOutcomes:
+  - "Recite the five steps of the REDNAC system design framework in order"
+  - "Write functional and non-functional requirements for a given system prompt"
+  - "Produce a back-of-envelope capacity estimate for read and write throughput"
+  - "Sketch a high-level component diagram that separates clients, load balancers, services, and data stores"
+  - "Identify at least two bottlenecks in a simple architecture and propose a mitigation for each"
+prerequisites:
+  - "HTTP request/response cycle"
+  - "Basic database concepts (tables, queries)"
+  - "What a load balancer is"
+  - "Client-server model"
+---
+
+## Why this matters
+
+System design interviews are the deciding gate at most senior software engineering roles. A candidate who writes excellent code can fail a system design round simply because they do not know how to structure 45 minutes of open-ended thinking. The question is deliberately vague — "Design Twitter" or "Design Uber" — because the interviewer is watching how you think, not whether you arrive at the exact same architecture they have in mind.
+
+The professionals who do well in these interviews are not necessarily the ones with the deepest distributed systems knowledge. They are the ones who communicate a clear, structured process — who narrow scope confidently, make trade-offs explicitly, and catch their own assumptions before the interviewer has to. This lesson gives you that structure so that in an interview, you spend your mental energy on the actual design rather than remembering what to do next.
+
+## A checklist is not enough — you need a framework
+
+Imagine you have just walked into an interview and the interviewer says: "Design a URL shortener. Go."
+
+Your instinct might be to immediately draw boxes — a database here, a server there. But that approach leaves the interviewer unsure whether you considered scale, whether you know what you are optimizing for, or whether you would make the same design choices for 100 users versus 100 million. The result looks like guessing, even if your boxes happen to be correct.
+
+A framework forces you to externalize your reasoning at every step. It turns an unstructured brainstorm into a demonstration of engineering judgment.
+
+> **A system design framework is just a checklist that you narrate out loud — so the interviewer can see the engineering process, not just the output.**
+
+## The REDNAC framework
+
+The five steps spell **REDNAC**. Work through them in order. Spend roughly the time shown at each step.
+
+| Step                         | What you do                                        | Time    |
+| ---------------------------- | -------------------------------------------------- | ------- |
+| **R** — Requirements         | Clarify functional and non-functional requirements | ~5 min  |
+| **E** — Estimates            | Back-of-envelope capacity math                     | ~3 min  |
+| **D** — Data model           | Core entities and their relationships              | ~5 min  |
+| **N** — API design           | Contract between clients and your system           | ~5 min  |
+| **A** — Architecture         | High-level component diagram                       | ~10 min |
+| **C** — Call out bottlenecks | Identify single points of failure, hot spots       | ~5 min  |
+
+### Step 1 — Requirements
+
+Never assume scope. Ask questions that box in the problem. There are two kinds of requirements:
+
+```
+FUNCTIONAL requirements — What must the system DO?
+  - Who are the users? (consumers, businesses, both?)
+  - What are the core user actions? (create, read, update, delete)
+  - Which features are in scope for this interview? (pick 2-3)
+  - Are we designing the happy path only, or handling failures too?
+
+NON-FUNCTIONAL requirements — How must the system BEHAVE?
+  - Scale: How many users? (100K DAU? 100M DAU?)
+  - Latency: p99 read latency target? (sub-100ms? sub-500ms?)
+  - Durability: Can we lose writes? (financial: no. social media: maybe)
+  - Consistency: Is stale data acceptable? (feed: yes. balance: no)
+  - Availability: Can the system be down for 5 minutes/month? (99.9%?)
+```
+
+Write the requirements you agreed on visibly, then reference them when you make trade-offs. "I'm choosing eventual consistency here because we agreed availability matters more than perfect accuracy in the feed."
+
+### Step 2 — Estimates
+
+Back-of-envelope math does two things: it tells you the order of magnitude you are designing for, and it signals to interviewers that you think about scale proactively.
+
+```python
+# Example: URL shortener, 100M DAU
+# Assumptions you say aloud:
+#   - 1% of users create a short URL per day (write)
+#   - 100% of users click short URLs, 10 clicks per day (read)
+#   - Read:write ratio should drive architecture choices
+
+DAU = 100_000_000
+
+# Writes
+writes_per_day = DAU * 0.01        # 1M writes/day
+writes_per_sec = 1_000_000 / 86400 # ~12 QPS (round to 15 QPS)
+
+# Reads
+reads_per_day = DAU * 10            # 1B reads/day
+reads_per_sec = 1_000_000_000 / 86400  # ~11,600 QPS (round to 12K QPS)
+
+# Read:write ratio
+ratio = reads_per_sec / writes_per_sec  # ~800:1
+# Conclusion: this is a HEAVILY read-heavy system. Cache everything.
+
+# Storage (5 years)
+url_record_bytes = 500  # id + short_url + long_url + metadata
+writes_per_year  = writes_per_day * 365   # ~365M writes/year
+storage_5yr = writes_per_year * 5 * url_record_bytes  # ~900 GB
+# Comfortable on a single database. No sharding needed at this scale.
+```
+
+Announce your assumptions out loud. Interviewers will stop you if you are wrong — and that's a good thing. It means they are engaged.
+
+### Step 3 — Data model
+
+Sketch the core entities and relationships. You do not need a full ERD, but you need to know what you are storing.
+
+```sql
+-- For a URL shortener:
+
+-- Core entity: the mapping
+CREATE TABLE short_urls (
+  id         BIGSERIAL PRIMARY KEY,
+  -- Short code is the lookup key, not id — why? Because clients
+  -- query by code (GET /abc123), not by internal id.
+  code       VARCHAR(8) UNIQUE NOT NULL,
+  long_url   TEXT NOT NULL,
+  user_id    BIGINT REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  expires_at TIMESTAMPTZ,          -- nullable, some links never expire
+  click_count BIGINT DEFAULT 0     -- denormalized for fast dashboard reads
+);
+
+-- Index on the lookup path, not the write path
+CREATE INDEX idx_short_urls_code ON short_urls(code);
+
+-- Analytics (separate table so writes don't block reads on main table)
+CREATE TABLE url_clicks (
+  id         BIGSERIAL PRIMARY KEY,
+  code       VARCHAR(8) NOT NULL,
+  clicked_at TIMESTAMPTZ DEFAULT NOW(),
+  referrer   TEXT,
+  country    CHAR(2)
+);
+```
+
+Note the design decision in the comment: the index is on `code`, not `id`, because that is the read path. This is the kind of observation that earns points in interviews.
+
+### Step 4 — API design
+
+Define the contract between the caller and your system. Use REST or gRPC, but be consistent.
+
+```
+POST /urls
+  Body:  { long_url: "https://example.com/very/long/path", expires_in_days?: 30 }
+  Auth:  Bearer token (optional — anonymous creation allowed with rate limiting)
+  201:   { code: "abc123", short_url: "https://sho.rt/abc123", expires_at: "..." }
+  400:   { error: "invalid_url" }
+  429:   { error: "rate_limit_exceeded", retry_after: 60 }
+
+GET /{code}
+  Auth:  none
+  302:   Location: <long_url>   (redirect — NOT 301, because 301 is cached by browser
+                                  forever and we cannot update analytics)
+  404:   { error: "not_found" }
+  410:   { error: "expired" }
+
+GET /urls/{code}/stats
+  Auth:  Bearer token (owner only)
+  200:   { code, click_count, top_countries, clicks_last_30d: [...] }
+```
+
+The 302 vs 301 choice in the comment is exactly the kind of trade-off interviewers want to see surfaced. Bring these up yourself before being asked.
+
+### Step 5 — Architecture
+
+Draw the happy-path flow, then the failure modes.
+
+```
+[Client]
+   │  GET /abc123
+   ▼
+[CDN / Edge Cache]     ← cache the redirect at the edge; most URLs are read many times
+   │ cache miss
+   ▼
+[Load Balancer]        ← active-active, health-checked
+   │
+   ├─ [Web Server A]
+   └─ [Web Server B]   ← stateless so any server handles any request
+          │
+          ▼
+     [Redis Cache]     ← code → long_url mappings; TTL = 24h; LRU eviction
+          │ cache miss
+          ▼
+     [Postgres Primary]   ← writes (URL creation)
+          │  async replication
+          ▼
+     [Postgres Replica]   ← reads (code lookup); isolates write load
+```
+
+Narrate every arrow: "The CDN caches at the edge so returning visitors in the same region never hit our servers. On a cache miss the edge fetches from our load balancer, which distributes across stateless web servers. Those servers check Redis before hitting the database — because our math showed 12K QPS on reads and the database would saturate without a cache layer."
+
+### Step 6 — Call out bottlenecks
+
+End by identifying your own weak points. This demonstrates maturity.
+
+```
+Bottleneck 1: Redis single point of failure
+  → Fix: Redis Sentinel (primary + 2 replicas, automatic failover)
+  → Or: Redis Cluster if data set grows beyond single-node memory
+
+Bottleneck 2: Postgres write throughput cap (~5-10K writes/sec)
+  → At 15 QPS today this is fine. At 100M writes/day (1,200 QPS) we approach limits.
+  → Short-term: connection pooling via PgBouncer
+  → Long-term: partition the table by code prefix (a-g, h-n, o-z shards)
+
+Bottleneck 3: Hot URLs (viral links)
+  → A single short URL going viral means millions of cache lookups for one key.
+  → Fix: replicate hot keys across multiple Redis nodes; client-side caching in CDN.
+
+Single point of failure: the load balancer
+  → Fix: anycast IP + two load balancers in different availability zones.
+```
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "You are asked to design a chat system. The interviewer says there are 10 million daily active users. Before sketching architecture, what is the most important next question to ask?",
+      options: [
+        "What database engine should I use?",
+        "Should messages be delivered in real-time or is polling acceptable?",
+        "How many microservices should the backend have?",
+        "Should I use Kafka or RabbitMQ for the message queue?",
+      ],
+      correct: 1,
+      explanation:
+        "Whether messages must arrive in real-time (WebSocket) or polling is acceptable changes the architecture fundamentally. That is a functional requirement to clarify before any technology choice.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Your back-of-envelope estimate shows 500 writes/second and 50,000 reads/second. What does this immediately suggest about your architecture?",
+      options: [
+        "You need exactly 100 database replicas",
+        "You should use a NoSQL database instead of SQL",
+        "The system is read-heavy and a caching layer is likely essential",
+        "You need to reject 99% of reads at the load balancer",
+      ],
+      correct: 2,
+      explanation:
+        "A 100:1 read:write ratio is a signal to invest in a cache (Redis, Memcached) between the application servers and the database. This pattern comes up constantly in system design.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "Why does a URL shortener redirect with HTTP 302 (temporary redirect) instead of 301 (permanent redirect)?",
+      options: [
+        "302 is faster over the network",
+        "301 redirects are cached by browsers indefinitely, preventing analytics tracking and updates",
+        "302 is required by the HTTP spec for short URLs",
+        "301 redirects do not work on mobile browsers",
+      ],
+      correct: 1,
+      explanation:
+        "A 301 tells the browser to cache the redirect forever locally. Future clicks skip your server entirely — so you cannot update the destination URL or count clicks. 302 keeps the browser checking your server each time.",
+    },
+  ]}
+/>
+
+<FillBlank
+  prompt="The five steps of the REDNAC framework are: Requirements, Estimates, Data model, ___, Architecture, and ___."
+  answers={["API design", "Call out bottlenecks"]}
+  hints={[
+    "What contract does the client use to communicate with your system?",
+    "What are you honest about at the end of your design?",
+    "Bottlenecks",
+  ]}
+/>
+
+## Check your understanding
+
+Given this prompt: "Design a photo-sharing app like Instagram. 50 million DAU. Photos should appear within 5 seconds of upload for followers."
+
+Write out, in the REDNAC order:
+
+1. Two functional and two non-functional requirements you would clarify.
+2. A write QPS estimate (assume 5% of DAU upload one photo per day).
+3. The core data entities (at minimum: user, photo, follow relationship).
+4. The API signature for uploading a photo.
+5. One bottleneck in your design and how you would mitigate it.
+
+There is no single correct answer — the goal is to practice narrating the process.
+
+## What you learned
+
+- System design interviews reward structured process, not memorized architectures.
+- The REDNAC framework gives you six concrete steps: Requirements, Estimates, Data model, API design, Architecture, Call out bottlenecks.
+- Functional requirements define what the system does; non-functional requirements define how it behaves under load, failure, and time.
+- Back-of-envelope estimates reveal whether a system is read-heavy or write-heavy, which drives cache and replication decisions.
+- Surfacing your own bottlenecks before the interviewer asks demonstrates senior-level self-awareness.
+
+The next lesson applies this framework to two of the most common architectural challenges: scaling reads with caching and scaling writes with sharding.

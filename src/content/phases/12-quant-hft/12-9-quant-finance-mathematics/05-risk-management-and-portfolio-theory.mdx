@@ -1,0 +1,432 @@
+---
+title: "Risk Management and Portfolio Theory"
+description: "Markowitz mean-variance optimization, Value-at-Risk, Expected Shortfall, Kelly criterion, and the risk management framework every quantitative fund runs to construct and protect a diversified portfolio."
+phase: 12
+module: "12-9"
+order: 5
+estimatedMinutes: 18
+difficulty: "advanced"
+prerequisites:
+  - "12-9-01-probability-and-statistics"
+  - "12-9-02-stochastic-processes-brownian-motion"
+  - "12-9-04-statistical-arbitrage-pairs-trading"
+standards:
+  cs2023:
+    - "DS/ProbabilityAndStatistics"
+    - "AL/FundamentalsOfDataScienceAndML"
+  swebok:
+    - "mathematical-foundations"
+    - "software-design"
+  bloom: "analyze"
+  sfia: 2
+  dreyfus: "proficient"
+vocabulary:
+  - mean-variance-optimization
+  - efficient-frontier
+  - diversification
+  - covariance-matrix
+  - value-at-risk
+  - expected-shortfall
+  - kelly-criterion
+  - maximum-drawdown
+  - information-ratio
+  - correlation
+  - portfolio-weights
+  - risk-adjusted-return
+  - position-sizing
+  - drawdown-control
+learningOutcomes:
+  - "Compute a covariance matrix from a return series and explain what each entry represents"
+  - "Implement mean-variance optimization to find the minimum-variance and maximum-Sharpe portfolios"
+  - "Calculate Value-at-Risk (VaR) and Expected Shortfall (ES) at a given confidence level and state why ES is preferred by regulators"
+  - "Apply the Kelly criterion to compute the optimal bet size for a strategy with known edge and variance"
+  - "Analyze the trade-off between the efficient frontier's return-risk curve and explain why adding uncorrelated assets improves it"
+---
+
+## Why this matters
+
+Building a strategy that works is only half the job. The other half is sizing it correctly, combining it with other strategies in a way that reduces risk without sacrificing return, and having a rigorous system that tells you when you have lost too much and should stop. Without this layer, a strategy that wins 60% of the time can still blow up from a sequence of large losses.
+
+Every major fund — from Renaissance to Bridgewater — runs an institutional risk management layer. The math is not optional. Position sizing determines whether a 10-Sharpe strategy makes money or destroys capital. Understanding the efficient frontier tells you how many positions to run and how to weight them. VaR and Expected Shortfall are the numbers regulators and risk committees demand before you can deploy capital. This lesson gives you that toolkit.
+
+## The egg basket analogy, made rigorous
+
+"Don't put all your eggs in one basket" is folk wisdom. The math behind it is more specific and more powerful: if two investments are not perfectly correlated, combining them can reduce total risk _without_ reducing expected return. This is the core insight of Harry Markowitz's 1952 paper, which earned him a Nobel Prize.
+
+The key is that risk is not simply additive. Two positions each with 20% volatility, combined 50/50, do not necessarily produce a 20% volatile portfolio. If those positions are negatively correlated, the combined portfolio has _less_ than 20% volatility. The math of covariance is what governs this.
+
+> **Mental model: portfolio risk is driven by correlations, not just individual volatilities.**
+> _The efficient frontier is the set of portfolios that maximize expected return for each level of risk — every portfolio below it is leaving return on the table._
+
+## The covariance matrix: measuring how assets move together
+
+The <VocabTooltip slug="covariance-matrix">covariance matrix</VocabTooltip> Σ captures how every pair of assets in a portfolio moves together.
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+
+def compute_portfolio_stats(
+    weights: np.ndarray,
+    mean_returns: np.ndarray,
+    cov_matrix: np.ndarray,
+    trading_days: int = 252
+) -> dict[str, float]:
+    """
+    Annualized return, volatility, and Sharpe ratio for a given set of portfolio weights.
+
+    We annualize by multiplying mean by 252 and std by sqrt(252).
+    The portfolio variance is w^T * Sigma * w — the quadratic form.
+    """
+    port_return = np.dot(weights, mean_returns) * trading_days
+    port_variance = np.dot(weights, np.dot(cov_matrix, weights))
+    port_vol = np.sqrt(port_variance * trading_days)
+    sharpe = port_return / port_vol if port_vol > 0 else 0
+
+    return {"return": port_return, "volatility": port_vol, "sharpe": sharpe}
+
+# Simulate 4-asset portfolio (daily returns)
+np.random.seed(42)
+n_days, n_assets = 500, 4
+asset_names = ["Tech", "Financials", "Energy", "Bonds"]
+
+# Correlation structure: tech/financials correlated, bonds negatively correlated
+true_corr = np.array([
+    [1.00,  0.65,  0.30, -0.20],
+    [0.65,  1.00,  0.40, -0.15],
+    [0.30,  0.40,  1.00, -0.10],
+    [-0.20, -0.15, -0.10,  1.00]
+])
+daily_vols = np.array([0.018, 0.015, 0.020, 0.006])  # daily volatilities
+
+# Construct covariance matrix from correlation and volatility
+cov_matrix = np.outer(daily_vols, daily_vols) * true_corr
+
+# Sample returns from multivariate normal
+L = np.linalg.cholesky(cov_matrix)  # Cholesky decomposition for correlated sampling
+raw = np.random.randn(n_days, n_assets)
+returns = raw @ L.T + np.array([0.0006, 0.0004, 0.0005, 0.0001])  # daily returns
+
+# Estimate from data (in practice: use exponentially weighted covariance for recency)
+mean_returns = returns.mean(axis=0)
+cov_estimated = np.cov(returns.T)   # .T because np.cov expects (n_assets, n_observations)
+
+print("Estimated covariance matrix (annualized):")
+print(np.round(cov_estimated * 252, 4))
+print("\nEstimated annual returns:")
+for name, r in zip(asset_names, mean_returns * 252):
+    print(f"  {name}: {r:.2%}")
+```
+
+## Mean-variance optimization: building the efficient frontier
+
+<VocabTooltip slug="mean-variance-optimization">Mean-variance optimization</VocabTooltip> finds the
+portfolio weights that maximize Sharpe ratio subject to constraints (weights sum to 1, no shorting).
+
+```python
+def minimum_variance_portfolio(
+    mean_returns: np.ndarray,
+    cov_matrix: np.ndarray,
+    allow_short: bool = False
+) -> dict[str, float | np.ndarray]:
+    """
+    Find weights that minimize portfolio variance (risk).
+
+    This is a convex quadratic program — scipy.optimize.minimize handles it.
+    The minimum variance portfolio is on the efficient frontier's leftmost point.
+    """
+    n = len(mean_returns)
+
+    def portfolio_variance(weights):
+        # Objective: minimize w^T * Sigma * w
+        return np.dot(weights, np.dot(cov_matrix, weights))
+
+    # Constraints: weights must sum to 1
+    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
+
+    # Bounds: no shorting unless explicitly allowed
+    bounds = [(-1.0, 1.0) if allow_short else (0.0, 1.0)] * n
+
+    # Initial guess: equal weight
+    w0 = np.ones(n) / n
+
+    result = minimize(
+        portfolio_variance, w0,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"ftol": 1e-12}
+    )
+
+    weights = result.x
+    stats = compute_portfolio_stats(weights, mean_returns, cov_matrix)
+    return {"weights": weights, **stats}
+
+def maximum_sharpe_portfolio(
+    mean_returns: np.ndarray,
+    cov_matrix: np.ndarray,
+    risk_free: float = 0.04
+) -> dict[str, float | np.ndarray]:
+    """
+    Find the tangency portfolio: maximum Sharpe ratio on the efficient frontier.
+
+    The tangency portfolio is where a line from the risk-free rate is tangent
+    to the efficient frontier. It maximizes risk-adjusted return.
+    """
+    n = len(mean_returns)
+    annual_returns = mean_returns * 252
+
+    def neg_sharpe(weights):
+        stats = compute_portfolio_stats(weights, mean_returns, cov_matrix)
+        return -(stats["return"] - risk_free) / stats["volatility"]
+
+    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
+    bounds = [(0.0, 1.0)] * n
+    w0 = np.ones(n) / n
+
+    result = minimize(neg_sharpe, w0, method="SLSQP", bounds=bounds, constraints=constraints)
+    weights = result.x
+    stats = compute_portfolio_stats(weights, mean_returns, cov_matrix)
+    return {"weights": weights, **stats}
+
+min_var = minimum_variance_portfolio(mean_returns, cov_estimated)
+max_sr  = maximum_sharpe_portfolio(mean_returns, cov_estimated, risk_free=0.04)
+
+print("=== Minimum Variance Portfolio ===")
+for name, w in zip(asset_names, min_var["weights"]):
+    print(f"  {name}: {w:.2%}")
+print(f"  Return: {min_var['return']:.2%}, Vol: {min_var['volatility']:.2%}, Sharpe: {min_var['sharpe']:.2f}")
+
+print("\n=== Maximum Sharpe Portfolio ===")
+for name, w in zip(asset_names, max_sr["weights"]):
+    print(f"  {name}: {w:.2%}")
+print(f"  Return: {max_sr['return']:.2%}, Vol: {max_sr['volatility']:.2%}, Sharpe: {max_sr['sharpe']:.2f}")
+```
+
+## Value-at-Risk and Expected Shortfall
+
+<VocabTooltip slug="value-at-risk">Value-at-Risk</VocabTooltip> (VaR) answers: "What is the maximum
+loss I should expect with 95% confidence over the next day?" Expected Shortfall (ES, also called
+CVaR) answers the better question: "Given that I *do* lose more than VaR, how much do I lose on
+average?"
+
+```python
+def parametric_var_es(
+    weights: np.ndarray,
+    returns: np.ndarray,
+    confidence: float = 0.95,
+    portfolio_value: float = 1_000_000
+) -> dict[str, float]:
+    """
+    Compute VaR and Expected Shortfall using both historical simulation
+    and the parametric (normal) approach.
+
+    ES is preferred by regulators (Basel III uses it) because VaR ignores
+    the severity of losses beyond the threshold — a critical deficiency for fat-tailed returns.
+    """
+    from scipy import stats
+
+    # Historical portfolio returns
+    port_returns = returns @ weights
+
+    # Historical simulation VaR: use the actual distribution
+    hist_var_pct = np.percentile(port_returns, (1 - confidence) * 100)
+    hist_var_dollar = -hist_var_pct * portfolio_value
+
+    # Historical ES: average of returns BELOW the VaR threshold
+    tail_returns = port_returns[port_returns <= hist_var_pct]
+    hist_es_dollar = -tail_returns.mean() * portfolio_value if len(tail_returns) > 0 else 0
+
+    # Parametric VaR: assumes normality (underestimates due to fat tails)
+    mu_port  = port_returns.mean()
+    std_port = port_returns.std()
+    z_score  = stats.norm.ppf(1 - confidence)  # e.g., -1.645 for 95%
+    param_var_pct    = mu_port + z_score * std_port
+    param_var_dollar = -param_var_pct * portfolio_value
+
+    # Parametric ES = E[X | X < VaR] = mu - sigma * phi(z) / (1 - conf)
+    # where phi is standard normal PDF evaluated at z
+    phi_z = stats.norm.pdf(z_score)
+    param_es_dollar = -(mu_port - std_port * phi_z / (1 - confidence)) * portfolio_value
+
+    return {
+        "hist_var_95":     hist_var_dollar,
+        "hist_es_95":      hist_es_dollar,
+        "param_var_95":    param_var_dollar,
+        "param_es_95":     param_es_dollar,
+        "es_var_ratio":    hist_es_dollar / hist_var_dollar if hist_var_dollar > 0 else 0
+    }
+
+risk = var_es = parametric_var_es(max_sr["weights"], returns, portfolio_value=1_000_000)
+print(f"Historical 95% VaR: ${risk['hist_var_95']:,.0f}")
+print(f"Historical 95% ES:  ${risk['hist_es_95']:,.0f}")
+print(f"Parametric 95% VaR: ${risk['param_var_95']:,.0f}")
+print(f"ES/VaR ratio: {risk['es_var_ratio']:.2f}  (always >= 1.0 by definition)")
+# ES > VaR: ES captures expected loss IN the tail, VaR only marks where the tail starts
+```
+
+## Kelly criterion: optimal position sizing
+
+The <VocabTooltip slug="kelly-criterion">Kelly criterion</VocabTooltip> answers: given a strategy's edge and variance, what fraction of capital should you bet to maximize long-run growth rate?
+
+```python
+def kelly_fraction(
+    expected_return: float,    # per trade
+    variance: float,           # of returns per trade
+    risk_free_rate: float = 0  # per trade
+) -> dict[str, float]:
+    """
+    Full Kelly fraction and the practical half-Kelly convention.
+
+    Kelly = E[r - r_f] / Var[r]
+
+    Kelly maximizes the expected log of wealth, which maximizes long-run growth.
+    Half-Kelly is used in practice because Kelly is derived from log-utility,
+    which assumes infinite time horizon. Finite-horizon traders apply a fraction
+    (usually 0.25–0.5) to reduce the risk of catastrophic drawdowns.
+    """
+    excess_return = expected_return - risk_free_rate
+
+    if variance <= 0:
+        return {"full_kelly": 0, "half_kelly": 0, "quarter_kelly": 0}
+
+    full_kelly   = excess_return / variance
+    half_kelly   = full_kelly / 2
+    quarter_kelly = full_kelly / 4
+
+    return {
+        "full_kelly":     full_kelly,
+        "half_kelly":     half_kelly,
+        "quarter_kelly":  quarter_kelly
+    }
+
+# A strategy with 0.1% mean daily return and 1.5% daily std
+strat_mean = 0.001
+strat_var  = 0.015**2
+
+kelly = kelly_fraction(strat_mean, strat_var)
+print(f"Full Kelly fraction:    {kelly['full_kelly']:.2%} of capital")
+print(f"Half Kelly (practical): {kelly['half_kelly']:.2%} of capital")
+print(f"Quarter Kelly (conservative): {kelly['quarter_kelly']:.2%} of capital")
+# Full Kelly maximizes growth but can have severe drawdowns
+# Half/quarter Kelly trades some growth for much smoother equity curve
+```
+
+<SandboxExercise
+  title="Portfolio risk analysis under a market stress scenario"
+  description="A portfolio holds 4 assets. Compute the portfolio VaR under normal conditions and under a stress scenario where all correlations jump to 0.95 (the 'correlation goes to one in a crisis' phenomenon). Quantify how much worse the VaR becomes."
+  starterCode={`import numpy as np
+from scipy import stats
+
+np.random.seed(42)
+
+# Portfolio weights (sum to 1)
+
+weights = np.array([0.30, 0.25, 0.25, 0.20])
+asset_names = ["Tech", "Financials", "Energy", "Bonds"]
+
+# Normal-regime parameters (daily)
+
+daily_vols = np.array([0.018, 0.015, 0.020, 0.006])
+daily_means = np.array([0.0006, 0.0004, 0.0005, 0.0001])
+
+normal_corr = np.array([
+[1.00, 0.65, 0.30, -0.20],
+[0.65, 1.00, 0.40, -0.15],
+[0.30, 0.40, 1.00, -0.10],
+[-0.20, -0.15, -0.10, 1.00]
+])
+
+# Stress scenario: correlations spike toward 1 (crisis contagion)
+
+stress_corr = np.array([
+[1.00, 0.95, 0.95, 0.95],
+[0.95, 1.00, 0.95, 0.95],
+[0.95, 0.95, 1.00, 0.95],
+[0.95, 0.95, 0.95, 1.00]
+])
+
+portfolio_value = 1_000_000
+
+# TODO: For each scenario (normal_corr and stress_corr):
+
+# 1. Build the covariance matrix from vols and correlation
+
+# 2. Compute portfolio daily mean and std
+
+# 3. Compute 95% parametric VaR in dollar terms
+
+# Then print the VaR for each scenario and the ratio stress_var / normal_var
+
+def compute_parametric_var(weights, daily_means, cov_matrix, portfolio_value, confidence=0.95):
+"""Returns 95% 1-day VaR in dollars."""
+port_mean = np.dot(weights, daily_means)
+port_var = np.dot(weights, np.dot(cov_matrix, weights))
+port_std = np.sqrt(port_var)
+z = stats.norm.ppf(1 - confidence)
+var_pct = port_mean + z _ port_std
+return -var_pct _ portfolio_value
+
+# Build covariance matrices and compute VaR
+
+normal_cov = ... # your code
+stress_cov = ... # your code
+
+normal_var = compute_parametric_var(weights, daily_means, normal_cov, portfolio_value)
+stress_var = compute_parametric_var(weights, daily_means, stress_cov, portfolio_value)
+
+print(f"Normal regime 95% VaR: \${normal_var:,.0f}")
+print(f"Stress regime 95% VaR: \${stress_var:,.0f}")
+print(f"VaR multiplier in crisis: {stress_var / normal_var:.2f}x")
+`}
+  solution={`normal_cov = np.outer(daily_vols, daily_vols) _ normal_corr
+stress_cov = np.outer(daily_vols, daily_vols) _ stress_corr
+
+# The stress VaR is typically 1.5-2.5x the normal VaR
+
+# because diversification breaks down when all correlations go to 1`}
+
+/>
+
+## Check your understanding
+
+<Quiz
+  question="You add an uncorrelated asset (correlation = 0 with all existing holdings) to a portfolio. The new asset has the same expected return as the portfolio but 40% higher volatility. What happens to the portfolio Sharpe ratio?"
+  options={[
+    { label: "It decreases, because the new asset has higher volatility", correct: false },
+    {
+      label: "It stays the same, because return and risk both scale proportionally",
+      correct: false,
+    },
+    { label: "It increases, because the uncorrelated volatility diversifies away", correct: true },
+    { label: "It depends on the weight assigned to the new asset", correct: false },
+  ]}
+  explanation="Because the new asset has zero correlation with the existing portfolio, its volatility does not add linearly to portfolio variance — it adds in quadrature. The portfolio variance increases less than proportionally to the weight given the new asset. This diversification effect means the Sharpe ratio improves. This is the mathematical basis for why diversification is not just a heuristic — it is a free lunch when correlations are less than 1."
+/>
+
+<Quiz
+  question="Value-at-Risk says a $1M portfolio has a 1-day 95% VaR of $20,000. Expected Shortfall at 95% is $35,000. What does the ES figure tell you that VaR does not?"
+  options={[
+    { label: "ES tells you the loss will definitely not exceed $35,000", correct: false },
+    { label: "ES tells you the average loss on the worst 5% of days is $35,000", correct: true },
+    { label: "ES is more conservative because it uses a higher confidence level", correct: false },
+    { label: "ES accounts for transaction costs that VaR ignores", correct: false },
+  ]}
+  explanation="VaR only tells you the threshold: 95% of days, losses are below $20,000. It says nothing about how bad the remaining 5% of days are. ES (CVaR) is the average loss on those worst 5% of days — $35,000 in this case. For a fat-tailed distribution, ES can be dramatically larger than VaR, which is why Basel III and Solvency II regulations mandate ES rather than VaR as the primary risk measure."
+/>
+
+## What you learned
+
+- The <VocabTooltip slug="covariance-matrix">covariance matrix</VocabTooltip> encodes both individual asset volatilities and pairwise correlations; portfolio variance is the quadratic form w'Σw
+- <VocabTooltip slug="mean-variance-optimization">Mean-variance optimization</VocabTooltip> finds
+  the <VocabTooltip slug="efficient-frontier">efficient frontier</VocabTooltip>: the set of
+  portfolios that achieve maximum return for each level of risk; the tangency portfolio maximizes
+  Sharpe ratio
+- <VocabTooltip slug="value-at-risk">Value-at-Risk</VocabTooltip> states the loss threshold at a
+  given confidence level; <VocabTooltip slug="expected-shortfall">Expected Shortfall</VocabTooltip>
+  improves on it by measuring the average loss *beyond* that threshold, which is critical for
+  fat-tailed return distributions
+- The <VocabTooltip slug="kelly-criterion">Kelly criterion</VocabTooltip> provides a mathematically optimal bet size that maximizes long-run growth; practitioners use half or quarter Kelly to reduce drawdown severity
+- Stress testing by inflating correlations toward 1 quantifies the "correlation goes to one in a crisis" phenomenon, which is the primary reason diversified portfolios lose their protection in market crashes
+
+You now have the mathematical toolkit that underlies all quantitative finance: probability and statistics for signal evaluation, stochastic processes for continuous-time modeling, Black-Scholes for derivatives pricing, statistical arbitrage for market-neutral strategies, and portfolio theory for capital allocation and risk control. These five tools work together as a complete system — each lesson's concepts appear in the others, and in every corner of institutional quantitative trading.

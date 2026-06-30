@@ -1,0 +1,323 @@
+---
+title: "Metastability, Synchronizers, and CDC Analysis"
+description: "Why flip-flops fail when clocks disagree, how synchronizers suppress the failure, and how CDC analysis tools catch uncrossed signals before silicon."
+phase: 11
+module: "11-9"
+order: 1
+estimatedMinutes: 20
+difficulty: "advanced"
+standards:
+  cs2023: ["AR-1", "AR-2"]
+  swebok: ["Software Design", "Software Testing"]
+  bloom: "analyze"
+  sfia: 2
+  dreyfus: "proficient"
+vocabulary:
+  - metastability
+  - clock-domain-crossing
+  - setup-time
+  - hold-time
+  - synchronizer
+  - mean-time-between-failures
+  - gray-code
+  - cdc-analysis
+learningOutcomes:
+  - "Explain why a flip-flop can enter a metastable state when data changes near a clock edge"
+  - "Calculate the qualitative impact of resolution time on mean-time-between-failures for a given synchronizer stage count"
+  - "Write a two-flop synchronizer in SystemVerilog and identify the constraints that make it safe"
+  - "Distinguish structurally safe CDC crossings (single-bit, Gray-coded bus, handshake) from structurally unsafe ones and justify each classification"
+  - "Identify CDC violations in a design by interpreting output from a static CDC analysis tool"
+prerequisites:
+  - "h-1-systemverilog-basics"
+  - "h-2-uvm-testbench-architecture"
+---
+
+## Why this matters
+
+Clock domain crossing bugs are among the most expensive defects in silicon: they slip past simulation, they slip past timing analysis, and they manifest as rare, unreproducible glitches that only appear in production silicon at specific PVT corners. A single unguarded CDC path in a high-volume SoC can cost millions of dollars in re-spin. Every verification engineer and RTL designer who works on multi-clock designs — which is almost every modern chip — needs to understand this class of failure precisely, because the tools that catch CDC violations only work correctly when you know what to tell them.
+
+Beyond cost, the underlying physics is genuinely interesting: you will learn that flip-flop output is not a crisp binary. Under the right conditions it can hover at a voltage between 0 and 1 for an unbounded amount of time, and the only engineering control you have is to make that unbounded time exponentially unlikely to exceed your resolution window. That mathematical structure — converting a random-duration analog failure into a predictable probability — is a pattern that reappears in distributed systems, network protocols, and async hardware design far beyond CDC.
+
+## What happens at the boundary of two clock worlds
+
+Picture a city where two neighborhoods run on different schedules — one side starts its day at 9 AM, the other at 7 AM. A letter carrier crossing the boundary has to hand off a package at exactly the moment the receiving neighborhood is "ready." If the handoff happens at the wrong instant — a second too early or a second too late — the receiving carrier may have already moved on, or may not have arrived yet. The package gets lost in limbo.
+
+That limbo is <VocabTooltip slug="metastability">metastability</VocabTooltip>. In digital circuits, a flip-flop has a narrow window around each clock edge — the <VocabTooltip slug="setup-time">setup time</VocabTooltip> before the edge and the <VocabTooltip slug="hold-time">hold time</VocabTooltip> after it — during which its input data must be stable. If data transitions inside that window, the flip-flop's output does not cleanly resolve to 0 or 1. Instead it enters a metastable state: an unstable equilibrium at a voltage somewhere between VDD and GND.
+
+```text
+       Data from Clock Domain A
+              |
+              v
+    ┌─────────────────────────┐
+    │  D  Q                   │
+    │  ─┤FF├─────────────────▶│ output: may be 0, 1, or ???
+    │     ^                   │
+    └─────|───────────────────┘
+          Clock Domain B
+          (different frequency / phase)
+```
+
+The metastable state is physically real: the flip-flop's internal feedback node is at a voltage where the two cross-coupled inverters are equally balanced. The node will eventually resolve — thermal noise kicks it one way — but "eventually" could be nanoseconds or microseconds. If downstream logic samples the still-unresolved output, the failure propagates.
+
+> **Metastability is not a timing violation you fix with a faster path. It is a physical analog failure that only resolves probabilistically.**
+
+## The physics and the math
+
+Metastability is described by the equation for mean-time-between-failures (MTBF):
+
+```text
+MTBF = exp(τ_r / τ) / (f_clk × f_data × T_W)
+```
+
+Where:
+
+- `τ_r` is the available resolution time (how long before downstream logic samples)
+- `τ` is the flip-flop's metastability time constant (device characteristic, ~20-100 ps for modern process nodes)
+- `f_clk` is the receiving clock frequency
+- `f_data` is the data transition rate
+- `T_W` is the setup/hold window width
+
+The critical insight is the **exponential**: every additional nanosecond of resolution time multiplies MTBF by `exp(1 ns / τ)`. For a flip-flop with τ = 50 ps, adding 1 ns of resolution time multiplies MTBF by `e^20 ≈ 485 million`. This is why the fix works.
+
+## The synchronizer: trading latency for reliability
+
+A <VocabTooltip slug="synchronizer">synchronizer</VocabTooltip> is two (or more) flip-flops in series, all clocked by the destination domain, with the only job of giving the first flip-flop's metastable output enough time to resolve before it is sampled by the second flip-flop.
+
+```systemverilog
+// Two-flop synchronizer: the canonical CDC crossing cell
+// This is the ONLY correct structural template for single-bit CDC signals.
+// Do not add combinational logic between the two flops —
+// that would reduce resolution time and defeat the purpose.
+
+module sync_2ff #(
+    parameter int STAGES = 2  // never fewer than 2; use 3 for very fast clocks
+) (
+    input  logic clk_dst,     // destination clock — both flops run on THIS
+    input  logic rst_n_dst,   // synchronous or async reset in destination domain
+    input  logic d_src,       // raw signal from source clock domain
+    output logic q_sync       // synchronized, safe-to-use output
+);
+
+    // The (* ASYNC_REG = "TRUE" *) attribute tells synthesis/P&R tools that
+    // these flops are intentional synchronizers — do NOT optimize them together,
+    // do NOT absorb them into LUT logic, and DO give them extra hold margin.
+    (* ASYNC_REG = "TRUE" *)
+    logic [STAGES-1:0] sync_chain;
+
+    always_ff @(posedge clk_dst or negedge rst_n_dst) begin
+        if (!rst_n_dst) begin
+            sync_chain <= '0;
+        end else begin
+            // Shift register: first stage captures potentially metastable value.
+            // Each additional stage multiplies MTBF by exp(T_period / tau).
+            // Two stages is standard; three stages for clocks above ~500 MHz.
+            sync_chain <= {sync_chain[STAGES-2:0], d_src};
+        end
+    end
+
+    assign q_sync = sync_chain[STAGES-1];
+
+endmodule
+```
+
+The `ASYNC_REG` constraint is not optional decoration. Without it, synthesis may merge the two flip-flops into a single LUT-based register, eliminating the resolution time gap entirely. The tool attribute is what makes the intent survive implementation.
+
+## What a synchronizer cannot protect
+
+A two-flop synchronizer is safe only for **single-bit control signals** where you do not care whether a particular transition is captured in cycle N or N+1 — only that when it is captured, it is captured cleanly.
+
+It fails for buses because the individual bits of a multi-bit value transition at different times. The synchronizer on each bit resolves independently, so the receiving domain may see `bit[7:4]` from the new value and `bit[3:0]` from the old value — a corrupted word that never existed in the source domain.
+
+```systemverilog
+// WRONG: synchronizing a multi-bit counter directly
+// Each bit resolves independently; destination sees a torn value.
+logic [7:0] counter_src;      // in clk_a domain
+logic [7:0] counter_sync;     // in clk_b domain — BROKEN
+
+// CORRECT option 1: Gray code — only one bit changes per count step,
+// so a torn capture still yields a valid adjacent value.
+logic [7:0] gray_src;
+assign gray_src = counter_src ^ (counter_src >> 1);  // binary to Gray
+
+sync_2ff #(.STAGES(2)) u_sync [7:0] (
+    .clk_dst  (clk_b),
+    .rst_n_dst(rst_n_b),
+    .d_src    (gray_src),
+    .q_sync   (counter_sync_gray)
+);
+// Convert back from Gray to binary in destination domain after sync
+
+// CORRECT option 2: Handshake protocol — source asserts req, destination
+// acks only after the data bus is stable for a full clock cycle.
+// Safe for arbitrary-width buses; adds 2-4 cycles of latency.
+```
+
+<VocabTooltip slug="gray-code">Gray code</VocabTooltip> works because adjacent Gray values differ in
+exactly one bit. Even if the synchronizer captures the signal mid-transition, the worst case is
+"captured the old value" or "captured the new value" — never a value that was never valid.
+
+## CDC analysis: finding uncrossed signals automatically
+
+Manual inspection of CDC paths is error-prone in any design larger than a few thousand gates. Static <VocabTooltip slug="cdc-analysis">CDC analysis</VocabTooltip> tools (Synopsys SpyGlass CDC, Cadence JasperGold CDC, Mentor Questa CDC) parse the netlist, identify every flip-flop whose clock is in a different domain from the flip-flop driving its input, and classify each crossing as:
+
+- **Synchronized** — a recognized synchronizer cell (2FF, 3FF, FIFO, handshake) is in the path. Safe.
+- **Unsynchronized** — data crosses domains with no synchronizer. Violation.
+- **Quasi-static** — data changes so slowly relative to both clocks that metastability probability is negligible. May be waived with documentation.
+- **Reconvergent** — synchronized and unsynchronized versions of the same signal reconverge in logic downstream. Dangerous: the synchronized and unsynchronized copies may resolve differently, creating a race.
+
+```text
+SpyGlass CDC output (example violation report):
+
+VIOLATION: cdc_unsync_path
+  Source FF : u_core/tx_ready_reg        [clk_tx, 100 MHz]
+  Dest   FF : u_mac/tx_start_latch_reg   [clk_mac, 125 MHz]
+  Path      : u_core/tx_ready → ... → u_mac/D
+  Synchronizer found: NONE
+  Suggested fix: Insert sync_2ff on tx_ready before u_mac
+
+VIOLATION: cdc_reconvergence
+  Signal    : u_dma/count_reg[3:0]
+  Sync path : u_dma/count_reg[3:0] → u_sync/... → u_ctrl/synced_count
+  Unsync path: u_dma/count_reg[3] → u_ctrl/raw_count_msb
+  Reconvergence point: u_ctrl/enable_AND [clk_sys]
+  Risk: synced_count and raw_count_msb may see different values of bit[3]
+  Fix: synchronize ALL uses of count_reg[3] or use a FIFO/handshake
+```
+
+CDC tools require clock domain definitions — you must tell the tool which signals are clock roots and which are the same domain. A poorly-specified constraint file produces false negatives (real violations not reported) far more dangerous than false positives. Writing correct CDC constraints is itself a skill that appears in every tape-out flow.
+
+## Practice
+
+<SandboxExercise
+  language="systemverilog"
+  instructions={`A design has a single-bit enable signal \`dma_en\` generated in a 100 MHz clock domain (\`clk_cpu\`) that must be used in a 250 MHz clock domain (\`clk_dma\`).
+
+Task:
+
+1. Instantiate the two-flop synchronizer module \`sync_2ff\` shown in the lesson to safely cross \`dma_en\` into the \`clk_dma\` domain.
+2. Add the \`ASYNC_REG\` attribute comment to explain why it must be present.
+3. Choose STAGES=2 or STAGES=3 and justify your choice in a comment.
+
+The top module signature and wire declarations are provided.`}
+  initialCode={`// CDC crossing: clk_cpu (100 MHz) → clk_dma (250 MHz)
+module dma_top (
+input logic clk_cpu,
+input logic clk_dma,
+input logic rst_n,
+input logic dma_en_cpu, // generated in clk_cpu domain
+output logic dma_en_safe // synchronized into clk_dma domain
+);
+
+    // TODO: instantiate sync_2ff here
+    // STAGES=2 or STAGES=3? Add a comment explaining your choice.
+    // Remember to include the ASYNC_REG note.
+
+endmodule`}
+  solution={`// CDC crossing: clk_cpu (100 MHz) → clk_dma (250 MHz)
+module dma_top (
+input logic clk_cpu,
+input logic clk_dma,
+input logic rst_n,
+input logic dma_en_cpu, // generated in clk_cpu domain
+output logic dma_en_safe // synchronized into clk_dma domain
+);
+
+    // STAGES=3: clk_dma runs at 250 MHz → T_period = 4 ns.
+    // With τ ≈ 50 ps, MTBF after 2 stages ≈ exp(4ns/50ps) = exp(80) — enormous.
+    // At 250 MHz with aggressive MTBF budgets, 3 stages is the conservative choice
+    // many teams adopt for clocks above 200 MHz. Either 2 or 3 is defensible;
+    // the reasoning matters more than the number.
+
+    sync_2ff #(
+        // ASYNC_REG="TRUE" must be applied to the flops inside sync_2ff.
+        // At the instantiation level we note it here so reviewers know
+        // the synchronizer is intentional and has been marked in the sub-module.
+        .STAGES(3)
+    ) u_sync_dma_en (
+        .clk_dst   (clk_dma),
+        .rst_n_dst (rst_n),
+        .d_src     (dma_en_cpu),
+        .q_sync    (dma_en_safe)
+    );
+
+endmodule`}
+testCases={[
+"sync_2ff is instantiated with clk_dma as clk_dst",
+"d_src is connected to dma_en_cpu",
+"q_sync is connected to dma_en_safe",
+"STAGES parameter is 2 or 3 with a justification comment"
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question:
+        "A design crosses a 4-bit counter from clk_a (200 MHz) to clk_b (133 MHz) using four independent two-flop synchronizers, one per bit. What is the fundamental problem with this approach?",
+      options: [
+        "Four synchronizers use too much area — a single wide synchronizer should be used instead.",
+        "Each bit resolves its metastability independently. The destination domain may capture some bits from the new count value and some from the old value, producing a count value that never existed in the source domain. For example, transitioning from 0111 to 1000, the destination might read 1111 — eight steps away from either valid value. The correct fix for a counter is either Gray coding (so only one bit changes per step) or a handshake/FIFO to transfer the entire word atomically.",
+        "Two-flop synchronizers only work for slow signals. A counter changes every cycle and needs a three-flop synchronizer.",
+        "The clocks are incommensurate, so the counter value can never be safely transferred.",
+      ],
+      correct: 1,
+      explanation:
+        "Independent synchronizers on a multi-bit bus create a torn-capture hazard. Gray encoding solves it because only one bit changes per count step, so a torn capture yields a valid adjacent value. A handshake or FIFO solves it for arbitrary data by ensuring atomicity at the protocol level.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A CDC analysis tool reports a 'reconvergent' violation. What does this mean and why is it more dangerous than a simple unsynchronized crossing?",
+      options: [
+        "Reconvergence means the signal crosses more than two clock domains — the solution is to add synchronizers at each boundary.",
+        "A reconvergent violation means the same source signal reaches the destination domain via two paths: one synchronized and one unsynchronized (or two synchronizers that may resolve differently). The destination logic then combines both paths — for example in an AND gate. The synchronized copy may resolve to 1 while the unsynchronized copy is still 0, creating a glitch. It is more dangerous than a simple unsynchronized crossing because simulation may not expose it: the synchronized path looks correct in simulation, but in silicon the unsynchronized path races it. The fix is to synchronize ALL uses of the signal through the same synchronizer instance.",
+        "Reconvergence is less dangerous than an unsynchronized crossing because at least one path is synchronized.",
+        "Reconvergence only occurs with Gray-coded buses and is flagged as a false positive in most tools.",
+      ],
+      correct: 1,
+      explanation:
+        "Reconvergence is insidious because it survives simulation — the synchronized branch behaves correctly in RTL simulation where metastability is not modeled. In silicon, the two copies can resolve to different values, corrupting logic that combines them. The fix: route all consumers through a single synchronizer instance so they all see the same resolved value.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "An engineer increases a synchronizer from 2 stages to 3 stages in a 500 MHz design with τ = 40 ps. Approximately how much does MTBF improve?",
+      options: [
+        "1.5× — adding one stage adds roughly 50% margin.",
+        "The period of a 500 MHz clock is 2 ns = 2000 ps. The third stage adds one full period of resolution time. MTBF improvement factor is exp(T_period / τ) = exp(2000 ps / 40 ps) = exp(50) ≈ 5 × 10^21. This is not a small improvement — it is astronomically large. This is why a single additional synchronizer stage is almost always sufficient to make a CDC crossing safe: the exponential in MTBF means each stage multiplies safety by a factor of tens of billions for typical parameters.",
+        "2× — the improvement is linear with number of stages.",
+        "The improvement depends on the data rate, not the clock frequency.",
+      ],
+      correct: 1,
+      explanation:
+        "MTBF scales exponentially with resolution time. Adding one stage at 500 MHz adds T_period = 2 ns of resolution time, multiplying MTBF by exp(2 ns / 40 ps) = exp(50) ≈ 5 × 10^21. This is why the two-flop synchronizer works: the first flip-flop may go metastable, but the probability that it remains unresolved for a full clock period is negligibly small.",
+    },
+    {
+      type: "multiple-choice",
+      question:
+        "A CDC analysis tool requires a 'clock domain definition' file before it can run. An engineer defines only the primary clocks and omits generated clocks from a PLL. What kind of CDC violations will the tool miss?",
+      options: [
+        "The tool will miss violations in the PLL block itself, but will correctly analyze all downstream logic.",
+        "Generated clocks are separate clock domains even if derived from the same PLL reference. Omitting them means the tool treats PLL-output clocks as having no defined domain, which typically causes the tool to either skip those paths entirely (false negatives) or group them with the wrong domain. Any crossing between a generated clock and a primary clock — or between two different generated clocks — will be reported as 'unconstrained' or silently ignored. In a design where PLLs generate the majority of operating clocks, this can leave most CDC paths unanalyzed. The constraint file for CDC must cover every clock in the design.",
+        "The tool will report false positives for the PLL outputs, not false negatives.",
+        "Omitting generated clocks causes the tool to fail with an error before any analysis runs.",
+      ],
+      correct: 1,
+      explanation:
+        "CDC tools can only analyze paths between domains they know about. An unconstrained clock domain is invisible to the tool — violations on paths entering or leaving that domain are silently undetected. False negatives in CDC analysis are far more dangerous than false positives because they represent real hardware failures that passed QA. Complete clock domain specifications are a non-negotiable part of the CDC sign-off flow.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- A flip-flop enters a metastable state when its input data transitions within its setup/hold window; metastability is a physical analog failure that resolves probabilistically, not a timing violation fixable by optimization.
+- MTBF scales exponentially with resolution time: each additional synchronizer stage multiplies MTBF by exp(T_period / τ), making the two-flop synchronizer an extremely effective solution despite its simplicity.
+- A two-flop synchronizer in SystemVerilog requires the `ASYNC_REG` synthesis attribute to prevent the tool from merging the two flip-flops and destroying the resolution time gap.
+- Multi-bit buses cannot be safely synchronized bit-by-bit; Gray coding (one bit changes per step) or a handshake/FIFO (atomic transfer) are the correct structural solutions.
+- Static CDC analysis tools classify crossings as synchronized, unsynchronized, quasi-static, or reconvergent, and require complete clock domain constraint files to avoid silent false negatives.
+
+The next module builds on structural correctness by introducing formal verification with SystemVerilog Assertions — the technique that proves a design not just against random stimulus but against all possible inputs in bounded time.

@@ -1,0 +1,415 @@
+---
+title: "Black-Scholes and the Greeks"
+description: "Derive the Black-Scholes formula from GBM, compute all five Greeks analytically, and implement a real-time options pricer that a market maker would recognize."
+phase: 12
+module: "12-9"
+order: 3
+estimatedMinutes: 20
+difficulty: "advanced"
+prerequisites:
+  - "12-9-01-probability-and-statistics"
+  - "12-9-02-stochastic-processes-brownian-motion"
+standards:
+  cs2023:
+    - "DS/ProbabilityAndStatistics"
+    - "AL/FundamentalsOfDataScienceAndML"
+  swebok:
+    - "mathematical-foundations"
+  bloom: "apply"
+  sfia: 2
+  dreyfus: "proficient"
+vocabulary:
+  - black-scholes
+  - call-option
+  - put-option
+  - strike-price
+  - time-to-expiry
+  - implied-volatility
+  - delta
+  - gamma
+  - theta
+  - vega
+  - rho
+  - risk-neutral-measure
+  - dynamic-hedging
+  - volatility-smile
+  - put-call-parity
+learningOutcomes:
+  - "Implement the Black-Scholes pricing formula for European calls and puts in code"
+  - "Calculate all five Greeks (delta, gamma, theta, vega, rho) analytically and explain what each measures"
+  - "Explain the concept of delta-hedging and why it eliminates directional risk"
+  - "State two assumptions of Black-Scholes that are violated in real markets and describe their practical consequence"
+  - "Use put-call parity to check option prices for arbitrage"
+---
+
+## Why this matters
+
+Options are a $700 trillion market. Every options market maker, every hedging desk, every volatility trader prices thousands of contracts per second using Black-Scholes as a baseline. Even traders who know Black-Scholes is wrong use it — because it is the common language of the market. When a trader says "the vol is 24," they mean the implied volatility that makes Black-Scholes equal to the observed market price. Understanding this formula is not academic; it is the entry ticket to one of the most quantitative corners of finance.
+
+Beyond pricing, the Greeks are the risk management toolkit. A market maker who buys options accumulates risk across delta, gamma, vega, and theta simultaneously. Managing that book in real time means monitoring and hedging each Greek continuously. This lesson builds both the pricing engine and the risk dashboard.
+
+## The insurance policy analogy
+
+A call option gives its holder the right — but not the obligation — to buy a stock at a predetermined price (the strike) on or before a set date. Think of it as insurance in reverse: you pay a premium upfront. If the stock rises above the strike, the option pays out; if it does not, you only lose the premium you paid.
+
+The question Black, Scholes, and Merton answered in 1973 was: given that the stock follows GBM, what is the _fair_ price for this insurance policy?
+
+> **Mental model: an option price is the expected payoff under the risk-neutral measure, discounted to present value.**
+> _The risk-neutral measure is a mathematical transformation that lets us price derivatives without knowing the actual drift — only the volatility matters._
+
+## The Black-Scholes formula
+
+For a European <VocabTooltip slug="call-option">call option</VocabTooltip> on a non-dividend-paying stock:
+
+$$C = S_0 N(d_1) - K e^{-rT} N(d_2)$$
+
+$$d_1 = \frac{\ln(S_0/K) + (r + \sigma^2/2)T}{\sigma\sqrt{T}}, \quad d_2 = d_1 - \sigma\sqrt{T}$$
+
+Where:
+
+- S₀ = current stock price
+- K = <VocabTooltip slug="strike-price">strike price</VocabTooltip>
+- r = risk-free interest rate
+- σ = volatility
+- T = <VocabTooltip slug="time-to-expiry">time to expiry</VocabTooltip> in years
+- N(·) = cumulative normal distribution function
+
+```python
+import numpy as np
+from scipy.stats import norm
+from dataclasses import dataclass
+
+@dataclass
+class OptionInputs:
+    S: float       # current stock price
+    K: float       # strike price
+    T: float       # time to expiry in years
+    r: float       # risk-free rate (annualized)
+    sigma: float   # volatility (annualized)
+
+def black_scholes(opt: OptionInputs) -> dict[str, float]:
+    """
+    Black-Scholes price for European call and put.
+
+    Returns both prices — put computed from put-call parity rather than
+    a separate formula, because parity is always exact and avoids redundant computation.
+    """
+    S, K, T, r, sigma = opt.S, opt.K, opt.T, opt.r, opt.sigma
+
+    if T <= 0:
+        # At expiry: intrinsic value only
+        call_price = max(S - K, 0.0)
+        put_price  = max(K - S, 0.0)
+        return {"call": call_price, "put": put_price, "d1": 0.0, "d2": 0.0}
+
+    # d1 and d2 are the Black-Scholes parameters
+    # d1: how far in-the-money on a vol-adjusted basis, including the vol/2 Itô correction
+    # d2: d1 minus one standard deviation of log-return over T
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+
+    # N(d1) is the option delta — also the risk-neutral probability of expiring in the money
+    # N(d2) is the risk-neutral probability that S_T > K (slightly different from N(d1))
+    call_price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+
+    # Put-call parity: C - P = S - K*exp(-rT)
+    # Rearranging: P = C - S + K*exp(-rT)
+    # This is model-independent and holds whenever there is no arbitrage
+    put_price = call_price - S + K * np.exp(-r * T)
+
+    return {"call": call_price, "put": put_price, "d1": d1, "d2": d2}
+
+# Example: AAPL-like stock
+inputs = OptionInputs(S=150.0, K=155.0, T=0.25, r=0.05, sigma=0.30)
+prices = black_scholes(inputs)
+print(f"Call price: ${prices['call']:.4f}")
+print(f"Put price:  ${prices['put']:.4f}")
+print(f"d1: {prices['d1']:.4f},  d2: {prices['d2']:.4f}")
+```
+
+## The Greeks: measuring risk dimensions
+
+The <VocabTooltip slug="delta">Greeks</VocabTooltip> are partial derivatives of the option price with respect to each input. A market maker holds a portfolio of hundreds of options and must know, at every moment, how the portfolio's value changes with each market variable.
+
+```python
+def black_scholes_greeks(opt: OptionInputs) -> dict[str, float]:
+    """
+    All five Black-Scholes Greeks for European calls and puts.
+
+    Each Greek answers: "if only this one input changes by a tiny amount,
+    how much does my option position change in value?"
+    """
+    S, K, T, r, sigma = opt.S, opt.K, opt.T, opt.r, opt.sigma
+
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+
+    # Standard normal PDF — appears in all second-order Greeks
+    phi_d1 = norm.pdf(d1)
+
+    # Delta: dC/dS — how much call price changes per $1 move in the stock
+    # For a call, delta is between 0 and 1; for a put, between -1 and 0
+    # At-the-money options have delta ~0.5 (calls) and ~-0.5 (puts)
+    call_delta = norm.cdf(d1)
+    put_delta  = call_delta - 1.0   # from put-call parity: delta_put = delta_call - 1
+
+    # Gamma: d²C/dS² — rate of change of delta itself
+    # Same for calls and puts (second derivative of linear parity relationship cancels)
+    # High gamma near expiry: delta changes rapidly, making hedging expensive
+    gamma = phi_d1 / (S * sigma * np.sqrt(T))
+
+    # Theta: dC/dt — time decay per calendar day
+    # Negative for long options: time passing hurts option buyers, helps sellers
+    # The -r*K*exp(-rT)*N(d2) term is the interest earned on the strike (carry)
+    call_theta = (
+        -(S * phi_d1 * sigma) / (2 * np.sqrt(T))
+        - r * K * np.exp(-r * T) * norm.cdf(d2)
+    ) / 365   # convert to per-day
+    put_theta = (
+        -(S * phi_d1 * sigma) / (2 * np.sqrt(T))
+        + r * K * np.exp(-r * T) * norm.cdf(-d2)
+    ) / 365
+
+    # Vega: dC/d(sigma) — sensitivity to a 1% move in implied volatility
+    # Same for calls and puts — both gain value when vol rises
+    # Multiply by 0.01 to express as "value change per 1 vol point"
+    vega = S * phi_d1 * np.sqrt(T) * 0.01
+
+    # Rho: dC/dr — sensitivity to interest rate changes (usually small)
+    # Long calls benefit from higher rates (higher carry on the underlying)
+    call_rho = K * T * np.exp(-r * T) * norm.cdf(d2)  * 0.01
+    put_rho  = -K * T * np.exp(-r * T) * norm.cdf(-d2) * 0.01
+
+    return {
+        "call_delta": call_delta, "put_delta": put_delta,
+        "gamma": gamma,
+        "call_theta": call_theta, "put_theta": put_theta,
+        "vega": vega,
+        "call_rho": call_rho, "put_rho": put_rho
+    }
+
+greeks = black_scholes_greeks(inputs)
+print("=== Greeks for AAPL-like 3-month call ===")
+print(f"Delta:  {greeks['call_delta']:.4f}  (per $1 stock move)")
+print(f"Gamma:  {greeks['gamma']:.6f}  (delta change per $1 stock move)")
+print(f"Theta:  {greeks['call_theta']:.4f}  (per calendar day)")
+print(f"Vega:   {greeks['vega']:.4f}    (per 1 vol point, i.e., 1% vol change)")
+print(f"Rho:    {greeks['call_rho']:.4f}   (per 1 basis point rate change)")
+```
+
+## Delta hedging: eliminating directional risk
+
+A <VocabTooltip slug="dynamic-hedging">delta hedge</VocabTooltip> makes an options position market-neutral. If you are long a call with delta = 0.42, you short 0.42 shares of the underlying. Now a small move in the stock leaves your portfolio value unchanged — you have neutralized directional exposure.
+
+```python
+def simulate_delta_hedging(
+    S0: float, K: float, T: float, r: float, sigma: float,
+    n_steps: int = 50, seed: int = 42
+) -> dict[str, float]:
+    """
+    Simulate a delta-hedged call position over its life.
+
+    A perfect delta hedge in continuous time replicates the option's payoff exactly.
+    In practice, we hedge in discrete steps — the hedging error is the cost of gamma risk.
+    """
+    np.random.seed(seed)
+    dt = T / n_steps
+
+    # Simulate one price path
+    log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * np.random.randn(n_steps)
+    prices = S0 * np.exp(np.concatenate([[0], np.cumsum(log_returns)]))
+
+    # Track hedging P&L
+    portfolio_value = 0.0
+    shares_held = 0.0
+    cash = 0.0
+
+    for i in range(n_steps):
+        t_remaining = T - i * dt
+        opt = OptionInputs(S=prices[i], K=K, T=t_remaining, r=r, sigma=sigma)
+
+        prices_bs = black_scholes(opt)
+        greeks = black_scholes_greeks(opt)
+
+        new_delta = greeks["call_delta"]
+
+        # Rebalance: buy/sell shares to match the new delta
+        # Cash changes by the cost of shares bought minus proceeds from shares sold
+        delta_change = new_delta - shares_held
+        cash -= delta_change * prices[i]  # negative: buying shares costs cash
+        cash *= np.exp(r * dt)            # cash earns risk-free rate between rebalances
+        shares_held = new_delta
+
+    # At expiry: settle the option and the stock position
+    final_option_payoff = max(prices[-1] - K, 0.0)
+    final_stock_value   = shares_held * prices[-1]
+
+    total_pnl = final_option_payoff - final_stock_value - cash
+    return {"final_price": prices[-1], "option_payoff": final_option_payoff, "hedge_pnl": total_pnl}
+
+result = simulate_delta_hedging(S0=150, K=155, T=0.25, r=0.05, sigma=0.30)
+print(f"Final stock price:  ${result['final_price']:.2f}")
+print(f"Option payoff:      ${result['option_payoff']:.2f}")
+print(f"Hedge P&L error:    ${result['hedge_pnl']:.4f}  (should be near zero for many paths)")
+```
+
+## Where Black-Scholes breaks
+
+The model assumes:
+
+1. **Constant volatility** — Real markets show a <VocabTooltip slug="volatility-smile">volatility smile</VocabTooltip>: implied vol varies with strike, invalidating the constant-σ assumption
+2. **Continuous trading** — In practice, hedging is discrete and markets have gaps (overnight, weekends, circuit breakers)
+3. **Log-normal returns** — Real returns have fat tails and jumps (crashes, earnings)
+4. **No transaction costs** — Continuous rebalancing would cost infinite commissions
+
+```python
+def implied_volatility(market_price: float, opt: OptionInputs, option_type: str = "call") -> float:
+    """
+    Find the implied vol via bisection: the sigma that makes BS price = market price.
+
+    Implied vol is the market's consensus forecast of future realized volatility.
+    If it equals historical vol, the option is fairly priced under BS assumptions.
+    Deviations reveal market risk premiums and model failures.
+    """
+    lo, hi = 0.001, 10.0  # vol bounds: 0.1% to 1000%
+
+    for _ in range(100):
+        mid_sigma = (lo + hi) / 2
+        trial = OptionInputs(S=opt.S, K=opt.K, T=opt.T, r=opt.r, sigma=mid_sigma)
+        trial_price = black_scholes(trial)[option_type]
+
+        if trial_price < market_price:
+            lo = mid_sigma  # BS price too low → vol too low
+        else:
+            hi = mid_sigma
+
+        if abs(hi - lo) < 1e-6:
+            break
+
+    return (lo + hi) / 2
+
+# A market price higher than BS suggests the market demands higher vol than historical
+market_call_price = 10.50
+implied_vol = implied_volatility(market_call_price, inputs, "call")
+print(f"Historical vol input: {inputs.sigma:.2%}")
+print(f"Implied vol:          {implied_vol:.2%}")
+print(f"Vol premium:          {(implied_vol - inputs.sigma):.2%}")
+```
+
+<SandboxExercise
+  title="Build a Greeks monitor for an options book"
+  description="You manage a book of 3 options positions. Compute the aggregate portfolio Greeks and determine how many shares to trade to make the book delta-neutral."
+  starterCode={`import numpy as np
+from scipy.stats import norm
+from dataclasses import dataclass
+
+@dataclass
+class OptionInputs:
+S: float
+K: float
+T: float
+r: float
+sigma: float
+
+# Your existing implementations
+
+def black_scholes(opt): ...
+def black_scholes_greeks(opt): ...
+
+# Portfolio: (option_inputs, quantity, option_type)
+
+# Positive quantity = long, negative = short
+
+portfolio = [
+(OptionInputs(S=150, K=150, T=0.25, r=0.05, sigma=0.28), +10, "call"), # long 10 ATM calls
+(OptionInputs(S=150, K=160, T=0.25, r=0.05, sigma=0.30), -5, "call"), # short 5 OTM calls
+(OptionInputs(S=150, K=145, T=0.25, r=0.05, sigma=0.27), +8, "put"), # long 8 OTM puts
+]
+
+# TODO: compute portfolio-level delta, gamma, theta, vega
+
+# Each option contract covers 100 shares (standard)
+
+SHARES_PER_CONTRACT = 100
+
+def portfolio_greeks(positions):
+"""
+Returns aggregate Greeks across all positions.
+Multiply individual greeks by quantity and SHARES_PER_CONTRACT.
+"""
+total = {"delta": 0, "gamma": 0, "theta": 0, "vega": 0} # ... your code here
+return total
+
+result = portfolio_greeks(portfolio)
+print(f"Portfolio delta: {result['delta']:.2f}")
+print(f"Portfolio gamma: {result['gamma']:.4f}")
+print(f"Portfolio theta: {result['theta']:.2f}/day")
+print(f"Portfolio vega: {result['vega']:.2f}/vol point")
+
+# Shares to trade to make delta-neutral:
+
+# If delta is positive, SELL shares. If negative, BUY shares.
+
+hedge_shares = -result['delta']
+print(f"\\nTo delta-hedge: {'buy' if hedge_shares > 0 else 'sell'} {abs(hedge_shares):.0f} shares")
+`}
+  solution={`def portfolio_greeks(positions):
+total = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+for opt, qty, opt_type in positions:
+g = black_scholes_greeks(opt)
+multiplier = qty \* SHARES_PER_CONTRACT
+
+        delta_key = f"{opt_type}_delta"
+        theta_key = f"{opt_type}_theta"
+
+        total["delta"] += g[delta_key] * multiplier
+        total["gamma"] += g["gamma"] * multiplier
+        total["theta"] += g[theta_key] * multiplier
+        total["vega"]  += g["vega"] * multiplier
+    return total`}
+
+/>
+
+## Check your understanding
+
+<Quiz
+  question="An options market maker is long 100 call contracts (delta 0.45 each, 100 shares/contract). To delta-hedge, they should:"
+  options={[
+    { label: "Buy 4,500 shares of the underlying", correct: false },
+    { label: "Sell 4,500 shares of the underlying", correct: true },
+    { label: "Buy 45 more call contracts", correct: false },
+    { label: "Sell 100 put contracts", correct: false },
+  ]}
+  explanation="Portfolio delta = 0.45 × 100 × 100 = 4,500. Being long 4,500 delta means the portfolio gains $4,500 if the stock rises $1. To neutralize this, the market maker sells 4,500 shares (negative delta of −1 per share), bringing total delta to zero."
+/>
+
+<Quiz
+  question="Two options have the same price but different gammas. Option A has gamma 0.02; Option B has gamma 0.08. Which is harder to hedge and why?"
+  options={[
+    {
+      label: "Option A, because higher gamma means larger delta changes per $1 move",
+      correct: false,
+    },
+    {
+      label:
+        "Option B, because higher gamma means larger delta changes per $1 move, requiring more frequent rebalancing",
+      correct: true,
+    },
+    { label: "They are equally hard to hedge since price is the same", correct: false },
+    { label: "Option A, because low gamma options have more time value", correct: false },
+  ]}
+  explanation="Gamma measures how fast delta changes. Option B's delta shifts 4× faster per $1 stock move, meaning a delta hedge becomes stale much more quickly. High-gamma positions require continuous, expensive rebalancing — this is why options near expiry (very high gamma) are said to have 'gamma risk'."
+/>
+
+## What you learned
+
+- The Black-Scholes formula prices European options assuming GBM for the underlying stock; it is the benchmark all market participants use even when they know its assumptions are violated
+- Delta measures a position's exposure to stock price moves; a <VocabTooltip slug="dynamic-hedging">delta hedge</VocabTooltip> neutralizes this exposure by taking an offsetting stock position
+- Gamma measures how fast delta changes; high-gamma positions are expensive to keep hedged and represent the core risk of short-dated options
+- Theta is the daily time decay of an option's value — long options lose value every day, short options gain it
+- <VocabTooltip slug="implied-volatility">Implied volatility</VocabTooltip> is the vol parameter
+  that makes Black-Scholes match the market price; the
+  <VocabTooltip slug="volatility-smile">volatility smile</VocabTooltip> (implied vol varies by
+  strike) is direct evidence that Black-Scholes is misspecified in practice
+
+The next lesson moves from single instruments to pairs: statistical arbitrage leverages the same probability tools to find and trade mean-reverting relationships between correlated assets.

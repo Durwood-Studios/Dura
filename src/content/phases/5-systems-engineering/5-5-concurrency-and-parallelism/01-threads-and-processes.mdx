@@ -1,0 +1,278 @@
+---
+title: "Threads vs. Processes — The Mental Model"
+description: "Build a concrete mental model for how processes and threads share (or don't share) resources, and when you'd choose one over the other."
+phase: 5
+module: "5-5"
+order: 1
+estimatedMinutes: 12
+difficulty: "intermediate"
+standards:
+  cs2023: ["OS-2", "OS-3"]
+  swebok: ["Computing Fundamentals", "Software Construction"]
+  bloom: "understand"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - process
+  - thread
+  - stack
+  - heap
+  - context-switch
+  - shared-memory
+  - address-space
+learningOutcomes:
+  - "Explain the difference between a process and a thread in terms of what each shares and what each owns privately"
+  - "Predict which resources are shared between threads in the same process"
+  - "Choose between threads and processes given a description of an isolation vs. communication trade-off"
+  - "Describe what the OS must save and restore during a context switch"
+prerequisites:
+  - "Basic understanding of what a program is and how it runs"
+  - "Familiarity with functions and the call stack (5-1 Operating Systems, Lesson 2)"
+  - "Understanding of virtual memory and address spaces (5-1 Operating Systems, Lesson 4)"
+---
+
+## Why this matters
+
+Every meaningful program you write will eventually need to do more than one thing at a time — handle multiple network connections, keep a UI responsive while computing something expensive, or saturate multiple CPU cores to finish a job faster. The two fundamental primitives for concurrent execution are **threads** and **processes**. If you reach for the wrong one, you either pay an enormous performance tax or introduce security and stability bugs that are nightmarish to debug.
+
+Understanding the difference is not academic trivia. It determines how you architect services, why certain bugs only appear under load, and what "isolated crash" means in production. The engineers who design reliable systems have this model so deeply internalized that they think with it automatically.
+
+## A building full of offices
+
+Before naming anything, picture a large office building. Each floor is rented by a different company. The company on floor 3 has its own locked server room, its own printers, its own filing cabinets. They can't accidentally walk into floor 7's server room because a locked door separates them. If a fire breaks out on floor 3, the sprinkler system on that floor can contain it without immediately burning down the whole building.
+
+Now picture the individual employees on floor 3. They all share the same floor plan, the same printer, the same coffee machine, the same filing cabinets. When an employee needs to send a fax, they walk to the shared fax machine. They can leave a note in the shared filing cabinet and any colleague can read it immediately — no courier required.
+
+This is the process/thread relationship.
+
+> **A process is a floor. A thread is an employee on that floor.**
+
+Each process gets its own isolated address space — its own virtual memory, file descriptors, and execution context. No other process can directly read or write that memory (barring explicit shared-memory mechanisms). Threads within the same process share everything: the heap, global variables, open file handles, the code itself. They each own only their own **stack** (the chain of function calls currently in progress) and their own register state (where in the code they're currently executing).
+
+## What the OS actually stores
+
+When you launch a program, the operating system creates a process. That process contains:
+
+| Resource              | Scope      | Description                                          |
+| --------------------- | ---------- | ---------------------------------------------------- |
+| Virtual address space | Process    | The full memory map: code, heap, memory-mapped files |
+| Open file descriptors | Process    | References to open files, sockets, pipes             |
+| Signal handlers       | Process    | How signals like SIGTERM are handled                 |
+| User/group IDs        | Process    | Who this process runs as                             |
+| **Stack**             | **Thread** | Each thread's own function call chain                |
+| **Program counter**   | **Thread** | Where this thread is currently executing             |
+| **Registers**         | **Thread** | CPU register state for this thread                   |
+
+A single-threaded program has exactly one thread — the main thread — with one stack and one program counter. A multi-threaded program has one process (one address space, one set of file descriptors) but multiple threads, each with their own private stack.
+
+## What a context switch costs
+
+The OS is constantly juggling many threads and processes on a limited number of CPU cores. It time-slices: each thread gets a slice of CPU time, then the OS pauses it and runs something else. The act of pausing one thread and resuming another is a **context switch**.
+
+```c
+// Pseudocode of what the OS kernel does during a context switch
+// (massively simplified — real kernels do much more)
+
+void context_switch(Thread *current, Thread *next) {
+    // Save the current thread's CPU state to memory
+    // so we can restore it exactly when it runs again
+    save_registers(current->cpu_context);
+    current->stack_pointer = get_cpu_stack_pointer();
+    current->program_counter = get_cpu_program_counter();
+
+    // Restore the next thread's previously-saved state
+    // The CPU will resume executing as if it never stopped
+    set_cpu_stack_pointer(next->stack_pointer);
+    set_cpu_program_counter(next->program_counter);
+    restore_registers(next->cpu_context);
+
+    // If switching between PROCESSES (not just threads within one process),
+    // we must also flush the TLB and switch page tables —
+    // this is why cross-process switches are more expensive
+    if (current->process != next->process) {
+        switch_page_tables(next->process->page_table);
+        flush_tlb();  // Translation Lookaside Buffer must be invalidated
+    }
+}
+```
+
+Switching between two threads in the same process is cheaper than switching between two processes because the memory mapping (page tables) stays the same. The address space doesn't need to change — only the registers and stack pointer do.
+
+## Threads in Python, Go, and C
+
+Different languages expose threads differently. Here's how you create and start a thread in three common systems languages:
+
+```python
+import threading
+import time
+
+def worker(name: str, iterations: int) -> None:
+    # Each thread has its own stack, so 'name' and 'iterations'
+    # are private to this invocation — no sharing needed
+    for i in range(iterations):
+        print(f"[{name}] step {i}")
+        time.sleep(0.05)
+
+# Thread creation: OS allocates a new stack for each thread
+# but both threads share this process's heap and file descriptors
+t1 = threading.Thread(target=worker, args=("Alpha", 3))
+t2 = threading.Thread(target=worker, args=("Beta", 3))
+
+t1.start()
+t2.start()
+
+# Main thread waits for both to finish before exiting
+# Without join(), the process can exit while threads are still running
+t1.join()
+t2.join()
+print("Both workers done")
+```
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync"
+    "time"
+)
+
+func worker(name string, iterations int, wg *sync.WaitGroup) {
+    // wg pointer is shared — it lives on the heap, not the stack
+    // All goroutines can safely call wg.Done() because sync.WaitGroup
+    // is designed for concurrent access
+    defer wg.Done()
+    for i := range iterations {
+        fmt.Printf("[%s] step %d\n", name, i)
+        time.Sleep(50 * time.Millisecond)
+    }
+}
+
+func main() {
+    var wg sync.WaitGroup
+    wg.Add(2)
+    go worker("Alpha", 3, &wg)
+    go worker("Beta", 3, &wg)
+    wg.Wait()
+    fmt.Println("Both workers done")
+}
+```
+
+Go's goroutines are lightweight threads managed by the Go runtime, not directly by the OS. The runtime multiplexes many goroutines onto a smaller pool of OS threads — this is called M:N threading and is why you can run millions of goroutines without running out of OS thread resources.
+
+## Processes vs threads: the trade-off table
+
+|                 | Threads                                   | Processes                                            |
+| --------------- | ----------------------------------------- | ---------------------------------------------------- |
+| Memory overhead | Low (share heap)                          | High (separate address space)                        |
+| Creation speed  | Fast                                      | Slow (must copy/fork address space)                  |
+| Communication   | Shared memory (fast, dangerous)           | IPC — pipes, sockets, shared memory (safe, overhead) |
+| Crash isolation | One thread crash can kill all threads     | Process crash doesn't affect other processes         |
+| Use case        | CPU parallelism, shared-state concurrency | Isolation, security boundaries, microservices        |
+
+Web browsers use both: one process per tab (isolation — a crashed tab doesn't crash the browser) and multiple threads within each tab (rendering thread, JavaScript thread, network thread).
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// Mental model exercise: which resources are shared?
+//
+// Below is a simulated process with multiple threads.
+// Your job: predict which operations will affect all threads
+// and which are private to the thread performing them.
+
+// Simulating a shared heap (process-level)
+const sharedHeap = {
+counter: 0,
+messages: [],
+};
+
+function simulateThread(name, operations) {
+// Each thread has its own stack frame (this function's local variables
+// are private to each call — they live on THAT thread's stack)
+let localStep = 0;
+
+for (const op of operations) {
+if (op.type === "increment-shared") {
+// Writing to sharedHeap — ALL threads see this change
+sharedHeap.counter++;
+console.log(\`[\${name}] incremented shared counter to \${sharedHeap.counter}\`);
+} else if (op.type === "local-compute") {
+// localStep is on this thread's stack — private, no other thread sees it
+localStep += op.value;
+console.log(\`[\${name}] local step is now \${localStep} (other threads can't see this)\`);
+} else if (op.type === "post-message") {
+// Writing to shared heap — visible to all threads
+sharedHeap.messages.push(\`[\${name}]: \${op.text}\`);
+}
+}
+}
+
+// Run two "threads" sequentially (JS is single-threaded,
+// but we're modeling the MEMORY sharing behavior)
+simulateThread("Thread-A", [
+{ type: "local-compute", value: 10 },
+{ type: "increment-shared" },
+{ type: "post-message", text: "Hello from A" },
+]);
+
+simulateThread("Thread-B", [
+{ type: "local-compute", value: 99 }, // Thread-B's localStep is its own
+{ type: "increment-shared" }, // Both increments affect shared counter
+{ type: "post-message", text: "Hello from B" },
+]);
+
+console.log("\\nFinal shared state (all threads see this):");
+console.log("Counter:", sharedHeap.counter);
+console.log("Messages:", sharedHeap.messages);
+
+// Q: What is Thread-A's localStep after Thread-B runs? Answer: still 10.
+// Q: What is sharedHeap.counter after both threads run? Answer: 2.
+`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Two threads in the same process each call a recursive function. Which resource do they NOT share?"
+  options={["The heap", "Open file descriptors", "Their call stacks", "Global variables"]}
+  answer={2}
+  explanation="Each thread has its own private stack. The heap, file descriptors, and global variables are all shared across threads in the same process."
+/>
+<Quiz
+  question="Why is switching between two processes more expensive than switching between two threads in the same process?"
+  options={[
+    "Processes have more code to execute",
+    "The OS must switch page tables and flush the TLB when changing address spaces",
+    "Threads share the CPU cache, processes do not",
+    "Process context switches require a system call, thread switches do not",
+  ]}
+  answer={1}
+  explanation="A thread context switch only needs to save/restore registers and the stack pointer. A process context switch must also swap out the entire virtual memory mapping (page tables) and invalidate the TLB, which is substantially more expensive."
+/>
+<FillBlank
+  question="Each thread owns its own ___ (which tracks its current function calls) and its own ___ (which records where in the code it's currently executing)."
+  answer="stack, program counter"
+/>
+<Quiz
+  question="A web server that handles each incoming request in a separate PROCESS rather than a separate THREAD would expect which trade-off?"
+  options={[
+    "Lower memory usage but faster request handling",
+    "Higher memory usage and slower request startup, but a crash in one request handler cannot corrupt another request's memory",
+    "Identical behavior to threads because processes and threads are the same thing",
+    "Faster startup because processes share memory",
+  ]}
+  answer={1}
+  explanation="Processes are isolated by their separate address spaces — a crash or memory corruption in one process cannot affect another. The cost is higher memory usage (each process gets its own copy of the heap) and slower creation (forking a process is more expensive than spawning a thread)."
+/>
+
+## What you learned
+
+- A **process** owns an isolated address space; a **thread** is an execution unit within a process that shares the heap and file descriptors but owns its own stack and registers
+- Context switches between threads in the same process are cheaper than between processes because the page table and TLB don't need to change
+- Threads are faster to create and cheaper for communication (shared memory), while processes provide crash isolation and security boundaries
+- The OS saves and restores a thread's registers and stack pointer during context switches so execution resumes exactly where it left off
+- Go's goroutines use M:N threading — many goroutines multiplexed onto fewer OS threads — which reduces OS-level overhead at high concurrency
+
+With the mental model in place, the next lesson confronts what goes wrong when threads share memory without coordination: race conditions, mutexes, and the dreaded deadlock.

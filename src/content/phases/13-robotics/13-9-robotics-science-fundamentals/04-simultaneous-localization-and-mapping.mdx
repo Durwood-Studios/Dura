@@ -1,0 +1,289 @@
+---
+title: "Simultaneous Localization and Mapping (SLAM)"
+description: "Understand how a mobile robot builds a map of an unknown environment while simultaneously estimating its own position within that map."
+phase: 13
+module: "13-9"
+order: 4
+estimatedMinutes: 18
+difficulty: "advanced"
+standards:
+  cs2023: ["AL-2", "AL-3", "SF-2"]
+  swebok: ["Software Construction", "Mathematical Foundations"]
+  bloom: "understand"
+  sfia: 2
+  dreyfus: "proficient"
+vocabulary:
+  - slam
+  - occupancy-grid
+  - pose-estimation
+  - loop-closure
+  - lidar
+  - odometry
+  - particle-filter
+  - graph-slam
+  - landmark
+learningOutcomes:
+  - "Explain why SLAM is a chicken-and-egg problem and describe how probabilistic methods resolve the circular dependency"
+  - "Describe what an occupancy grid encodes and how lidar scans update cell probabilities"
+  - "Explain loop closure detection and why failing to detect a loop causes unbounded map drift"
+  - "Distinguish the filter-based (EKF-SLAM, particle filter) and graph-based SLAM architectures by their computational trade-offs"
+prerequisites:
+  - "Pose (position + orientation in 2D/3D)"
+  - "Probability: conditional probability, Bayes' theorem"
+  - "Odometry concept (wheel encoder dead-reckoning)"
+  - "PID control and joint control (Lesson 13-9-3)"
+---
+
+## Why this matters
+
+Every autonomous mobile robot — from a warehouse AGV to a self-driving car — must answer two questions at all times: "Where am I?" and "What does the world look like?" Each answer normally requires the other. You need a map to localize precisely; you need a precise location to build an accurate map. SLAM is the algorithmic framework that solves both simultaneously.
+
+Without SLAM or an equivalent approach, autonomous navigation is limited to environments with pre-built maps and perfect GPS — which excludes every GPS-denied space: indoors, underground, dense urban canyons. Understanding SLAM is prerequisite knowledge for any work in mobile robotics, autonomous vehicles, or drone navigation.
+
+## The lost hiker analogy
+
+Imagine you wake up in an unfamiliar forest with a blank sheet of paper and a compass but no GPS. You start walking and sketching landmarks — a distinctive rock, a stream bend, a clearing. After an hour you circle back and see a rock that matches your sketch. You are at that landmark. That moment of recognition — "I've been here before" — lets you correct your accumulated position error and fuse your partial map segments into a consistent global map.
+
+That process — dead-reckoning your path, recording landmarks, and correcting errors when you recognize a place you've visited — is exactly what a SLAM algorithm does.
+
+> **SLAM is the problem of building a map while simultaneously using that map to localize — solved by maintaining a probability distribution over all possible robot poses and landmark positions.**
+
+## The occupancy grid
+
+The most common 2D map representation is an **occupancy grid**: a discretized grid where each cell stores the probability that cell is occupied by an obstacle.
+
+```python
+import math
+from typing import TypeAlias
+
+# Grid: 2D list of log-odds values (more numerically stable than raw probabilities)
+OccupancyGrid: TypeAlias = list[list[float]]
+
+LOG_ODDS_FREE     = math.log(0.3 / 0.7)   # -0.847 — sensor says clear
+LOG_ODDS_OCCUPIED = math.log(0.9 / 0.1)   # +2.197 — sensor says obstacle
+LOG_ODDS_PRIOR    = 0.0                    # 50/50 prior (no information)
+
+def create_grid(width_cells: int, height_cells: int) -> OccupancyGrid:
+    """Initialize grid with uninformative prior (log-odds = 0)."""
+    return [[LOG_ODDS_PRIOR] * width_cells for _ in range(height_cells)]
+
+def log_odds_to_probability(log_odds: float) -> float:
+    """Convert log-odds back to probability for visualization."""
+    return 1.0 - 1.0 / (1.0 + math.exp(log_odds))
+
+def update_cell(grid: OccupancyGrid, row: int, col: int,
+                measurement: str) -> None:
+    """
+    Update a single cell with a lidar measurement.
+
+    Log-odds representation lets us simply add the sensor model update —
+    no multiplication of small probabilities that would cause floating-point underflow.
+    """
+    if measurement == "free":
+        grid[row][col] += LOG_ODDS_FREE
+    elif measurement == "occupied":
+        grid[row][col] += LOG_ODDS_OCCUPIED
+
+    # Clamp to prevent overconfidence from many repeated scans
+    grid[row][col] = max(-5.0, min(5.0, grid[row][col]))
+
+# Simulate 5 lidar returns confirming an obstacle
+grid = create_grid(10, 10)
+for _ in range(5):
+    update_cell(grid, row=3, col=7, measurement="occupied")
+
+prob = log_odds_to_probability(grid[3][7])
+print(f"Cell (3,7) occupied probability after 5 scans: {prob:.3f}")
+# Cell (3,7) occupied probability after 5 scans: 0.957
+```
+
+## Odometry and sensor fusion
+
+Odometry (dead-reckoning from wheel encoders) accumulates error over time — wheel slip, uneven terrain, and encoder quantization all cause drift. A lidar or camera provides absolute measurements relative to landmarks, which corrects the drift.
+
+```python
+import math
+
+class RobotPose:
+    """2D robot pose: (x, y, theta)."""
+    def __init__(self, x: float = 0.0, y: float = 0.0, theta: float = 0.0) -> None:
+        self.x = x
+        self.y = y
+        self.theta = theta  # heading in radians
+
+    def __repr__(self) -> str:
+        return f"Pose(x={self.x:.3f}, y={self.y:.3f}, θ={math.degrees(self.theta):.1f}°)"
+
+def odometry_update(pose: RobotPose, delta_forward: float,
+                    delta_theta: float) -> RobotPose:
+    """
+    Integrate wheel odometry to update the pose estimate.
+
+    We use the midpoint heading to reduce linearization error
+    over large motion steps.
+    """
+    mid_theta = pose.theta + delta_theta / 2.0
+    new_x     = pose.x + delta_forward * math.cos(mid_theta)
+    new_y     = pose.y + delta_forward * math.sin(mid_theta)
+    new_theta = pose.theta + delta_theta
+
+    return RobotPose(new_x, new_y, new_theta)
+
+def add_odometry_noise(delta_forward: float, delta_theta: float,
+                       alpha1: float = 0.02, alpha2: float = 0.01) -> tuple[float, float]:
+    """
+    Simulate realistic odometry noise (motion model error).
+
+    Noise is proportional to motion magnitude — this is why
+    odometry error accumulates rather than stays constant.
+    """
+    import random
+    noisy_forward = delta_forward + random.gauss(0, alpha1 * abs(delta_forward))
+    noisy_theta   = delta_theta   + random.gauss(0, alpha2 * abs(delta_theta))
+    return noisy_forward, noisy_theta
+
+# Dead-reckoning a 1m straight path in 10 steps
+true_pose      = RobotPose()
+estimated_pose = RobotPose()
+
+for step in range(10):
+    true_pose      = odometry_update(true_pose, 0.1, 0.0)
+    noisy_d, noisy_a = add_odometry_noise(0.1, 0.0)
+    estimated_pose = odometry_update(estimated_pose, noisy_d, noisy_a)
+
+pos_error = math.sqrt((true_pose.x - estimated_pose.x)**2 +
+                      (true_pose.y - estimated_pose.y)**2)
+print(f"True pose:      {true_pose}")
+print(f"Estimated pose: {estimated_pose}")
+print(f"Position error after 1m: {pos_error*100:.1f} cm")
+```
+
+## Loop closure and graph SLAM
+
+The most important SLAM event is **loop closure**: recognizing that the robot has returned to a previously visited location. Loop closure provides a global constraint that corrects accumulated drift across the entire trajectory.
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass
+class PoseNode:
+    """A node in the pose graph — one robot pose at one timestep."""
+    node_id: int
+    pose: RobotPose
+    # Edges to neighboring nodes (node_id, relative_transform, information_matrix)
+    edges: list[tuple[int, RobotPose, float]] = field(default_factory=list)
+
+def detect_loop_closure(
+    current_node: PoseNode,
+    all_nodes: list[PoseNode],
+    scan_match_threshold: float = 0.15,  # meters
+    min_time_separation: int = 30,       # must be at least 30 nodes ago
+) -> int | None:
+    """
+    Check whether the current scan matches a past pose (loop closure candidate).
+
+    In a real system this uses scan matching (ICP) or visual place recognition
+    (bag-of-words). Here we use Euclidean distance as a proxy.
+
+    Returns the node_id of the matching past pose, or None if no match found.
+    """
+    for past_node in all_nodes:
+        # Only consider poses far enough back to be a true loop
+        if current_node.node_id - past_node.node_id < min_time_separation:
+            continue
+
+        dist = math.sqrt(
+            (current_node.pose.x - past_node.pose.x)**2 +
+            (current_node.pose.y - past_node.pose.y)**2
+        )
+        if dist < scan_match_threshold:
+            return past_node.node_id  # loop closure detected
+
+    return None
+
+# Demonstrate the dramatic effect of loop closure on drift correction
+def drift_without_loop_closure(steps: int = 100) -> float:
+    """
+    Simulate drift accumulation without loop closure.
+    A robot making a square loop ends up far from where it started.
+    """
+    pose = RobotPose()
+    for _ in range(steps):
+        noisy_d, noisy_a = add_odometry_noise(0.1, math.radians(3.6))
+        pose = odometry_update(pose, noisy_d, noisy_a)
+    # After a full "loop", the estimated position should be (0,0)
+    return math.sqrt(pose.x**2 + pose.y**2)
+
+import random
+random.seed(42)
+final_drift = drift_without_loop_closure(100)
+print(f"Drift after 100-step loop without closure: {final_drift:.3f}m")
+# Without loop closure, drift accumulates — typically 0.5–2m over a 10m loop
+```
+
+## SLAM architecture comparison
+
+| Architecture                     | Core technique          | Scales to large maps?   | Handles loop closure?    |
+| -------------------------------- | ----------------------- | ----------------------- | ------------------------ |
+| EKF-SLAM                         | Extended Kalman Filter  | No (O(n²) in landmarks) | Yes (state augmentation) |
+| Particle Filter SLAM             | Monte Carlo sampling    | Better than EKF         | Yes (weight update)      |
+| Graph-SLAM (e.g. g2o, GTSAM)     | Pose graph optimization | Yes (sparse graph)      | Yes (graph edge)         |
+| LiDAR Odometry (LOAM, LeGO-LOAM) | Feature matching + ICP  | Yes                     | Yes (place recognition)  |
+
+Modern systems (Google Cartographer, ORB-SLAM3, RTAB-Map) use graph-based backends because graph optimization scales better and handles large environments.
+
+## Practice
+
+<Quiz
+  question="A robot completes a 50-meter loop through an office building. Without loop closure, its estimated end position is 2.3 meters from its true start. With loop closure detected at the right moment, the error drops to 0.1 meters. What does loop closure mathematically provide?"
+  choices={[
+    "A faster odometry integration algorithm",
+    "A global constraint that allows backward error correction across the entire trajectory",
+    "A new sensor that measures absolute position",
+    "A reset of the odometry integrator to zero",
+  ]}
+  correct={1}
+  explanation="Loop closure adds a constraint between the current node and a past node in the pose graph. Graph optimization (e.g., Levenberg-Marquardt) then redistributes the accumulated error across the entire trajectory — all poses are adjusted, not just the current one."
+/>
+
+<FillBlank
+  prompt="An occupancy grid cell has been measured as 'free' four times and 'occupied' once. Using log-odds free = -0.847 and log-odds occupied = +2.197, starting from prior = 0, the final log-odds value is ___."
+  blanks={[{ answer: "-1.191", tolerance: 0.01, label: "log-odds" }]}
+  hint="Sum all updates: 4 × (-0.847) + 1 × (2.197) = -3.388 + 2.197 = -1.191."
+/>
+
+## Check your understanding
+
+<Quiz
+  question="EKF-SLAM becomes computationally impractical when the environment contains thousands of landmarks. What is the root cause of this scaling problem?"
+  choices={[
+    "The EKF requires more sensors as the map grows",
+    "The covariance matrix grows as O(n²) in the number of landmarks, making updates prohibitively expensive",
+    "EKF cannot handle non-linear motion models in large spaces",
+    "Loop closure detection fails when there are too many landmarks",
+  ]}
+  correct={1}
+  explanation="EKF-SLAM maintains a joint state vector of robot pose and all landmark positions. The covariance matrix is (3 + 2n) × (3 + 2n) for n landmarks in 2D. Updating this matrix scales as O(n²) per timestep, becoming impractical beyond a few hundred landmarks — which is why graph-based methods (sparse structure) replaced EKF for large-scale SLAM."
+/>
+
+<Quiz
+  question="A SLAM system produces a map that looks accurate in local regions but has visible discontinuities — walls that should be straight appear bent, and corridors that form a loop don't connect. What is the most likely cause?"
+  choices={[
+    "The lidar sensor has poor range resolution",
+    "Loop closure detection is failing, so accumulated odometry drift is not being corrected",
+    "The occupancy grid resolution is too coarse",
+    "The robot is moving too fast for the SLAM update rate",
+  ]}
+  correct={1}
+  explanation="The described symptoms — locally accurate maps with global inconsistencies at loop junctions — are the classic signature of missed loop closures. Without the global constraint, odometry drift makes the same physical location appear as two different map locations, creating the visible discontinuity."
+/>
+
+## What you learned
+
+- SLAM is a chicken-and-egg problem solved probabilistically: maintain a joint distribution over robot pose and map, update it with sensor measurements and motion commands.
+- Occupancy grids represent maps as log-odds probability fields; log-odds representation enables numerically stable, additive updates from repeated measurements.
+- Odometry accumulates unbounded error over time; sensor-based measurements (lidar, camera) provide corrections that reduce drift.
+- Loop closure is the event of recognizing a previously visited location; it provides a global constraint that allows backward error correction across the entire trajectory.
+- EKF-SLAM scales as O(n²) in landmark count; graph-based SLAM (g2o, GTSAM) uses sparse structure to scale to large environments.
+
+The next lesson moves from reactive state estimation to predictive control: Model Predictive Control optimizes future actions over a time horizon, enabling a robot to plan around constraints before they become problems.

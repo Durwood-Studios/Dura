@@ -81,9 +81,9 @@ export const PHASES: Phase[] = [
     description:
       "Variables, control flow, functions, data structures, debugging. Language-agnostic mental models with hands-on JavaScript and Python.",
     color: "#93c5fd",
-    estimatedHours: 225,
-    moduleCount: 6,
-    lessonCount: 45,
+    estimatedHours: 260,
+    moduleCount: 7,
+    lessonCount: 50,
     order: 1,
     modules: [
       mod(
@@ -100,6 +100,15 @@ export const PHASES: Phase[] = [
       mod("1", 4, "data-structures", "Data Structures", "Arrays, objects, maps, sets.", 40, 8),
       mod("1", 5, "debugging", "Debugging", "Reading errors, stack traces, breakpoints.", 35, 7),
       mod("1", 6, "first-projects", "First Projects", "Build something real, end to end.", 40, 8),
+      mod(
+        "1",
+        7,
+        "oop-and-classes",
+        "OOP and Classes",
+        "Classes, objects, inheritance, polymorphism, and encapsulation.",
+        35,
+        5
+      ),
     ],
   },
   {
@@ -110,9 +119,9 @@ export const PHASES: Phase[] = [
     description:
       "HTML, CSS, JavaScript, React, accessibility, deploying. Everything you need to ship a real web app.",
     color: "#c4b5fd",
-    estimatedHours: 275,
-    moduleCount: 5,
-    lessonCount: 50,
+    estimatedHours: 365,
+    moduleCount: 7,
+    lessonCount: 60,
     order: 2,
     modules: [
       mod(
@@ -144,6 +153,24 @@ export const PHASES: Phase[] = [
       ),
       mod("2", 4, "react", "React Fundamentals", "Components, hooks, state, effects.", 60, 10),
       mod("2", 5, "nextjs", "Next.js 15", "App router, server components, data fetching.", 50, 10),
+      mod(
+        "2",
+        6,
+        "typescript",
+        "TypeScript",
+        "Type annotations, generics, tsconfig, TypeScript in React.",
+        50,
+        6
+      ),
+      mod(
+        "2",
+        7,
+        "real-time-and-websockets",
+        "Real-Time and WebSockets",
+        "HTTP polling vs push, WebSockets, SSE, real-time patterns.",
+        40,
+        4
+      ),
     ],
   },
   {
@@ -154,9 +181,9 @@ export const PHASES: Phase[] = [
     description:
       "Data structures, algorithms, complexity, discrete math. The theoretical core that separates senior engineers from juniors.",
     color: "#fda4af",
-    estimatedHours: 225,
-    moduleCount: 5,
-    lessonCount: 40,
+    estimatedHours: 270,
+    moduleCount: 6,
+    lessonCount: 45,
     order: 3,
     modules: [
       mod(
@@ -204,6 +231,15 @@ export const PHASES: Phase[] = [
         40,
         8
       ),
+      mod(
+        "3",
+        6,
+        "discrete-mathematics",
+        "Discrete Mathematics",
+        "Propositional logic, sets, graph theory, combinatorics, proof techniques.",
+        45,
+        5
+      ),
     ],
   },
   {
@@ -214,9 +250,9 @@ export const PHASES: Phase[] = [
     description:
       "APIs, databases, auth, queues, caching, deployment. The work that keeps applications running for millions of users.",
     color: "#fdba74",
-    estimatedHours: 275,
-    moduleCount: 5,
-    lessonCount: 45,
+    estimatedHours: 325,
+    moduleCount: 6,
+    lessonCount: 50,
     order: 4,
     modules: [
       mod(
@@ -264,6 +300,15 @@ export const PHASES: Phase[] = [
         55,
         9
       ),
+      mod(
+        "4",
+        6,
+        "message-queues-and-events",
+        "Message Queues and Events",
+        "Why queues exist, Kafka, RabbitMQ, event-driven architecture, at-least-once delivery.",
+        50,
+        5
+      ),
     ],
   },
   {
@@ -274,9 +319,9 @@ export const PHASES: Phase[] = [
     description:
       "Operating systems, computer networking, database internals, and cloud infrastructure. The systems-layer fundamentals that explain why production behaves the way it does.",
     color: "#f0abfc",
-    estimatedHours: 350,
-    moduleCount: 4,
-    lessonCount: 35,
+    estimatedHours: 395,
+    moduleCount: 5,
+    lessonCount: 40,
     order: 5,
     modules: [
       mod(
@@ -315,6 +360,15 @@ export const PHASES: Phase[] = [
         85,
         8
       ),
+      mod(
+        "5",
+        5,
+        "concurrency-and-parallelism",
+        "Concurrency and Parallelism",
+        "Threads, locks, race conditions, async, actors — the models for doing multiple things at once.",
+        45,
+        5
+      ),
     ],
   },
   {
@@ -325,9 +379,9 @@ export const PHASES: Phase[] = [
     description:
       "Applied AI engineering: foundations, RAG pipelines, agentic AI, MCP server development, fine-tuning, AI in production, and the production agentic-AI discipline.",
     color: "#67e8f9",
-    estimatedHours: 440,
-    moduleCount: 7,
-    lessonCount: 62,
+    estimatedHours: 550,
+    moduleCount: 9,
+    lessonCount: 71,
     order: 6,
     modules: [
       mod(
@@ -393,6 +447,24 @@ export const PHASES: Phase[] = [
         20,
         7
       ),
+      mod(
+        "6",
+        8,
+        "classical-ml-foundations",
+        "Classical ML Foundations",
+        "Linear algebra for ML, linear/logistic regression, decision trees, clustering, model evaluation.",
+        60,
+        5
+      ),
+      mod(
+        "6",
+        9,
+        "computer-vision",
+        "Computer Vision",
+        "How computers see images, CNNs, object detection, transfer learning, vision in production.",
+        50,
+        4
+      ),
     ],
   },
   {
@@ -403,9 +475,9 @@ export const PHASES: Phase[] = [
     description:
       "Compilers and interpreters, distributed systems, Rust fundamentals, performance engineering. Where engineering becomes craft.",
     color: "#fcd34d",
-    estimatedHours: 300,
-    moduleCount: 4,
-    lessonCount: 30,
+    estimatedHours: 360,
+    moduleCount: 5,
+    lessonCount: 35,
     order: 7,
     modules: [
       mod(
@@ -444,6 +516,15 @@ export const PHASES: Phase[] = [
         40,
         6
       ),
+      mod(
+        "7",
+        5,
+        "formal-methods-and-gpu",
+        "Formal Methods and GPU Programming",
+        "What formal methods are for, TLA+, model checking, GPU memory model, CUDA fundamentals.",
+        60,
+        5
+      ),
     ],
   },
   {
@@ -454,9 +535,9 @@ export const PHASES: Phase[] = [
     description:
       "Testing, CI/CD and DevOps, architecture patterns, security, and code quality. The engineering practices that separate code that ships from code that survives.",
     color: "#a3e635",
-    estimatedHours: 200,
-    moduleCount: 5,
-    lessonCount: 35,
+    estimatedHours: 270,
+    moduleCount: 7,
+    lessonCount: 44,
     order: 8,
     modules: [
       mod(
@@ -504,6 +585,24 @@ export const PHASES: Phase[] = [
         40,
         7
       ),
+      mod(
+        "8",
+        6,
+        "system-design-at-scale",
+        "System Design at Scale",
+        "System design interview framework, scaling reads/writes, consistency models, real-world architectures.",
+        40,
+        5
+      ),
+      mod(
+        "8",
+        7,
+        "incident-management",
+        "Incident Management",
+        "SLOs, SLAs, error budgets, on-call rotation, postmortems, blameless culture.",
+        30,
+        4
+      ),
     ],
   },
   {
@@ -514,9 +613,9 @@ export const PHASES: Phase[] = [
     description:
       "The transition into engineering management, architecture at scale, org design, product strategy, business fundamentals, and the day-to-day of CTO life from startup through enterprise.",
     color: "#f472b6",
-    estimatedHours: 500,
-    moduleCount: 8,
-    lessonCount: 60,
+    estimatedHours: 600,
+    moduleCount: 10,
+    lessonCount: 68,
     order: 9,
     modules: [
       mod(
@@ -591,6 +690,24 @@ export const PHASES: Phase[] = [
         60,
         7
       ),
+      mod(
+        "9",
+        9,
+        "technical-due-diligence",
+        "Technical Due Diligence",
+        "Evaluating technical health for M&A and investment: framework, red flags, code quality signals.",
+        50,
+        4
+      ),
+      mod(
+        "9",
+        10,
+        "compliance-and-governance",
+        "Compliance and Governance",
+        "Regulatory landscape, SOC 2, GDPR, HIPAA, security governance, the CTO's compliance role.",
+        50,
+        4
+      ),
     ],
   },
 
@@ -606,9 +723,9 @@ export const PHASES: Phase[] = [
     description:
       "Eight code-teaching lessons from C-literacy to a working real-time sensor pipeline on STM32. C and Rust on bare metal, RTOS fundamentals, drivers for the four canonical buses, MISRA-C:2023 in practice. Code-first — standards appear only where they're load-bearing.",
     color: "#fb923c",
-    estimatedHours: 15,
-    moduleCount: 8,
-    lessonCount: 8,
+    estimatedHours: 18.5,
+    moduleCount: 10,
+    lessonCount: 10,
     order: 12,
     modules: [
       mod(
@@ -683,6 +800,24 @@ export const PHASES: Phase[] = [
         3,
         1
       ),
+      mod(
+        "10",
+        9,
+        "power-management",
+        "Power Management",
+        "Sleep modes, wake sources, stop mode on STM32. Cut MCU power 99% using low-power peripheral design.",
+        1.5,
+        1
+      ),
+      mod(
+        "10",
+        10,
+        "bootloaders-and-ota",
+        "Bootloaders and OTA",
+        "Flash layout, dual-bank failsafe OTA, signature verification before executing application images.",
+        2,
+        1
+      ),
     ],
   },
 
@@ -698,9 +833,9 @@ export const PHASES: Phase[] = [
     description:
       "Eight code-teaching lessons that move you from SystemVerilog literacy to a complete UVM testbench. IEEE 1800-2023 + IEEE 1800.2-2020 anchored throughout.",
     color: "#a78bfa",
-    estimatedHours: 13,
-    moduleCount: 8,
-    lessonCount: 8,
+    estimatedHours: 16.0,
+    moduleCount: 10,
+    lessonCount: 10,
     order: 13,
     modules: [
       mod(
@@ -775,6 +910,24 @@ export const PHASES: Phase[] = [
         2.5,
         1
       ),
+      mod(
+        "11",
+        9,
+        "clock-domain-crossing",
+        "Clock Domain Crossing",
+        "Metastability, synchronizers, CDC analysis — why flip-flops fail when clocks disagree.",
+        1.5,
+        1
+      ),
+      mod(
+        "11",
+        10,
+        "emulation-and-acceleration",
+        "Emulation and Hardware Acceleration",
+        "FPGA-based emulation, hardware-accelerated simulation — how to verify chips that simulate too slowly.",
+        1.5,
+        1
+      ),
     ],
   },
 
@@ -789,9 +942,9 @@ export const PHASES: Phase[] = [
     description:
       "Eight code-teaching lessons from modern C++ to a working order book. ISO C++23, IEEE 754-2019, FIX, and Nasdaq ITCH/OUCH anchored throughout.",
     color: "#f59e0b",
-    estimatedHours: 14,
-    moduleCount: 8,
-    lessonCount: 8,
+    estimatedHours: 16,
+    moduleCount: 9,
+    lessonCount: 12,
     order: 14,
     modules: [
       mod(
@@ -866,6 +1019,15 @@ export const PHASES: Phase[] = [
         3,
         1
       ),
+      mod(
+        "12",
+        9,
+        "quant-finance-mathematics",
+        "Quant Finance Mathematics",
+        "Probability, statistics, and stochastic processes for trading: distributions, hypothesis testing, time-series.",
+        2,
+        4
+      ),
     ],
   },
 
@@ -881,9 +1043,9 @@ export const PHASES: Phase[] = [
     description:
       "Eight lessons anchored to the 2025 unified ISO 10218 family + the functional-safety triad + ROS-Industrial. Capstone hash-anchors a complete R15.06-2025 risk-assessment package as a /verify artifact a hiring manager can audit.",
     color: "#818cf8",
-    estimatedHours: 11,
-    moduleCount: 8,
-    lessonCount: 8,
+    estimatedHours: 13,
+    moduleCount: 9,
+    lessonCount: 12,
     order: 10,
     modules: [
       mod(
@@ -958,6 +1120,15 @@ export const PHASES: Phase[] = [
         3,
         1
       ),
+      mod(
+        "13",
+        9,
+        "robotics-science-fundamentals",
+        "Robotics Science Fundamentals",
+        "Forward/inverse kinematics, robot perception, state estimation, planning algorithms.",
+        2,
+        4
+      ),
     ],
   },
 
@@ -974,9 +1145,9 @@ export const PHASES: Phase[] = [
     description:
       "Twelve lessons anchored to ISO 9001, AS9100, IATF 16949 + Core Tools, ASME Y14.5/Y14.41 GD&T + MBD, ISA-95/88, MTConnect + OPC UA + TSN, IEC 62443, Lean / Six Sigma. Five hash-anchorable /verify artifacts: PPAP package, DMAIC project, GD&T stack-up, OEE computation, MTConnect→OPC UA bridge.",
     color: "#2dd4bf",
-    estimatedHours: 16,
-    moduleCount: 12,
-    lessonCount: 12,
+    estimatedHours: 19.5,
+    moduleCount: 14,
+    lessonCount: 16,
     order: 11,
     modules: [
       mod(
@@ -1086,6 +1257,24 @@ export const PHASES: Phase[] = [
         "OT cybersecurity via zones, conduits, SL1-SL4. Plus RAMI 4.0 + IIRA architectural literacy for EU and US supply chains.",
         1,
         1
+      ),
+      mod(
+        "14",
+        13,
+        "cnc-and-cam",
+        "CNC and CAM",
+        "G-code fundamentals, program structure, canned cycles, coordinate systems, CAM workflow.",
+        1.5,
+        2
+      ),
+      mod(
+        "14",
+        14,
+        "metrology-and-supply-chain",
+        "Metrology and Supply Chain",
+        "CMM programming, measurement uncertainty, GUM framework, supply-chain quality integration.",
+        2,
+        2
       ),
     ],
   },

@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   Lightbulb,
   AlertTriangle,
@@ -125,6 +127,7 @@ function AnnotationCard({ annotation, userId, onVote }: AnnotationCardProps): Re
  * optional: guests can read, signed-in users can vote and annotate.
  */
 export function AnnotationsPanel({ lessonId }: AnnotationsPanelProps): React.ReactElement | null {
+  const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -316,13 +319,23 @@ export function AnnotationsPanel({ lessonId }: AnnotationsPanelProps): React.Rea
           {/* Add annotation toggle */}
           <div>
             {!isFormOpen ? (
-              <button
-                onClick={() => setIsFormOpen(true)}
-                className="flex min-h-[48px] items-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] px-4 text-sm text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
-              >
-                <Plus className="h-4 w-4" />
-                Add a note
-              </button>
+              userId ? (
+                <button
+                  onClick={() => setIsFormOpen(true)}
+                  className="flex min-h-[48px] items-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] px-4 text-sm text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add a note
+                </button>
+              ) : (
+                <Link
+                  href={`/auth/sign-in?next=${encodeURIComponent(pathname)}`}
+                  className="inline-flex min-h-[48px] items-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] px-4 text-sm text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
+                >
+                  <Plus className="h-4 w-4" />
+                  Sign in to add a note
+                </Link>
+              )
             ) : (
               <form
                 onSubmit={(e) => {

@@ -1,0 +1,438 @@
+---
+title: "G-Code Fundamentals — Program Structure and Common Cycles"
+description: "Read and write G-code programs for CNC machines: program structure, modal groups, canned cycles, and the coordinate system model that ties them together."
+phase: 14
+module: "14-13"
+order: 1
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-1", "SE-2", "PD-1"]
+  swebok: ["Software Construction", "Software Design"]
+  bloom: "apply"
+  sfia: 2
+  dreyfus: "competent"
+vocabulary:
+  - g-code
+  - cnc-machine
+  - modal-group
+  - canned-cycle
+  - coordinate-system
+  - work-offset
+  - tool-offset
+  - feed-rate
+  - spindle-speed
+  - preparatory-word
+learningOutcomes:
+  - "Identify and label each section of a G-code program (preamble, body, footer) and explain what each section configures."
+  - "Write a G-code program that drills a row of holes using a canned cycle (G81) with correct work offset, spindle speed, and feed rate."
+  - "Explain why modal G-codes persist across blocks and predict the machine state after a sequence of mixed G0/G1/G2 blocks."
+  - "Distinguish between G90 absolute and G91 incremental coordinates and convert a move between the two modes."
+  - "Interpret a tool-change block (T, M6, G43) and describe what each word does to machine state."
+prerequisites:
+  - basic-trigonometry
+  - cartesian-coordinates
+  - manufacturing-tolerances
+---
+
+## Why this matters
+
+CNC machines are the bridge between a digital design and a physical part. Every metal bracket, aluminum enclosure, and precision shaft in production hardware was cut by a machine that followed a program written in G-code. If you design hardware, knowing G-code means you can verify the program your CAM software generated — and catch a $40,000 mistake before it becomes scrap metal. If you write software for manufacturing systems, G-code is the assembly language of the shop floor: understanding it is mandatory for building DNC servers, machine monitoring tools, or anything that touches machine data.
+
+The stakes are not abstract. A single wrong sign in a coordinate — `Z-25.0` instead of `Z25.0` — drives a tool into a fixture clamp at full rapids speed. Production shops run programs thousands of times before a human sees the output. The knowledge that programs do exactly what they say, because you can read every line, is a real safety net.
+
+## What is G-code?
+
+Imagine a robot that only understands spoken sentences, one command at a time. "Move your arm forward 30 mm at walking speed." "Open your hand." "Spin your wrist at 2000 rotations per minute." G-code is that language for machine tools — a line-oriented instruction set where each line (called a **block**) contains words that set machine state, move axes, or trigger actions.
+
+> **G-code is just a list of sentences telling the machine what to do, one move at a time. Each sentence is a block; each word in the sentence is a letter-number pair.**
+
+A G-code file for a simple drilling operation looks like this:
+
+```gcode
+%                           ; tape start / file delimiter
+O1000                       ; program number
+(DRILL TOP PLATE - 4x HOLES)
+N10 G17 G20 G40 G49 G80 G90 ; safety block — reset all modal states
+N20 T1 M6                   ; tool change: load tool #1 (1/4" drill)
+N30 G43 H1                  ; apply tool length offset #1 so Z=0 is the part surface
+N40 S2500 M3                ; spindle on, 2500 RPM, clockwise
+N50 G54                     ; activate work offset #1 (where G54 says Z0 = part top)
+N60 G0 X1.000 Y1.000        ; rapid move to first hole location (no cutting yet)
+N70 G81 Z-0.600 R0.100 F8.0 ; drill cycle: plunge to Z-0.600, retract to Z0.100, feed 8 ipm
+N80 X2.000                  ; drill second hole — G81 stays active (modal)
+N90 X3.000                  ; third hole
+N100 X4.000                 ; fourth hole
+N110 G80                    ; cancel canned cycle
+N120 G0 Z1.000              ; retract to safe Z
+N130 M5                     ; spindle off
+N140 M30                    ; program end and rewind
+%
+```
+
+Every word is a letter followed by a number. The letter tells you what category of command it is:
+
+| Letter  | Meaning                                                                          |
+| ------- | -------------------------------------------------------------------------------- |
+| `G`     | **Preparatory word** — sets the mode or motion type                              |
+| `M`     | **Miscellaneous function** — machine actions (spindle, coolant, program control) |
+| `X Y Z` | **Axis words** — target coordinates                                              |
+| `F`     | **Feed rate** — cutting speed (inches/min or mm/min)                             |
+| `S`     | **Spindle speed** — RPM                                                          |
+| `T`     | **Tool number** — selects a tool from the carousel                               |
+| `H`     | **Tool offset number** — which length offset to use with G43                     |
+| `R`     | **Retract plane** — the Z height the drill returns to between holes              |
+| `N`     | **Block number** — optional line number, for reference only                      |
+
+## Modal groups: state that persists
+
+The most important concept for reading G-code is **modal groups**. A modal G-code stays active until another code in the same group cancels or replaces it. Modal groups are how the machine remembers context between blocks.
+
+```gcode
+; Modal group 1: motion mode
+G0 X1.0 Y1.0   ; Rapid (G0 active)
+G1 X2.0 F10.0  ; Linear feed (G1 active, G0 cancelled)
+X3.0           ; G1 still active — this block also cuts at feed rate
+X4.0           ; G1 still active
+G0 X0.0 Y0.0   ; Back to rapid (G1 cancelled)
+```
+
+The machine state after the last block: rapid mode (G0), at position X0 Y0. Notice that `X3.0` and `X4.0` don't repeat the `G1` — it's already in effect.
+
+Common modal groups you'll see in every program:
+
+```gcode
+; Modal group 3: absolute vs incremental
+G90             ; absolute — X1.0 means "move to position 1.0"
+G91             ; incremental — X1.0 means "move 1.0 from current position"
+
+; Converting the same physical move:
+; If the tool is at X2.0 and you want to move to X5.0:
+G90 X5.0        ; absolute: go to position 5.0
+G91 X3.0        ; incremental: go +3.0 from current position (same result)
+```
+
+**Safety block** — the first motion block in every program resets all modal states to known defaults:
+
+```gcode
+G17 G20 G40 G49 G80 G90
+; G17: XY plane active (for G2/G3 arcs)
+; G20: inch mode (G21 = mm mode)
+; G40: cancel tool radius compensation
+; G49: cancel tool length offset
+; G80: cancel any active canned cycle
+; G90: absolute coordinates
+```
+
+Running this line costs nothing — it takes zero machine time — and it prevents catastrophic surprises from the previous program leaving modal state active.
+
+## Coordinate systems and offsets
+
+A CNC machine has one machine coordinate system (the absolute reference of the physical machine) and multiple work coordinate systems (G54 through G59, and more via G54.1 Pn extensions). Work offsets let you tell the machine "for this program, X0 Y0 Z0 is the top-left corner of this part" without moving where the machine thinks home is.
+
+```gcode
+; The machine's spindle is physically at machine position X310.5 Y-127.3 Z-45.2
+; The operator set G54 so that the part corner = machine position 310.5, -127.3, -45.2
+
+G54             ; activate work offset 1
+G0 X0 Y0 Z1.0  ; rapid to part corner (which is machine home - G54 offset)
+                ; the machine moves to machine coords X310.5, Y-127.3, Z-44.2
+                ; but the programmer only thinks in part coordinates
+```
+
+**Tool length offset** (G43) does the same thing in Z: it adds the measured tool length to every Z move, so Z0 always means "at the part surface" regardless of how long the tool is.
+
+```gcode
+T1 M6           ; load tool 1
+G43 H1          ; apply length offset stored in offset register H1
+                ; if the tool is 3.250" long, every Z move adds 3.250"
+                ; so G0 Z0.1 physically moves to Z3.350 from the gauge line
+```
+
+## Canned cycles: compressed multi-step operations
+
+Drilling a hole isn't one move — it's: rapid to clearance, plunge at feed rate, retract. A **canned cycle** compresses this sequence into one G-code. The most common:
+
+```gcode
+; G81 — simple drill
+G81 Z-0.750 R0.100 F12.0
+; Z-0.750: drill depth (part surface is Z0, so this drills 0.750" deep)
+; R0.100: retract plane (rapid back to Z0.100 after each hole)
+; F12.0: feed rate during the plunge
+
+; G83 — peck drill (for deep holes — clears chips by retracting periodically)
+G83 Z-1.500 R0.100 Q0.200 F8.0
+; Q0.200: peck depth — drill 0.200", retract to R, drill again, etc.
+
+; G84 — right-hand tapping
+G84 Z-0.600 R0.100 F12.5
+; F must equal pitch × RPM: 1/20 thread × 250 RPM = 12.5 ipm
+
+; Canned cycles are modal — list positions to repeat the cycle
+G81 Z-0.500 R0.100 F10.0   ; drill first hole at current XY
+X1.500                      ; drill at X1.500 (G81 still active)
+X3.000                      ; drill at X3.000
+Y2.000                      ; drill at X3.000, Y2.000
+X1.500                      ; drill at X1.500, Y2.000
+X0.000                      ; drill at X0.000, Y2.000
+G80                         ; cancel cycle — REQUIRED or next XY rapid also drills
+```
+
+## Arc motion (G2/G3)
+
+Linear moves use G1; circular arcs use G2 (clockwise) or G3 (counter-clockwise):
+
+```gcode
+; Cut a 90-degree arc in the XY plane
+; Start: X2.000 Y0.000
+; End: X0.000 Y2.000
+; Center: X0.000 Y0.000 (I=−2.000 from start, J=0.000 from start)
+G90 G17             ; absolute, XY plane
+G1 X2.000 Y0.000 F20.0   ; move to arc start
+G3 X0.000 Y2.000 I-2.000 J0.000 F15.0
+; G3: counter-clockwise
+; X,Y: arc endpoint
+; I,J: arc center offset FROM the start point (not absolute coordinates)
+```
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// G-code simulator — parses and executes a subset of G-code
+// Tracks machine state and produces a list of moves for visualization
+
+class GCodeSimulator {
+constructor() {
+this.state = {
+x: 0, y: 0, z: 0, // current position (work coords)
+modal: {
+motion: 'G0', // G0|G1|G2|G3
+plane: 'G17', // G17=XY, G18=XZ, G19=YZ
+units: 'G20', // G20=inch, G21=mm
+absolute: true, // G90=true, G91=false
+canned: null, // G81|G83|G84|null
+},
+feedRate: 0,
+spindleSpeed: 0,
+spindleOn: false,
+tool: 0,
+workOffset: 'G54',
+cycleRetract: 0, // R value for active canned cycle
+cycleDepth: 0, // Z value for active canned cycle
+cycleFeed: 0,
+};
+this.moves = []; // recorded toolpath
+this.errors = [];
+}
+
+parseBlock(line) {
+// Strip comments and trim
+const clean = line.replace(/[();].\*$/g, '').trim().toUpperCase();
+if (!clean || clean.startsWith('%')) return null;
+
+    // Extract all word-value pairs: G90, X1.5, F10.0, etc.
+    const words = {};
+    const regex = /([A-Z])(-?\\d+\\.?\\d*)/g;
+    let match;
+    while ((match = regex.exec(clean)) !== null) {
+      const letter = match[1];
+      const value = parseFloat(match[2]);
+      // Allow multiple G/M codes per block by collecting into arrays
+      if (letter === 'G' || letter === 'M') {
+        words[letter] = words[letter] ? [...words[letter], value] : [value];
+      } else {
+        words[letter] = value;
+      }
+    }
+    return words;
+
+}
+
+applyTarget(words) {
+// Compute target position based on absolute/incremental mode
+const abs = this.state.modal.absolute;
+return {
+x: words.X !== undefined ? (abs ? words.X : this.state.x + words.X) : this.state.x,
+y: words.Y !== undefined ? (abs ? words.Y : this.state.y + words.Y) : this.state.y,
+z: words.Z !== undefined ? (abs ? words.Z : this.state.z + words.Z) : this.state.z,
+};
+}
+
+executeBlock(line) {
+const words = this.parseBlock(line);
+if (!words) return;
+
+    const gCodes = words.G || [];
+    const mCodes = words.M || [];
+
+    // Process modal state changes first
+    for (const g of gCodes) {
+      if (g === 90) this.state.modal.absolute = true;
+      else if (g === 91) this.state.modal.absolute = false;
+      else if (g === 17) this.state.modal.plane = 'G17';
+      else if (g === 20) this.state.modal.units = 'G20';
+      else if (g === 21) this.state.modal.units = 'G21';
+      else if (g === 80) this.state.modal.canned = null;
+      else if ([0, 1, 2, 3].includes(g)) this.state.modal.motion = \`G\${g}\`;
+      else if ([81, 83, 84].includes(g)) {
+        this.state.modal.canned = \`G\${g}\`;
+        if (words.R !== undefined) this.state.cycleRetract = words.R;
+        if (words.Z !== undefined) this.state.cycleDepth = words.Z;
+        if (words.F !== undefined) this.state.cycleFeed = words.F;
+      }
+      else if (g === 54) this.state.workOffset = 'G54';
+    }
+
+    // Feed rate and spindle speed
+    if (words.F !== undefined) this.state.feedRate = words.F;
+    if (words.S !== undefined) this.state.spindleSpeed = words.S;
+    if (words.T !== undefined) this.state.tool = words.T;
+
+    // Miscellaneous codes
+    for (const m of mCodes) {
+      if (m === 3 || m === 4) this.state.spindleOn = true;
+      else if (m === 5) this.state.spindleOn = false;
+      else if (m === 6) this.moves.push({ type: 'toolChange', tool: this.state.tool });
+    }
+
+    // Execute canned cycle at this XY position
+    if (this.state.modal.canned && (words.X !== undefined || words.Y !== undefined)) {
+      const target = this.applyTarget(words);
+      // Rapid to XY at retract plane
+      this.moves.push({ type: 'rapid', from: { ...this.state }, to: { x: target.x, y: target.y, z: this.state.cycleRetract } });
+      // Feed to depth
+      this.moves.push({ type: 'feed', from: { x: target.x, y: target.y, z: this.state.cycleRetract }, to: { x: target.x, y: target.y, z: this.state.cycleDepth }, feed: this.state.cycleFeed });
+      // Retract
+      this.moves.push({ type: 'rapid', from: { x: target.x, y: target.y, z: this.state.cycleDepth }, to: { x: target.x, y: target.y, z: this.state.cycleRetract } });
+      this.state.x = target.x;
+      this.state.y = target.y;
+      this.state.z = this.state.cycleRetract;
+      return;
+    }
+
+    // Motion execution (G0/G1)
+    const hasAxisWord = words.X !== undefined || words.Y !== undefined || words.Z !== undefined;
+    if (hasAxisWord && !this.state.modal.canned) {
+      const from = { x: this.state.x, y: this.state.y, z: this.state.z };
+      const to = this.applyTarget(words);
+      const motion = gCodes.includes(0) ? 'G0' : gCodes.includes(1) ? 'G1' : this.state.modal.motion;
+      this.moves.push({
+        type: motion === 'G0' ? 'rapid' : 'feed',
+        from,
+        to,
+        feed: motion === 'G1' ? this.state.feedRate : null,
+      });
+      this.state.x = to.x;
+      this.state.y = to.y;
+      this.state.z = to.z;
+    }
+
+}
+
+run(program) {
+this.moves = [];
+this.errors = [];
+for (const line of program.split('\\n')) {
+try { this.executeBlock(line); }
+catch (e) { this.errors.push({ line, error: e.message }); }
+}
+return this;
+}
+
+summary() {
+const rapids = this.moves.filter(m => m.type === 'rapid').length;
+const feeds = this.moves.filter(m => m.type === 'feed').length;
+const toolChanges = this.moves.filter(m => m.type === 'toolChange').length;
+return { totalMoves: this.moves.length, rapids, feeds, toolChanges, errors: this.errors };
+}
+}
+
+// --- Run the simulator on a 4-hole drilling program ---
+const sim = new GCodeSimulator();
+const program = \`
+%
+O2000
+(4-HOLE DRILL PATTERN)
+G17 G20 G40 G49 G80 G90
+T1 M6
+S2500 M3
+G54
+G0 X0.500 Y0.500
+G81 Z-0.600 R0.100 F8.0
+X1.500
+X2.500
+X3.500
+G80
+G0 Z1.000
+M5
+M30
+%
+\`;
+
+sim.run(program);
+
+console.log('=== Simulation Summary ===');
+console.log(JSON.stringify(sim.summary(), null, 2));
+
+console.log('\\n=== Toolpath Moves ===');
+sim.moves.forEach((move, i) => {
+if (move.type === 'toolChange') {
+console.log(\`[\${i}] TOOL CHANGE → T\${move.tool}\`);
+} else {
+const from = \`(\${move.from.x}, \${move.from.y}, \${move.from.z})\`;
+const to = \`(\${move.to.x}, \${move.to.y}, \${move.to.z})\`;
+const speed = move.feed ? \`@ \${move.feed} ipm\` : '(rapid)';
+console.log(\`[\${i}] \${move.type.toUpperCase().padEnd(5)} \${from} → \${to} \${speed}\`);
+}
+});
+
+// Your turn: modify the program above to drill a 3×2 grid of holes
+// spaced 1.000" apart, starting at X0.500 Y0.500
+// What does the toolpath look like? How many feed moves does the simulator report?`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="You have an active G81 canned cycle and you program 'X2.000 Y3.000'. What does the machine do?"
+  options={[
+    "Rapid to X2.000 Y3.000 at the current Z height",
+    "Rapid to X2.000 Y3.000 at the retract plane, plunge to cycle depth, retract — drilling a hole",
+    "Move to X2.000 Y3.000 at feed rate",
+    "Nothing — you need to repeat the full G81 block to drill again",
+  ]}
+  answer={1}
+  explanation="Canned cycles are modal. Once G81 is active, any block with an XY position triggers the full drill sequence (rapid to XY/R, plunge to Z depth, retract to R) without repeating the G81 word."
+/>
+
+<Quiz
+  question="The safety block 'G17 G20 G40 G49 G80 G90' takes significant machine time because it moves all axes to home."
+  options={["True", "False"]}
+  answer={1}
+  explanation="False. Modal state changes consume zero machine time — they change what the controller remembers, not where the machine moves. The safety block is free to include."
+/>
+
+<Quiz
+  question="A tool is at X3.000. You program 'G91 X-1.500'. Where is the tool after this block?"
+  options={["X1.500", "X-1.500", "X4.500", "X3.000 (G91 has no effect without a prior G90)"]}
+  answer={0}
+  explanation="G91 switches to incremental mode: X-1.500 means 'move -1.5 from the current position'. Current position 3.000 + (−1.500) = 1.500."
+/>
+
+<FillBlank
+  question="The G-code word that applies a tool length offset so that Z0 always represents the part surface — regardless of tool length — is ___."
+  answer="G43"
+/>
+
+<FillBlank question="To cancel any active canned cycle, you program ___." answer="G80" />
+
+## What you learned
+
+- A G-code program has three sections: a preamble (safety block + setup), a body (the actual cutting moves), and a footer (spindle off, program end) — each section has a specific job.
+- Modal G-codes remain active until replaced by another code in the same group; reading a G-code program means tracking machine state block by block, not just reading individual lines.
+- G90 coordinates are absolute (target position); G91 coordinates are incremental (distance from current position) — you can convert by adding or subtracting the current machine position.
+- Canned cycles (G81, G83, G84) compress repetitive multi-step operations into one modal command; listing XY positions after a canned cycle repeats the full operation at each location.
+- Work offsets (G54–G59) and tool length offsets (G43) decouple the program's coordinate math from the physical machine position, making programs portable across different setups.
+
+In the next lesson you will see how CAM software generates these exact G-code lines automatically — starting from a 3D solid model and a choice of toolpath strategy.

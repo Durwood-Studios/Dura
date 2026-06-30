@@ -1,0 +1,437 @@
+---
+title: "Model Predictive Control (MPC)"
+description: "Analyze how Model Predictive Control formulates robot motion as a constrained optimization problem solved receding-horizon at every timestep."
+phase: 13
+module: "13-9"
+order: 5
+estimatedMinutes: 20
+difficulty: "advanced"
+standards:
+  cs2023: ["AL-2", "AL-3", "SF-2"]
+  swebok: ["Software Construction", "Mathematical Foundations"]
+  bloom: "analyze"
+  sfia: 2
+  dreyfus: "proficient"
+vocabulary:
+  - model-predictive-control
+  - receding-horizon
+  - prediction-horizon
+  - control-horizon
+  - cost-function
+  - state-constraints
+  - control-constraints
+  - quadratic-programming
+  - reference-trajectory
+learningOutcomes:
+  - "Formulate an MPC optimization problem for a linear system by writing its cost function and constraints"
+  - "Explain the receding-horizon principle and why only the first control input is applied"
+  - "Analyze the trade-off between prediction horizon length and computational cost"
+  - "Compare MPC to PID control by identifying what each can and cannot handle (constraints, multi-variable coupling, feed-forward)"
+prerequisites:
+  - "PID control tuning and implementation (Lesson 13-9-3)"
+  - "Robot dynamics equations of motion"
+  - "Matrix algebra (multiplication, quadratic forms xᵀQx)"
+  - "Constrained optimization concept (objective function, feasible set)"
+---
+
+## Why this matters
+
+PID gives you reactive feedback: you see an error and push back against it. But what if the best action right now is to slow down preemptively because a hard constraint is coming in three timesteps? PID cannot reason about the future — it cannot know about tomorrow's wall. MPC can.
+
+Model Predictive Control is the algorithm that lets a robot arm decelerate before hitting a joint limit, a drone bank around an obstacle it will encounter in 200ms, or a chemical plant throttle a valve now to prevent a pressure spike in ten minutes. Understanding MPC is the gateway to high-performance constrained control — the kind that appears in Formula 1 engine management, automotive stability control, and modern robotic manipulators.
+
+## The chess player analogy
+
+A PID controller plays checkers: it looks at the board right now and makes the locally best move. A chess player looks several moves ahead, picks a sequence, makes the first move, then re-evaluates.
+
+MPC plays chess. At every timestep it solves an optimization problem: "Given my current state and my system model, what sequence of control inputs over the next N steps minimizes my cost function while staying within all my constraints?" It takes only the first control input from that sequence, then re-solves the entire problem at the next timestep with fresh state information.
+
+> **MPC is just "solve an optimization problem at each timestep, apply the first answer, discard the rest, repeat" — the receding-horizon principle.**
+
+## The MPC formulation
+
+For a discrete-time linear system x\_{k+1} = A·x_k + B·u_k, the MPC optimization at time k is:
+
+```
+minimize   Σ_{i=0}^{N-1} [ xᵀQx + uᵀRu ]  +  x_Nᵀ P x_N
+over       u_0, u_1, ..., u_{N-1}
+
+subject to x_{i+1} = A·x_i + B·u_i        (system model)
+           x_min ≤ x_i ≤ x_max             (state constraints)
+           u_min ≤ u_i ≤ u_max             (actuator limits)
+           x_0 = x_current                 (initial condition)
+```
+
+Where:
+
+- **Q** — state penalty matrix (how much do we care about tracking error?)
+- **R** — control effort penalty matrix (how much do we penalize actuator use?)
+- **P** — terminal cost matrix (stability guarantee at horizon end)
+- **N** — prediction horizon (how many steps ahead to optimize)
+
+```python
+import math
+from typing import TypeAlias
+
+Matrix: TypeAlias = list[list[float]]
+Vector: TypeAlias = list[float]
+
+def mat_vec_mul(A: Matrix, x: Vector) -> Vector:
+    """Matrix-vector multiplication: y = A·x"""
+    return [sum(A[i][j] * x[j] for j in range(len(x))) for i in range(len(A))]
+
+def vec_add(a: Vector, b: Vector) -> Vector:
+    return [a[i] + b[i] for i in range(len(a))]
+
+def quadratic_cost(x: Vector, Q: Matrix) -> float:
+    """Compute xᵀQx — the standard quadratic penalty on state deviation."""
+    Qx = mat_vec_mul(Q, x)
+    return sum(x[i] * Qx[i] for i in range(len(x)))
+
+class LinearMPCProblem:
+    """
+    MPC problem formulation for a linear discrete-time system.
+
+    x_{k+1} = A*x_k + B*u_k
+
+    State:   x = [position, velocity]
+    Control: u = [force/torque command]
+    """
+
+    def __init__(
+        self,
+        A: Matrix,           # state transition matrix
+        B: Matrix,           # control input matrix
+        Q: Matrix,           # state tracking cost
+        R: Matrix,           # control effort cost
+        N: int,              # prediction horizon (steps)
+        x_min: Vector,       # state lower bounds
+        x_max: Vector,       # state upper bounds
+        u_min: float,        # control lower bound
+        u_max: float,        # control upper bound
+    ) -> None:
+        self.A = A
+        self.B = B
+        self.Q = Q
+        self.R = R
+        self.N = N
+        self.x_min = x_min
+        self.x_max = x_max
+        self.u_min = u_min
+        self.u_max = u_max
+
+    def predict_trajectory(self, x0: Vector,
+                           u_sequence: list[float]) -> list[Vector]:
+        """
+        Propagate the system model forward N steps given an input sequence.
+
+        This is the 'model' in Model Predictive Control — we use the system
+        equations, not the real system, to predict future states.
+        """
+        trajectory = [x0]
+        x = x0[:]
+        for u in u_sequence:
+            # x_{k+1} = A*x_k + B*u_k  (single-input system: B is a column vector)
+            x_next = vec_add(mat_vec_mul(self.A, x),
+                             [self.B[i][0] * u for i in range(len(self.B))])
+            trajectory.append(x_next)
+            x = x_next
+        return trajectory
+
+    def evaluate_cost(self, trajectory: list[Vector],
+                      u_sequence: list[float],
+                      x_ref: Vector) -> float:
+        """
+        Compute the total MPC cost for a predicted trajectory.
+
+        The cost penalizes deviation from reference AND control effort.
+        Tuning Q vs R is the primary design knob: high Q → tracks well but
+        uses more actuator; high R → smooth control but allows more tracking error.
+        """
+        total_cost = 0.0
+
+        for i, x in enumerate(trajectory[:-1]):
+            # Deviation from reference
+            error = [x[j] - x_ref[j] for j in range(len(x))]
+            total_cost += quadratic_cost(error, self.Q)
+
+            # Control effort penalty
+            total_cost += self.R[0][0] * u_sequence[i]**2
+
+        # Terminal cost on the final state
+        final_error = [trajectory[-1][j] - x_ref[j] for j in range(len(x_ref))]
+        total_cost += quadratic_cost(final_error, self.Q)
+
+        return total_cost
+
+    def check_constraints(self, trajectory: list[Vector],
+                          u_sequence: list[float]) -> tuple[bool, str]:
+        """
+        Check whether a candidate trajectory satisfies all constraints.
+
+        Constraint enforcement is what separates MPC from unconstrained optimal control.
+        Without constraints, MPC degenerates to a linear-quadratic regulator (LQR).
+        """
+        for i, x in enumerate(trajectory):
+            for j in range(len(x)):
+                if x[j] < self.x_min[j]:
+                    return False, f"State x[{j}]={x[j]:.3f} < min={self.x_min[j]} at step {i}"
+                if x[j] > self.x_max[j]:
+                    return False, f"State x[{j}]={x[j]:.3f} > max={self.x_max[j]} at step {i}"
+
+        for i, u in enumerate(u_sequence):
+            if u < self.u_min:
+                return False, f"Control u={u:.3f} < min={self.u_min} at step {i}"
+            if u > self.u_max:
+                return False, f"Control u={u:.3f} > max={self.u_max} at step {i}"
+
+        return True, "feasible"
+```
+
+## The receding horizon in action
+
+```python
+def simple_mpc_grid_search(
+    problem: LinearMPCProblem,
+    x_current: Vector,
+    x_ref: Vector,
+    n_candidates: int = 20,
+) -> tuple[float, list[float]]:
+    """
+    Naive MPC solver using grid search over constant-input candidates.
+
+    Real MPC uses quadratic programming (QP) solvers (OSQP, qpOASES, ACADOS)
+    that exploit the problem structure for millisecond solve times.
+    Grid search is used here to make the optimization visible without QP.
+    """
+    best_cost   = float("inf")
+    best_u_seq  = [0.0] * problem.N
+    best_u_first = 0.0
+
+    # Search over constant control sequences (simplification)
+    u_candidates = [
+        problem.u_min + i * (problem.u_max - problem.u_min) / (n_candidates - 1)
+        for i in range(n_candidates)
+    ]
+
+    for u_const in u_candidates:
+        u_seq  = [u_const] * problem.N
+        traj   = problem.predict_trajectory(x_current, u_seq)
+        feasible, _ = problem.check_constraints(traj, u_seq)
+
+        if not feasible:
+            continue  # skip constraint-violating candidates
+
+        cost = problem.evaluate_cost(traj, u_seq, x_ref)
+        if cost < best_cost:
+            best_cost   = cost
+            best_u_seq  = u_seq
+            best_u_first = u_const
+
+    # ONLY apply the first control input — the receding horizon principle
+    # We re-solve next timestep with updated state information
+    return best_u_first, best_u_seq
+
+# Single-integrator position control: x = [pos, vel], u = force
+# x_{k+1} = [[1, dt],[0, 1]]*x + [[0],[dt/m]]*u
+dt = 0.05
+m  = 1.0
+
+A = [[1.0, dt],  [0.0, 1.0]]
+B = [[0.0],      [dt/m]]
+Q = [[10.0, 0.0],[0.0, 1.0]]   # penalize position error more than velocity
+R = [[0.1]]                    # small control penalty → responsive
+
+problem = LinearMPCProblem(
+    A=A, B=B, Q=Q, R=R, N=10,
+    x_min=[-2.0, -1.5],   # position and velocity lower bounds
+    x_max=[2.0,  1.5],    # position and velocity upper bounds
+    u_min=-3.0, u_max=3.0
+)
+
+# Simulate receding-horizon control for 2 seconds
+x_state = [0.0, 0.0]   # start at position 0, velocity 0
+x_ref   = [1.0, 0.0]   # target: position 1.0, velocity 0 (stop there)
+results = []
+
+for step in range(40):   # 40 steps × 0.05s = 2.0s
+    u_apply, u_seq = simple_mpc_grid_search(problem, x_state, x_ref)
+
+    # Apply first control, propagate true system (same as model here)
+    x_state = vec_add(mat_vec_mul(A, x_state), [B[i][0] * u_apply for i in range(2)])
+
+    results.append({"step": step, "pos": x_state[0], "vel": x_state[1], "u": u_apply})
+
+final = results[-1]
+print(f"Final position: {final['pos']:.4f}  (target: 1.0)")
+print(f"Final velocity: {final['vel']:.4f}  (target: 0.0)")
+```
+
+## MPC vs. PID: when to use which
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class ControllerComparison:
+    """Analytical comparison of MPC and PID properties."""
+
+    capability: str
+    pid_handles: bool
+    mpc_handles: bool
+    notes: str
+
+COMPARISON_TABLE = [
+    ControllerComparison(
+        "Hard actuator limits (u_min, u_max)",
+        pid_handles=False,   # PID ignores limits; must add external clamping
+        mpc_handles=True,    # constraints are first-class in the formulation
+        notes="PID anti-windup partially mitigates; MPC enforces exactly"
+    ),
+    ControllerComparison(
+        "State constraints (e.g. joint angle limits)",
+        pid_handles=False,
+        mpc_handles=True,
+        notes="PID reacts after violation; MPC predicts and avoids"
+    ),
+    ControllerComparison(
+        "Multi-variable coupling (MIMO systems)",
+        pid_handles=False,   # decentralized PID ignores cross-coupling
+        mpc_handles=True,    # system model captures coupling naturally
+        notes="Requires n² PID loops for n-state MIMO vs. one MPC"
+    ),
+    ControllerComparison(
+        "Real-time implementation on low-cost hardware",
+        pid_handles=True,
+        mpc_handles=False,   # QP solve adds latency; requires fast solver + horizon tuning
+        notes="PID runs in microseconds; MPC needs milliseconds minimum"
+    ),
+    ControllerComparison(
+        "Tuning interpretability",
+        pid_handles=True,   # Kp/Ki/Kd have intuitive effect
+        mpc_handles=False,  # Q, R, N interact less intuitively
+        notes="MPC tuning is more systematic but less transparent"
+    ),
+]
+
+for c in COMPARISON_TABLE:
+    pid_str = "YES" if c.pid_handles else "NO "
+    mpc_str = "YES" if c.mpc_handles else "NO "
+    print(f"  {c.capability[:45]:<45}  PID:{pid_str}  MPC:{mpc_str}")
+```
+
+## Practice
+
+<SandboxExercise
+  title="Analyze MPC horizon trade-offs"
+  description="The code below runs MPC with two different prediction horizons (N=3 and N=15) and prints the final tracking error and total control effort. Run it, compare the outputs, and then answer: which horizon reaches the target more smoothly, and which uses more aggressive control? Modify Q and R to understand their effect on the trade-off."
+  initialCode={`import math
+
+def mat_vec_mul(A, x):
+return [sum(A[i][j] \* x[j] for j in range(len(x))) for i in range(len(A))]
+
+def vec_add(a, b):
+return [a[i] + b[i] for i in range(len(a))]
+
+def run_mpc_horizon(N, Q_pos_weight, R_weight, steps=40):
+dt, m = 0.05, 1.0
+A = [[1.0, dt], [0.0, 1.0]]
+B = [[0.0], [dt / m]]
+Q = [[Q_pos_weight, 0.0], [0.0, 1.0]]
+R_val = R_weight
+
+    x_state = [0.0, 0.0]
+    x_ref = [1.0, 0.0]
+    total_effort = 0.0
+
+    for _ in range(steps):
+        best_cost = float("inf")
+        best_u = 0.0
+        for u_int in range(-30, 31):
+            u_const = u_int * 0.1  # search -3.0 to 3.0
+            if u_const < -3.0 or u_const > 3.0:
+                continue
+            u_seq = [u_const] * N
+            x = x_state[:]
+            cost = 0.0
+            feasible = True
+            for u in u_seq:
+                x = vec_add(mat_vec_mul(A, x), [B[i][0] * u for i in range(2)])
+                if not (-2.0 <= x[0] <= 2.0 and -1.5 <= x[1] <= 1.5):
+                    feasible = False
+                    break
+                err = [x[0] - x_ref[0], x[1] - x_ref[1]]
+                cost += Q[0][0] * err[0]**2 + Q[1][1] * err[1]**2 + R_val * u**2
+            if feasible and cost < best_cost:
+                best_cost, best_u = cost, u_const
+
+        x_state = vec_add(mat_vec_mul(A, x_state), [B[i][0] * best_u for i in range(2)])
+        total_effort += abs(best_u) * dt
+
+    final_error = abs(x_state[0] - x_ref[0])
+    return final_error, total_effort
+
+# Compare short horizon vs. long horizon
+
+# TODO: Change N=3 to N=15 and observe the difference
+
+# TODO: Try Q_pos_weight=50 (aggressive tracking) vs Q_pos_weight=2 (gentle tracking)
+
+err3, eff3 = run_mpc_horizon(N=3, Q_pos_weight=10, R_weight=0.1)
+err15, eff15 = run_mpc_horizon(N=15, Q_pos_weight=10, R_weight=0.1)
+
+print(f"N=3 : final error={err3:.4f}m total effort={eff3:.3f} N·s")
+print(f"N=15 : final error={err15:.4f}m total effort={eff15:.3f} N·s")
+`}
+language="python"
+expectedOutput="N=15 has lower final error"
+hint="A longer horizon lets the optimizer see further into the future — it can smooth the approach and satisfy constraints proactively. But it increases computation time quadratically."
+/>
+
+## Check your understanding
+
+<Quiz
+  question="An MPC controller computes an optimal control sequence [u₀, u₁, u₂, ..., u_{N-1}] at timestep k. What does it apply to the real system, and why?"
+  choices={[
+    "The entire sequence u₀ through u_{N-1}, because re-solving would be wasteful",
+    "Only u₀ — the first element — then re-solves at the next timestep with updated state",
+    "The average of the sequence, to smooth the input",
+    "u_{N-1} — the last element — because it accounts for the most future information",
+  ]}
+  correct={1}
+  explanation="The receding-horizon principle: only u₀ is applied. Re-solving at the next timestep incorporates actual system state (which may differ from the prediction due to model mismatch, disturbances, or noise), giving MPC its robustness. Applying the full pre-computed sequence would be open-loop and would not correct for any prediction errors."
+/>
+
+<Quiz
+  question="A robotic arm using PID control repeatedly violates its wrist joint limit during fast trajectories, even though the joint limit is programmed as a software stop. An engineer proposes switching to MPC. What specific property of MPC would prevent the joint limit violations that PID cannot prevent?"
+  choices={[
+    "MPC has faster sampling rate, so it reacts before the limit is reached",
+    "MPC includes state constraints in the optimization — it predicts future states and chooses inputs that keep the predicted trajectory within the limits",
+    "MPC uses a better motor model that inherently avoids saturating the joint",
+    "MPC's integral term accumulates the constraint violation and corrects it faster",
+  ]}
+  correct={1}
+  explanation="PID reacts to errors that have already occurred — by the time the joint is near its limit, the only way PID avoids violation is by producing a large corrective output, which often overshoots the limit before correcting. MPC predicts future state trajectories and enforces x_min ≤ x_i ≤ x_max for all predicted steps — so it begins decelerating before the limit is reached, not after."
+/>
+
+<Quiz
+  question="You are designing an MPC controller for a 6-DOF robot arm. Increasing the prediction horizon from N=10 to N=30 improves constraint handling but causes the real-time loop to miss its 10ms deadline. What is the correct analysis of this trade-off?"
+  choices={[
+    "Use N=30 anyway — constraint violations are always worse than missed deadlines",
+    "N=30 is optimal; reduce the sample rate to give the solver more time per cycle",
+    "The horizon length N directly increases the size of the QP problem; the trade-off between control quality and solve time must be resolved by profiling the QP solver or switching to a faster solver library",
+    "Increase only the control horizon to N=30, keeping the prediction horizon at N=10",
+  ]}
+  correct={2}
+  explanation="The QP problem grows with the horizon length. The correct engineering response is to (a) profile the actual QP solve time, (b) try faster solvers (ACADOS, OSQP) that exploit the banded structure of MPC QPs, (c) consider explicit MPC (pre-computed solution map) for simple systems, or (d) reduce N to fit the deadline. Missing real-time deadlines produces control failures in all control architectures, so deadline compliance is not optional."
+/>
+
+## What you learned
+
+- MPC formulates robot control as a constrained optimization problem solved at every timestep over a finite prediction horizon.
+- The receding-horizon principle applies only the first optimal control input, then re-solves with fresh state measurements — this is what gives MPC closed-loop robustness despite using an open-loop optimization.
+- Hard constraints on states (joint limits, velocity limits) and controls (actuator limits) are first-class constraints in the MPC formulation, not ad-hoc limiters added afterward.
+- The cost function matrices Q (state penalty) and R (control effort penalty) are the primary tuning knobs; longer horizon N improves constraint handling but increases solver cost as O(N²).
+- PID is preferred when constraints are non-critical, the system is SISO, and compute budget is tight; MPC is preferred when constraint satisfaction, multi-variable coupling, or predictive deceleration is required.
+
+This module has covered the mathematical backbone of modern robotics: kinematics computes where the arm is, dynamics tells you how much force to apply, PID closes the feedback loop, SLAM builds the map while localizing within it, and MPC plans constrained optimal actions over a future horizon. These five frameworks appear together in nearly every high-performance robotic system deployed today.

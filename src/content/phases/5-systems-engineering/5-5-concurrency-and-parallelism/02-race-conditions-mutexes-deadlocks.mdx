@@ -1,0 +1,417 @@
+---
+title: "Race Conditions, Mutexes, and Deadlocks"
+description: "Diagnose the class of bugs that only appear when threads run simultaneously, and learn the locking primitives that prevent them — and the traps those primitives introduce."
+phase: 5
+module: "5-5"
+order: 2
+estimatedMinutes: 18
+difficulty: "advanced"
+standards:
+  cs2023: ["OS-2", "OS-3", "PD-2"]
+  swebok: ["Computing Fundamentals", "Software Construction"]
+  bloom: "analyze"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - race-condition
+  - critical-section
+  - mutex
+  - deadlock
+  - atomicity
+  - lock-ordering
+  - thread-safety
+learningOutcomes:
+  - "Identify the three conditions that produce a race condition in concurrent code"
+  - "Write code that uses a mutex to protect a critical section from concurrent access"
+  - "Explain the four Coffman conditions required for deadlock to occur"
+  - "Apply consistent lock-ordering to eliminate a deadlock from a two-thread, two-mutex scenario"
+  - "Distinguish between a data race and a logic race, and explain why tools like ThreadSanitizer only detect the former"
+prerequisites:
+  - "Understanding of threads and shared memory (Lesson 1 of this module)"
+  - "Basic familiarity with functions and variables in at least one systems language"
+  - "Conceptual understanding of what a CPU instruction is"
+---
+
+## Why this matters
+
+Race conditions are among the most expensive bugs in software. They're non-deterministic — they appear intermittently, often only under production load, and frequently disappear the moment you add debugging instrumentation (because the timing changes). Financial systems have had race conditions that caused double-charges. Operating systems have had race conditions that opened privilege escalation holes. Game servers have had race conditions that let players duplicate items worth real money.
+
+The tools for preventing races — mutexes — are simple to understand and easy to misuse. Misuse them in one direction and you get the race back. Misuse them in the other direction and you get deadlock: a situation where your program freezes forever, silently doing nothing. Understanding both failure modes and the analysis tools for each is a core competency for anyone writing multi-threaded code.
+
+## The ATM that lies
+
+Two people share a bank account with a $500 balance. At the same moment, Person A withdraws $300 from ATM A, and Person B withdraws $300 from ATM B. Both ATMs read the balance: $500. Both see that $300 ≤ $500 — sufficient funds. Both approve the withdrawal. Both write the new balance back: $500 - $300 = $200. The account is now at $200, but $600 was withdrawn.
+
+This is a **race condition**: a correctness bug caused by multiple threads accessing shared state concurrently, where the result depends on the exact interleaving of their operations.
+
+The critical insight: neither ATM did anything wrong in isolation. Each correctly checked the balance and computed the new value. The bug is the **gap between reading and writing** — the check and the update are not atomic. Another thread can run in that gap and change the world out from under the first thread.
+
+> **A race condition is what happens when "read-then-write" is not atomic, and another thread can modify the data in between.**
+
+## Anatomy of a race: the non-atomic increment
+
+The classic teaching example is a shared counter that two threads increment. It looks trivially safe. It isn't.
+
+```c
+#include <stdio.h>
+#include <pthread.h>
+
+// Shared counter on the heap — visible to all threads in this process
+long counter = 0;
+
+void *increment_worker(void *arg) {
+    for (int i = 0; i < 1000000; i++) {
+        // This ONE LINE compiles to THREE CPU instructions:
+        //   1. LOAD  counter → register
+        //   2. ADD   register + 1
+        //   3. STORE register → counter
+        // The OS can preempt this thread between ANY two of those instructions.
+        counter++;
+    }
+    return NULL;
+}
+
+int main(void) {
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, increment_worker, NULL);
+    pthread_create(&t2, NULL, increment_worker, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+
+    // Expected: 2,000,000. Actual: anywhere from ~1,000,000 to 2,000,000.
+    // The exact value is different every run.
+    printf("Final counter: %ld\n", counter);
+    return 0;
+}
+```
+
+The interleaving that loses an increment:
+
+```
+Thread 1: LOAD counter (reads 42)
+            [OS preempts Thread 1, runs Thread 2]
+Thread 2: LOAD counter (reads 42)
+Thread 2: ADD (computes 43)
+Thread 2: STORE counter = 43
+            [OS preempts Thread 2, resumes Thread 1]
+Thread 1: ADD (computes 43, not 44 — Thread 1 read 42 before Thread 2 updated it)
+Thread 1: STORE counter = 43
+-- One increment was silently lost --
+```
+
+## The critical section and the mutex
+
+The solution is to protect the **critical section** — the region of code where shared state is accessed — with a **mutex** (mutual exclusion lock). A mutex has two operations: `lock` (acquire) and `unlock` (release). Only one thread can hold a mutex at a time. Any other thread that tries to lock it will block until the holder releases it.
+
+```c
+#include <stdio.h>
+#include <pthread.h>
+
+long counter = 0;
+pthread_mutex_t counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void *safe_increment_worker(void *arg) {
+    for (int i = 0; i < 1000000; i++) {
+        // Lock: if another thread holds this mutex, we block here until they release it.
+        // This guarantees we are the ONLY thread executing the critical section.
+        pthread_mutex_lock(&counter_mutex);
+
+        // Critical section: only one thread can be here at a time
+        counter++;
+
+        // Unlock: release the mutex so other threads can proceed
+        pthread_mutex_unlock(&counter_mutex);
+    }
+    return NULL;
+}
+
+int main(void) {
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, safe_increment_worker, NULL);
+    pthread_create(&t2, NULL, safe_increment_worker, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+
+    // Now deterministically 2,000,000 every run
+    printf("Final counter: %ld\n", counter);
+    pthread_mutex_destroy(&counter_mutex);
+    return 0;
+}
+```
+
+The same pattern in Python and Go:
+
+```python
+import threading
+
+counter = 0
+lock = threading.Lock()
+
+def safe_increment(iterations: int) -> None:
+    global counter
+    for _ in range(iterations):
+        with lock:  # with-statement automatically releases lock even if an exception occurs
+            counter += 1
+
+threads = [threading.Thread(target=safe_increment, args=(500_000,)) for _ in range(4)]
+for t in threads: t.start()
+for t in threads: t.join()
+print(f"Counter: {counter}")  # Always 2,000,000
+```
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync"
+)
+
+func main() {
+    var counter int64
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+
+    for range 4 {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for range 500_000 {
+                mu.Lock()
+                counter++
+                mu.Unlock()
+            }
+        }()
+    }
+    wg.Wait()
+    fmt.Println("Counter:", counter) // Always 2,000,000
+}
+```
+
+## Deadlock: the mutex trap
+
+A mutex prevents races by forcing serialization. But if two threads each hold a mutex the other one needs, they'll wait for each other forever. This is **deadlock**.
+
+```python
+import threading
+
+lock_a = threading.Lock()
+lock_b = threading.Lock()
+
+def thread_1():
+    with lock_a:        # Thread 1 acquires lock_a
+        print("T1 has A, waiting for B...")
+        with lock_b:    # Thread 1 now waits for lock_b — but Thread 2 holds it
+            print("T1 has both locks")
+
+def thread_2():
+    with lock_b:        # Thread 2 acquires lock_b
+        print("T2 has B, waiting for A...")
+        with lock_a:    # Thread 2 now waits for lock_a — but Thread 1 holds it
+            print("T2 has both locks")
+
+t1 = threading.Thread(target=thread_1)
+t2 = threading.Thread(target=thread_2)
+t1.start()
+t2.start()
+t1.join()  # This will hang forever — the program is deadlocked
+t2.join()
+```
+
+## The four Coffman conditions
+
+Deadlock requires ALL four of these conditions simultaneously. Eliminating any one of them prevents deadlock:
+
+1. **Mutual exclusion** — at least one resource can only be held by one thread at a time (mutexes, by definition, satisfy this)
+2. **Hold and wait** — a thread is holding at least one resource while waiting to acquire another
+3. **No preemption** — resources cannot be forcibly taken from a thread; the thread must voluntarily release them
+4. **Circular wait** — a circular chain of threads exists, where each is waiting for a resource held by the next thread in the chain
+
+The most practical prevention strategy in real code is eliminating **circular wait** via **consistent lock ordering**.
+
+## Lock ordering: the practical fix
+
+If every thread acquires multiple locks in the same global order, circular wait cannot form.
+
+```python
+import threading
+
+lock_a = threading.Lock()
+lock_b = threading.Lock()
+
+# Rule: always acquire lock_a before lock_b, everywhere in the codebase.
+# Both threads follow the same order — circular wait is impossible.
+
+def safe_thread_1():
+    with lock_a:        # Acquire in order: A then B
+        with lock_b:
+            print("T1 has A and B")
+
+def safe_thread_2():
+    with lock_a:        # Same order: A then B
+        with lock_b:
+            print("T2 has A and B")
+
+t1 = threading.Thread(target=safe_thread_1)
+t2 = threading.Thread(target=safe_thread_2)
+t1.start()
+t2.start()
+t1.join()
+t2.join()
+print("Done — no deadlock")
+```
+
+When Thread 2 tries to acquire `lock_a` and Thread 1 already holds it, Thread 2 blocks. Thread 1 finishes and releases both locks. Thread 2 then proceeds. They serialize on `lock_a`, but there's no cycle — no deadlock.
+
+In large codebases, document your lock hierarchy. Some teams assign a numeric level to each mutex and enforce: "you may only acquire a mutex at level N if you hold no mutex with level ≥ N."
+
+## Data races vs. logic races
+
+ThreadSanitizer (TSan) and similar tools detect **data races** — concurrent accesses to the same memory location where at least one is a write and there is no synchronization between them. These are detectable by the tool because the tool can observe memory accesses.
+
+**Logic races** are harder: the code is correctly synchronized (no data race), but the sequence of operations is still wrong.
+
+```python
+# No data race here — the lock is always held during balance reads and writes.
+# But there IS a logic race.
+
+def withdraw(account, amount, lock):
+    with lock:
+        balance = account["balance"]  # Safe: protected by lock
+
+    # !! The lock was released here !!
+    # Another thread can change the balance between this check
+    # and the next lock acquisition.
+    if balance >= amount:
+        with lock:
+            account["balance"] -= amount  # The original ATM bug, with a mutex!
+```
+
+The fix: the check AND the update must be inside the same lock acquisition — one atomic operation.
+
+```python
+def withdraw_correctly(account, amount, lock):
+    with lock:
+        # Check and update happen atomically — the lock is never released in between
+        if account["balance"] >= amount:
+            account["balance"] -= amount
+            return True
+        return False
+```
+
+## Practice
+
+<SandboxExercise language="javascript">
+{`// JavaScript is single-threaded, but we can MODEL race conditions
+// by simulating interleaved execution via generators.
+//
+// Each generator represents a thread. The scheduler alternates steps between them.
+// Watch how the "no lock" version loses increments, while the "locked" version doesn't.
+
+function\* unsafeIncrement(shared, iterations) {
+for (let i = 0; i < iterations; i++) {
+// Simulate the read-modify-write as three steps
+const read = shared.counter; // LOAD
+yield; // OS could switch threads HERE
+const computed = read + 1; // ADD
+yield; // or HERE
+shared.counter = computed; // STORE
+yield;
+}
+}
+
+function\* safeIncrement(shared, lock, iterations) {
+for (let i = 0; i < iterations; i++) {
+// Acquire the lock — spin until it's free
+while (lock.held) {
+yield; // Give other threads a chance to run while we wait
+}
+lock.held = true; // Lock acquired
+
+    // Critical section — protected
+    shared.counter++;    // This is still three CPU ops, but no thread can interleave here
+
+    lock.held = false;   // Release the lock
+    yield;
+
+}
+}
+
+function runInterleaved(generators) {
+// Round-robin scheduler: advance each generator one step at a time
+let anyAlive = true;
+while (anyAlive) {
+anyAlive = false;
+for (const gen of generators) {
+const result = gen.next();
+if (!result.done) anyAlive = true;
+}
+}
+}
+
+const ITERATIONS = 10;
+
+// --- Unsafe version ---
+const unsafeShared = { counter: 0 };
+runInterleaved([
+unsafeIncrement(unsafeShared, ITERATIONS),
+unsafeIncrement(unsafeShared, ITERATIONS),
+]);
+console.log(\`Unsafe result: \${unsafeShared.counter} (expected \${ITERATIONS \* 2})\`);
+
+// --- Safe version ---
+const safeShared = { counter: 0 };
+const lock = { held: false };
+runInterleaved([
+safeIncrement(safeShared, lock, ITERATIONS),
+safeIncrement(safeShared, lock, ITERATIONS),
+]);
+console.log(\`Safe result: \${safeShared.counter} (expected \${ITERATIONS \* 2})\`);
+`}
+
+</SandboxExercise>
+
+## Check your understanding
+
+<Quiz
+  question="Thread A holds Mutex 1 and is waiting for Mutex 2. Thread B holds Mutex 2 and is waiting for Mutex 1. Which Coffman condition does this scenario illustrate?"
+  options={["Hold and wait", "No preemption", "Circular wait", "Mutual exclusion"]}
+  answer={2}
+  explanation="Circular wait is the condition where a cycle exists in the wait graph — Thread A waits for Thread B, and Thread B waits for Thread A. This is the Coffman condition that consistent lock ordering directly eliminates."
+/>
+<Quiz
+  question="Which of the following is the CORRECT way to use a mutex for the check-then-act pattern?"
+  options={[
+    "Lock, read, unlock, check, lock, write, unlock",
+    "Lock, read, check, write, unlock",
+    "Read, check, lock, write, unlock",
+    "Lock, read, unlock, lock, check, write, unlock",
+  ]}
+  answer={1}
+  explanation="The check and the write must happen inside the same lock acquisition. Releasing the lock between the check and the write recreates the original race condition — another thread can modify the data in the gap."
+/>
+<Quiz
+  question="A data race detector like ThreadSanitizer reports no issues on your code. Does that mean your code has no race conditions?"
+  options={[
+    "Yes — if TSan passes, the code is race-free",
+    "No — TSan detects data races but cannot detect logic races where locks are used incorrectly",
+    "No — TSan only works on single-threaded code",
+    "Yes — if all accesses are synchronized, race conditions are impossible by definition",
+  ]}
+  answer={1}
+  explanation="TSan detects data races: unsynchronized concurrent memory accesses. It cannot detect logic races where you use locks but release and re-acquire them in the wrong places, creating a window for another thread to intervene between logically-related operations."
+/>
+<FillBlank
+  question="The four Coffman conditions for deadlock are: mutual exclusion, hold and wait, no preemption, and ___ ___."
+  answer="circular wait"
+/>
+
+## What you learned
+
+- A race condition arises when multiple threads read-then-write shared state and the read and write are not atomic — another thread can modify the data in the gap
+- A **mutex** allows exactly one thread at a time into a **critical section**; all other threads block until the mutex is released
+- **Deadlock** requires all four Coffman conditions: mutual exclusion, hold-and-wait, no preemption, and circular wait — eliminating any one prevents deadlock
+- **Consistent lock ordering** eliminates circular wait: if every thread acquires multiple locks in the same global order, a cycle in the wait graph cannot form
+- ThreadSanitizer detects **data races** (unsynchronized memory accesses) but cannot detect **logic races** where synchronization is structurally present but semantically wrong
+
+The next lesson zooms out from synchronous thread locks to a fundamentally different model of concurrency: async I/O and event loops, where a single thread handles thousands of concurrent operations without a mutex in sight.

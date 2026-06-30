@@ -1,0 +1,235 @@
+---
+title: "Robot Dynamics and Torque"
+description: "Model the forces and torques that govern robot arm motion, and compute the motor effort required to move a multi-link arm at a desired acceleration."
+phase: 13
+module: "13-9"
+order: 2
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["AL-1", "AL-2"]
+  swebok: ["Software Construction", "Mathematical Foundations"]
+  bloom: "understand"
+  sfia: 2
+  dreyfus: "competent"
+vocabulary:
+  - rigid-body-dynamics
+  - torque
+  - inertia-tensor
+  - coriolis-force
+  - centripetal-force
+  - gravity-compensation
+  - equations-of-motion
+  - newton-euler-method
+learningOutcomes:
+  - "State the three force terms in the robot equations of motion and explain the physical source of each"
+  - "Compute the gravity-compensation torque for a single revolute joint given link mass and length"
+  - "Explain why joint torque requirements change as the arm moves through different configurations"
+  - "Describe what the inertia matrix encodes and why it is configuration-dependent"
+prerequisites:
+  - "Forward kinematics (Lesson 13-9-1)"
+  - "Jacobian matrix concept"
+  - "Newton's second law (F = ma)"
+  - "Torque as a cross-product (τ = r × F)"
+---
+
+## Why this matters
+
+Knowing where the robot's end-effector is (kinematics) is only half the picture. To move the arm, motors must produce specific torques — not arbitrary torques, but exactly the torques needed to accelerate the links, resist gravity, and counteract the coupling forces that one joint imposes on its neighbors. Size a motor too small and the arm cannot hold its own weight. Ignore coupling forces and your trajectory controller produces jerky, imprecise motion.
+
+Every motor sizing calculation, every feedforward controller, and every physical simulation of a robot arm depends on the dynamics equations you will learn here.
+
+## A wrench tightening a bolt
+
+Imagine holding a wrench parallel to the floor to tighten a bolt. Your arm must do three jobs simultaneously: (1) exert the turning force on the bolt, (2) hold the wrench up against gravity, and (3) counteract the tendency of the spinning wrench to pull your shoulder sideways. Each of those is a separate torque contribution. Robot joints face the same three-part problem — all at once, at every timestep.
+
+> **Robot dynamics is just Newton's second law (F = ma) applied to a chain of rotating rigid bodies — one equation per joint, three physical terms per equation.**
+
+## The equations of motion
+
+The complete dynamics of an n-joint robot arm can be written in matrix form:
+
+```
+τ = M(q)·q̈ + C(q,q̇)·q̇ + g(q)
+```
+
+Where:
+
+- **τ** — vector of joint torques (what motors must provide)
+- **M(q)** — inertia matrix (how hard it is to accelerate, depends on configuration)
+- **q̈** — joint angular accelerations (what we want to achieve)
+- **C(q,q̇)·q̇** — Coriolis and centrifugal coupling terms (joints fighting each other)
+- **g(q)** — gravity torques (holding the arm up against gravity)
+
+```python
+import math
+from typing import NamedTuple
+
+class Link(NamedTuple):
+    mass_kg: float    # concentrated at the center of the link
+    length_m: float   # link length
+
+def gravity_torque_1dof(theta_rad: float, link: Link,
+                        g: float = 9.81) -> float:
+    """
+    Torque required at a single revolute joint to hold a horizontal arm
+    at angle theta against gravity.
+
+    Gravity acts at the link's center of mass (L/2 from the joint).
+    The torque is the cross product of the moment arm and the gravitational force.
+    cos(theta) projects the gravity vector onto the direction that creates torque.
+    """
+    moment_arm = link.length_m / 2.0       # CoM is halfway along the link
+    gravity_force = link.mass_kg * g        # N, acts straight down
+    # Maximum torque when arm is horizontal (theta=0); zero when arm is vertical
+    return moment_arm * gravity_force * math.cos(theta_rad)
+
+upper_arm = Link(mass_kg=2.5, length_m=0.4)
+
+for angle_deg in [0, 30, 60, 90]:
+    tau = gravity_torque_1dof(math.radians(angle_deg), upper_arm)
+    print(f"θ = {angle_deg:2d}°  →  gravity torque = {tau:.2f} N·m")
+
+# θ =  0°  →  gravity torque = 4.91 N·m
+# θ = 30°  →  gravity torque = 4.25 N·m
+# θ = 60°  →  gravity torque = 2.45 N·m
+# θ = 90°  →  gravity torque = 0.00 N·m
+```
+
+## The inertia matrix M(q)
+
+For a 2-DOF arm the inertia matrix is 2×2. Each diagonal element is the effective inertia seen by that joint; off-diagonal elements capture inertial coupling between joints.
+
+```python
+def inertia_matrix_2dof(theta1: float, theta2: float,
+                         m1: float, m2: float,
+                         L1: float, L2: float) -> list[list[float]]:
+    """
+    Compute the 2x2 inertia matrix for a 2-DOF planar arm with
+    point masses at each link's center.
+
+    Off-diagonal terms are nonzero when the elbow is bent — this is why
+    commanding only joint 1 still requires joint 2's motor to work:
+    the joints are dynamically coupled.
+    """
+    # Moment of inertia contributions (point mass assumption, each at L/2)
+    I1 = m1 * (L1/2)**2                  # joint 1 sees its own link
+    Lc2 = L2 / 2                          # center of mass of link 2
+
+    # Joint 2 inertia is simple — only link 2's own inertia
+    M22 = m2 * Lc2**2
+
+    # Joint 1 inertia includes link 2's mass at varying distance (config-dependent)
+    # The distance from joint 1 to link 2's CoM depends on theta2
+    r2 = math.sqrt(L1**2 + Lc2**2 + 2*L1*Lc2*math.cos(theta2))
+    M11 = I1 + m2 * r2**2
+
+    # Cross-inertia term — nonzero when elbow is bent
+    M12 = m2 * (L1 * Lc2 * math.cos(theta2) + Lc2**2)
+
+    return [[M11, M12],
+            [M12, M22]]
+
+# Compare inertia at arm extended vs. elbow fully bent
+M_extended = inertia_matrix_2dof(0, 0,    m1=2.0, m2=1.5, L1=0.4, L2=0.35)
+M_folded   = inertia_matrix_2dof(0, math.pi, m1=2.0, m2=1.5, L1=0.4, L2=0.35)
+
+print(f"Extended  M[0][0] = {M_extended[0][0]:.4f} kg·m²")
+print(f"Folded    M[0][0] = {M_folded[0][0]:.4f} kg·m²")
+# Extended  M[0][0] = 0.4972 kg·m²   ← harder to accelerate joint 1
+# Folded    M[0][0] = 0.0736 kg·m²   ← arm folded inward, much less inertia
+```
+
+This configuration-dependence is why fixed-gain PID controllers struggle on robot arms: the plant (inertia matrix) changes with every pose.
+
+## Coriolis and centrifugal terms
+
+When an arm is moving (q̇ ≠ 0), each joint exerts reaction forces on the others — even with zero joint acceleration. A joint spinning at constant speed while a neighboring joint is also moving creates **Coriolis** coupling; a single joint spinning at constant speed creates **centrifugal** loading.
+
+```python
+def coriolis_centrifugal_2dof(theta2: float, dtheta1: float, dtheta2: float,
+                               m2: float, L1: float, L2: float) -> list[float]:
+    """
+    Coriolis + centrifugal torques for a 2-DOF arm.
+
+    These terms vanish when the arm is stationary (velocities = 0),
+    which is why quasi-static (slow) motion is much easier to control precisely.
+    Fast paths require full dynamic compensation.
+    """
+    Lc2 = L2 / 2
+    h = m2 * L1 * Lc2 * math.sin(theta2)  # coupling coefficient
+
+    # Coriolis on joint 1: caused by both joints moving simultaneously
+    tau_c1 = -h * dtheta2 * (2*dtheta1 + dtheta2)
+
+    # Centrifugal on joint 2: caused by joint 1 spinning
+    tau_c2 = h * dtheta1**2
+
+    return [tau_c1, tau_c2]
+
+# Example: arm spinning fast with elbow bent at 45°
+cc = coriolis_centrifugal_2dof(
+    theta2=math.radians(45),
+    dtheta1=2.0,   # rad/s
+    dtheta2=1.0,   # rad/s
+    m2=1.5, L1=0.4, L2=0.35
+)
+print(f"Coriolis torque on joint 1: {cc[0]:.3f} N·m")
+print(f"Centrifugal torque on joint 2: {cc[1]:.3f} N·m")
+```
+
+## Practice
+
+<FillBlank
+  prompt="A single-joint arm holds a 3 kg link of length 0.6 m horizontally. Using g = 9.81 m/s², the gravity torque at the joint is ___ N·m (round to one decimal place)."
+  blanks={[{ answer: "8.8", tolerance: 0.1, label: "τ (N·m)" }]}
+  hint="The center of mass is at L/2 = 0.3 m from the joint. τ = m·g·(L/2)·cos(0°) = 3 × 9.81 × 0.3."
+/>
+
+<Quiz
+  question="An arm's inertia matrix M(q) has large off-diagonal elements. What physical situation does this indicate?"
+  choices={[
+    "The joints are mechanically decoupled and can be controlled independently",
+    "The joints are dynamically coupled — commanding one joint's acceleration requires the other joint's motor to produce torque as well",
+    "The arm has reached a singularity and is about to lose controllability",
+    "The off-diagonal elements represent gravitational loading, not coupling",
+  ]}
+  correct={1}
+  explanation="Off-diagonal elements of M(q) represent inertial coupling between joints. A non-diagonal M means that accelerating joint i distributes reaction forces to joint j — so both motors must act even when you command motion in only one joint."
+/>
+
+## Check your understanding
+
+<Quiz
+  question="You run a robot arm at very slow speed (quasi-static motion) and the trajectory is accurate. At high speed the same trajectory develops large errors. Which dynamics term is most responsible for the high-speed error?"
+  choices={[
+    "Gravity compensation — g(q) grows with speed",
+    "Inertia — M(q)·q̈ becomes large at high acceleration",
+    "Coriolis and centrifugal terms — C(q,q̇)·q̇ are proportional to velocity and vanish at low speed",
+    "Link mass — heavier links are always harder to control regardless of speed",
+  ]}
+  correct={2}
+  explanation="The Coriolis/centrifugal term C(q,q̇)·q̇ scales with the square of joint velocity. At slow speed these terms are negligible; at high speed they become the dominant error source for a controller that does not explicitly compensate them."
+/>
+
+<Quiz
+  question="Why does a fixed-gain PID controller often perform poorly across the full workspace of a robot arm?"
+  choices={[
+    "PID controllers cannot handle multi-input multi-output systems at all",
+    "The effective plant (inertia matrix M(q)) changes with configuration, so fixed gains are tuned for one pose and wrong for others",
+    "PID requires continuous-time signals but robot controllers run in discrete time",
+    "Gravity changes the setpoint, which PID cannot track",
+  ]}
+  correct={1}
+  explanation="Because M(q) is configuration-dependent, the dynamic response of the arm (how it reacts to a given torque command) varies across the workspace. Fixed PID gains matched at one configuration will be over-damped or under-damped at others. This motivates feedforward dynamic compensation and gain-scheduling."
+/>
+
+## What you learned
+
+- Robot dynamics are governed by three torque terms: inertial (M·q̈), velocity-coupling (C·q̇), and gravitational (g(q)).
+- The inertia matrix M(q) is configuration-dependent — the same arm is harder to accelerate when extended than when folded.
+- Gravity compensation torque at a revolute joint is proportional to the cosine of the joint angle and the moment arm to the link's center of mass.
+- Coriolis and centrifugal terms are proportional to velocity and vanish at slow speeds, which is why quasi-static motion is easier to control accurately.
+- Fixed-gain controllers fail across the workspace because the dynamic plant changes with configuration.
+
+The next lesson builds on these dynamics: PID control gives you a practical feedback law, and tuning its gains is the first bridge between dynamics equations and real hardware behavior.

@@ -1,0 +1,439 @@
+---
+title: "Object Detection — YOLO, R-CNN"
+description: "From classification to localization: bounding boxes, anchor boxes, and how YOLO detects objects in real time."
+phase: 6
+module: "6-9"
+order: 3
+estimatedMinutes: 18
+difficulty: "intermediate"
+standards:
+  cs2023: ["AI-3", "AI-4"]
+  swebok: ["Software Design", "Software Testing"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - bounding-box
+  - anchor-box
+  - iou
+  - nms
+  - object-detection
+  - region-proposal
+  - confidence-score
+  - one-stage-detector
+  - two-stage-detector
+learningOutcomes:
+  - "Explain the difference between image classification and object detection as distinct problem formulations"
+  - "Describe how YOLO divides an image into a grid and predicts bounding boxes from each cell"
+  - "Implement IoU (Intersection over Union) to measure how well a predicted box overlaps a ground-truth box"
+  - "Apply Non-Maximum Suppression to remove duplicate detections from a set of predicted boxes"
+  - "Use a pretrained YOLO model to run inference on an image and parse its outputs"
+prerequisites:
+  - "Convolutional neural networks (lesson 6-9-02)"
+  - "Python, NumPy, basic PyTorch"
+  - "Confidence intervals and probability basics"
+---
+
+## Why this matters
+
+Image classification answers one question: "what is in this image?" Object detection answers a harder question: "what is in this image, and where exactly is each thing?" That spatial answer is what separates a camera that says "there is a person somewhere" from one that can draw a tight box around that person and track them in real time.
+
+If you work anywhere near autonomous vehicles, robotics, retail analytics, security systems, medical imaging, or manufacturing quality control, you will encounter object detection. Understanding the two dominant architectural families — YOLO and R-CNN variants — gives you the vocabulary to read papers, select models, and debug failures at the right level.
+
+## The gap between classification and detection
+
+A classification model takes an image and outputs a probability for each class. But detection requires two outputs per object: what it is (class) and where it is (bounding box coordinates).
+
+A <VocabTooltip slug="bounding-box">bounding box</VocabTooltip> is the minimal rectangle that encloses an object. It is represented as four numbers: either `(x_min, y_min, x_max, y_max)` or `(center_x, center_y, width, height)`. YOLO uses the center format; COCO benchmark datasets use corner format.
+
+> **Object detection = classification × localization × counting.** A detector must simultaneously answer "what", "where", and "how many" for an arbitrary number of objects.
+
+The naive approach — scan every possible crop of the image at every scale and run a classifier — is too slow for real use. Both YOLO and R-CNN were designed to solve the efficiency problem, in opposite ways.
+
+## Two-stage detection: R-CNN family
+
+R-CNN (Region-based CNN, 2014) proposed a two-stage pipeline:
+
+1. **Stage 1 (Region Proposal):** Generate ~2,000 candidate regions likely to contain objects using a fast heuristic algorithm (selective search, or a learned Region Proposal Network in Faster R-CNN).
+2. **Stage 2 (Classification + Refinement):** For each proposal, crop and resize that patch, run it through a CNN, classify it, and refine the box coordinates.
+
+```
+Image → Region Proposal → [Crop + Resize] × N → CNN → [class, refined box] × N
+```
+
+The advantage: high accuracy, because stage 2 sees each candidate carefully. The disadvantage: inherently sequential and slow (~5 seconds per image for the original R-CNN). Faster R-CNN reduced this to ~0.1 seconds by sharing the backbone convolutions across all proposals.
+
+**When to use R-CNN variants:** Tasks where accuracy matters more than speed — medical imaging, forensic analysis, satellite object detection.
+
+## One-stage detection: YOLO
+
+YOLO (You Only Look Once, 2016) rejected the two-stage approach entirely. Instead of proposing regions then classifying them, YOLO runs the image through a CNN exactly once and predicts all boxes simultaneously.
+
+The architecture divides the image into an S×S grid. Each grid cell predicts B bounding boxes, a <VocabTooltip slug="confidence-score">confidence score</VocabTooltip> for each box (probability that an object is centered in this cell), and class probabilities.
+
+```
+Image → CNN backbone → S×S×(B*5 + C) tensor
+                             │
+                             └─ B boxes × [x, y, w, h, confidence]
+                                C class probabilities per cell
+```
+
+For a 13×13 grid, 3 anchor boxes per cell, and 80 COCO classes: output tensor is `(13, 13, 3*(5+80)) = (13, 13, 255)`.
+
+```python
+import numpy as np
+
+def parse_yolo_output(
+    raw_output: np.ndarray,   # shape: (grid_h, grid_w, num_anchors * (5 + num_classes))
+    anchors: list[tuple[float, float]],
+    num_classes: int,
+    confidence_threshold: float = 0.5,
+) -> list[dict]:
+    """
+    Parse raw YOLO output into a list of detected boxes above threshold.
+    Returns list of dicts with: box (cx, cy, w, h), confidence, class_id, class_prob.
+    """
+    grid_h, grid_w, _ = raw_output.shape
+    num_anchors = len(anchors)
+    # Reshape so each anchor is explicit
+    output = raw_output.reshape(grid_h, grid_w, num_anchors, 5 + num_classes)
+
+    detections = []
+
+    for gy in range(grid_h):
+        for gx in range(grid_w):
+            for a_idx, (anchor_w, anchor_h) in enumerate(anchors):
+                pred = output[gy, gx, a_idx]
+
+                # Sigmoid squashes tx, ty, confidence into (0,1)
+                # tx, ty are offsets from grid cell top-left corner
+                tx, ty = 1 / (1 + np.exp(-pred[0])), 1 / (1 + np.exp(-pred[1]))
+                tw, th = pred[2], pred[3]
+                confidence = 1 / (1 + np.exp(-pred[4]))
+
+                if confidence < confidence_threshold:
+                    continue  # skip low-confidence predictions early
+
+                # Decode box to absolute image coordinates
+                cx = (gx + tx) / grid_w
+                cy = (gy + ty) / grid_h
+                # Anchor dimensions are given in absolute pixels; normalize
+                w = anchor_w * np.exp(tw)
+                h = anchor_h * np.exp(th)
+
+                class_logits = pred[5:]
+                class_id = int(np.argmax(class_logits))
+                class_prob = float(np.max(1 / (1 + np.exp(-class_logits))))
+
+                detections.append({
+                    "box": (cx, cy, w, h),
+                    "confidence": float(confidence),
+                    "class_id": class_id,
+                    "class_prob": class_prob,
+                })
+
+    return detections
+```
+
+## Measuring overlap: Intersection over Union
+
+Both training and evaluation require comparing predicted boxes to ground-truth boxes. <VocabTooltip slug="iou">IoU (Intersection over Union)</VocabTooltip> is the standard metric: the area of overlap divided by the area of the union.
+
+IoU = 1.0 means perfect overlap. IoU = 0.0 means no overlap. A prediction is typically considered a "true positive" if IoU > 0.5 with the closest ground truth box.
+
+```python
+def compute_iou(
+    box_a: tuple[float, float, float, float],
+    box_b: tuple[float, float, float, float],
+) -> float:
+    """
+    Compute Intersection over Union for two boxes in (x_min, y_min, x_max, y_max) format.
+
+    Args:
+        box_a, box_b: (x1, y1, x2, y2) in any consistent unit
+
+    Returns:
+        IoU in [0.0, 1.0]
+    """
+    # Find the coordinates of the intersection rectangle
+    inter_x1 = max(box_a[0], box_b[0])
+    inter_y1 = max(box_a[1], box_b[1])
+    inter_x2 = min(box_a[2], box_b[2])
+    inter_y2 = min(box_a[3], box_b[3])
+
+    # Intersection area — clamp to 0 if boxes don't overlap
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    intersection = inter_w * inter_h
+
+    # Union area = sum of individual areas minus intersection
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    union = area_a + area_b - intersection
+
+    # Guard against degenerate boxes (zero area)
+    if union <= 0:
+        return 0.0
+
+    return intersection / union
+
+
+# Perfect overlap
+print(compute_iou((0, 0, 10, 10), (0, 0, 10, 10)))  # 1.0
+
+# 50% overlap (right half of A overlaps left half of B)
+print(compute_iou((0, 0, 10, 10), (5, 0, 15, 10)))  # 0.333...
+
+# No overlap
+print(compute_iou((0, 0, 5, 5), (10, 10, 15, 15)))  # 0.0
+```
+
+## Removing duplicates: Non-Maximum Suppression
+
+A single object often triggers multiple overlapping predictions. YOLO might predict a dog with confidence 0.9 at (50, 60, 120, 140) and another with confidence 0.75 at (52, 62, 118, 142). Both are "the same dog."
+
+<VocabTooltip slug="nms">Non-Maximum Suppression (NMS)</VocabTooltip> removes duplicates:
+
+1. Sort all predictions for a class by confidence (highest first).
+2. Keep the highest-confidence box.
+3. Remove any remaining box that overlaps the kept box by more than the IoU threshold (e.g., 0.45).
+4. Repeat with the next-highest remaining box.
+
+```python
+def non_maximum_suppression(
+    boxes: list[tuple[float, float, float, float]],
+    scores: list[float],
+    iou_threshold: float = 0.45,
+) -> list[int]:
+    """
+    Apply NMS and return indices of kept boxes.
+
+    Args:
+        boxes: list of (x1, y1, x2, y2) boxes
+        scores: confidence score for each box
+        iou_threshold: boxes with IoU above this with a kept box are suppressed
+
+    Returns:
+        List of indices into boxes that survive NMS
+    """
+    if not boxes:
+        return []
+
+    # Sort by confidence descending — best predictions first
+    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    kept: list[int] = []
+
+    while order:
+        # The highest-confidence remaining box is always kept
+        current = order.pop(0)
+        kept.append(current)
+
+        # Suppress any remaining box that overlaps too much with 'current'
+        order = [
+            idx for idx in order
+            if compute_iou(boxes[current], boxes[idx]) < iou_threshold
+        ]
+
+    return kept
+
+
+boxes = [
+    (10, 10, 80, 80),   # box 0
+    (12, 12, 82, 82),   # box 1 — almost identical to box 0
+    (200, 200, 280, 280),  # box 2 — different object
+]
+scores = [0.9, 0.75, 0.85]
+
+kept = non_maximum_suppression(boxes, scores, iou_threshold=0.45)
+print(kept)  # [0, 2] — box 1 suppressed because it overlaps box 0 too much
+```
+
+## Using a pretrained YOLO model
+
+In practice you use a library rather than implementing YOLO from scratch. The `ultralytics` package provides YOLOv8/v11 with a clean API:
+
+```python
+from ultralytics import YOLO
+from pathlib import Path
+
+# Load YOLOv8 nano — fast model pretrained on COCO (80 classes)
+model = YOLO("yolov8n.pt")
+
+# Run inference — model handles normalization, resizing, NMS internally
+results = model("street_scene.jpg", conf=0.5, iou=0.45)
+
+for result in results:
+    boxes = result.boxes  # Boxes object
+    for i in range(len(boxes)):
+        xyxy = boxes.xyxy[i].tolist()      # [x1, y1, x2, y2] in pixels
+        conf = float(boxes.conf[i])         # confidence score
+        cls  = int(boxes.cls[i])            # class index
+        name = result.names[cls]            # e.g., "car", "person"
+        print(f"{name}: {conf:.2f} at {[round(v) for v in xyxy]}")
+
+# Save annotated image
+result.save("output.jpg")
+```
+
+**Model variants by speed/accuracy tradeoff:**
+
+| Model   | Parameters | Speed (ms/img) | mAP50-95 |
+| ------- | ---------- | -------------- | -------- |
+| YOLOv8n | 3.2M       | ~1ms GPU       | 37.3     |
+| YOLOv8s | 11.2M      | ~2ms GPU       | 44.9     |
+| YOLOv8m | 25.9M      | ~5ms GPU       | 50.2     |
+| YOLOv8l | 43.7M      | ~9ms GPU       | 52.9     |
+| YOLOv8x | 68.2M      | ~14ms GPU      | 53.9     |
+
+Choose `n` or `s` for edge devices and real-time applications. Choose `l` or `x` when you have a GPU server and accuracy is paramount.
+
+## Practice
+
+<SandboxExercise
+  language="python"
+  instructions="Implement `filter_detections`, which takes a list of raw detections (dicts with 'box', 'confidence', 'class_id') and returns only the boxes that survive confidence thresholding AND per-class NMS. Use the IoU and NMS functions from this lesson."
+  initialCode={`def compute_iou(box_a, box_b):
+    inter_x1 = max(box_a[0], box_b[0])
+    inter_y1 = max(box_a[1], box_b[1])
+    inter_x2 = min(box_a[2], box_b[2])
+    inter_y2 = min(box_a[3], box_b[3])
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    intersection = inter_w * inter_h
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+def filter_detections(
+detections: list[dict],
+confidence_threshold: float = 0.5,
+iou_threshold: float = 0.45,
+) -> list[dict]:
+""" 1. Remove detections below confidence_threshold. 2. For each class separately, apply NMS with iou_threshold. 3. Return the surviving detections.
+
+    Each detection dict has: 'box' (x1,y1,x2,y2), 'confidence', 'class_id'.
+    """
+    # Your code here
+    pass
+
+# Test
+
+detections = [
+{"box": (10, 10, 80, 80), "confidence": 0.92, "class_id": 0}, # person
+{"box": (12, 12, 82, 82), "confidence": 0.78, "class_id": 0}, # person duplicate
+{"box": (200, 50, 320, 180),"confidence": 0.88, "class_id": 2}, # car
+{"box": (202, 52, 318, 178),"confidence": 0.65, "class_id": 2}, # car duplicate
+{"box": (400, 300, 500, 400),"confidence": 0.30, "class_id": 1}, # low confidence, should drop
+]
+
+kept = filter_detections(detections, confidence_threshold=0.5, iou_threshold=0.45)
+print(f"Kept {len(kept)} detections (expected 2):")
+for d in kept:
+print(d)`}
+  solution={`def compute_iou(box_a, box_b):
+inter_x1 = max(box_a[0], box_b[0])
+inter_y1 = max(box_a[1], box_b[1])
+inter_x2 = min(box_a[2], box_b[2])
+inter_y2 = min(box_a[3], box_b[3])
+inter_w = max(0.0, inter_x2 - inter_x1)
+inter_h = max(0.0, inter_y2 - inter_y1)
+intersection = inter_w _ inter_h
+area_a = (box_a[2] - box_a[0]) _ (box_a[3] - box_a[1])
+area_b = (box_b[2] - box_b[0]) \* (box_b[3] - box_b[1])
+union = area_a + area_b - intersection
+return intersection / union if union > 0 else 0.0
+
+def filter_detections(detections, confidence_threshold=0.5, iou_threshold=0.45): # Step 1: confidence threshold
+above_thresh = [d for d in detections if d["confidence"] >= confidence_threshold]
+
+    # Step 2: group by class, apply NMS per class
+    from collections import defaultdict
+    by_class = defaultdict(list)
+    for d in above_thresh:
+        by_class[d["class_id"]].append(d)
+
+    kept = []
+    for class_dets in by_class.values():
+        boxes = [d["box"] for d in class_dets]
+        scores = [d["confidence"] for d in class_dets]
+        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        surviving = []
+        while order:
+            current = order.pop(0)
+            surviving.append(class_dets[current])
+            order = [i for i in order if compute_iou(boxes[current], boxes[i]) < iou_threshold]
+        kept.extend(surviving)
+
+    return kept
+
+detections = [
+{"box": (10, 10, 80, 80), "confidence": 0.92, "class_id": 0},
+{"box": (12, 12, 82, 82), "confidence": 0.78, "class_id": 0},
+{"box": (200, 50, 320, 180),"confidence": 0.88, "class_id": 2},
+{"box": (202, 52, 318, 178),"confidence": 0.65, "class_id": 2},
+{"box": (400, 300, 500, 400),"confidence": 0.30, "class_id": 1},
+]
+
+kept = filter_detections(detections, confidence_threshold=0.5, iou_threshold=0.45)
+print(f"Kept {len(kept)} detections (expected 2):")
+for d in kept:
+print(d)`}
+testCases={["low confidence dropped", "duplicates suppressed", "two final detections remain"]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      type: "multiple-choice",
+      question: "What is the key architectural difference between YOLO and Faster R-CNN?",
+      options: [
+        "YOLO uses larger kernels than Faster R-CNN",
+        "YOLO runs the backbone once and predicts all boxes simultaneously; Faster R-CNN uses two separate stages",
+        "Faster R-CNN is faster because it uses fewer layers",
+        "YOLO can only detect one object per image",
+      ],
+      correct: 1,
+      explanation:
+        "YOLO is a one-stage detector — one forward pass produces all predictions. Faster R-CNN is two-stage: first propose regions, then classify each proposal. This makes YOLO faster but historically less accurate on small objects.",
+    },
+    {
+      type: "multiple-choice",
+      question: "What does an IoU of 0.0 between two bounding boxes mean?",
+      options: [
+        "The boxes are identical",
+        "One box is contained inside the other",
+        "The boxes do not overlap at all",
+        "The prediction confidence is zero",
+      ],
+      correct: 2,
+      explanation:
+        "IoU = intersection / union. If intersection = 0 (no shared area), IoU = 0 regardless of box sizes.",
+    },
+    {
+      type: "multiple-choice",
+      question: "Why does NMS process each class separately?",
+      options: [
+        "To make the algorithm slower and more accurate",
+        "Because a car and a person can legitimately overlap; only two boxes of the same class are true duplicates",
+        "Because IoU is only defined for same-class boxes",
+        "Because the COCO benchmark requires it",
+      ],
+      correct: 1,
+      explanation:
+        "A person standing next to a car genuinely overlaps in pixel space. If NMS ran across all classes, it would suppress valid detections of different objects. Running per-class ensures only redundant same-class predictions are removed.",
+    },
+  ]}
+/>
+
+## What you learned
+
+- Object detection requires both classification (what) and localization (where), expressed as bounding boxes: `(x1, y1, x2, y2)` or `(cx, cy, w, h)`.
+- Two-stage detectors (R-CNN family) propose regions first, then classify them — higher accuracy but slower.
+- YOLO divides the image into a grid and predicts all boxes in a single forward pass — faster but historically less accurate on small objects.
+- IoU measures bounding box overlap (0 = no overlap, 1 = perfect overlap); a threshold of 0.5 is the standard true-positive criterion.
+- Non-Maximum Suppression removes duplicate predictions by iteratively keeping the highest-confidence box and suppressing overlapping boxes per class.
+
+The next lesson scales these concepts to production: latency budgets, batching, GPU vs edge deployment, and what breaks in the real world when your object detector meets a camera it was never trained on.

@@ -1,0 +1,301 @@
+---
+title: "RabbitMQ and AMQP Patterns"
+description: "Apply RabbitMQ's exchange and binding model to implement work queues, pub/sub fanout, and topic routing — and choose between Kafka and RabbitMQ for real workloads."
+phase: 4
+module: "4-6"
+order: 3
+estimatedMinutes: 15
+difficulty: "intermediate"
+standards:
+  cs2023: ["SE-4", "SF-3"]
+  swebok: ["Software Design", "Software Architecture"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - amqp
+  - rabbitmq-exchange
+  - rabbitmq-queue
+  - rabbitmq-binding
+  - direct-exchange
+  - fanout-exchange
+  - topic-exchange
+  - dead-letter-queue
+  - message-acknowledgment
+learningOutcomes:
+  - "Write code that publishes to a RabbitMQ exchange and binds a queue to receive messages with a routing key"
+  - "Implement at least two exchange types (direct, fanout, or topic) and explain when each is appropriate"
+  - "Configure a dead-letter queue to handle messages that fail processing after repeated retries"
+  - "Articulate the key architectural differences between RabbitMQ's push model and Kafka's pull model, and state which fits a given scenario"
+prerequisites:
+  - message-queue
+  - producer
+  - consumer
+  - kafka-topic
+  - at-least-once-delivery
+  - nodejs-basics
+  - async-await
+---
+
+## Why this matters
+
+RabbitMQ has been solving message routing problems since 2007, and it remains the dominant choice for task queues, microservice orchestration, and any scenario where you need sophisticated routing logic built into the broker rather than into your application code. Where Kafka is optimized for high-throughput event streaming and replay, RabbitMQ is optimized for smart delivery: the broker decides which queue a message goes to, can retry failed messages with exponential backoff, and removes messages from the system once they are successfully processed. Understanding both tools — and when to choose each — is a senior engineering skill that pays dividends every time you design a new service.
+
+The AMQP protocol that RabbitMQ implements introduces a model that is more flexible than Kafka's but also has more moving parts. Once you internalize how exchanges, queues, and bindings compose, you will be able to implement almost any messaging topology: round-robin work distribution, broadcasting to every subscriber, content-based routing, and graceful error handling with dead-letter queues.
+
+## The AMQP model: exchanges route to queues
+
+In Kafka, producers write directly to a named topic. In RabbitMQ, producers never write directly to a queue. They publish to an **exchange**, and the exchange decides which queues receive the message based on **bindings** and **routing keys**.
+
+Think of an exchange as a mail-sorting room. Letters arrive with an address on them (the routing key). Sorters (the binding rules) look at the address and deposit each letter into the correct mailbox (queue). Consumers pick up letters from their mailbox. The sorters are configurable — you can change where mail goes without the sender knowing.
+
+```
+Producer
+   │
+   │ publish(exchange="notifications", routingKey="email.order")
+   ▼
+┌──────────────────────────────┐
+│     Exchange: notifications  │
+│     Type: topic              │
+└──────────────────────────────┘
+   │                  │
+   │ binding:         │ binding:
+   │ "email.*"        │ "*.order"
+   ▼                  ▼
+┌──────────┐    ┌──────────────┐
+│ email-q  │    │ order-audit-q│
+└──────────┘    └──────────────┘
+   │                  │
+   ▼                  ▼
+Email Consumer   Audit Consumer
+```
+
+## Exchange types
+
+RabbitMQ ships with four built-in exchange types. Three are used constantly.
+
+**Direct exchange** — delivers to queues whose binding key exactly matches the message's routing key. Use for task distribution where each message type goes to one specific queue:
+
+```javascript
+import amqplib from "amqplib";
+
+const connection = await amqplib.connect("amqp://localhost");
+const channel = await connection.createChannel();
+
+// Declare the exchange (idempotent — safe to call on every startup)
+await channel.assertExchange("tasks", "direct", { durable: true });
+
+// Declare the queue (durable: survives broker restart)
+await channel.assertQueue("thumbnail-jobs", { durable: true });
+
+// Bind: route messages with routingKey="thumbnail" to this queue
+await channel.bindQueue("thumbnail-jobs", "tasks", "thumbnail");
+
+// Publish — only consumers of 'thumbnail-jobs' receive this
+await channel.publish(
+  "tasks",
+  "thumbnail", // routing key
+  Buffer.from(JSON.stringify({ imageId: "img-123", size: "200x200" })),
+  { persistent: true } // survive broker restart
+);
+```
+
+**Fanout exchange** — ignores routing keys entirely and delivers to every bound queue. Use for broadcasting events that every subscriber should receive:
+
+```javascript
+await channel.assertExchange("user.events", "fanout", { durable: true });
+
+// Every service that wants user events creates its OWN queue and binds it.
+// The producer does not need to know how many consumers exist.
+await channel.assertQueue("analytics-user-events", { durable: true });
+await channel.bindQueue("analytics-user-events", "user.events", ""); // key ignored
+
+await channel.assertQueue("audit-log-user-events", { durable: true });
+await channel.bindQueue("audit-log-user-events", "user.events", "");
+
+// One publish reaches both queues
+await channel.publish(
+  "user.events",
+  "", // routing key is irrelevant for fanout
+  Buffer.from(JSON.stringify({ event: "user.signed_up", userId: "u-456" }))
+);
+```
+
+**Topic exchange** — uses dot-separated routing key patterns with `*` (one word) and `#` (zero or more words) wildcards. Use when you need fine-grained routing without enumerating every routing key at binding time:
+
+```javascript
+await channel.assertExchange("notifications", "topic", { durable: true });
+
+// This queue receives all email notifications
+await channel.bindQueue("email-worker", "notifications", "email.*");
+
+// This queue receives all order-related notifications regardless of channel
+await channel.bindQueue("order-audit", "notifications", "*.order");
+
+// Routing key "email.order" matches BOTH patterns above —
+// both queues receive this message
+await channel.publish(
+  "notifications",
+  "email.order",
+  Buffer.from(JSON.stringify({ orderId: "ord-789", template: "order-confirmed" }))
+);
+```
+
+## Consuming with acknowledgments
+
+RabbitMQ holds a message as "unacked" until the consumer explicitly acknowledges it. If the consumer crashes before acking, RabbitMQ requeues the message and delivers it to another consumer. This is the reliability guarantee:
+
+```javascript
+// noAck: false means we manually acknowledge (default is safe, recommended)
+await channel.consume(
+  "thumbnail-jobs",
+  async (msg) => {
+    if (!msg) return; // consumer cancelled
+
+    try {
+      const job = JSON.parse(msg.content.toString());
+      await generateThumbnail(job.imageId, job.size);
+
+      // Tell RabbitMQ: "I processed this successfully, remove it from the queue."
+      channel.ack(msg);
+    } catch (error) {
+      console.error("Thumbnail generation failed:", error);
+
+      // nack with requeue: false — sends to dead-letter queue instead of
+      // immediately requeuing (which would create an infinite loop on hard failures)
+      channel.nack(msg, false, false);
+    }
+  },
+  { noAck: false }
+);
+```
+
+## Dead-letter queues for graceful failure handling
+
+A **dead-letter queue** (DLQ) captures messages that cannot be processed after all retries. Instead of losing failed messages or creating retry loops, you route them to a dedicated queue for inspection and manual remediation:
+
+```javascript
+// The main queue declares where to send dead-lettered messages
+await channel.assertQueue("thumbnail-jobs", {
+  durable: true,
+  arguments: {
+    // Messages that are nack'd or expire go here
+    "x-dead-letter-exchange": "thumbnail-dlx",
+    // Optionally override the routing key for dead-lettered messages
+    "x-dead-letter-routing-key": "failed",
+    // Auto-expire messages after 60 seconds if unprocessed
+    "x-message-ttl": 60000,
+  },
+});
+
+// The dead-letter exchange and queue — completely separate processing
+await channel.assertExchange("thumbnail-dlx", "direct", { durable: true });
+await channel.assertQueue("thumbnail-dlq", { durable: true });
+await channel.bindQueue("thumbnail-dlq", "thumbnail-dlx", "failed");
+
+// A separate worker monitors the DLQ for investigation or replay
+await channel.consume(
+  "thumbnail-dlq",
+  (msg) => {
+    const failed = JSON.parse(msg.content.toString());
+    console.error("Failed job requires attention:", failed);
+    // Alert, log to error tracker, store in DB for later replay
+    channel.ack(msg);
+  },
+  { noAck: false }
+);
+```
+
+## RabbitMQ vs Kafka: choosing the right tool
+
+| Concern                             | RabbitMQ                              | Kafka                                    |
+| ----------------------------------- | ------------------------------------- | ---------------------------------------- |
+| Message retention after consumption | Deleted on ack                        | Retained per retention policy            |
+| Message replay                      | No (messages gone after ack)          | Yes (seek to any offset)                 |
+| Routing logic                       | Rich (exchange types, patterns)       | In-application logic                     |
+| Throughput                          | High (tens of thousands/sec per node) | Very high (millions/sec with partitions) |
+| Ordering guarantee                  | Per-queue FIFO                        | Per-partition strict order               |
+| Best fit                            | Task queues, RPC, complex routing     | Event streaming, audit logs, replay      |
+
+**Choose RabbitMQ when:** you need smart routing, messages should be deleted after consumption, you want built-in retry and DLQ, or you are orchestrating work between microservices with different message types.
+
+**Choose Kafka when:** you need to replay events, multiple independent consumers need the same stream, you are building an audit log, or throughput requirements are in the millions of messages per second range.
+
+## Practice
+
+<SandboxExercise
+  title="Build a topic exchange router"
+  description="A notification system needs to route messages to different queues based on channel and event type. Messages like 'sms.payment' should go to the SMS worker. Messages like '*.payment' should go to the audit worker regardless of channel. Implement the exchange declaration and correct bindings."
+  template={`
+import amqplib from 'amqplib'
+
+async function setupNotificationRouting() {
+const connection = await amqplib.connect('amqp://localhost')
+const channel = await connection.createChannel()
+
+// 1. Declare a topic exchange called 'notifications'
+
+// 2. Declare two queues: 'sms-worker' and 'payment-audit'
+
+// 3. Bind 'sms-worker' to receive only SMS notifications (any event)
+
+// 4. Bind 'payment-audit' to receive any payment events (any channel)
+
+console.log('Routing configured')
+}
+`}
+  solution={`
+async function setupNotificationRouting() {
+const connection = await amqplib.connect('amqp://localhost')
+const channel = await connection.createChannel()
+
+await channel.assertExchange('notifications', 'topic', { durable: true })
+
+await channel.assertQueue('sms-worker', { durable: true })
+await channel.assertQueue('payment-audit', { durable: true })
+
+// sms._ matches sms.payment, sms.alert, sms.verification, etc.
+await channel.bindQueue('sms-worker', 'notifications', 'sms._')
+
+// _.payment matches sms.payment, email.payment, push.payment, etc.
+await channel.bindQueue('payment-audit', 'notifications', '_.payment')
+}
+`}
+hint="Topic exchange wildcards: _ matches exactly one dot-separated word, # matches zero or more. 'sms._' matches any two-word key starting with sms. '\*.payment' matches any two-word key ending with payment."
+/>
+
+## Check your understanding
+
+<Quiz
+  question="You publish a message with routing key 'email.order' to a topic exchange. Queue A has binding pattern 'email.*' and Queue B has binding pattern '*.order'. Which queues receive the message?"
+  choices={[
+    "Only Queue A — first matching binding wins",
+    "Only Queue B — more specific pattern takes precedence",
+    "Both Queue A and Queue B — all matching bindings are activated",
+    "Neither — routing keys with dots are not valid for topic exchanges",
+  ]}
+  correct={2}
+  explanation="A topic exchange delivers the message to every queue whose binding pattern matches the routing key. 'email.*' matches 'email.order' and '*.order' also matches 'email.order', so both queues receive the message independently."
+/>
+
+<Quiz
+  question="A consumer processes a message but throws an exception before calling channel.ack(). The consumer then crashes and restarts. What does RabbitMQ do with that message?"
+  choices={[
+    "The message is lost — RabbitMQ only keeps messages until first delivery",
+    "RabbitMQ requeues the message and redelivers it to the next available consumer",
+    "RabbitMQ moves the message to the dead-letter queue automatically",
+    "RabbitMQ waits 30 seconds then marks the message as processed",
+  ]}
+  correct={1}
+  explanation="RabbitMQ holds messages as 'unacknowledged' until the consumer explicitly calls ack(). If the consumer disconnects before acking, RabbitMQ treats the message as unprocessed and requeues it for redelivery. Moving to a DLQ only happens when you explicitly nack with requeue=false, or when message TTL expires."
+/>
+
+## What you learned
+
+- RabbitMQ's AMQP model routes messages through exchanges to queues via bindings — producers publish to exchanges, consumers read from queues, and the exchange type determines routing behavior
+- Direct exchanges route by exact key match; fanout exchanges broadcast to all bound queues; topic exchanges route by wildcard patterns
+- Manual acknowledgments with `channel.ack()` give RabbitMQ reliability: unacked messages are redelivered if the consumer fails before acknowledging
+- Dead-letter queues capture messages that cannot be processed after retries, providing observability into failures without losing data
+- RabbitMQ fits task queues and complex routing; Kafka fits event streaming and replay — the right choice depends on whether consumers need messages after they are processed
+
+The next lesson steps up in abstraction: you will learn Event Sourcing and CQRS, architectural patterns that use the event log itself as the database — using what you now know about durable messaging as the foundation.
