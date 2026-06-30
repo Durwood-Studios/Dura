@@ -24,6 +24,7 @@ import {
   Flame,
   LogOut,
   User,
+  Shield,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { ReviewBadge } from "@/components/review/ReviewBadge";
@@ -91,6 +92,7 @@ interface SidebarUser {
   email: string;
   name: string | null;
   avatarUrl: string | null;
+  isAdmin: boolean;
 }
 
 export function Sidebar(): React.ReactElement {
@@ -130,6 +132,8 @@ export function Sidebar(): React.ReactElement {
             email: sbUser.email ?? "",
             name: (sbUser.user_metadata?.full_name as string | null) ?? null,
             avatarUrl: (sbUser.user_metadata?.avatar_url as string | null) ?? null,
+            // is_admin lives in app_metadata — server-only, cannot be self-modified
+            isAdmin: (sbUser.app_metadata?.is_admin as boolean | undefined) === true,
           });
         }
       } catch {
@@ -214,6 +218,44 @@ export function Sidebar(): React.ReactElement {
           </div>
         ))}
       </nav>
+
+      {/* ── Admin ─────────────────────────────────────────────────── */}
+      {user?.isAdmin && (
+        <div className="px-3 pb-1">
+          <div className="dura-divider mx-2 my-2" />
+          <span className="mb-1 block px-3 pt-1 text-xs font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+            Admin
+          </span>
+          <Link
+            href="/admin/annotations"
+            className={cn(
+              "group/item relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-all duration-200",
+              pathname.startsWith("/admin/annotations")
+                ? "dura-glow-emerald bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
+                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-text-primary)]"
+            )}
+          >
+            <span
+              className={cn(
+                "absolute top-1/2 left-0 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-emerald-500 transition-all duration-200",
+                pathname.startsWith("/admin/annotations")
+                  ? "scale-y-100 opacity-100"
+                  : "scale-y-0 opacity-0 group-hover/item:scale-y-75 group-hover/item:opacity-40"
+              )}
+            />
+            <Shield
+              className={cn(
+                "h-4 w-4 shrink-0 transition-colors",
+                pathname.startsWith("/admin/annotations")
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-[var(--color-text-muted)] group-hover/item:text-[var(--color-text-secondary)]"
+              )}
+              aria-hidden
+            />
+            <span className="flex-1">Moderation</span>
+          </Link>
+        </div>
+      )}
 
       {/* ── Feedback ───────────────────────────────────────────────── */}
       <div className="px-3 pb-1">
