@@ -1,0 +1,220 @@
+---
+title: "Secure Boot Chain and Key Management"
+description: "The Ed25519 signature is only as strong as the private key's security. This lesson covers key generation, storage in an HSM, key rotation without bricking the fleet, and the chain of trust from silicon root to application."
+phase: 10
+module: "10-10-bootloaders-and-ota"
+order: 4
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "10-10-bootloaders-and-ota/03"
+standards:
+  primaryAnchor: "NIST SP 800-57 Key Management Recommendations"
+  cs2023: ["SE-Security", "SF-Foundations"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - chain-of-trust
+  - root-of-trust
+  - secure-boot
+  - hsm
+  - key-rotation
+  - key-derivation
+  - revocation
+  - secure-element
+  - trust-anchor
+  - otp-fuses
+learningOutcomes:
+  - "Trace the chain of trust from silicon OTP fuses through MCUboot to application"
+  - "Explain why the signing private key must never exist on the build server or in version control"
+  - "Describe a key rotation strategy that allows fleet-wide key updates without bricking devices"
+  - "Identify the additional security properties provided by OTP fuses and secure elements versus software-only solutions"
+professionalContext: "Key management is where many well-designed embedded security systems fail in practice. The engineer who understands the full chain of trust — from silicon to cloud — can design systems that stay secure through their operational lifetime, not just at initial deployment. This is increasingly a job requirement for security-sensitive embedded roles."
+thresholdConcept: false
+---
+
+## Why this matters
+
+An IoT fleet of 100,000 devices uses Ed25519 for firmware signing. The private key is stored as a file on the CI server (for convenience — the build pipeline signs every release automatically). A developer's laptop is compromised. The attacker finds CI credentials, accesses the build server, extracts the private key, and can now sign arbitrary firmware for all 100,000 devices.
+
+The bootloader's signature verification is correct. The key management is catastrophic. The result: every device in the fleet is owned.
+
+Key management is not an implementation detail. It's a fundamental part of the security architecture.
+
+## The chain of trust
+
+A secure boot chain is a sequence of verified steps, where each step verifies the next:
+
+```
+Silicon (CPU ROM) — hardwired, untamperable
+    ↓ verifies
+MCUboot (bootloader in flash) — signed with Silicon vendor's key
+                                OR enforced by OTP read-back
+    ↓ verifies
+Application firmware — signed with your company's signing key
+    ↓ optionally verifies
+Configuration blobs, models, or scripting runtime
+```
+
+Each link in the chain must be cryptographically verified by the previous link. If any link is skipped, an attacker can inject code at that point.
+
+**Silicon root of trust**: On high-security MCUs (STM32H5, nRF9160, TI CC26xx), the CPU ROM contains a hash of the expected bootloader. At power-on, the ROM verifies the bootloader before executing it. This is enforced by OTP (one-time-programmable) fuses — silicon bits written once at manufacturing that cannot be changed. Even physical access to the chip cannot bypass ROM verification.
+
+For standard Cortex-M devices without ROM verification, the "root of trust" is the MCUboot binary itself. Physical access (JTAG) can overwrite it, so the silicon root is weaker. Prevent this in production with JTAG lockdown (RDP level 2 on STM32).
+
+## JTAG lockdown (RDP — Read Protection)
+
+STM32 Read Protection levels:
+
+| Level | Effect                                                                      |
+| ----- | --------------------------------------------------------------------------- |
+| RDP 0 | Debug fully enabled. No protection.                                         |
+| RDP 1 | Flash reads from debugger blocked. JTAG still connects.                     |
+| RDP 2 | JTAG fully disconnected. Permanent. Mass erase required to change to RDP 0. |
+
+For production devices where firmware IP and security keys must be protected:
+
+```c
+/* Set RDP level 2 — PERMANENT, cannot be reversed */
+/* This disables JTAG/SWD access entirely. */
+/* WARNING: If bootloader has bugs, no recovery via JTAG is possible. */
+void set_rdp_level2_PERMANENT(void) {
+    /* Unlock option bytes */
+    FLASH->OPTKEYR = FLASH_OPT_KEY1;
+    FLASH->OPTKEYR = FLASH_OPT_KEY2;
+
+    /* Set RDP to 0xCC (level 2) — DO NOT SET THIS LIGHTLY */
+    FLASH->OPTCR = (FLASH->OPTCR & ~0xFF00U) | 0xCC00U;
+
+    /* Program option bytes */
+    FLASH->OPTCR |= FLASH_OPTCR_OPTSTART;
+    while (FLASH->SR & FLASH_SR_BSY) { }
+    /* System must reset for the new RDP level to take effect */
+}
+```
+
+**Never set RDP level 2 without a tested serial recovery mechanism (DFU over UART, USB DFU) and a confirmed-working bootloader.** RDP 2 makes JTAG access impossible. A bootloader bug at RDP 2 means the device is permanently bricked.
+
+## Private key management
+
+The signing private key must be protected at every stage of its lifecycle:
+
+### Generation
+
+```bash
+# Generate on a secure offline machine or HSM — never on the build server
+# Use the HSM's own key generation if available (key never leaves the HSM)
+openssl genpkey -algorithm ed25519 -out signing_key.pem
+
+# Or use imgtool:
+imgtool keygen -k signing_key.pem -t ed25519
+```
+
+### Storage
+
+The private key must never:
+
+- Be committed to version control
+- Exist on the build server in plaintext
+- Be transmitted over a network in any form
+- Be accessible to more people than operationally necessary
+
+Correct storage options (in order of security):
+
+1. **Hardware Security Module (HSM)** — dedicated hardware device that performs signing operations; the key never leaves the HSM. AWS CloudHSM, Nitrokey, Thales Luna are examples.
+2. **Secure offline machine** — air-gapped laptop with encrypted storage; signing is done manually for each release.
+3. **Encrypted vault** — HashiCorp Vault with HSM-backed secrets; signing is done via a Vault agent that never exposes the key.
+
+### Signing in CI (HSM approach)
+
+```bash
+# CI pipeline signs via HSM API — key never touches the build runner
+# Example with SoftHSM2 for demonstration (real: Thales, AWS CloudHSM)
+pkcs11-tool --module /usr/lib/softHSM.so \
+  --sign --mechanism EDDSA \
+  --id 01 \
+  --input-file firmware.bin \
+  --output-file signature.bin
+
+# imgtool supports PKCS#11 for HSM-backed signing:
+imgtool sign --key "pkcs11:object=signing-key" --algorithm ed25519 \
+  firmware.bin firmware_signed.bin
+```
+
+### Key rotation
+
+Keys must be rotatable without bricking the fleet. A naive approach (one key, burned into every bootloader) is not rotatable — every device in the fleet must be updated simultaneously if the key is compromised, and the update itself requires the compromised key.
+
+MCUboot supports multiple public keys:
+
+```c
+/* MCUboot can verify against a list of public keys */
+/* Public key table — compiled into the bootloader */
+static const struct bootutil_key bootutil_keys[] = {
+    [0] = { .key = ec_pub_key_primary,   .len = sizeof(ec_pub_key_primary) },
+    [1] = { .key = ec_pub_key_secondary, .len = sizeof(ec_pub_key_secondary) },
+};
+const int bootutil_key_cnt = 2;
+```
+
+Rotation strategy:
+
+1. **Phase 1**: Deploy new bootloader that accepts BOTH old key and new key. Old key still works.
+2. **Phase 2**: Sign all new firmware with the NEW key. Deploy the new-key-signed firmware to the fleet (using the OLD key to authorize this deployment).
+3. **Phase 3**: Once the fleet is running new-key-signed firmware, deploy a bootloader update that removes the old key.
+4. Retire the old private key.
+
+This three-phase approach ensures no device is bricked during rotation — the transition period accepts both keys.
+
+## Revocation vs rotation
+
+Rotation (above) assumes the old key is deprecated gracefully. If the old key is COMPROMISED:
+
+- You cannot trust any image signed with it (the attacker can sign malicious images)
+- You must deploy the new-bootloader (accepting only new key) as fast as possible
+- Until every device has the new bootloader, compromised-key-signed images could be served
+
+This is the worst case in OTA security. The mitigations:
+
+1. **Offline key with HSM** — compromise requires physical access to the HSM; attacks are slower
+2. **Short validity windows in manifests** — SUIT manifests can include expiry timestamps; an attacker must forge a fresh manifest for each attack, not just reuse a stolen image
+3. **Version pinning** — bootloader only boots images with version > current_version (anti-rollback). Signed with compromised key but with higher version number: only possible if attacker has the key AND knows the current version
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A team stores the firmware signing private key in a GitHub repository secret (used in CI Actions). A security researcher demonstrates that repository secrets can be exfiltrated via a malicious workflow PR. What's the scope of the security impact for the firmware?",
+      options: [
+        "Minimal — the key is only used for signing, not encryption",
+        "The entire fleet is compromised. Anyone with the signing private key can produce validly-signed firmware images that any device in the fleet will boot. This includes: root-kit firmware that exfiltrates data, firmware that bricks devices, firmware that disables safety functions, or firmware that establishes persistent access. The signature scheme's security relies entirely on the private key being secret — once it's stolen, every signature check the bootloader performs is meaningless. Key storage in a repository secret is insufficient; HSM or offline air-gapped storage is required.",
+        "Only devices that received an update in the last month are affected",
+        "The researcher cannot forge images without also knowing the image format",
+      ],
+      correct: 1,
+      explanation:
+        "The signing private key IS the root of security for the firmware. Its compromise is a total security failure — not a partial one. An attacker with the key can sign arbitrary code that any device will accept as legitimate firmware. 'Only used for signing' understates the importance: signing IS the authorization mechanism. The image format is public (MCUboot's spec is open source); knowing the key and format is all an attacker needs. Repository secrets are better than plaintext files but are still software-accessible — a compromised CI system can read them. HSM keeps the key in hardware that is not software-accessible, making exfiltration require physical compromise of the HSM.",
+    },
+    {
+      question:
+        "A device has OTP fuses that burn in the SHA-256 hash of the permitted bootloader binary. The production bootloader has a security bug. An engineer proposes patching the bootloader and deploying it via OTA. Why doesn't this work?",
+      options: [
+        "OTA is only for applications, not bootloaders",
+        "The OTP fuses contain the hash of the ORIGINAL bootloader binary. A patched bootloader has a different binary, therefore a different SHA-256 hash. When the CPU ROM verifies the patched bootloader against the OTP-burned hash, the hash won't match, and the ROM will refuse to boot — permanently, since OTP fuses can't be changed. The chain of trust enforced by OTP fuses prevents any modification to the bootloader after manufacturing, including legitimate security patches. This is the fundamental trade-off of hardware-rooted security: extremely strong protection against malicious modification, but no recoverability if the protected code has bugs.",
+        "The bootloader can self-update without going through the OTP check",
+        "OTA requires an internet connection",
+      ],
+      correct: 1,
+      explanation:
+        "This is the core tension in silicon-rooted secure boot: immutability provides security guarantees (an attacker cannot modify the bootloader) but also prevents legitimate updates (including security fixes). Different silicon families handle this differently: some allow a limited number of OTP 'override' fuses for emergency patching; some include a ROM-resident recovery mechanism that can replace a bad bootloader under controlled conditions; some use a hierarchical trust model where a hardware-verified stage 1 bootloader loads a software-updateable stage 2. Engineers must understand these trade-offs before selecting a silicon platform for security-critical applications.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 5 covers OTA update testing and validation — how to verify that the complete OTA pipeline (manifest → download → flash → MCUboot → application confirm) works correctly before deploying to the fleet, including rollback testing, interrupted-transfer recovery, and power-fail scenarios.

@@ -1,0 +1,346 @@
+---
+title: "MoveIt 2 — From Target Pose to Executed Trajectory"
+description: "The motion planning framework that turns 'move the end-effector to this pose' into a collision-free joint trajectory and hands it off to ros2_control for execution."
+phase: 13
+module: "r-6-ros-industrial"
+order: 5
+estimatedMinutes: 80
+difficulty: 4
+prerequisites:
+  - "r-6-ros-industrial-03"
+  - "r-6-ros-industrial-04"
+  - "r-1-iso-8373-vocabulary-01"
+standards:
+  primaryAnchor: "MoveIt 2 (Jazzy)"
+  cs2023: []
+  swebok: ["Software Construction", "Software Engineering Design"]
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - moveit
+  - planning-scene
+  - move-group
+  - ompl
+  - collision-object
+  - cartesian-path
+  - planning-pipeline
+  - execution-pipeline
+learningOutcomes:
+  - "After this lesson you can: use the MoveIt 2 Python API to plan and execute a joint-space goal and a Cartesian goal for a UR5e in simulation"
+  - "After this lesson you can: add a collision object to the planning scene and verify the planner avoids it"
+  - "After this lesson you can: distinguish joint-space planning from Cartesian path planning and state when each is appropriate"
+  - "After this lesson you can: read a MoveIt planning failure message and identify the three most common causes"
+professionalContext: "MoveIt is the de-facto standard motion planner for ROS 2. Every major robot vendor publishes a MoveIt configuration package for their hardware. The engineer who can configure MoveIt, plan a path, and debug planning failures is immediately productive on any industrial ROS 2 integration."
+thresholdConcept: false
+---
+
+## Why motion planning is not just IK
+
+Inverse kinematics gives you one set of joint angles that puts the end-effector at a target pose. But:
+
+- The path FROM the current configuration TO the IK solution might pass through a table, a fixture, or the robot itself.
+- There may be multiple IK solutions; some are reachable without collisions, others are not.
+- The IK solution might require passing through a kinematic singularity.
+- Even if the target is reachable, the trajectory must satisfy velocity and acceleration limits.
+
+<VocabTooltip slug="moveit">MoveIt</VocabTooltip> solves all of this. It represents the world as a
+<VocabTooltip slug="planning-scene">planning scene</VocabTooltip> — the robot model, plus every
+obstacle — and runs a sampling-based or optimization-based planner to find a collision-free path
+from start to goal in configuration space.
+
+## MoveIt 2 architecture
+
+```
+User code (Python/C++) → MoveGroupInterface
+        ↓ action: /move_action
+  MoveGroup node (the planner)
+        ↓ loads URDF, SRDF, kinematics.yaml, joint_limits.yaml
+  Planning Pipeline
+        ↓ Request + PlanningScene + Constraints → Path
+  OMPL / CHOMP / PILZ (planning algorithms)
+        ↓ result: joint trajectory
+  Trajectory Execution Manager
+        ↓ action: /joint_trajectory_controller/follow_joint_trajectory
+  ros2_control JointTrajectoryController
+        ↓ read/write
+  Hardware Interface → physical robot
+```
+
+The key configuration files that live in the robot's MoveIt package:
+
+| File                             | Purpose                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------ |
+| `config/robot.urdf.xacro`        | Robot model with ros2_control block                                            |
+| `config/robot.srdf`              | Semantic description: planning groups, end-effectors, disabled collision pairs |
+| `config/kinematics.yaml`         | IK solver selection per planning group                                         |
+| `config/joint_limits.yaml`       | Optional per-joint velocity/acceleration overrides for MoveIt                  |
+| `config/ompl_planning.yaml`      | OMPL planner parameters                                                        |
+| `config/moveit_controllers.yaml` | Maps MoveIt trajectory output to ros2_control controllers                      |
+
+For UR arms, the `ur_moveit_config` package provides all of these. You can start working immediately:
+
+```bash
+# Launch UR5e in simulation with MoveIt
+ros2 launch ur_moveit_config ur_moveit.launch.py \
+  ur_type:=ur5e use_fake_hardware:=true launch_rviz:=true
+```
+
+## Planning group and SRDF
+
+The SRDF (Semantic Robot Description Format) tells MoveIt about logical groupings of joints. A 6-axis arm typically has one planning group (`manipulator`) containing all six joints, plus an end-effector group.
+
+```xml
+<!-- config/robot.srdf — excerpt -->
+<robot name="simple_arm">
+  <!-- Planning group for the arm -->
+  <group name="arm">
+    <joint name="joint_1"/>
+    <joint name="joint_2"/>
+  </group>
+
+  <!-- End-effector link -->
+  <end_effector name="gripper_ee"
+                parent_link="tool_flange"
+                group="arm"/>
+
+  <!-- Disable self-collision between links that cannot contact each other -->
+  <!-- Without this, the planner wastes time checking impossible collisions -->
+  <disable_collisions link1="base_link" link2="link_1" reason="Adjacent"/>
+  <disable_collisions link1="link_1" link2="link_2" reason="Adjacent"/>
+</robot>
+```
+
+The `<disable_collisions>` entries dramatically speed up planning by removing impossible checks from the collision matrix.
+
+## Planning and execution with Python
+
+```python
+"""
+moveit_example.py — plan and execute two types of motion goals.
+
+Run against URSim or Gazebo with MoveIt launched.
+"""
+
+import math
+import rclpy
+from rclpy.node import Node
+from moveit.planning import MoveItPy
+from moveit.core.robot_state import RobotState
+from geometry_msgs.msg import Pose, Point, Quaternion
+from shape_msgs.msg import SolidPrimitive
+from moveit_msgs.msg import CollisionObject
+
+
+class MoveItExample(Node):
+    """Demonstrates joint-space and Cartesian planning with MoveIt 2."""
+
+    def __init__(self) -> None:
+        super().__init__('moveit_example')
+
+        # MoveItPy is the Python binding to the MoveIt MoveGroupInterface
+        self._robot = MoveItPy(node_name='moveit_py')
+        self._arm = self._robot.get_planning_component('arm')
+        self._logger = self.get_logger()
+
+    def plan_joint_space_goal(self) -> bool:
+        """
+        Move to a joint configuration directly.
+
+        Use joint-space goals when:
+        - The target pose has multiple IK solutions and you want a specific one
+        - You're moving to a known "home" configuration
+        - Cartesian path constraints are not needed
+        """
+        # Set the start state (current robot state)
+        self._arm.set_start_state_to_current_state()
+
+        # Specify the goal as named state from SRDF, or as joint values
+        goal_state = RobotState(self._robot.get_robot_model())
+        goal_state.set_joint_group_positions(
+            'arm',
+            [math.radians(30), math.radians(45)],   # [joint_1, joint_2]
+        )
+        self._arm.set_goal_state(robot_state=goal_state)
+
+        # Plan
+        plan_result = self._arm.plan()
+        if plan_result:
+            self._logger.info('Joint-space plan succeeded.')
+            # Execute — blocks until trajectory completes
+            self._robot.execute(plan_result.trajectory, controllers=[])
+            return True
+        else:
+            self._logger.error('Joint-space plan FAILED. Check for collisions or joint limits.')
+            return False
+
+    def plan_cartesian_goal(self, target_pose: Pose) -> bool:
+        """
+        Move the end-effector to a Cartesian pose.
+
+        Use Cartesian goals when:
+        - The application specifies a workpiece pose (welding seam, pick location)
+        - The exact orientation of the tool matters
+        - Constraints on the path direction matter less than the endpoint
+
+        MoveIt will find the IK solution and plan in joint space internally.
+        """
+        self._arm.set_start_state_to_current_state()
+        self._arm.set_goal_state(
+            pose_stamped_msg=target_pose,
+            pose_link='tool_flange',          # the link to position at target_pose
+        )
+        plan_result = self._arm.plan()
+        if plan_result:
+            self._robot.execute(plan_result.trajectory, controllers=[])
+            return True
+        return False
+
+    def plan_cartesian_path(self, waypoints: list[Pose]) -> bool:
+        """
+        Move the end-effector through a sequence of Cartesian waypoints
+        in a straight-line path.
+
+        Use compute_cartesian_path when:
+        - The tool must follow a straight line (seam welding, dispensing)
+        - Intermediate poses must be respected, not just start and end
+        - You need > 90% fraction of waypoints followed
+
+        Limitation: Cartesian paths can fail near singularities.
+        Always check the returned fraction (1.0 = all waypoints reached).
+        """
+        # compute_cartesian_path is on the planning component
+        fraction, trajectory = self._arm.compute_cartesian_path(
+            waypoints=waypoints,
+            max_step=0.01,              # max step size in meters
+            jump_threshold=0.0,         # 0.0 disables joint jump detection
+        )
+
+        if fraction < 0.9:
+            self._logger.warning(
+                f'Cartesian path only achieved {fraction:.0%} of waypoints. '
+                'Check for singularities or collisions along the path.'
+            )
+            return False
+
+        self._robot.execute(trajectory, controllers=[])
+        return True
+
+    def add_box_obstacle(self) -> None:
+        """
+        Add a box collision object to the planning scene.
+        The planner will route around it automatically.
+        """
+        planning_scene_monitor = self._robot.get_planning_scene_monitor()
+
+        with planning_scene_monitor.read_write() as scene:
+            collision_object = CollisionObject()
+            collision_object.header.frame_id = 'base_link'
+            collision_object.id = 'obstacle_box'
+
+            box = SolidPrimitive()
+            box.type = SolidPrimitive.BOX
+            box.dimensions = [0.2, 0.2, 0.5]   # x, y, z dimensions in meters
+
+            box_pose = Pose(
+                position=Point(x=0.5, y=0.0, z=0.25),
+                orientation=Quaternion(w=1.0),
+            )
+
+            collision_object.primitives = [box]
+            collision_object.primitive_poses = [box_pose]
+            collision_object.operation = CollisionObject.ADD
+
+            scene.apply_collision_object(collision_object)
+
+        self._logger.info('Added obstacle box to planning scene.')
+```
+
+## Reading planning failures
+
+MoveIt planning failures cluster in three patterns:
+
+**Failure 1: "No motion plan found"**
+
+The OMPL planner ran its timeout (default 5 s) without finding a valid collision-free path.
+
+Diagnostic:
+
+- Is the goal reachable? Check in RViz — does the goal pose appear inside the robot's reach envelope?
+- Is the goal blocked by an obstacle? Visualize the planning scene in RViz (display: PlanningScene).
+- Are joints at their limits? A joint at its limit cannot move in one direction.
+
+Fix: increase planning time (`plan_request_params.max_velocity_scaling_factor`), simplify the scene, or change the goal.
+
+**Failure 2: "IK solution not found"**
+
+The Cartesian goal pose has no IK solution — it is either out of reach, or the IK solver cannot find a joint configuration that puts the end-effector there without violating joint limits.
+
+Diagnostic:
+
+- Verify the goal position is inside the robot's reach envelope.
+- Check the goal orientation — it may require a wrist configuration the arm cannot achieve from the start state.
+
+Fix: try an alternative goal orientation, or plan in joint space with a pre-computed IK solution.
+
+**Failure 3: "Plan succeeded, execution failed"**
+
+The plan was computed but the trajectory execution was rejected by the controller.
+
+Common causes:
+
+- The trajectory's start state does not match the actual robot state (robot moved between plan and execute).
+- Joint velocity or acceleration in the trajectory exceeds controller limits.
+- The ros2_control action server is not active.
+
+Fix: call `set_start_state_to_current_state()` immediately before planning (not earlier), and verify the JointTrajectoryController is active with `ros2 control list_controllers`.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A welding application requires the torch end-effector to travel in a straight line over a 300 mm seam. Which MoveIt planning method is appropriate, and why?",
+      options: [
+        "Joint-space planning — it is faster and produces smoother joint motion",
+        "Cartesian path planning (compute_cartesian_path) — the tool must follow a straight-line path in task space; joint-space planning may produce a curved Cartesian path that deviates from the seam",
+        "Either — MoveIt guarantees a straight-line Cartesian path regardless of which method is used",
+        "Neither — welding paths require a specialized welding plugin, not standard MoveIt",
+      ],
+      correct: 1,
+      explanation:
+        "Joint-space planning finds the shortest path in joint-angle space, which maps to a curved path in Cartesian space. For a welding seam, the torch must follow the actual seam geometry in Cartesian space. `compute_cartesian_path` interpolates between waypoints in Cartesian space with a configurable step size, ensuring the torch stays on the seam. The trade-off: Cartesian paths are more likely to encounter singularities and joint-limit violations.",
+    },
+    {
+      question:
+        "You add a large box obstacle to the MoveIt planning scene but the planner still sends the robot through the obstacle. What is the most likely cause?",
+      options: [
+        "The obstacle was added after the plan was computed — MoveIt does not update the scene between plan and execution",
+        "The SRDF has a `<disable_collisions>` entry that excludes the obstacle from collision checking",
+        "Box primitives are not supported for collision avoidance; only mesh obstacles are checked",
+        "The planner ignores obstacles added via the Python API; they must be added through RViz",
+      ],
+      correct: 0,
+      explanation:
+        "MoveIt captures the planning scene at the moment `plan()` is called. If the obstacle was added after the plan was computed (or if the scene update had not propagated to the planner's copy of the scene yet), the plan was generated without knowing about the obstacle. The trajectory does not re-check collisions at execution time by default. Always add obstacles to the scene BEFORE calling plan(), and verify they appear in RViz's PlanningScene display before planning.",
+    },
+    {
+      question:
+        "`compute_cartesian_path` returns a fraction of 0.72. What does this mean and what should the engineer investigate?",
+      options: [
+        "72% of the planned time budget was used; the path is safe to execute",
+        "Only 72% of the requested waypoints could be connected by a collision-free Cartesian path; the rest could not be reached. The engineer should investigate singularities, joint-limit violations, or collisions along the remaining portion of the path",
+        "The trajectory has been scaled to 72% of maximum velocity for safety",
+        "72% of the path was computed successfully; the remaining 28% will be computed lazily during execution",
+      ],
+      correct: 1,
+      explanation:
+        "The fraction returned by `compute_cartesian_path` is the proportion of the input waypoint sequence that could be connected by a collision-free, joint-limit-respecting Cartesian path. A fraction of 0.72 means the path broke down at the 72% mark — the planner could not continue the Cartesian interpolation. Common causes: a kinematic singularity along the path (det(J) → 0, requiring infinite joint velocities to maintain Cartesian direction), a joint limit hit, or a collision with the environment. Executing a fraction < 1.0 stops the robot partway through the intended path.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson R6-6 covers ROS 2 lifecycle nodes and Nav2 — the navigation stack for mobile robots. Understanding how managed nodes use lifecycle states for orderly startup, pause, and shutdown is a prerequisite for any system-level ROS 2 integration, and Nav2 applies those patterns at scale for autonomous mobile platforms.

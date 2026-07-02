@@ -1,0 +1,247 @@
+---
+title: "Coverage Collectors — uvm_subscriber and Analysis Ports"
+description: "Connecting covergroups to the UVM analysis fabric so they sample automatically without polluting drivers or sequences."
+phase: 11
+module: "h-4-functional-coverage"
+order: 3
+estimatedMinutes: 60
+difficulty: 4
+prerequisites:
+  - "h-4-covergroup-options"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - uvm-subscriber
+  - analysis-port
+  - analysis-export
+  - uvm-analysis-imp
+  - coverage-collector
+  - passive-component
+learningOutcomes:
+  - "Write a uvm_subscriber that samples a covergroup from an analysis port"
+  - "Connect a coverage collector to a monitor's analysis port in connect_phase"
+  - "Distinguish uvm_subscriber from uvm_component with a manual analysis export"
+  - "Implement multiple coverage collectors on one analysis port using uvm_analysis_port broadcast"
+professionalContext: "Separation of concerns is the load-bearing architectural principle of UVM coverage. Monitors observe and publish; coverage collectors subscribe and measure — neither needs to know the other exists. Engineers who put coverage sampling inside the driver or sequence create maintenance debt that grows with every new coverage point. The subscriber pattern described in this lesson is how production DV teams connect coverage to stimulus without coupling."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Where should coverage sampling happen? NOT in the driver (it doesn't see DUT responses). NOT in the sequence (it doesn't see what actually occurred on the interface). The right place is the MONITOR — it observes both what was driven and what the DUT responded.
+
+But the monitor shouldn't contain coverage logic either. Coverage requirements change; the monitor's job (faithfully reconstructing transactions from the interface) doesn't. The right architecture:
+
+```
+Monitor (observe + publish)
+    │  uvm_analysis_port #(txn)
+    ├──→ Scoreboard (check correctness)
+    ├──→ Coverage Collector A (functional coverage)
+    └──→ Coverage Collector B (protocol coverage)
+```
+
+The analysis port broadcasts to all subscribers. Adding or removing a coverage collector doesn't touch the monitor.
+
+## uvm_subscriber — the canonical subscriber
+
+`uvm_subscriber` is a UVM base class that provides an analysis export and requires you to implement `write()`. It's the simplest path to a coverage collector:
+
+```systemverilog
+class axi_write_cov extends uvm_subscriber #(axi4_lite_write_txn);
+    `uvm_component_utils(axi_write_cov)
+
+    axi4_lite_write_txn cur;
+
+    covergroup cg_write;
+        cp_addr : coverpoint cur.awaddr[15:12] {
+            bins zones[] = { [0:15] };
+        }
+
+        cp_strb : coverpoint cur.wstrb {
+            bins full    = { 4'b1111 };
+            bins partial = default;
+        }
+
+        cx : cross cp_addr, cp_strb;
+    endgroup
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        cg_write = new();
+    endfunction
+
+    // write() is called automatically by the analysis port every time
+    // the monitor publishes a transaction.
+    function void write(axi4_lite_write_txn t);
+        cur = t;
+        cg_write.sample();
+    endfunction
+endclass
+```
+
+`uvm_subscriber #(T)` automatically provides:
+
+- An analysis export (`analysis_export`) that accepts type T.
+- A pure virtual `write(T t)` method you must implement.
+
+The covergroup samples `cur` which is set to the received transaction. This is the production pattern used in every UVM testbench.
+
+## Connecting subscriber to monitor in the environment
+
+```systemverilog
+class axi_env extends uvm_env;
+    `uvm_component_utils(axi_env)
+
+    axi_agent        agent;
+    axi_scoreboard   scoreboard;
+    axi_write_cov    write_cov;    // Coverage collector
+
+    function void build_phase(uvm_phase phase);
+        agent      = axi_agent::type_id::create("agent", this);
+        scoreboard = axi_scoreboard::type_id::create("scoreboard", this);
+        write_cov  = axi_write_cov::type_id::create("write_cov", this);
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        // Monitor broadcasts to both scoreboard and coverage collector
+        agent.monitor.ap.connect(scoreboard.analysis_export);
+        agent.monitor.ap.connect(write_cov.analysis_export);
+        // uvm_analysis_port supports multiple subscribers (fan-out)
+    endfunction
+endclass
+```
+
+The `uvm_analysis_port` supports unlimited fan-out — one `ap.write(txn)` call in the monitor calls `write()` on every connected subscriber. Connecting a second coverage collector costs one line in `connect_phase`.
+
+## uvm_analysis_imp — when you need multiple write() methods
+
+A scoreboard that receives transactions from two monitors (one per protocol) can't use `uvm_subscriber` (only one write()). Instead, use `uvm_analysis_imp` with a tag:
+
+```systemverilog
+// Declare two typed analysis exports
+`uvm_analysis_imp_decl(_write_channel)
+`uvm_analysis_imp_decl(_read_channel)
+
+class axi_scoreboard extends uvm_scoreboard;
+    `uvm_component_utils(axi_scoreboard)
+
+    uvm_analysis_imp_write_channel #(axi_write_txn, axi_scoreboard) write_export;
+    uvm_analysis_imp_read_channel  #(axi_read_txn,  axi_scoreboard) read_export;
+
+    function void build_phase(uvm_phase phase);
+        write_export = new("write_export", this);
+        read_export  = new("read_export",  this);
+    endfunction
+
+    // Called when write monitor publishes
+    function void write_write_channel(axi_write_txn t);
+        check_write(t);
+    endfunction
+
+    // Called when read monitor publishes
+    function void write_read_channel(axi_read_txn t);
+        check_read(t);
+    endfunction
+endclass
+```
+
+The macro `uvm_analysis_imp_decl(_suffix)` generates an analysis imp with a method named `write_suffix()`. This pattern enables one component to receive from multiple sources with type safety.
+
+## Sampling strategy — when to sample
+
+The covergroup samples on each `write()` call. But WHEN is write() called? The monitor decides:
+
+```systemverilog
+class axi_monitor extends uvm_monitor;
+    task run_phase(uvm_phase phase);
+        forever begin
+            // Option A: sample on transaction completion
+            @(posedge vif.clk iff vif.bvalid && vif.bready);
+            txn = reconstruct_txn_from_interface();
+            ap.write(txn);   // Triggers ALL subscribers including coverage
+        end
+    endtask
+endclass
+```
+
+Two common sampling points and what they cover:
+
+| Sampling point           | Covers                                         | Misses                           |
+| ------------------------ | ---------------------------------------------- | -------------------------------- |
+| Transaction start (AW+W) | What was requested (stimulus coverage)         | The DUT's response (BRESP)       |
+| Transaction complete (B) | Full round-trip including response             | Transactions that don't complete |
+| Both                     | Full visibility — two analysis ports, two cg's | Nothing                          |
+
+For protocol coverage (did we exercise every request type?), sample at start. For correctness-checking coverage (did every request get a valid response?), sample at completion. Many covergroups need both.
+
+## Coverage collector vs direct sampling
+
+An alternative to the subscriber pattern: call `cg.sample()` directly inside the monitor. This works but creates tight coupling:
+
+```systemverilog
+// Anti-pattern: coverage inside the monitor
+task run_phase(uvm_phase phase);
+    forever begin
+        @(transaction_complete);
+        txn = reconstruct();
+        cg.sample(txn);        // Coverage coupled to monitor
+        ap.write(txn);
+    end
+endtask
+```
+
+Problems: the monitor is now responsible for coverage — a separate verification concern. To add a new coverage metric, you edit the monitor. To disable coverage in a gate-level simulation, you edit the monitor. The subscriber pattern avoids all of this.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A uvm_analysis_port<T> has three connected subscribers. The monitor calls ap.write(txn). How many write() calls occur?",
+      options: [
+        "One — the port dispatches to one subscriber at a time",
+        "Three — uvm_analysis_port broadcasts to ALL connected subscribers synchronously. Each subscriber's write() method is called in the order they were connected. Analysis ports are designed for fan-out; there is no overhead cost to adding subscribers (the port iterates the connection list). This is why the scoreboard + coverage collector + debug logger pattern is free — no extra monitor calls needed.",
+        "The number depends on the message queue depth",
+        "Zero — write() is asynchronous",
+      ],
+      correct: 1,
+      explanation:
+        "uvm_analysis_port broadcasts synchronously to all subscribers. It maintains a list of connected exports/imps and calls write() on each in sequence. This is the fundamental property that makes the analysis port the right mechanism for one-to-many publishing. Adding a fourth subscriber costs one connect_phase line, not a monitor change.",
+    },
+    {
+      question: "Why is uvm_subscriber preferred over implementing a uvm_analysis_imp manually?",
+      options: [
+        "uvm_subscriber is faster",
+        "uvm_subscriber provides the analysis_export and the pure-virtual write() in one base class, reducing boilerplate. The component writer only implements write(). With manual uvm_analysis_imp, you must declare the port, instantiate it in build_phase, and implement write() — three separate pieces that can be inconsistently done. uvm_subscriber is the canonical UVM idiom for single-input coverage/checking components. Manual imp is needed only when you have multiple inputs (different transaction types) or need fine-grained control over the export name.",
+        "uvm_subscriber avoids the factory",
+        "Manual analysis_imp requires a license",
+      ],
+      correct: 1,
+      explanation:
+        "uvm_subscriber is a convenience base class that handles the mechanical plumbing (export instantiation, type parameterization, pure-virtual write()) so you focus on what matters (the write() implementation). Use it for single-input components. Use uvm_analysis_imp directly when you need multiple inputs of different types, as shown in the scoreboard example with the _decl macros.",
+    },
+    {
+      question:
+        "A coverage collector is connected but the covergroup reports 0% after a 10,000-transaction run. What should the engineer check first?",
+      options: [
+        "The covergroup definition",
+        "The connect_phase wiring: verify that `monitor.ap.connect(coverage_collector.analysis_export)` is actually executed. A missing or miswired connection means write() is never called. Use `uvm_info` in write() to confirm it fires. Second: verify that the monitor is actually calling `ap.write(txn)` — a monitor that reconstructs transactions but never publishes them (e.g., a bug in run_phase) produces 0 hits everywhere. Third: check that sampling() is called in write() and that cur is set before sample().",
+        "Increase at_least",
+        "The bins are wrong",
+      ],
+      correct: 1,
+      explanation:
+        "0% coverage after many transactions almost always means write() was never called — a wiring or logic bug, not a coverage model problem. Debug steps: (1) add `$display` in write() to confirm it fires; (2) check connect_phase for the connection; (3) verify the monitor calls ap.write(); (4) confirm the covergroup's sample() is inside write(). Coverage model errors (wrong bins) produce partial coverage, not zero.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H4-4 walks through the complete coverage-driven verification loop: how coverage reports drive constraint refinement, how targeted sequences close specific holes, and when to declare a coverage model closed vs. mark bins as unreachable.

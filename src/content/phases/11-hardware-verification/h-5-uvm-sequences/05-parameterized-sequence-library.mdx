@@ -1,0 +1,272 @@
+---
+title: "Parameterized Sequences and Test-Pattern Libraries"
+description: "Writing configurable sequences, using uvm_config_db for sequence configuration, and building a reusable sequence library that a full regression test suite can rely on."
+phase: 11
+module: "h-5-uvm-sequences"
+order: 5
+estimatedMinutes: 65
+difficulty: 4
+prerequisites:
+  - "h-5-uvm-sequences/04-virtual-sequencer-pattern"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - sequence-library
+  - parameterized-sequence
+  - uvm-sequence-library
+  - test-reuse
+  - sequence-configuration
+learningOutcomes:
+  - "Write a sequence class with configurable fields set via constructor or config_db"
+  - "Use the UVM sequence library mechanism to select sequences by weight"
+  - "Build a regression sequence that exhausts a coverage model through library selection"
+  - "Explain the amortization benefit of reusable sequence libraries across test suites"
+professionalContext: "DV teams that write one sequence per test produce hundreds of single-use test files and spend the rest of the project debugging them independently. DV teams that build parameterized sequence libraries write once and run everywhere — the same sequence class generates the write-all-aligned test, the write-all-unaligned test, the write-boundary test, and the write-crossing test by varying a parameter. This is the difference between a five-engineer test suite and a one-engineer test suite with the same coverage depth."
+thresholdConcept: false
+---
+
+## The reuse problem
+
+Test-first DV teams end up with hundreds of files named `test_write_aligned.sv`, `test_write_unaligned.sv`, `test_write_boundary.sv`. Each differs by three field assignments. Any protocol change requires updating each file separately.
+
+Parameterized sequences solve this by encoding the variation as fields:
+
+```systemverilog
+class write_seq extends uvm_sequence #(axi_txn);
+    `uvm_object_utils(write_seq)
+
+    // Configurable parameters — set these before calling start()
+    rand int unsigned num_txns;
+    rand bit          force_aligned;   // true: aligned only; false: random
+    rand bit [31:0]   base_addr;
+    rand bit [31:0]   addr_mask;
+
+    constraint c_n      { num_txns inside { [10:200] }; }
+    constraint c_base   { (base_addr & addr_mask) == base_addr; }
+
+    task body();
+        axi_txn tx;
+        repeat (num_txns) begin
+            tx = axi_txn::type_id::create("tx");
+            start_item(tx);
+            if (force_aligned)
+                assert(tx.randomize() with { addr[1:0] == 2'b00; });
+            else
+                assert(tx.randomize());
+            finish_item(tx);
+        end
+    endtask
+endclass
+```
+
+In each test, change only the sequence parameters:
+
+```systemverilog
+// Aligned write test
+write_seq s = write_seq::type_id::create("s");
+s.force_aligned = 1;
+s.base_addr     = 32'h0;
+s.num_txns      = 100;
+s.start(sequencer);
+
+// Boundary test — same class, different params
+write_seq s2 = write_seq::type_id::create("s2");
+s2.force_aligned = 0;
+s2.base_addr     = 32'hFFFF_0000;
+s2.num_txns      = 50;
+s2.start(sequencer);
+```
+
+## Configuring sequences via config_db
+
+For sequences buried deep in a virtual sequence hierarchy, passing parameters through constructor chains is unwieldy. Use `uvm_config_db` instead:
+
+```systemverilog
+class write_seq extends uvm_sequence #(axi_txn);
+    `uvm_object_utils(write_seq)
+    int unsigned num_txns = 100;   // default
+    bit          force_aligned = 0;
+
+    function void pre_start();
+        // Fetch config from the DB; use the default if not set
+        void'(uvm_config_db #(int unsigned)::get(
+            m_sequencer, get_full_name(), "num_txns", num_txns));
+        void'(uvm_config_db #(bit)::get(
+            m_sequencer, get_full_name(), "force_aligned", force_aligned));
+    endfunction
+
+    task body();
+        // ... body uses num_txns and force_aligned
+    endtask
+endclass
+
+// In the test, set before start:
+uvm_config_db #(int unsigned)::set(null, "*.write_seq*", "num_txns", 500);
+uvm_config_db #(bit)::set(null, "*.write_seq*", "force_aligned", 1'b1);
+```
+
+The wildcard path `"*.write_seq*"` targets any write_seq instance created anywhere in the testbench hierarchy. The sequence retrieves its config in `pre_start()`, before `body()` runs.
+
+## UVM sequence library — weighted random selection
+
+A sequence library automatically selects and runs sequences from a registered set, with configurable weights and modes:
+
+```systemverilog
+// Define a sequence library type
+class axi_seq_lib extends uvm_sequence_library #(axi_txn);
+    `uvm_object_utils(axi_seq_lib)
+    `uvm_sequence_library_utils(axi_seq_lib)
+
+    function new(string name = "axi_seq_lib");
+        super.new(name);
+        init_sequence_library();
+    endfunction
+endclass
+
+// Register sequences into the library (in a package or test)
+initial begin
+    axi_seq_lib::add_typewide_sequence(write_seq::get_type());
+    axi_seq_lib::add_typewide_sequence(read_seq::get_type());
+    axi_seq_lib::add_typewide_sequence(burst_seq::get_type());
+    axi_seq_lib::add_typewide_sequence(error_seq::get_type());
+end
+```
+
+The library's `min_random_count` and `max_random_count` set how many sequences to run. Mode options:
+
+```systemverilog
+// Configure the library in the test
+uvm_config_db #(uvm_sequence_lib_mode)::set(
+    null, "*.axi_seqr.main_phase", "default_sequence.selection_mode",
+    UVM_SEQ_LIB_RAND);       // or FIFO, ITEM, USER
+uvm_config_db #(int)::set(
+    null, "*.axi_seqr.main_phase", "default_sequence.min_random_count", 10);
+uvm_config_db #(int)::set(
+    null, "*.axi_seqr.main_phase", "default_sequence.max_random_count", 50);
+```
+
+Modes:
+
+- `UVM_SEQ_LIB_RAND`: randomly selects among registered sequences
+- `UVM_SEQ_LIB_FIFO`: runs each registered sequence once in order
+- `UVM_SEQ_LIB_ITEM`: runs a single sequence item (the simplest form)
+
+## Coverage-driven sequence selection
+
+Link coverage to sequence selection by checking coverage in the sequence body:
+
+```systemverilog
+class coverage_aware_seq extends uvm_sequence #(axi_txn);
+    `uvm_object_utils(coverage_aware_seq)
+
+    // Reference to coverage model (set before start)
+    axi_coverage cov_model;
+
+    task body();
+        axi_txn tx;
+        int idle_attempts = 0;
+
+        // Drive stimulus until coverage closes or we've tried enough
+        while (cov_model.get_coverage() < 99.0 && idle_attempts < 1000) begin
+            tx = axi_txn::type_id::create("tx");
+            start_item(tx);
+
+            // Bias constraints toward coverage holes
+            if (!cov_model.is_covered(AXI_WRAP_BURST))
+                assert(tx.randomize() with { burst_type == AXI_WRAP; });
+            else if (!cov_model.is_covered(AXI_NARROW))
+                assert(tx.randomize() with { size < 3; });
+            else
+                assert(tx.randomize());
+
+            finish_item(tx);
+
+            // Count attempts without coverage improvement
+            if (cov_model.get_coverage() < 99.0)
+                idle_attempts++;
+            else
+                idle_attempts = 0;
+        end
+
+        if (cov_model.get_coverage() < 99.0)
+            `uvm_warning("CVG", $sformatf("Coverage closed at %.1f%%",
+                cov_model.get_coverage()))
+    endtask
+endclass
+```
+
+This closes the constrained-random verification loop inside a single sequence: measure, bias, repeat.
+
+## Building the complete regression library
+
+```
+sequence_library/
+├── axi_seq_lib.sv           ← registers all sequences, configures modes
+├── axi_write_seq.sv         ← parameterized write: aligned, unaligned, burst
+├── axi_read_seq.sv          ← parameterized read: sequential, random, strided
+├── axi_error_seq.sv         ← protocol violations for error handling coverage
+├── axi_back_to_back_seq.sv  ← B2B transactions for timing coverage
+└── axi_mixed_seq.sv         ← read and write interleaved
+```
+
+Each test imports the library package and calls one of:
+
+- `seq_lib.start(seqr)` — runs the full library in configured mode
+- `specific_seq.start(seqr)` — runs a targeted scenario
+
+Coverage closure uses the library; directed testing uses individual sequences. The same code serves both flows.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A test needs to run 500 AXI write transactions with unaligned addresses. Using a parameterized write_seq, what's the cleanest way to configure num_txns=500 and force_aligned=0 without editing the sequence class?",
+      options: [
+        "Create a subclass that hard-codes the values",
+        'Set the parameters before calling start(): `s.num_txns = 500; s.force_aligned = 0; s.start(seqr);` OR set them via config_db before run_phase: `uvm_config_db#(int)::set(null, "*.write_seq*", "num_txns", 500);`. The first approach is direct and works for single-test use; the config_db approach works when the sequence is nested deep in a hierarchy and you can\'t get a direct handle to set fields.',
+        "Edit the sequence class for this test",
+        "Use constraint_mode to enable the right constraint",
+      ],
+      correct: 1,
+      explanation:
+        "Parameterized sequences support configuration by direct field assignment (simple, direct) or by config_db (works for deep hierarchies). Both are correct. The right choice depends on whether you have a handle to the sequence instance. Hard-coding in a subclass or editing the class defeats the purpose of parameterization.",
+    },
+    {
+      question:
+        "Why register sequences into a UVM sequence library using add_typewide_sequence() rather than just calling each sequence explicitly from the test?",
+      options: [
+        "Library sequences run faster",
+        "The library enables weighted random selection, running N randomly chosen sequences from the registered set in each simulation. This means a single regression run exercises different orderings and combinations on each seed. Over many seeds, the library covers the Cartesian product of sequences without the test author enumerating every combination. Explicit test calls enumerate only what the author planned; the library generates combinations the author didn't anticipate — which is where unexpected bugs hide.",
+        "Libraries reduce compile time",
+        "Required by the UVM spec",
+      ],
+      correct: 1,
+      explanation:
+        "The sequence library's value is automated exploration of the sequence space. An engineer registers N sequences; the library on K seeds runs K×(N weighted-random choices). Unexpected orderings and combinations emerge naturally. Explicit test calls enumerate what the engineer foresaw; libraries cover what they didn't.",
+    },
+    {
+      question:
+        "A sequence library reports 70% coverage closure after 10,000 transactions. The coverage report shows AXI WRAP burst type and narrow transfers are never hit. What's the structural change needed, not just 'run more'?",
+      options: [
+        "Increase max_random_count",
+        "Add targeted sequences for the missing coverage: a wrap_burst_seq that forces burst_type==AXI_WRAP, and a narrow_seq that forces size<3. Register them in the library. Alternatively, bias the write_seq's constraints to include those ranges in its distribution. More random transactions from a distribution that never generates WRAP or narrow will produce more 0% hits on those bins — the structural bias is the problem, not the count.",
+        "Use a different random seed",
+        "Change the library mode to FIFO",
+      ],
+      correct: 1,
+      explanation:
+        "Coverage holes with fine-grained analysis have structural causes: the constraint distribution never generates the missing values. The fix is structural: add targeted sequences that force the missing scenarios, or add dist directives to the existing sequence's constraints. Scaling up a biased distribution produces more coverage of what's already covered, not closure on what's missing.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H5-06 covers advanced sequence techniques — on-the-fly constraint overrides inside sequences, composing sequences with `p_sequencer` in non-virtual contexts, and debugging common sequence-related simulation failures (zero-time loops, missing objections, driver/sequence deadlock).

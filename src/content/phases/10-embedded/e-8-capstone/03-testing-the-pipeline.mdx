@@ -1,0 +1,295 @@
+---
+title: "Testing the Sensor Pipeline — Strategy, Evidence, and Submission"
+description: "A systematic test plan for the capstone firmware: host-side unit tests for logic, on-target integration tests for timing, and the test-evidence document that becomes part of the portfolio artifact."
+phase: 10
+module: "e-8-capstone"
+order: 3
+estimatedMinutes: 22
+difficulty: 5
+prerequisites:
+  - "e-8-capstone/02"
+standards:
+  primaryAnchor: "ARMv7-M Architecture Reference Manual"
+  cs2023: ["SE-Testing", "SE-CodeQuality"]
+  swebok: []
+  bloom: "evaluate"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - test-plan
+  - unit-test
+  - integration-test
+  - hardware-in-the-loop
+  - test-evidence
+  - gpio-toggle
+  - logic-analyzer
+  - coverage
+  - test-harness
+learningOutcomes:
+  - "Write a test plan that distinguishes host-side unit tests from on-target integration tests for embedded firmware"
+  - "Measure end-to-end latency in the sensor pipeline using GPIO toggles and a logic analyzer"
+  - "Produce a test evidence document that records test results alongside test descriptions"
+  - "Verify that the RTOS task structure handles the case where the telemetry queue is full"
+professionalContext: "A hiring manager who receives a capstone with a test plan and measured results treats it as production-quality work. A capstone with 'it works' and a demo video is a student project. The test evidence document is the artifact that bridges those two categories — it shows you have the engineering discipline to specify what you're testing and verify that it passes."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Testing embedded firmware requires two environments: a development host (PC) for logic testing, and the actual hardware for timing and electrical verification. Engineers who conflate these two environments waste time: running timing tests on a simulator (which doesn't model interrupt latency) or spending an afternoon on hardware debugging a compensation formula that a 10-second PC test would have caught.
+
+This lesson structures a test plan that uses the right environment for each test category.
+
+## Test plan structure
+
+A minimal test plan for the capstone pipeline has three sections:
+
+```
+SENSOR PIPELINE FIRMWARE — TEST PLAN v1.0
+Date: 2026-06-30
+Author: [Your name]
+
+Section 1: Host-side unit tests (run on PC, no hardware)
+  T-01: ADC compensation formula correctness
+  T-02: Mean/min/max computation correctness
+  T-03: JSON formatting correctness
+  T-04: Buffer-selection logic (HT vs TC interrupt)
+  T-05: Queue-full handling in telemetry path
+
+Section 2: On-target integration tests (run on STM32F4 Discovery)
+  T-06: ADC sampling rate verification (GPIO toggle + logic analyzer)
+  T-07: DMA half-transfer interrupt latency measurement
+  T-08: End-to-end latency (sample acquisition → UART byte transmitted)
+  T-09: Watchdog recovery on simulated task stall
+  T-10: HardFault capture and boot-log output
+
+Section 3: Soak test
+  T-11: 30-minute continuous run, no reset, no queue overflow
+```
+
+## T-01 through T-05: Host-side unit tests
+
+Using the Unity framework from E5 lesson 5, test the pipeline's pure logic:
+
+```c
+/* test_pipeline_logic.c */
+#include "unity.h"
+#include "pipeline_compute.h"
+
+void test_mean_min_max_basic(void) {
+    uint16_t samples[4] = {100, 200, 150, 50};
+    pipeline_stats_t stats;
+    compute_stats(samples, 4, &stats);
+    TEST_ASSERT_EQUAL_UINT16(125, stats.mean);   /* (100+200+150+50)/4 */
+    TEST_ASSERT_EQUAL_UINT16(50,  stats.min);
+    TEST_ASSERT_EQUAL_UINT16(200, stats.max);
+}
+
+void test_mean_min_max_single_element(void) {
+    uint16_t samples[1] = {1000};
+    pipeline_stats_t stats;
+    compute_stats(samples, 1, &stats);
+    TEST_ASSERT_EQUAL_UINT16(1000, stats.mean);
+    TEST_ASSERT_EQUAL_UINT16(1000, stats.min);
+    TEST_ASSERT_EQUAL_UINT16(1000, stats.max);
+}
+
+void test_json_format_output(void) {
+    telemetry_msg_t msg = { .timestamp_ms = 12345, .mean = 2048, .min = 2032, .max = 2061 };
+    char buf[96];
+    int n = format_telemetry_json(&msg, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"ts\":12345,\"mean\":2048,\"min\":2032,\"max\":2061}\n",
+        buf
+    );
+    TEST_ASSERT_EQUAL_INT(47, n);
+}
+
+void test_json_format_truncates_if_buffer_too_small(void) {
+    telemetry_msg_t msg = { .timestamp_ms = 99999, .mean = 4095, .min = 0, .max = 4095 };
+    char buf[10];   /* Too small */
+    int n = format_telemetry_json(&msg, buf, sizeof(buf));
+    TEST_ASSERT_LESS_THAN(0, n);  /* Should return error on truncation */
+    /* Buffer should not overflow — no UB */
+}
+
+void test_buffer_selection_ht_interrupt(void) {
+    /* When the HT (half-transfer) ISR fires, it should select the FIRST half */
+    buffer_msg_t msg = select_buffer_on_ht(adc_buffer, BUFFER_SAMPLES);
+    TEST_ASSERT_EQUAL_PTR(&adc_buffer[0], msg.start);
+    TEST_ASSERT_EQUAL_UINT16(HALF_SAMPLES, msg.count);
+}
+```
+
+These run in CI on every commit, in under a second, without hardware.
+
+## T-06: ADC sampling rate (on-target)
+
+Verify the ADC + DMA samples at exactly 1 kHz by toggling a GPIO on each DMA half-transfer interrupt and measuring the period with a logic analyzer:
+
+```c
+/* In DMA2_Stream0_IRQHandler: */
+void DMA2_Stream0_IRQHandler(void) {
+    if ((DMA2_LISR & DMA_LISR_HTIF0) != 0U) {
+        DMA2_LIFCR = DMA_LIFCR_CHTIF0;
+        /* DEBUG: toggle GPIO PE0 to measure HT interrupt period */
+        GPIOE->ODR ^= (1U << 0);
+        /* ... rest of ISR */
+    }
+}
+```
+
+Measurement procedure:
+
+1. Connect logic analyzer probe to PE0
+2. Flash firmware and let it run for 10 seconds
+3. Measure the toggle period — should be 50.0 ms ± 0.5 ms (50 samples at 1 kHz = 50 ms per half-buffer)
+
+Expected result: 50.0 ms. Acceptable range: 49.0–51.0 ms. Document the measured value.
+
+## T-07: DMA interrupt latency (on-target)
+
+Measure the time from DMA half-transfer trigger to task wakeup:
+
+```c
+/* In DMA ISR: toggle PE1 high */
+void DMA2_Stream0_IRQHandler(void) {
+    GPIOE->BSRR = (1U << 1);    /* PE1 high at ISR entry */
+    /* ... post to queue ... */
+}
+
+/* In process_task: toggle PE1 low */
+void process_task(void *params) {
+    for (;;) {
+        xQueueReceive(buffer_queue, &buf_msg, portMAX_DELAY);
+        GPIOE->BSRR = (1U << 17);  /* PE1 low (bit 16+1) at task wakeup */
+        /* ... process ... */
+    }
+}
+```
+
+Measure the PE1 pulse width — this is the ISR-to-task-wakeup latency.
+
+Expected: < 2 ms (one FreeRTOS tick at 1 kHz tick rate). Document the measured maximum.
+
+## T-08: End-to-end latency (on-target)
+
+Measure total pipeline latency from ADC DMA HT trigger to first UART byte:
+
+```c
+/* PE2 high at DMA HT ISR entry */
+/* PE2 low at first byte written to UART DMA */
+```
+
+Calculate from logic analyzer: PE2 pulse width = end-to-end latency. Compare against the latency budget from lesson 1 (target: < 100 ms). Document the measured value.
+
+## T-09: Watchdog recovery test (on-target)
+
+Test that the IWDG correctly resets the system when the supervisor task is stalled:
+
+```c
+/* Test mode: inject a task stall via a button press */
+void EXTI0_IRQHandler(void) {
+    if (EXTI->PR & 1U) {
+        EXTI->PR = 1U;
+        /* Simulate supervisor stall for 3 seconds (> IWDG timeout) */
+        vTaskSuspend(supervisor_task_handle);
+        /* System should reset via IWDG within 2 seconds */
+    }
+}
+```
+
+Procedure:
+
+1. Boot firmware, observe normal operation via UART telemetry
+2. Press the user button (PA0) to stall the supervisor
+3. Observe: UART goes silent, then system resets
+4. On next boot log: "Boot: IWDG watchdog reset"
+
+Pass criterion: system resets within (IWDG_timeout + 100 ms), boot log shows IWDG reset.
+
+## T-10: HardFault capture test (on-target)
+
+Inject a controlled null-pointer dereference to verify the fault handler captures state:
+
+```c
+/* Test mode only — inject a fault */
+#ifdef TEST_FAULT_HANDLER
+void inject_null_fault(void) {
+    volatile uint32_t *bad_ptr = NULL;
+    (void)(*bad_ptr);   /* Dereference NULL — triggers HardFault */
+}
+#endif
+```
+
+After the HardFault-triggered reset, the boot log should show:
+
+```
+Boot: Software reset (from NVIC_SystemReset in HardFault handler)
+FAULT! PC=0x08001234 LR=0x08001500 CFSR=0x00008200
+```
+
+`CFSR=0x00008200` decodes to: BFARVALID=1, PRECISERR=1 (precise bus fault), which corresponds to a null pointer dereference. Pass criterion: CFSR decoded correctly, PC maps to the injected fault line via addr2line.
+
+## T-11: 30-minute soak test (on-target)
+
+Run the full pipeline for 30 minutes with no intervention:
+
+```c
+/* Soak test criteria — checked via UART telemetry */
+void verify_soak_test(void) {
+    /* After 30 minutes: */
+    /* - System still running (no reset) */
+    /* - telemetry JSON still streaming at expected rate */
+    /* - No queue overflow counter incremented (xQueueSend fails counted) */
+    /* - IWDG never fired (no IWDG boot reason) */
+    /* - xPortGetMinimumEverFreeHeapSize() > 512 bytes (heap not exhausted) */
+}
+```
+
+Log the heap minimum, stack high-water marks, and error counter values at the end of the soak. These numbers go in the test evidence document.
+
+## Test evidence document template
+
+```markdown
+# Sensor Pipeline Firmware — Test Evidence
+
+Project: Phase E Capstone
+Date: 2026-06-30
+Firmware version: git sha abc1234
+
+## Host-side unit tests (CI run)
+
+| Test                | Result | Notes                                            |
+| ------------------- | ------ | ------------------------------------------------ |
+| T-01: Compensation  | PASS   | Reference values match Bosch datasheet §4.2.3    |
+| T-02: Mean/min/max  | PASS   | Edge cases (single element, all equal) covered   |
+| T-03: JSON format   | PASS   | Output matches expected format including newline |
+| T-04: Buffer select | PASS   | HT selects first half, TC selects second half    |
+| T-05: Queue full    | PASS   | Drops telemetry message, increments counter      |
+
+## On-target integration tests
+
+| Test                | Expected          | Measured                 | Result |
+| ------------------- | ----------------- | ------------------------ | ------ |
+| T-06: ADC rate      | 50.0 ms HT period | 50.2 ms                  | PASS   |
+| T-07: ISR→task      | < 2.0 ms          | 1.1 ms                   | PASS   |
+| T-08: E2E latency   | < 100 ms          | 62 ms                    | PASS   |
+| T-09: WDG reset     | IWDG boot log     | Confirmed                | PASS   |
+| T-10: Fault capture | PC + CFSR valid   | PC=correct, CFSR decoded | PASS   |
+
+## Soak test (30 minutes)
+
+- No resets observed
+- Telemetry rate: 20 msg/s (expected 20/s)
+- Queue overflow count: 0
+- Heap minimum: 2840 bytes
+- process_task stack HWM: 180 words / 384 allocated (47% free)
+- telemetry_task stack HWM: 220 words / 512 allocated (57% free)
+```
+
+This document goes in the capstone submission package alongside the source code, architecture diagram, and latency budget.
+
+## What's next
+
+The Phase E capstone is complete when: source compiles clean, firmware runs correctly on hardware, test evidence document covers all test categories, /verify hash anchor is obtained, and the package is published. The final lesson (this module's lesson 01) covers the complete submission checklist. This lesson is the testing layer that makes the submission defensible to a technical reviewer.

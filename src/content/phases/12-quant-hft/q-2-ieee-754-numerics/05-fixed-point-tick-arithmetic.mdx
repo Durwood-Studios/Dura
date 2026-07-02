@@ -1,0 +1,254 @@
+---
+title: "Fixed-Point Tick Arithmetic — Why HFT Prices Are Integers"
+description: "How HFT systems represent prices as integer ticks, the overflow and underflow properties of tick arithmetic, and when fixed-point outperforms binary64 on the hot path."
+phase: 12
+module: "q-2-ieee-754-numerics"
+order: 5
+estimatedMinutes: 40
+difficulty: 4
+prerequisites:
+  - "q-2-ieee-754-numerics/04-rounding-modes-and-determinism"
+standards:
+  primaryAnchor: "IEEE 754-2019"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - fixed-point
+  - tick-size
+  - ticks
+  - integer-price
+  - implied-decimal
+  - overflow-check
+  - saturating-arithmetic
+  - price-scale
+  - raw-price
+  - nominal-price
+learningOutcomes:
+  - "After this lesson you can convert a nominal dollar price to an integer tick representation given a tick size, and recover the nominal price without floating-point error"
+  - "After this lesson you can implement addition, comparison, and spread computation on integer prices without any floating-point operations"
+  - "After this lesson you can identify the overflow boundary for a given tick scale and write a checked conversion that detects it"
+  - "After this lesson you can state three concrete advantages of integer tick representation over binary64 for prices in an HFT order book"
+professionalContext: "Every serious HFT order book stores prices as integers. ITCH delivers them as integers. The matching engine compares them as integers. The risk system accumulates P&L using integer arithmetic scaled to ticks. Moving to binary64 mid-stream — to display prices, to compute Greeks, to feed a model — is a deliberate conversion at a known boundary, never an accident. Engineers who do not understand why prices are integers introduce float-tick round-trip bugs that lose money silently: the order book stores 18350000 (meaning $183.50 with 4 decimal places), the code prints it as a double, the double rounds to 183.4999999..., and the strategy sends a limit order at the wrong price. This lesson makes that bug class impossible to introduce."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You write `double price = 183.50`. You store it. You read it back. You print it. It says `183.4999999999`. You multiply by 100 to convert cents and round: you get `18349`. You just sent a limit order to the exchange at `$183.49`. The exchange accepted it. Your strategy now has an open position at a price you never intended, and the only symptom is a fill confirmation that says `$183.49`.
+
+This is not a rare edge case. `183.50` in binary64 is `183.4999999999999715782905695...` at full precision. The representable double nearest to `183.50` is slightly below it. Multiply by 100 and floor: wrong. This is the number one source of silent price errors in trading systems written by people who treat `double` as a decimal.
+
+The fix is to never use `double` for prices. This lesson shows the replacement.
+
+## The fundamental observation
+
+Prices in financial markets are <VocabTooltip slug="tick-size">discrete</VocabTooltip>. Equity prices on US exchanges move in increments of `$0.0001` (one-hundredth of a cent) for sub-penny pricing, or `$0.01` for most retail-visible prices. There is no such thing as a trade at `$183.500000001`. The matching engine's price grid is finite and regular.
+
+That regularity makes floating-point the wrong tool. You do not need an arbitrary approximation of a real number. You need exact representation of one of a finite set of values. Integers are exact. So: represent prices as integers, where the integer counts <VocabTooltip slug="ticks">ticks</VocabTooltip> from zero.
+
+```
+tick size  = $0.0001           (one ten-thousandth of a dollar)
+tick price = price_dollars / 0.0001
+           = price_dollars * 10000
+
+$183.50 → 1835000   (exact, no rounding)
+$0.01   → 100       (exact)
+$0.0001 → 1         (the minimum price increment, the tick itself)
+```
+
+The integer `1835000` is the <VocabTooltip slug="integer-price">integer price</VocabTooltip> (also called <VocabTooltip slug="raw-price">raw price</VocabTooltip> or the ITCH term: <VocabTooltip slug="implied-decimal">4-decimal implied format</VocabTooltip>). The <VocabTooltip slug="price-scale">price scale</VocabTooltip> is 10000.
+
+Nasdaq ITCH 5.0 sends all prices in this exact format: a 4-byte unsigned integer, 4 implied decimal places. When ITCH says `Price = 1835000`, the price is `$183.5000`. No float involved anywhere in the exchange-to-strategy path.
+
+## Integer price arithmetic
+
+Addition, subtraction, and comparison of integer prices are exact with no rounding — because integers have exact arithmetic at the precision you care about.
+
+```cpp
+#include <cstdint>
+#include <cassert>
+#include <stdexcept>
+#include <format>
+
+// Integer price: ticks from 0, scale = 10000 (4 decimal places).
+// 32-bit unsigned handles prices up to 429496.7295 dollars — sufficient for most equities.
+// For options or indices, use int64_t for prices up to ~922 trillion ticks.
+using Price = int64_t;
+constexpr int64_t PRICE_SCALE = 10'000;  // ticks per dollar
+
+// Convert a nominal dollar value to an integer price.
+// Converts via int64 math to avoid float rounding.
+// Precondition: price_x10000 must already be the price in ten-thousandths of a dollar.
+inline Price from_ticks(int64_t raw_ticks) noexcept { return raw_ticks; }
+
+// Display a tick price as a decimal string — never convert to double for display.
+std::string price_to_string(Price p) {
+    int64_t dollars  = p / PRICE_SCALE;
+    int64_t fraction = p % PRICE_SCALE;
+    return std::format("{}.{:04d}", dollars, fraction);
+}
+
+// Spread: best_ask - best_bid, in ticks.
+inline Price spread(Price best_bid, Price best_ask) noexcept {
+    return best_ask - best_bid;
+}
+
+// Mid price: (bid + ask) / 2.
+// Result is in half-ticks. Store as int64_t × 2 if you need precision,
+// or truncate — but document the choice.
+inline Price mid_price_truncated(Price bid, Price ask) noexcept {
+    return (bid + ask) / 2;  // truncates; half-tick is lost
+}
+
+// Convert integer price to double ONLY for display or model input.
+// Never use the result to drive order entry.
+inline double to_double(Price p) noexcept {
+    return static_cast<double>(p) / static_cast<double>(PRICE_SCALE);
+}
+```
+
+Key properties:
+
+- `spread()` and comparison are single CPU instructions — no floating-point unit involved.
+- `price_to_string()` uses only integer division and the `format` library — exact.
+- `to_double()` exists but is documented as a one-way boundary: you convert _out_ to a model, never back in.
+
+## Overflow analysis
+
+The choice of `int64_t` is deliberate. Let's verify the headroom:
+
+```cpp
+// int64_t max: 9,223,372,036,854,775,807
+// PRICE_SCALE:                       10,000
+// Max representable dollar price: 922,337,203,685 dollars
+// (922 trillion dollars — far above any instrument price)
+
+// Overflow can still occur in intermediate calculations.
+// Example: computing total notional value of a position.
+int64_t shares  = 1'000'000;   // 1M shares
+Price   price   = 1'835'000;   // $183.50 in ticks
+
+// Naive: shares * price — but 1e6 * 1.835e6 = 1.835e12
+// int64_t can hold up to ~9.2e18, so this fits.
+int64_t notional_ticks = shares * price;  // = 1,835,000,000,000 ticks
+// In dollars: notional_ticks / PRICE_SCALE = $183,500,000
+
+// The dangerous case: shares * price * some_multiplier
+// Always check before multiplying large values.
+```
+
+For P&L accumulation where you sum notional values across many positions, prefer `__int128` or keep the sum in double after the tick→dollar conversion is done. The accumulation is a model concern, not an order-entry concern; error at the P&L sum level is acceptable. Error at the price level is not.
+
+## Round-trip safety
+
+The one place you might convert from a human-readable decimal string to a tick price is config parsing or order input. Do it correctly:
+
+```cpp
+#include <charconv>
+#include <system_error>
+#include <optional>
+
+// Parse "$183.5000" → tick price 1835000.
+// Avoids double entirely. Assumes exactly 4 decimal places for the fractional part.
+std::optional<Price> parse_price(std::string_view s) {
+    // Find the decimal point.
+    auto dot = s.find('.');
+    if (dot == std::string_view::npos) {
+        // Integer price (e.g. "183") — treat as dollars, no cents.
+        int64_t dollars{};
+        if (std::from_chars(s.data(), s.data() + s.size(), dollars).ec != std::errc{})
+            return std::nullopt;
+        return dollars * PRICE_SCALE;
+    }
+
+    int64_t dollars{};
+    if (std::from_chars(s.data(), s.data() + dot, dollars).ec != std::errc{})
+        return std::nullopt;
+
+    // Fractional part: read up to 4 digits, right-pad with zeros.
+    std::string_view frac = s.substr(dot + 1);
+    if (frac.size() > 4) return std::nullopt;  // sub-tick precision not representable
+
+    int64_t frac_val{};
+    if (std::from_chars(frac.data(), frac.data() + frac.size(), frac_val).ec != std::errc{})
+        return std::nullopt;
+
+    // Scale to 4 decimal places.
+    for (size_t i = frac.size(); i < 4; ++i) frac_val *= 10;
+
+    return dollars * PRICE_SCALE + frac_val;
+}
+```
+
+Notice: no `double` anywhere. The parsing goes directly from decimal characters to integer ticks. Sub-tick precision (a fifth decimal place) is correctly rejected.
+
+## The three advantages of integer prices
+
+Knowing why the industry standardized on integer prices lets you defend the decision in design reviews:
+
+**1. Exact representation.** Any price at the venue's tick granularity is exactly representable as a 64-bit integer. Zero rounding, ever, on the values that matter. `double` represents at most 15-16 significant decimal digits; at a price of `$10,000.0001`, the fourth decimal place is at the 9th significant digit — still safe in double, but why carry the risk?
+
+**2. Comparison is bitwise.** `bid < ask` on two `int64_t` values is a single `cmp` instruction. On `double` it is also a single instruction (`ucomisd`) but the CPU must handle NaN and signed-zero edge cases. For an order book that runs this comparison millions of times per second, the integer path is simpler and has no exceptional cases.
+
+**3. No floating-point unit required.** Integer arithmetic runs on the integer execution units. In an ITCH parsing loop that fills the order book, never touching the FPU means the FPU stays cold and available for the model that runs downstream. Integer units on modern CPUs have higher throughput than the FPU for simple operations.
+
+<SandboxExercise
+  title="Integer Price Arithmetic"
+  description="Implement the functions below and verify they produce correct results without ever using floating-point arithmetic for intermediate storage."
+  language="cpp"
+  starterCode={`#include <cstdint>
+#include <string>
+#include <format>
+#include <iostream>
+
+using Price = int64_t;
+constexpr int64_t PRICE_SCALE = 10'000;
+
+// Convert a price in ten-thousandths to a human-readable string.
+// Example: 1835000 → "183.5000"
+std::string price_to_string(Price p) {
+// TODO: implement without using double
+}
+
+// Compute the spread in ticks.
+Price spread(Price bid, Price ask) {
+// TODO
+}
+
+// Compute the mid-price in ticks, truncating if the sum is odd.
+Price mid_price(Price bid, Price ask) {
+// TODO
+}
+
+int main() {
+Price bid = 1835000; // $183.5000
+Price ask = 1835100; // $183.5100
+
+    std::cout << "bid:    " << price_to_string(bid) << "\\n";
+    std::cout << "ask:    " << price_to_string(ask) << "\\n";
+    std::cout << "spread: " << spread(bid, ask) << " ticks\\n";  // should be 100
+    std::cout << "mid:    " << price_to_string(mid_price(bid, ask)) << "\\n"; // $183.5050
+
+}
+`}
+  solution={`std::string price_to_string(Price p) {
+int64_t dollars = p / PRICE_SCALE;
+int64_t fraction = p % PRICE_SCALE;
+return std::format("{}.{:04d}", dollars, fraction);
+}
+
+Price spread(Price bid, Price ask) { return ask - bid; }
+Price mid_price(Price bid, Price ask) { return (bid + ask) / 2; }
+`}
+tests={[
+{ input: "bid=1835000, ask=1835100", expected: "spread=100, mid=1835050" },
+{ input: "bid=100, ask=101", expected: "spread=1, mid=100" }
+]}
+/>
+
+## What's next
+
+With prices safely in integer form, the next lesson examines what happens to the floating-point values your models _do_ use: how accumulated error — measured in units in the last place — grows through long summation chains, and how to recognize catastrophic cancellation before it corrupts a P&L calculation.

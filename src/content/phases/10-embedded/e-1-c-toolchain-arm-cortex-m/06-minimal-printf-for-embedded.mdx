@@ -1,0 +1,330 @@
+---
+title: "Writing a Minimal printf for Embedded"
+description: "Newlib's printf is 6.5 KB. A minimal embedded printf that covers 95% of the use cases is under 500 bytes. Build one from scratch — integer formatting, zero allocation, UART output."
+phase: 10
+module: "e-1-c-toolchain-arm-cortex-m"
+order: 6
+estimatedMinutes: 20
+difficulty: 3
+prerequisites:
+  - "e-1-c-toolchain-arm-cortex-m/05"
+standards:
+  primaryAnchor: "ISO C11 Standard — Variadic Functions"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "create"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - variadic-function
+  - va-list
+  - newlib
+  - format-string
+  - integer-to-ascii
+  - uart-putchar
+  - code-size
+learningOutcomes:
+  - "Explain why newlib's printf is too large for constrained embedded targets"
+  - "Write a minimal integer-to-ASCII conversion without dynamic allocation"
+  - "Implement a variadic log function that handles %u, %d, %x, %s format specifiers"
+  - "Wire the output to UART and verify it produces correct output at runtime"
+  - "Measure the code-size impact using the map file from Lesson 04"
+professionalContext: "Every embedded project needs some form of logging. The default answer — link newlib and use printf — costs 6-8 KB of flash before you've written a single application line. On chips with 32-64 KB flash, that's 10-25% of your budget for one function. Writing a minimal printf is a rite of passage: it teaches variadic function mechanics, integer formatting, and the real cost of abstractions. The result is a tool you'll carry across projects."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Lesson 05 showed you the map file entry for newlib-nano's printf:
+
+```
+.text.printf   0x080000DC     0x1A40  printf_nano.o   ← 6.5 KB
+```
+
+On a chip with 32 KB flash, that's 20% of your entire code budget. Most embedded debugging only needs `%u`, `%d`, `%x`, and `%s`. A hand-written function that handles those four specifiers compiles to under 500 bytes — leaving 6 KB for your actual application.
+
+Beyond code size, understanding how printf works internally helps you debug format-string bugs, understand variadic function calling conventions, and write diagnostic tools in environments where no standard library exists at all.
+
+## The variadic function mechanism
+
+`printf` is a variadic function — it takes a variable number of arguments. The `...` in the signature and the `va_list` API are how C handles this:
+
+```c
+#include <stdarg.h>
+
+void log_msg(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);     // Initialize iterator at first variadic arg
+
+    char c;
+    while ((c = *fmt++) != '\0') {
+        if (c != '%') {
+            uart_putc(c);    // Non-format character: pass through
+            continue;
+        }
+        // Format specifier follows
+        char spec = *fmt++;
+        switch (spec) {
+            case 'u': {
+                uint32_t v = va_arg(args, uint32_t);
+                print_uint(v);
+                break;
+            }
+            case 'd': {
+                int32_t v = va_arg(args, int32_t);
+                if (v < 0) { uart_putc('-'); v = -v; }
+                print_uint((uint32_t)v);
+                break;
+            }
+            case 'x': {
+                uint32_t v = va_arg(args, uint32_t);
+                print_hex(v);
+                break;
+            }
+            case 's': {
+                const char *s = va_arg(args, const char *);
+                while (*s) uart_putc(*s++);
+                break;
+            }
+            case '%':
+                uart_putc('%');
+                break;
+            default:
+                uart_putc('?');
+                break;
+        }
+    }
+
+    va_end(args);
+}
+```
+
+`va_arg(args, type)` reads the next argument from the stack and advances the iterator. The types must match what the caller passed — C's type system doesn't enforce this at compile time (though `-Wformat` catches mismatches in GCC for literal format strings).
+
+## Integer to ASCII — no allocation
+
+The tricky part of printf is converting an integer to decimal digits. The naive approach — sprintf into a temp buffer — requires allocation. The embedded approach: divide-and-reverse in a fixed stack buffer.
+
+```c
+static void print_uint(uint32_t v) {
+    if (v == 0) {
+        uart_putc('0');
+        return;
+    }
+
+    // Extract digits in reverse order (least significant first)
+    char buf[10];   // uint32_t max is 4294967295 — 10 digits
+    uint8_t len = 0;
+    while (v > 0) {
+        buf[len++] = '0' + (v % 10);
+        v /= 10;
+    }
+
+    // Print in forward order (most significant first)
+    while (len-- > 0) {
+        uart_putc(buf[len]);
+    }
+}
+
+static void print_hex(uint32_t v) {
+    static const char hex[] = "0123456789abcdef";
+    uart_putc('0');
+    uart_putc('x');
+    for (int i = 28; i >= 0; i -= 4) {
+        uart_putc(hex[(v >> i) & 0xF]);
+    }
+}
+```
+
+No `malloc`, no recursion, no dependency on any library. The stack usage is 10 bytes for `buf` plus the frame overhead — around 32 bytes total.
+
+## The UART output function
+
+`uart_putc` from Lesson E2's UART patterns (polled for simplicity here):
+
+```c
+// Assumes USART2 is initialized at 115200 baud from prior setup
+static inline void uart_putc(char c) {
+    while (!(USART2_SR & (1U << 7))) { }   // TXE: TX register empty
+    USART2_DR = (uint8_t)c;
+}
+```
+
+For interrupt-driven or DMA-driven UART, replace the body — `log_msg` doesn't care, it calls `uart_putc` and the implementation swaps out.
+
+## The complete minimal printf
+
+Putting it together as a single header — no .c file needed, which avoids link-order issues:
+
+```c
+// embed_log.h — drop-in minimal printf for bare-metal
+#pragma once
+#include <stdarg.h>
+#include <stdint.h>
+#include "uart.h"   // provides uart_putc(char)
+
+static void _print_uint(uint32_t v) {
+    if (v == 0) { uart_putc('0'); return; }
+    char b[10]; uint8_t n = 0;
+    while (v > 0) { b[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n-- > 0) uart_putc(b[n]);
+}
+
+static void _print_hex(uint32_t v) {
+    const char h[] = "0123456789abcdef";
+    uart_putc('0'); uart_putc('x');
+    for (int8_t i = 28; i >= 0; i -= 4) uart_putc(h[(v >> i) & 0xF]);
+}
+
+/* MISRA-C:2023 Rule 17.1 advisory: variadic macros are permitted
+   when the alternative (runtime format strings) is less safe. Deviation: LOG.001 */
+static void LOG(const char *fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    for (char c; (c = *fmt++);) {
+        if (c != '%') { uart_putc(c); continue; }
+        switch (*fmt++) {
+            case 'u': _print_uint(va_arg(a, uint32_t));            break;
+            case 'd': { int32_t v = va_arg(a, int32_t);
+                        if (v < 0) { uart_putc('-'); v = -v; }
+                        _print_uint((uint32_t)v); break; }
+            case 'x': _print_hex(va_arg(a, uint32_t));             break;
+            case 's': { const char *s = va_arg(a, const char *);
+                        while (*s) uart_putc(*s++); break; }
+            case '%': uart_putc('%');                               break;
+            default:  uart_putc('?');                               break;
+        }
+    }
+    va_end(a);
+}
+```
+
+Usage:
+
+```c
+#include "embed_log.h"
+
+int main(void) {
+    uint32_t val = 12345;
+    LOG("ADC = %u (0x%x)\n", val, val);
+    LOG("count=%d status=%s\n", -7, "ok");
+}
+```
+
+Output on the terminal: `ADC = 12345 (0x3039)` then `count=-7 status=ok`.
+
+## Measuring the code size
+
+From Lesson 04, add `-Wl,-Map=firmware.map` to LDFLAGS, then check:
+
+```bash
+$ grep "_print_uint\|_print_hex\|LOG" firmware.map
+ .text._print_uint    0x0800012c       0x44
+ .text._print_hex     0x08000170       0x24
+ .text.LOG            0x08000194       0xb8
+```
+
+Total: 0x44 + 0x24 + 0xb8 = 288 bytes. Compare to newlib-nano's 6.5 KB. For a 32 KB flash device, this saves ~6 KB — room for hundreds more lines of application code.
+
+## What you don't get
+
+This minimal printf intentionally omits:
+
+- Width and precision specifiers (`%08x`, `%.2f`)
+- Floating-point (`%f`, `%e`) — adds 1-2 KB and requires FPU context in the formatter
+- `%p` (pointer) — implement as `%x` if needed
+- Buffer-overflow protection on `%s` — callers are responsible (acceptable in firmware you control)
+
+For projects that need width/padding/float, the next step is Mpaland's `printf` (github.com/mpaland/printf) — a ~2 KB open-source alternative to newlib that supports most specifiers with no allocation.
+
+## Competency check
+
+<SandboxExercise
+  language="c"
+  instructions="The LOG function below is missing the '%x' case and the '%s' case. Complete the switch statement so that LOG('val=0x%x name=%s', 255, 'gpio') outputs 'val=0xff name=gpio'. Use the print_hex and uart_putc patterns from the lesson. Assume uart_putc and print_uint are already provided."
+  initialCode={`#include <stdarg.h>
+#include <stdint.h>
+
+/_ Provided by the test harness _/
+extern void uart_putc(char c);
+extern void print_uint(uint32_t v);
+
+static void print_hex(uint32_t v) {
+const char h[] = "0123456789abcdef";
+uart_putc('0'); uart_putc('x');
+for (int8_t i = 28; i >= 0; i -= 4) uart_putc(h[(v >> i) & 0xF]);
+}
+
+static void LOG(const char *fmt, ...) {
+va_list a;
+va_start(a, fmt);
+for (char c; (c = *fmt++) != '\\0'; ) {
+if (c != '%') { uart*putc(c); continue; }
+switch (\_fmt++) {
+case 'u': print_uint(va_arg(a, uint32_t)); break;
+case 'd': {
+int32_t v = va_arg(a, int32_t);
+if (v < 0) { uart_putc('-'); v = -v; }
+print_uint((uint32_t)v);
+break;
+}
+/* TODO: add case 'x' _/
+/_ TODO: add case 's' \*/
+case '%': uart_putc('%'); break;
+default: uart_putc('?'); break;
+}
+}
+va_end(a);
+}
+`}
+  solution={`#include <stdarg.h>
+#include <stdint.h>
+
+extern void uart_putc(char c);
+extern void print_uint(uint32_t v);
+
+static void print_hex(uint32_t v) {
+const char h[] = "0123456789abcdef";
+uart_putc('0'); uart_putc('x');
+for (int8_t i = 28; i >= 0; i -= 4) uart_putc(h[(v >> i) & 0xF]);
+}
+
+static void LOG(const char *fmt, ...) {
+va_list a;
+va_start(a, fmt);
+for (char c; (c = *fmt++) != '\\0'; ) {
+if (c != '%') { uart_putc(c); continue; }
+switch (*fmt++) {
+case 'u': print_uint(va_arg(a, uint32_t)); break;
+case 'd': {
+int32_t v = va_arg(a, int32_t);
+if (v < 0) { uart_putc('-'); v = -v; }
+print_uint((uint32_t)v);
+break;
+}
+case 'x': print_hex(va_arg(a, uint32_t)); break;
+case 's': {
+const char *s = va_arg(a, const char *);
+while (*s) uart_putc(\*s++);
+break;
+}
+case '%': uart_putc('%'); break;
+default: uart_putc('?'); break;
+}
+}
+va_end(a);
+}
+`}
+testCases={[
+"LOG('val=0x%x name=%s', 255, 'gpio') produces 'val=0xff name=gpio'",
+"LOG('%s=%d', 'count', -3) produces 'count=-3'",
+"LOG('%x', 0xDEAD) produces '0xdead'",
+"No malloc or sprintf calls are present"
+]}
+/>
+
+## What's next
+
+You've completed Module E1 — the C toolchain for ARM Cortex-M. You can build a flashable binary from source, read and write linker scripts, understand how the optimizer interacts with embedded code, debug over JTAG, and emit structured logs without a standard library.
+
+Module E2 takes this toolchain and applies it to real peripherals: UART, timers, GPIO input, SPI, and ADC — all from the reference manual, no vendor HAL.

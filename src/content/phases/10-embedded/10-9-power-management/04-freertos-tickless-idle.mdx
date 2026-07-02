@@ -1,0 +1,214 @@
+---
+title: "FreeRTOS Tickless Idle — Sleep During Scheduler Idle Periods"
+description: "FreeRTOS's tickless idle mode suppresses the system tick and enters low-power sleep automatically when all tasks are blocked. Configure it correctly and the RTOS itself manages your sleep/wake cycle."
+phase: 10
+module: "10-9-power-management"
+order: 4
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "10-9-power-management/03"
+  - "e-4-rtos-fundamentals/01"
+standards:
+  primaryAnchor: "FreeRTOS"
+  cs2023: ["OS-Scheduling", "SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - tickless-idle
+  - idle-hook
+  - expected-idle-time
+  - vPortSuppressTicksAndSleep
+  - pre-sleep-processing
+  - post-sleep-processing
+  - wakeup-correction
+  - portSUPPRESS_TICKS_AND_SLEEP
+learningOutcomes:
+  - "Enable FreeRTOS tickless idle mode and configure the required hook functions"
+  - "Implement vApplicationIdleHook to enter Stop mode during scheduler idle periods"
+  - "Correct the FreeRTOS tick count after waking from Stop mode"
+  - "Measure the power reduction achieved by tickless idle on a sensor-node workload"
+professionalContext: "A FreeRTOS application running vTaskDelay between task activations has the scheduler firing a system tick every 1 ms — even when all tasks are blocked and the CPU has nothing to do. Each tick wakes the CPU, checks the task list, and goes back to sleep. On a battery-powered device this is the most common avoidable power waste. Tickless idle eliminates these wasted wake-ups."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A sensor node with FreeRTOS running at a 1 ms tick (1000 Hz) wakes the CPU 1,000 times per second just to check whether any tasks have become ready — even if all tasks are sleeping for 500 ms. Each wake-up costs the run mode current for ~10 µs before returning to sleep. At 30 mA active current: 1000 wakes × 10 µs × 30 mA = 300 µAs per second = 300 µA overhead from ticking alone.
+
+Tickless idle eliminates those wasted wakes during idle periods. The scheduler computes the expected next task activation time, programs a hardware timer for that interval, and the CPU sleeps until the timer fires. Result: the CPU wakes only when there's work to do, not on every tick.
+
+## Standard FreeRTOS tick behavior (problem)
+
+```
+Time: 0ms    1ms    2ms  ... 499ms   500ms   501ms  ...
+      │tick  │tick  │tick │   │tick   │task A │tick  │
+      │wake  │wake  │wake │   │wake   │runs   │wake  │
+      │check │check │check│   │check  │       │check │
+      │sleep │sleep │sleep│   │sleep  │       │sleep │
+```
+
+Task A is blocked with `vTaskDelay(pdMS_TO_TICKS(500))`. The CPU wakes 499 times between activations to check "is task A ready? No. Go back to sleep." Each wake costs energy.
+
+## Tickless idle behavior (solution)
+
+```
+Time: 0ms                              500ms   501ms
+      │scheduler sees expected idle = 500ms    │task A
+      │programs hardware timer for 500ms       │runs
+      │CPU enters Stop mode                    │
+      └───────────────────────────────────────►│
+                    500 ms of deep sleep
+```
+
+One sleep entry, one wake, zero wasted ticks.
+
+## Enabling tickless idle in FreeRTOS
+
+```c
+/* FreeRTOSConfig.h */
+#define configUSE_TICKLESS_IDLE              1   /* Enable tickless idle */
+#define configEXPECTED_IDLE_TIME_BEFORE_SLEEP  2  /* Minimum idle ticks before sleeping
+                                                    (prevents sleep for tiny intervals) */
+```
+
+With `configUSE_TICKLESS_IDLE = 1`, FreeRTOS calls `portSUPPRESS_TICKS_AND_SLEEP(xExpectedIdleTime)` when the idle task runs and the expected idle duration exceeds `configEXPECTED_IDLE_TIME_BEFORE_SLEEP` ticks.
+
+On STM32, implement the required hook by providing `vPortSuppressTicksAndSleep`:
+
+```c
+/* Override the weak FreeRTOS default with our Stop-mode implementation */
+void vPortSuppressTicksAndSleep(TickType_t xExpectedIdleTime) {
+    /* Compute how long to sleep in real time */
+    uint32_t sleep_ms = xExpectedIdleTime * portTICK_PERIOD_MS;
+
+    /* Pre-sleep processing:
+       - Configure the RTC or LPTIM to wake in sleep_ms milliseconds
+       - Disable SysTick (the kernel tick timer) — it would wake from Stop mode
+       - Disable any peripherals that shouldn't run during sleep              */
+    suspend_systick();
+    configure_rtc_wakeup_ms(sleep_ms);
+
+    /* Enter Stop mode — CPU sleeps until RTC alarm or EXTI fires */
+    enter_stop_mode();
+
+    /* Post-sleep processing:
+       - Reconfigure clocks (Stop mode exits on HSI, must re-lock PLL)
+       - Re-enable SysTick with the updated tick value
+       - Tell FreeRTOS how many ticks actually elapsed               */
+    reclock_after_stop();
+
+    /* Compute actual elapsed ticks from the hardware timer that was running */
+    uint32_t elapsed_ticks = read_elapsed_ticks_from_lptim();
+
+    /* Correct the FreeRTOS tick count */
+    vTaskStepTick(elapsed_ticks);
+
+    resume_systick();
+}
+```
+
+The `vTaskStepTick(elapsed_ticks)` call advances the FreeRTOS tick counter by the number of ticks that elapsed during Stop mode. Without this, task timeouts would appear to run faster (the tick count didn't advance while asleep).
+
+## LPTIM as the wakeup timer in Stop mode
+
+SysTick stops when the CPU enters Stop mode (no HCLK). The Low-Power Timer (LPTIM on STM32L/G/H series, or using the RTC on F4) runs from LSI during Stop mode and provides the wakeup trigger:
+
+```c
+/* STM32F4: Use RTC wakeup timer as the Stop mode timekeeper */
+void configure_rtc_wakeup_ms(uint32_t ms) {
+    /* RTC Wakeup timer clocked from LSI (~32 kHz), prescaler /16 → 2 kHz
+       Period = wakeup_counter / 2000 seconds */
+    uint32_t counter = (ms * 2000U) / 1000U;
+
+    /* Disable wakeup timer, set counter, re-enable */
+    RTC->CR &= ~RTC_CR_WUTE;
+    while (!(RTC->ISR & RTC_ISR_WUTWF)) { }
+    RTC->WUTR = counter;
+    RTC->CR |= RTC_CR_WUTE | RTC_CR_WUTIE;
+
+    /* Route to EXTI line 22 to wake from Stop mode */
+    EXTI->IMR  |= (1U << 22);
+    EXTI->RTSR |= (1U << 22);
+    NVIC_EnableIRQ(RTC_WKUP_IRQn);
+}
+
+uint32_t read_elapsed_ticks_from_lptim(void) {
+    /* Read RTC Wakeup downcounter; compare against starting value
+       to compute elapsed ticks */
+    /* Simplified — full implementation reads the RTC subsecond register */
+    return elapsed_ms / portTICK_PERIOD_MS;
+}
+```
+
+## The idle hook vs tickless idle
+
+FreeRTOS provides two idle mechanisms:
+
+- **`vApplicationIdleHook()`** — called every tick when idle. With standard tick, it's called 1000×/s. Not suitable for Stop mode (too short between calls).
+- **Tickless idle (`vPortSuppressTicksAndSleep`)** — called once with the total idle duration. Correct for Stop mode.
+
+The idle hook is suitable for lightweight housekeeping (e.g., updating a display, petting a watchdog) that should happen frequently. Tickless idle is for deep sleep.
+
+Using both together:
+
+```c
+/* Idle hook for housekeeping (runs during each tick-based idle period if tickless is brief) */
+void vApplicationIdleHook(void) {
+    /* Pet the watchdog — if tickless sleep is shorter than WDG timeout, this still fires */
+    /* Note: with tickless idle, this may not run every 1 ms — check WDG timeout >= 2×sleep */
+}
+```
+
+A common mistake: relying on the idle hook to pet the watchdog when tickless idle might suppress ticks for 500 ms — longer than the watchdog timeout. The watchdog must have a timeout > 2× the maximum expected tickless sleep period, or be petted from the wakeup path.
+
+## Measured power reduction
+
+On a sensor node workload (1 kHz ADC, process every 50 samples, idle 95% of the time):
+
+| Configuration                      | Average current |
+| ---------------------------------- | --------------- |
+| Standard tick, Sleep mode          | 4.2 mA          |
+| Standard tick, Stop mode idle hook | 1.8 mA          |
+| Tickless idle + Stop mode          | 0.28 mA         |
+
+The 6× improvement from tickless over standard tick + stop mode comes from eliminating the 1000 wakes/second even when those wakes re-enter Stop quickly. Each re-entry has startup latency (PLL relock: ~300 µs) that's pure power overhead.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "FreeRTOS tickless idle is enabled. A task is blocked for 500 ms with vTaskDelay. The vPortSuppressTicksAndSleep implementation enters Stop mode and wakes via RTC alarm. After waking, the implementation calls vTaskStepTick(498) instead of vTaskStepTick(500) due to a measurement error. What happens to the task?",
+      options: [
+        "Nothing — FreeRTOS corrects the error automatically",
+        "The task wakes 2 ms late. vTaskStepTick advances the FreeRTOS tick counter by 498; the task was waiting for 500 ticks to elapse. With only 498 elapsed, FreeRTOS thinks 2 ticks remain before the task should wake. SysTick resumes and fires 2 more ticks (2 ms) before FreeRTOS unblocks the task. The task was supposed to wake at t=500; it actually wakes at t=502. For soft-real-time tasks this is harmless; for tasks with tight timing requirements, accurate vTaskStepTick correction is important.",
+        "The task never wakes",
+        "FreeRTOS crashes — vTaskStepTick with wrong argument corrupts the kernel",
+      ],
+      correct: 1,
+      explanation:
+        "vTaskStepTick tells FreeRTOS how many ticks elapsed during sleep. An undercount means FreeRTOS thinks less time passed than actually did — tasks that were scheduled to wake during that period are delayed by the undercount amount. An overcount is more dangerous: FreeRTOS thinks more time passed than did, and may unblock tasks early (before their delay has elapsed). For most applications, a 1-2 tick error is acceptable. Safety-critical or hard-real-time tasks may need more precise elapsed-time measurement (e.g., using the RTC subsecond register for sub-tick accuracy).",
+    },
+    {
+      question:
+        "An engineer enables tickless idle and observes that the system never enters Stop mode — it stays in Sleep mode even during long idle periods. The FreeRTOS tick rate is 1000 Hz and configEXPECTED_IDLE_TIME_BEFORE_SLEEP is 2. What's the likely cause?",
+      options: [
+        "Stop mode is not supported on this chip",
+        "The vPortSuppressTicksAndSleep implementation is entering Sleep mode (SCB_SCR without SLEEPDEEP) instead of Stop mode (with SLEEPDEEP + PWR_CR). The idle hook calls enter_stop_mode() but perhaps the Stop mode configuration has SLEEPDEEP not set, so the Cortex-M core enters normal Sleep rather than Stop. Another possibility: a peripheral interrupt wakes the CPU so frequently that the expected idle time never exceeds configEXPECTED_IDLE_TIME_BEFORE_SLEEP (2 ticks = 2 ms). Check: is there a timer or SysTick firing every 1-2 ms that prevents long idle periods?",
+        "Tickless idle only works with configTICK_RATE_HZ < 100",
+        "The scheduler is preventing Sleep entry",
+      ],
+      correct: 1,
+      explanation:
+        "Two common causes for tickless idle not reaching Stop mode: (1) wrong sleep mode in vPortSuppressTicksAndSleep — SLEEPDEEP not set, so WFI enters normal sleep; (2) interrupts too frequent — if any interrupt fires every < configEXPECTED_IDLE_TIME_BEFORE_SLEEP ticks, the idle period is always too short to trigger tickless sleep. Diagnose by adding GPIO toggles at the entry/exit of vPortSuppressTicksAndSleep and measuring how often it's called and for how long. Then add GPIO toggles in enter_stop_mode to verify SLEEPDEEP is being set. Logic-analyzer measurement distinguishes the two causes.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 5 covers system-level low-power design decisions — where clocks, peripherals, and RTOS configuration choices interact to produce the overall power budget. This lesson contextualizes all of module 9's individual techniques within a holistic product-level energy strategy.

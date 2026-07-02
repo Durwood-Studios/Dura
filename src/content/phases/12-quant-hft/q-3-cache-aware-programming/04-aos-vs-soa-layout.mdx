@@ -1,0 +1,269 @@
+---
+title: "Array-of-Structs vs Structure-of-Arrays — Transforming for SIMD and Prefetch"
+description: "How choosing between AoS and SoA layout changes which fields arrive in the same cache line, why SoA is essential for SIMD vectorization, and how to make the transformation in C++23."
+phase: 12
+module: "q-3-cache-aware-programming"
+order: 4
+estimatedMinutes: 50
+difficulty: 4
+prerequisites:
+  - "q-3-cache-aware-programming/03-cache-aware-programming"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - array-of-structs
+  - structure-of-arrays
+  - vectorization
+  - simd
+  - gather-load
+  - scatter-store
+  - memory-stride
+  - cache-utilization
+  - auto-vectorization
+learningOutcomes:
+  - "After this lesson you can explain why iterating over one field of an AoS layout wastes cache bandwidth and how SoA fixes that waste"
+  - "After this lesson you can transform a market-data quote struct from AoS to SoA and write the access patterns for both"
+  - "After this lesson you can identify which loops auto-vectorize under SoA layout and confirm it with the compiler's vectorization report"
+  - "After this lesson you can state when AoS is the correct choice and when the transformation is counterproductive"
+professionalContext: "In a market-making system that computes mid-prices across 1,000 tracked symbols every microsecond, the layout of the quote array determines whether the SIMD unit processes 8 prices in one instruction or fetches scattered memory for hundreds of cycles. SoA is the enabling transformation — most HFT codebases that have gone through a layout audit have a before/after story where switching one struct to SoA cut a hot-loop latency in half."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You have a struct for a <VocabTooltip slug="limit-order-book">limit order</VocabTooltip> quote — a bid price, an ask price, a bid size, and an ask size. You keep an array of 1,000 of them, one per tracked symbol. Every 100 microseconds, your pricing model iterates that array and computes the mid-price for each symbol.
+
+You write the obvious loop. It feels fast. But on a profiler, that loop is slow. Not "a little slow" — it is burning three times the cycles the math requires. The prices are all there. The cache should be warm. So where is the time going?
+
+It is going into cache lines you loaded but never used. The struct holds four fields. When you read the bid price of symbol 0, the CPU pulls in 64 bytes — a full cache line. But you only use 8 of those bytes (the bid price). The other 56 bytes — ask price, bid size, ask size — arrive in the same load and sit unused in the cache line, displacing something else that was useful. Your cache is full of data you never touched.
+
+<VocabTooltip slug="structure-of-arrays">Structure-of-arrays</VocabTooltip> is the fix.
+
+## The two layouts
+
+Consider this quote struct:
+
+```cpp
+// AoS: Array-of-Structs (the intuitive layout)
+struct Quote {
+    int64_t bid_price;  // 8 bytes
+    int64_t ask_price;  // 8 bytes
+    int32_t bid_size;   // 4 bytes
+    int32_t ask_size;   // 4 bytes
+};                      // 24 bytes total
+
+Quote quotes[1024];     // 24,576 bytes
+```
+
+In memory, this lays out as:
+
+```
+[bid0|ask0|bsz0|asz0] [bid1|ask1|bsz1|asz1] [bid2|ask2|bsz2|asz2] ...
+ ← 24 bytes ──────→    ← 24 bytes ──────→    ← 24 bytes ──────→
+```
+
+A 64-byte cache line spans roughly 2.6 quotes. When you load `quotes[0].bid_price`, you also pull in `quotes[0].ask_price`, `quotes[0].bid_size`, `quotes[0].ask_size`, and a fraction of `quotes[1]`.
+
+If the loop only touches `bid_price`, two-thirds of every loaded cache line is wasted bandwidth.
+
+Now the SoA transformation:
+
+```cpp
+// SoA: Structure-of-Arrays
+struct QuoteBook {
+    int64_t bid_price[1024];  // 8,192 bytes
+    int64_t ask_price[1024];  // 8,192 bytes
+    int32_t bid_size[1024];   // 4,096 bytes
+    int32_t ask_size[1024];   // 4,096 bytes
+};
+
+QuoteBook book;
+```
+
+In memory, all 1,024 bid prices are contiguous:
+
+```
+[bid0|bid1|bid2|bid3|bid4|bid5|bid6|bid7] ...
+ ← one 64-byte cache line has 8 bid prices →
+```
+
+When the mid-price loop loads `book.bid_price[0]`, it gets `bid_price[0]` through `bid_price[7]` in one cache line. Every byte of the load is useful. The loop processes 8× more data per cache miss.
+
+## The mid-price loop: AoS vs SoA
+
+```cpp
+// AoS version — poor cache utilization
+void compute_mids_aos(const Quote* quotes, int64_t* mids, int n) {
+    for (int i = 0; i < n; ++i) {
+        mids[i] = (quotes[i].bid_price + quotes[i].ask_price) / 2;
+    }
+}
+// Each iteration: load 24-byte struct (touches 2 cache lines for alignment reasons),
+// use 16 bytes, discard 8 bytes of size data.
+// The compiler cannot vectorize this because the two fields are interleaved.
+
+// SoA version — full cache utilization + auto-vectorization
+void compute_mids_soa(const QuoteBook& book, int64_t* mids, int n) {
+    for (int i = 0; i < n; ++i) {
+        mids[i] = (book.bid_price[i] + book.ask_price[i]) / 2;
+    }
+}
+// Each iteration: bid_price and ask_price are separate contiguous arrays.
+// GCC/Clang vectorize this with AVX2 automatically: 4 mids per cycle.
+// Cache lines are 100% utilized.
+```
+
+Force the compiler to tell you what it did:
+
+```bash
+# GCC vectorization report
+g++ -O3 -mavx2 -fopt-info-vec-optimized mids.cpp -o mids 2>&1 | grep vectorized
+
+# Clang vectorization report
+clang++ -O3 -mavx2 -Rpass=loop-vectorize mids.cpp -o mids
+```
+
+Under AoS, the interleaved layout prevents auto-vectorization — the compiler cannot generate a contiguous SIMD load because bid_price and ask_price do not form a contiguous array. Under SoA, both fields are contiguous arrays and the loop vectorizes automatically with no intrinsics required.
+
+## When AoS is correct
+
+SoA is not always faster. The transformation has a cost when your access pattern touches all fields of one element together.
+
+| Access pattern                                             | Better layout |
+| ---------------------------------------------------------- | ------------- |
+| Process one field across all elements                      | SoA           |
+| Process all fields of one element                          | AoS           |
+| SIMD/vectorized computation over one field                 | SoA           |
+| Single-element lookup (e.g. "get the full quote for AAPL") | AoS           |
+
+For a quote book where updates arrive one symbol at a time (ITCH Add/Execute/Cancel), but pricing loops process all symbols together, you often need **both**: AoS for the update path (write all fields of one element), SoA for the computation path. The solution is to keep the authoritative store in AoS and maintain a SoA mirror for the computation path, flushed after each update batch.
+
+```cpp
+struct QuoteBook {
+    // AoS store for individual updates — O(1) random access
+    Quote     quotes[1024];
+
+    // SoA mirror for vectorized computation — refreshed in batch
+    int64_t   bid_price_vec[1024];
+    int64_t   ask_price_vec[1024];
+
+    void flush_to_soa(int count) {
+        for (int i = 0; i < count; ++i) {
+            bid_price_vec[i] = quotes[i].bid_price;
+            ask_price_vec[i] = quotes[i].ask_price;
+        }
+        // Compiler vectorizes this gather automatically
+    }
+};
+```
+
+The flush is a <VocabTooltip slug="gather-load">gather</VocabTooltip> — reading strided elements from the AoS array and writing them densely into the SoA mirror. It is not free, but if you run the pricing loop thousands of times per second and update individual quotes hundreds of times per second, the flush cost amortizes.
+
+## Measuring the difference
+
+```cpp
+#include <chrono>
+#include <cstdint>
+#include <numeric>
+
+static constexpr int N = 1024;
+
+// AoS
+struct Quote { int64_t bid, ask; };
+Quote q_aos[N];
+
+// SoA
+struct QuoteSoA { int64_t bid[N], ask[N]; } q_soa;
+
+int64_t bench_aos() {
+    int64_t sum = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int iter = 0; iter < 100'000; ++iter)
+        for (int i = 0; i < N; ++i)
+            sum += (q_aos[i].bid + q_aos[i].ask) >> 1;
+    auto t1 = std::chrono::steady_clock::now();
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    // ns / (100'000 * N) = ns per mid computation
+    (void)ns;
+    return sum;
+}
+
+int64_t bench_soa() {
+    int64_t sum = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int iter = 0; iter < 100'000; ++iter)
+        for (int i = 0; i < N; ++i)
+            sum += (q_soa.bid[i] + q_soa.ask[i]) >> 1;
+    auto t1 = std::chrono::steady_clock::now();
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    (void)ns;
+    return sum;
+}
+```
+
+On a Skylake-X machine with warm cache, SoA is typically 3–5× faster for this pattern. The gap is larger as N grows (more cache pressure) and smaller as N shrinks (the whole AoS array fits in L1).
+
+<SandboxExercise
+  title="Transform a Quote Struct to SoA"
+  description="Below is an AoS pricing engine that iterates over 512 quotes to compute weighted mid-prices. Transform the data layout to SoA, update the computation loop, and verify the outputs match. Then add a timing call to compare the two versions."
+  language="cpp"
+  starterCode={`#include <cstdint>
+#include <array>
+
+// AoS layout - transform this to SoA
+struct Quote {
+int64_t bid_price; // in integer ticks (price \* 10000)
+int64_t ask_price;
+int32_t bid_size;
+int32_t ask_size;
+};
+
+static constexpr int N = 512;
+std::array<Quote, N> quotes;
+
+// Weighted mid: (bid*price * ask*size + ask_price * bid_size) / (bid_size + ask_size)
+void compute_weighted_mids(int64_t* out) {
+for (int i = 0; i < N; ++i) {
+int64_t w = (int64_t)quotes[i].bid_size + quotes[i].ask_size;
+out[i] = (quotes[i].bid_price * quotes[i].ask_size + quotes[i].ask_price \* quotes[i].bid_size) / w;
+}
+}
+
+int main() {
+// Initialize with dummy data
+for (int i = 0; i < N; ++i) {
+quotes[i] = { 184'5200, 184'5300, 100, 200 };
+}
+int64_t mids[N];
+compute_weighted_mids(mids);
+// Expected: mids[0] == 184'5267 (bid weighted heavier by ask size)
+}
+`}
+/>
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A struct has 4 fields: price (8B), size (4B), flags (1B), padding (3B). You keep 1,024 of them and loop to sum the price field. A cache line is 64 bytes. How many cache lines does the loop touch?",
+      options: [
+        "128 — only the price bytes, packed at 8B each",
+        "256 — the struct is 16B, so 4 per cache line, 256 lines for 1024 structs",
+        "1024 — one load per struct, each struct on its own line",
+        "1024/2 = 512 — structs straddle lines unpredictably",
+      ],
+      correct: 1,
+      explanation:
+        "The struct is 16 bytes (8+4+1+3). Four structs fit in a 64-byte cache line. 1024 structs ÷ 4 per line = 256 cache lines. All 256 are loaded even though only the 8 bytes at offset 0 per struct (the price) are used. Cache utilization is 8/16 = 50%. Under SoA, the 1024 prices form a contiguous 8,192-byte region: 8,192 ÷ 64 = 128 cache lines, with 100% utilization.",
+    },
+  ]}
+/>
+
+## What's next
+
+Your data is laid out correctly for the CPU's cache. The next question is what happens when that data crosses a socket boundary — when one thread writes on NUMA node 0 and another reads on node 1. Lesson 5 covers NUMA topology and the remote-memory latency cliff.

@@ -1,0 +1,256 @@
+---
+title: "Embassy — Async Embedded Rust on Cortex-M"
+description: "Embassy brings async/await to bare-metal Rust. Write concurrent embedded firmware without an RTOS — the async executor handles task scheduling with zero dynamic allocation."
+phase: 10
+module: "e-6-rust-cortex-m"
+order: 2
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-6-rust-cortex-m/01"
+standards:
+  primaryAnchor: "Embassy Project (embassy.dev)"
+  cs2023: ["SF-Foundations", "PL-LangIndep"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - embassy
+  - async-executor
+  - async-await
+  - future
+  - embassy-time
+  - embassy-stm32
+  - no-std-async
+  - waker
+  - cooperative-concurrency
+learningOutcomes:
+  - "Structure an Embassy application with multiple concurrent tasks using async/await"
+  - "Use embassy-time for delays and timeouts without blocking the executor"
+  - "Explain how the Embassy executor schedules tasks without a heap or OS"
+  - "Compare Embassy's cooperative async model to FreeRTOS's preemptive task model"
+professionalContext: "Embassy is the fastest-growing embedded Rust framework in 2026. Nordic Semiconductor ships Embassy-based examples for all nRF9160 IoT projects; Espressif supports it for ESP32; it's the de facto standard for new async embedded Rust. Engineers who understand async Rust on embedded are positioned at the intersection of two fast-growing specialties."
+thresholdConcept: true
+---
+
+## Why this matters
+
+FreeRTOS concurrency requires: a task function, a stack allocation, a priority, and a handle. Adding five concurrent peripherals means five task stacks (each 512–2048 bytes), five priority decisions, and five inter-task communication channels.
+
+Embassy concurrency requires: five `async fn`s and one `spawn` call per task. The executor schedules them cooperatively. Stack usage is typically much lower than FreeRTOS because futures only consume stack while actively running (not while awaiting). No RTOS kernel overhead.
+
+The threshold concept: **async/await on embedded is not just syntax — it's a different execution model where the compiler transforms your code into a state machine that yields at every `await` point, and the executor runs whichever future has work to do.**
+
+## How async works on embedded
+
+An `async fn` in Rust is syntactic sugar for a state machine. When you write:
+
+```rust
+async fn blink(led: &mut Output<'_>) {
+    loop {
+        led.set_high();
+        Timer::after_millis(500).await;
+        led.set_low();
+        Timer::after_millis(500).await;
+    }
+}
+```
+
+The compiler generates a struct that represents the state of `blink` at each `await` point. At `Timer::after_millis(500).await`, the future returns `Poll::Pending` to the executor. The executor records a <VocabTooltip slug="waker">waker</VocabTooltip> (a callback that says "wake me when the timer fires") and runs another task. When the timer ISR fires, it calls the waker, which tells the executor to poll the blink future again. No stack space is consumed while waiting — only the future's state struct, which lives on the heap or as a static.
+
+This is <VocabTooltip slug="cooperative-concurrency">cooperative concurrency</VocabTooltip>: tasks voluntarily yield at `await` points, not preempted by a scheduler tick. The implication: a task that never awaits blocks the executor forever. In FreeRTOS, a tight loop in a task still gets preempted; in Embassy, it doesn't.
+
+## Project setup
+
+```toml
+# Cargo.toml
+[dependencies]
+embassy-executor  = { version = "0.5", features = ["arch-cortex-m", "executor-thread"] }
+embassy-stm32    = { version = "0.1", features = ["stm32f407vg", "time-driver-tim2"] }
+embassy-time     = { version = "0.3" }
+cortex-m-rt      = "0.7"
+defmt            = "0.3"
+defmt-rtt        = "0.4"
+panic-probe       = { version = "0.3", features = ["print-defmt"] }
+```
+
+```toml
+# .cargo/config.toml
+[build]
+target = "thumbv7em-none-eabihf"
+```
+
+## Multi-task blink example
+
+```rust
+#![no_std]
+#![no_main]
+
+use embassy_executor::Spawner;
+use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_time::Timer;
+use defmt_rtt as _;
+use panic_probe as _;
+
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_stm32::init(Default::default());
+
+    // Spawn independent concurrent tasks from main
+    spawner.spawn(blink_fast(p.PD12)).unwrap();
+    spawner.spawn(blink_slow(p.PD13)).unwrap();
+    spawner.spawn(uart_logger()).unwrap();
+
+    // main itself is a task — can do work here too
+    loop {
+        Timer::after_secs(1).await;
+        defmt::info!("heartbeat");
+    }
+}
+
+#[embassy_executor::task]
+async fn blink_fast(pin: embassy_stm32::peripherals::PD12) {
+    let mut led = Output::new(pin, Level::Low, Speed::Low);
+    loop {
+        led.set_high();
+        Timer::after_millis(100).await;
+        led.set_low();
+        Timer::after_millis(100).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn blink_slow(pin: embassy_stm32::peripherals::PD13) {
+    let mut led = Output::new(pin, Level::Low, Speed::Low);
+    loop {
+        led.set_high();
+        Timer::after_millis(500).await;
+        led.set_low();
+        Timer::after_millis(500).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn uart_logger() {
+    // Placeholder — would use embassy_stm32::usart::UartTx
+    loop {
+        Timer::after_secs(5).await;
+        defmt::info!("logger tick");
+    }
+}
+```
+
+Three concurrent tasks, zero RTOS overhead, zero dynamic allocation at runtime (the futures are statically allocated by the `#[embassy_executor::task]` macro).
+
+## Async UART receive with timeout
+
+```rust
+use embassy_stm32::usart::{Config, Uart};
+use embassy_time::{Duration, with_timeout};
+
+#[embassy_executor::task]
+async fn uart_reader(mut rx: embassy_stm32::usart::UartRx<'static, embassy_stm32::peripherals::USART2, embassy_stm32::mode::Async>) {
+    let mut buf = [0u8; 64];
+    loop {
+        // Receive with a 1-second timeout — doesn't block other tasks while waiting
+        match with_timeout(Duration::from_secs(1), rx.read(&mut buf)).await {
+            Ok(Ok(n)) => {
+                defmt::info!("received {} bytes", n);
+            }
+            Ok(Err(e)) => {
+                defmt::error!("UART error: {:?}", e);
+            }
+            Err(_) => {
+                defmt::warn!("UART receive timeout");
+            }
+        }
+    }
+}
+```
+
+`with_timeout` wraps any future with a deadline. If the inner future doesn't complete within the duration, it returns `Err(TimeoutError)`. The calling task yields to the executor while waiting — other tasks run normally.
+
+## Embassy channels: async queues
+
+Embassy's `channel` is the async equivalent of a FreeRTOS queue:
+
+```rust
+use embassy_sync::channel::{Channel, Receiver, Sender};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+
+// Static channel with capacity 8 — declared at module level
+static SENSOR_CHANNEL: Channel<NoopRawMutex, u16, 8> = Channel::new();
+
+#[embassy_executor::task]
+async fn sensor_producer() {
+    let sender: Sender<NoopRawMutex, u16, 8> = SENSOR_CHANNEL.sender();
+    loop {
+        let reading = adc_read().await;
+        sender.send(reading).await;   // Async: yields if channel is full
+        Timer::after_millis(10).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn sensor_consumer() {
+    let receiver: Receiver<NoopRawMutex, u16, 8> = SENSOR_CHANNEL.receiver();
+    loop {
+        let reading = receiver.receive().await;  // Async: yields until data available
+        process(reading);
+    }
+}
+```
+
+`NoopRawMutex` is correct when tasks run on a single executor (no actual locking needed). For multi-core or interrupt-safe use, replace with `CriticalSectionRawMutex`.
+
+## Embassy vs RTIC vs FreeRTOS
+
+| Aspect             | FreeRTOS (C)           | RTIC (Rust)                   | Embassy (Rust)                 |
+| ------------------ | ---------------------- | ----------------------------- | ------------------------------ |
+| Scheduling model   | Preemptive             | Preemptive (interrupt-driven) | Cooperative async              |
+| Task creation      | `xTaskCreate` runtime  | `#[task]` compile-time        | `spawner.spawn()` static       |
+| Heap dependency    | Yes (configurable)     | No (SRP, static)              | Optional (tasks can be static) |
+| Priority inversion | Mutex + inheritance    | Impossible by construction    | Cooperative: not a concern     |
+| Blocking risk      | None (preemptive)      | Must not block in task        | Must await, never busy-wait    |
+| Learning curve     | RTOS concepts (medium) | Rust + RTIC model (high)      | Rust + async concepts (medium) |
+| DMA / async IO     | Manual ISR + queue     | Manual ISR + resource         | embassy-dma: native async      |
+
+Embassy's cooperative model means a task that never awaits starves all others — the same discipline required in FreeRTOS with cooperative scheduling. The trade: simpler concurrency model, lower overhead, but the programmer must ensure no task loops without awaiting.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An Embassy task runs a computation loop for 200 ms without any await points. What happens to other tasks during this time?",
+      options: [
+        "Other tasks are preempted by the Embassy executor and continue running",
+        "All other tasks stall — the executor cannot run any other future until the current task yields at an await point. Embassy's executor is cooperative: tasks run to their next await point before the executor can switch. A 200 ms busy loop without awaiting blocks all other tasks for 200 ms, regardless of their 'priority'. The fix: insert Timer::after(Duration::ZERO).await in long computation loops to yield to the executor.",
+        "Embassy automatically detects the long task and preempts it",
+        "The other tasks run in parallel on separate cores",
+      ],
+      correct: 1,
+      explanation:
+        "Cooperative concurrency's one discipline requirement: never hold the executor for a long time without yielding. 200 ms without an await starves all other tasks, including timers, UART RX, and any other future that needs CPU. The fix is Timer::after(Duration::ZERO).await, which yields to the executor and immediately re-queues the current task — a zero-cost cooperative yield. In FreeRTOS, the RTOS tick preempts any task; in Embassy, you are responsible for yielding. This is the main trade-off of the cooperative model.",
+    },
+    {
+      question:
+        "A static Embassy channel is declared with `NoopRawMutex`. An interrupt handler tries to send data to the channel using channel.try_send(). The team observes occasional data corruption. What's the likely cause?",
+      options: [
+        "try_send is not supported for channels",
+        "NoopRawMutex performs no actual locking — it's correct only when all access happens from a single execution context (one executor, no interrupts). An interrupt handler is a different execution context; concurrent access with NoopRawMutex produces data races. The fix: use CriticalSectionRawMutex, which masks interrupts while the channel's internal state is modified, making access from both tasks and ISRs safe.",
+        "The channel capacity is too small",
+        "Embassy channels don't support interrupt handlers",
+      ],
+      correct: 1,
+      explanation:
+        "Mutex type selection in Embassy matches the access pattern. NoopRawMutex provides no synchronization — safe only for single-executor, no-interrupt access. ThreadModeRawMutex works for multi-task (executor-only, no interrupts). CriticalSectionRawMutex works for access from both tasks and interrupt handlers (disables interrupts during access). Using the wrong mutex type produces unsynchronized access, which on Cortex-M is a data race — the CPU may read a partially-updated channel state. The corruption is intermittent because the race is timing-dependent.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 3 covers writing no_std drivers with embedded-hal traits — the same trait-based abstraction as the C HAL from E5 lesson 2, but enforced by the Rust type system. A driver written against embedded-hal traits compiles for any chip with a HAL crate, identical to the C vtable pattern but with compile-time guarantees instead of runtime conventions.

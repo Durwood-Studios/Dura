@@ -1,0 +1,312 @@
+---
+title: "Lifecycle Nodes and Nav2 — System-Level ROS 2"
+description: "Managed node lifecycle for safe startup/shutdown sequencing, and Nav2 as the canonical mobile-robot navigation stack — autonomous path planning, obstacle avoidance, and recovery behaviors."
+phase: 13
+module: "r-6-ros-industrial"
+order: 6
+estimatedMinutes: 60
+difficulty: 4
+prerequisites:
+  - "r-6-ros-industrial-02"
+  - "r-6-ros-industrial-05"
+standards:
+  primaryAnchor: "ROS 2 Jazzy (LTS)"
+  cs2023: []
+  swebok: ["Software Construction", "Software Engineering Design"]
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - lifecycle-node
+  - nav2
+  - behavior-tree
+  - costmap
+  - global-planner
+  - local-planner
+  - amcl
+  - bt-navigator
+learningOutcomes:
+  - "After this lesson you can: implement a lifecycle node with correct on_configure(), on_activate(), on_deactivate(), on_cleanup() callbacks"
+  - "After this lesson you can: explain why Nav2 uses lifecycle nodes and what failure during on_configure() prevents"
+  - "After this lesson you can: describe the Nav2 stack's five-component architecture (AMCL, costmaps, global planner, local planner, BT Navigator)"
+  - "After this lesson you can: launch a TurtleBot4 simulation with Nav2 and navigate to a pose programmatically"
+professionalContext: "Lifecycle nodes prevent the 'robot starts before sensors are ready' failure mode that causes random crashes in production. Nav2 is the standard for autonomous mobile platforms — every AMR project that uses ROS 2 builds on Nav2. An engineer who can configure and troubleshoot Nav2 is immediately useful on any AMR program."
+thresholdConcept: false
+---
+
+## The problem lifecycle nodes solve
+
+Without lifecycle management, ROS 2 nodes start immediately when launched and begin publishing to topics before their subscribers may be ready. A sensor fusion node that publishes before the SLAM algorithm has initialized causes a cascade of messages that the SLAM node either drops or reacts to incorrectly.
+
+Lifecycle nodes solve this by adding an explicit state machine to every node. A node must be explicitly configured, then activated, before it sends any commands to hardware or publishes data that downstream nodes depend on. The <VocabTooltip slug="lifecycle-node">lifecycle node</VocabTooltip> pattern lets a launch orchestrator control startup order precisely.
+
+## The lifecycle state machine
+
+ROS 2 lifecycle nodes follow the state machine defined in `rclcpp_lifecycle`:
+
+```
+            configure()          activate()
+  Unconfigured ──────→ Inactive ──────────→ Active
+       ↑                  ↑                   │
+       │   cleanup()      │   deactivate()    │
+       └──────────────────┴───────────────────┘
+                                              │
+                          shutdown()          │
+        Finalized ←───────────────────────────┘
+```
+
+Each transition has a callback you override. The contract:
+
+| Callback          | What it must do                                          | What it must NOT do                |
+| ----------------- | -------------------------------------------------------- | ---------------------------------- |
+| `on_configure()`  | Allocate resources, open communications, load parameters | Start publishing, command hardware |
+| `on_activate()`   | Start publishing, command hardware, start timers         | Allocate new resources             |
+| `on_deactivate()` | Stop publishing, stop timers, park hardware              | Deallocate resources               |
+| `on_cleanup()`    | Deallocate resources, close communications               | Leave dangling handles             |
+| `on_shutdown()`   | Emergency shutdown — any state                           | —                                  |
+
+```python
+import rclpy
+from rclpy.lifecycle import LifecycleNode, State, TransitionCallbackReturn
+from sensor_msgs.msg import LaserScan
+
+
+class SafetyScanner(LifecycleNode):
+    """
+    A lifecycle node for a safety laser scanner.
+
+    The node does NOT publish until explicitly activated.
+    This prevents spurious stop commands during system startup.
+    """
+
+    def __init__(self) -> None:
+        super().__init__('safety_scanner')
+        # Declare parameters here — they can be set before configure()
+        self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('min_obstacle_distance', 0.5)
+
+        self._publisher = None
+        self._subscription = None
+        self._min_distance: float = 0.5
+
+    def on_configure(self, state: State) -> TransitionCallbackReturn:
+        """
+        Allocate resources. Validate parameters. Do NOT publish.
+        Return FAILURE if the scanner hardware is unreachable —
+        the orchestrator will not activate this node.
+        """
+        scan_topic = self.get_parameter('scan_topic').value
+        self._min_distance = self.get_parameter('min_obstacle_distance').value
+
+        self._publisher = self.create_lifecycle_publisher(LaserScan, scan_topic, 10)
+        self.get_logger().info(f'Configured. Min obstacle distance: {self._min_distance}m')
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_activate(self, state: State) -> TransitionCallbackReturn:
+        """Start the scan subscription and safety monitoring."""
+        # Activate the lifecycle publisher — it only publishes when active
+        super().on_activate(state)
+        self._subscription = self.create_subscription(
+            LaserScan, '/raw_scan', self._scan_callback, 10
+        )
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_deactivate(self, state: State) -> TransitionCallbackReturn:
+        """Stop monitoring — the publisher goes silent automatically."""
+        if self._subscription:
+            self.destroy_subscription(self._subscription)
+            self._subscription = None
+        super().on_deactivate(state)
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_cleanup(self, state: State) -> TransitionCallbackReturn:
+        """Release all resources."""
+        self.destroy_publisher(self._publisher)
+        self._publisher = None
+        return TransitionCallbackReturn.SUCCESS
+
+    def _scan_callback(self, msg: LaserScan) -> None:
+        # Only runs when Active — the lifecycle_publisher ensures this
+        min_range = min(r for r in msg.ranges if r > 0.0)
+        if min_range < self._min_distance:
+            self.get_logger().warning(f'Obstacle at {min_range:.2f}m — below threshold!')
+        # Process and re-publish processed scan
+        self._publisher.publish(msg)
+```
+
+## Nav2 — the autonomous mobile robot stack
+
+<VocabTooltip slug="nav2">Nav2</VocabTooltip> is the ROS 2 navigation stack for autonomous mobile
+platforms (AMRs, autonomous forklifts, service robots). All Nav2 components are lifecycle nodes —
+the `nav2_lifecycle_manager` activates them in dependency order at startup and deactivates them in
+reverse order at shutdown.
+
+### The five-component architecture
+
+```
+┌─────────────────── Nav2 Stack ────────────────────────┐
+│                                                        │
+│  AMCL ← sensor data        ← /map (static map)        │
+│  (localization)             → /amcl_pose               │
+│                                                        │
+│  Global Costmap ← AMCL pose + sensor data              │
+│  (static + known obstacles)                            │
+│                                                        │
+│  Local Costmap ← real-time sensor data                 │
+│  (dynamic obstacles around the robot)                  │
+│                                                        │
+│  NavFn / Smac Planner ← Global Costmap                 │
+│  (global path: start → goal, avoids static obstacles)  │
+│                                                        │
+│  DWB / RPP Controller ← Local Costmap + global path    │
+│  (local control: follow the path, avoid dynamic obs.)  │
+│                                                        │
+│  BT Navigator ← NavigateToPose action                  │
+│  (orchestrates all of the above via behavior trees)    │
+└────────────────────────────────────────────────────────┘
+```
+
+**AMCL** (Adaptive Monte Carlo Localization): estimates the robot's pose on the static map using particle filter. Takes lidar scans and odometry; outputs `/amcl_pose` (robot pose with covariance in the map frame).
+
+**Global Costmap**: a 2D grid covering the whole environment. Occupied cells from the static map are marked as obstacles. AMCL pose keeps the robot's position aligned to the map.
+
+**Local Costmap**: a smaller 2D grid (typically 3–5 m radius) around the robot. Updated in real-time from sensor data to detect dynamic obstacles not on the static map.
+
+**Global Planner** (NavFn or Smac): computes an obstacle-free path from the robot's current position to the navigation goal through the global costmap. Runs once per goal.
+
+**Local Planner / Controller** (DWB or Regulated Pure Pursuit): follows the global path at the actuator level. Runs at 10–20 Hz. Re-plans locally to avoid dynamic obstacles without re-running the global planner.
+
+**BT Navigator**: orchestrates all of the above using a <VocabTooltip slug="behavior-tree">behavior tree</VocabTooltip>. The behavior tree defines recovery behaviors (spin in place, back up, re-plan) when the controller gets stuck.
+
+### Launching Nav2 with TurtleBot4
+
+```bash
+# Install TurtleBot4 simulation packages (Jazzy)
+sudo apt install ros-jazzy-turtlebot4-simulator
+
+# Launch the simulation (Gazebo + Nav2 + RVIZ)
+ros2 launch turtlebot4_ignition_bringup turtlebot4_ignition.launch.py \
+  nav2:=true slam:=false rviz:=true world:=maze
+
+# Wait for "Nav2 is ready" in the terminal, then navigate:
+ros2 action send_goal /navigate_to_pose \
+  nav2_msgs/action/NavigateToPose \
+  '{pose: {header: {frame_id: map}, pose: {position: {x: 1.5, y: 0.5, z: 0.0}, orientation: {w: 1.0}}}}'
+```
+
+### Programmatic navigation in Python
+
+```python
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import PoseStamped, Point, Quaternion
+
+
+class Navigator(Node):
+    """Send navigation goals to Nav2 programmatically."""
+
+    def __init__(self) -> None:
+        super().__init__('navigator')
+        self._client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+
+    def navigate_to(self, x: float, y: float, yaw_radians: float = 0.0) -> None:
+        """
+        Navigate to (x, y) in the map frame.
+
+        The quaternion for a 2D yaw rotation is:
+            w = cos(yaw/2), z = sin(yaw/2), x=y=0
+        """
+        import math
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = PoseStamped()
+        goal_msg.pose.header.frame_id = 'map'
+        goal_msg.pose.pose.position = Point(x=x, y=y, z=0.0)
+        goal_msg.pose.pose.orientation = Quaternion(
+            x=0.0,
+            y=0.0,
+            z=math.sin(yaw_radians / 2.0),
+            w=math.cos(yaw_radians / 2.0),
+        )
+
+        self.get_logger().info(f'Navigating to ({x:.2f}, {y:.2f})...')
+        self._client.wait_for_server()
+        future = self._client.send_goal_async(
+            goal_msg,
+            feedback_callback=self._feedback_callback,
+        )
+        future.add_done_callback(self._goal_accepted_callback)
+
+    def _feedback_callback(self, feedback_msg: NavigateToPose.Feedback) -> None:
+        remaining = feedback_msg.feedback.distance_remaining
+        self.get_logger().info(f'Distance remaining: {remaining:.2f}m')
+
+    def _goal_accepted_callback(self, future) -> None:
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error('Navigation goal REJECTED.')
+            return
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._result_callback)
+
+    def _result_callback(self, future) -> None:
+        # NavigateToPose result is empty — success is implied if no error
+        self.get_logger().info('Navigation goal completed.')
+```
+
+## What the lifecycle manager does
+
+The `nav2_lifecycle_manager` activates all Nav2 nodes in dependency order (AMCL → Costmaps → Planners → Controller → BT Navigator) and monitors their health. If any node transitions to an error state, the lifecycle manager deactivates the entire stack in reverse order, preventing partial operation where, for example, the controller runs without a valid local costmap.
+
+This is why `ros2 lifecycle set /nav2_amcl configure` commands work in Nav2: the lifecycle manager exposes these transitions externally.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A lifecycle node's `on_configure()` callback returns `TransitionCallbackReturn.FAILURE`. What happens next?",
+      options: [
+        "The node transitions to Active state anyway and logs a warning",
+        "The node transitions to the ErrorProcessing state; the lifecycle manager receives the failure, deactivates any dependent nodes that were already active, and reports the system as not ready",
+        "The node retries on_configure() up to three times before giving up",
+        "The node transitions to Inactive state and waits for a manual activate() call",
+      ],
+      correct: 1,
+      explanation:
+        "A FAILURE return from on_configure() signals that the node could not initialize correctly — a sensor was unreachable, a parameter was invalid, or a resource was unavailable. The node enters the ErrorProcessing state. A lifecycle manager (like nav2_lifecycle_manager) watching this node will not proceed to activate it and will deactivate any nodes that depended on this one being ready. This is the key value of lifecycle nodes: a failed configure prevents the system from starting in a partially-initialized state.",
+    },
+    {
+      question:
+        "In the Nav2 architecture, what is the role of the local costmap and how does it differ from the global costmap?",
+      options: [
+        "The local costmap covers a small radius around the robot and is updated in real-time from sensor data to track dynamic obstacles; the global costmap covers the entire environment and represents static obstacles from the map",
+        "The local costmap handles path planning; the global costmap handles obstacle avoidance",
+        "They are identical — 'local' and 'global' refer to coordinate frames (robot frame vs. map frame), not to different update rates",
+        "The local costmap is lower resolution for performance; the global costmap is higher resolution for accuracy",
+      ],
+      correct: 0,
+      explanation:
+        "The local costmap is a sliding window (typically 3–5 m radius) around the robot that is continuously updated from real-time sensor data (lidar, depth camera). It captures dynamic obstacles — a person crossing the hallway, a cart left in the aisle — that the static map doesn't know about. The local controller uses it to avoid these obstacles while following the global plan. The global costmap covers the whole environment and is primarily populated from the static map, with slow-updating sensor layers added for semi-permanent changes.",
+    },
+    {
+      question:
+        "A Nav2 deployment on a hospital delivery robot must guarantee that the robot does not move if its localization quality degrades below a threshold (e.g., AMCL covariance too large). Where in the Nav2 architecture should this check be implemented?",
+      options: [
+        "In the global planner — it should refuse to compute a new plan if localization is poor",
+        "In the local controller — it should stop sending velocity commands if localization is poor",
+        "In a behavior tree node that monitors AMCL pose covariance and transitions to a recovery behavior (stop, sound alert, request human assistance) when covariance exceeds the threshold",
+        "In the Nav2 lifecycle manager — it should deactivate all Nav2 nodes if localization degrades",
+      ],
+      correct: 2,
+      explanation:
+        "Behavior trees are Nav2's mechanism for policy decisions about when and how to navigate. A custom behavior tree node (a Condition node in BT.cpp) can subscribe to /amcl_pose, check the covariance values, and return FAILURE when they exceed the threshold. The BT Navigator's tree structure then routes to a recovery behavior (stop, alert, wait). Implementing this in the planner or controller couples a policy decision (when to stop) to a computation module (how to plan/control), which violates separation of concerns. The lifecycle manager is a blunt instrument — shutting down all Nav2 when localization degrades is more disruptive than a targeted recovery.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lessons R6-2 through R6-6 have given you the complete ROS 2 industrial stack: workspace and packages, robot description (URDF/XACRO), hardware abstraction (ros2_control), motion planning (MoveIt 2), and system lifecycle + navigation (lifecycle nodes + Nav2). Module R7 returns to the compliance domain: the cybersecurity threat model for robot systems, STRIDE applied to cobot architectures, and the network segmentation patterns that ISO 10218-1:2025 demands.

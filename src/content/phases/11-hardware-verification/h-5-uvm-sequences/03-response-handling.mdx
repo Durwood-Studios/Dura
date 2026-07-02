@@ -1,0 +1,328 @@
+---
+title: "Sequence Response Handling"
+description: "How sequences receive DUT responses via get_response(), how drivers put responses back, and why response IDs keep responses routed to the right sequence."
+phase: 11
+module: "h-5-uvm-sequences"
+order: 3
+estimatedMinutes: 60
+difficulty: 4
+prerequisites:
+  - "h-5-uvm-sequences/02-sequencer-arbitration"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - get-response
+  - put-response
+  - response-id
+  - response-queue
+  - use-response-handler
+learningOutcomes:
+  - "Write a driver that sends a response transaction back to the sequence"
+  - "Write a sequence that calls get_response() and processes the returned transaction"
+  - "Explain why response IDs prevent responses from routing to the wrong sequence"
+  - "Choose between in-body get_response() and a response handler callback"
+professionalContext: "Protocols with split transactions — AXI with out-of-order responses, PCIe completions, APB read returns — require sequences that send a request and then wait for a response. Engineers who implement this correctly model full request/response pairs; engineers who skip it only model the stimulus half and miss response-dependent bugs like incorrect address decoding or data corruption on reads."
+thresholdConcept: false
+---
+
+## Why responses matter
+
+The H5-01 sequence pattern drives transactions at the DUT and moves on. Many protocols require the other direction too: the sequence sends a READ request, and then needs to receive the returned data to check it against the expected value, or to generate the next request based on what was read.
+
+Without response handling, sequences are one-way. With it, they model full protocol round-trips.
+
+## The response flow
+
+```
+Sequence                    Sequencer           Driver              DUT
+   │                           │                  │                  │
+   ├──start_item(tr)──────────►│                  │                  │
+   │◄──(blocked)──────────────◄│                  │                  │
+   ├──finish_item(tr)─────────►│                  │                  │
+   │                           ├──get_next_item──►│                  │
+   │                           │◄──(tr returned)──│                  │
+   │                           │                  ├──drive signals──►│
+   │                           │                  │◄──(DUT responds)─│
+   │                           │                  ├──put_response────►│──(into response queue)
+   │                           │                  ├──item_done───────►│
+   ├──get_response(rsp)───────►│◄───(rsp taken)───│                  │
+```
+
+The driver calls `put_response(rsp)` after the DUT responds. The sequencer queues the response. The sequence calls `get_response(rsp)` to retrieve it.
+
+## Driver side: put_response()
+
+```systemverilog
+class axi_read_driver extends uvm_driver #(axi_txn);
+    `uvm_component_utils(axi_read_driver)
+    virtual axi_if vif;
+
+    task run_phase(uvm_phase phase);
+        forever begin
+            axi_txn req;
+            seq_item_port.get_next_item(req);
+
+            // Drive the read address channel
+            @(posedge vif.clk);
+            vif.arvalid <= 1'b1;
+            vif.araddr  <= req.addr;
+            @(posedge vif.clk iff vif.arready);
+            vif.arvalid <= 1'b0;
+
+            // Wait for read data channel
+            @(posedge vif.clk iff vif.rvalid);
+
+            // Build the response transaction
+            axi_txn rsp = axi_txn::type_id::create("rsp");
+            rsp.set_id_info(req);   // CRITICAL: copy the ID from the request
+            rsp.data  = vif.rdata;
+            rsp.resp  = vif.rresp;
+            rsp.addr  = req.addr;
+
+            seq_item_port.item_done(rsp);   // Sends response and acks in one call
+            // OR equivalently:
+            // seq_item_port.put_response(rsp);
+            // seq_item_port.item_done();
+        end
+    endtask
+endclass
+```
+
+`set_id_info(req)` copies the request's sequence ID into the response. Without this, the sequencer doesn't know which sequence to route the response to.
+
+## Sequence side: get_response()
+
+```systemverilog
+class axi_read_seq extends uvm_sequence #(axi_txn);
+    `uvm_object_utils(axi_read_seq)
+    bit [31:0] expected_data[];
+
+    task body();
+        axi_txn req, rsp;
+        foreach (expected_data[i]) begin
+            req = axi_txn::type_id::create("req");
+            start_item(req);
+            req.op   = AXI_READ;
+            req.addr = i * 4;
+            finish_item(req);
+
+            // Wait for the DUT response
+            get_response(rsp);
+
+            // Check the returned data
+            if (rsp.data !== expected_data[i]) begin
+                `uvm_error("RD_CHECK",
+                    $sformatf("addr=0x%h: expected 0x%h, got 0x%h",
+                        req.addr, expected_data[i], rsp.data))
+            end
+        end
+    endtask
+endclass
+```
+
+`get_response(rsp)` blocks until a response with a matching ID arrives in the queue. The sequence then inspects `rsp.data`, `rsp.resp`, etc.
+
+## Response IDs — why they matter
+
+When multiple sequences run on the same sequencer, responses must route to the right sequence. The mechanism is the sequence ID embedded in the transaction.
+
+```systemverilog
+// The sequencer assigns each sequence a unique ID when start() is called.
+// put_response() stores the response, tagged with its ID.
+// get_response() retrieves only responses matching the calling sequence's ID.
+```
+
+Without `set_id_info(req)` in the driver, every response has ID=0. The sequencer routes it to whichever sequence asks first — nondeterministic and almost always wrong in multi-sequence testbenches.
+
+The debug symptom: responses are retrieved by the wrong sequence, producing incorrect data comparisons even when the DUT is correct.
+
+## Response handler callback — non-blocking alternative
+
+Blocking in `body()` on `get_response()` works, but adds latency: the next request waits until the previous response arrives. For pipelined protocols (AXI, PCIe), you want to issue multiple requests before any response arrives.
+
+Use `use_response_handler(1)` and override `response_handler()`:
+
+```systemverilog
+class pipelined_read_seq extends uvm_sequence #(axi_txn);
+    `uvm_object_utils(pipelined_read_seq)
+    int outstanding;
+    bit [31:0] check_data[int];   // indexed by addr
+
+    function new(string name = "pipelined_read_seq");
+        super.new(name);
+        use_response_handler(1);   // Enable callback mode
+    endfunction
+
+    // Called automatically when a response arrives — non-blocking
+    function void response_handler(uvm_sequence_item response);
+        axi_txn rsp;
+        if (!$cast(rsp, response)) return;
+        if (rsp.data !== check_data[rsp.addr]) begin
+            `uvm_error("PIPELINE_CHK",
+                $sformatf("Addr 0x%h: exp=0x%h got=0x%h",
+                    rsp.addr, check_data[rsp.addr], rsp.data))
+        end
+        outstanding--;
+    endfunction
+
+    task body();
+        axi_txn req;
+        outstanding = 0;
+        for (int i = 0; i < 16; i++) begin
+            req = axi_txn::type_id::create($sformatf("req%0d", i));
+            start_item(req);
+            req.op   = AXI_READ;
+            req.addr = i * 4;
+            check_data[req.addr] = expected[i];
+            finish_item(req);
+            outstanding++;
+        end
+        // Wait for all responses to arrive via response_handler
+        wait (outstanding == 0);
+    endtask
+endclass
+```
+
+This issues all 16 reads without waiting for any response, then waits for all responses to arrive via the callback. AXI-style out-of-order responses are handled correctly because each response is matched by ID.
+
+## Choosing between the two patterns
+
+| Pattern                       | Use when                                                         |
+| ----------------------------- | ---------------------------------------------------------------- |
+| In-body `get_response()`      | Protocol is non-pipelined (one req, then one rsp, then next req) |
+| `response_handler()` callback | Protocol allows outstanding transactions (AXI, PCIe, USB)        |
+
+APB and SPI are sequential — in-body `get_response()`. AXI and PCIe are pipelined — use the callback pattern.
+
+## Check your understanding
+
+<SandboxExercise
+  language="systemverilog"
+  instructions={`A simple APB read driver and sequence are shown. The driver drives the APB read but NEVER sends a response back to the sequence. The sequence tries to call get_response() but gets nothing.
+
+Task:
+
+1. Fix the driver: after capturing PRDATA from the interface, create a response transaction, call set_id_info(req), and send it back with item_done(rsp).
+2. Fix the sequence: enable get_response() after finish_item.
+
+The APB transaction class and interface are defined for you.`}
+  initialCode={`// APB transaction
+class apb_txn extends uvm_sequence_item;
+\`uvm_object_utils(apb_txn)
+rand bit [31:0] addr;
+rand bit [31:0] data;
+rand bit write;
+function new(string n="apb_txn"); super.new(n); endfunction
+endclass
+
+// BROKEN driver — no response sent
+class apb_driver extends uvm_driver #(apb_txn);
+\`uvm_component_utils(apb_driver)
+virtual apb_if vif;
+
+    task run_phase(uvm_phase phase);
+        forever begin
+            apb_txn req;
+            seq_item_port.get_next_item(req);
+            @(posedge vif.clk);
+            vif.paddr  <= req.addr;
+            vif.pwrite <= req.write;
+            vif.psel   <= 1'b1;
+            vif.penable<= 1'b0;
+            @(posedge vif.clk iff vif.pready);
+            vif.psel   <= 1'b0;
+            vif.penable<= 1'b0;
+            seq_item_port.item_done();  // BUG: no response
+        end
+    endtask
+
+endclass
+
+// BROKEN sequence — tries to get response but never gets one
+class apb_read_seq extends uvm_sequence #(apb_txn);
+\`uvm_object_utils(apb_read_seq)
+bit [31:0] read_data;
+
+    task body();
+        apb_txn req;
+        req = apb_txn::type_id::create("req");
+        start_item(req);
+        req.addr  = 32'h1000;
+        req.write = 1'b0;
+        finish_item(req);
+        // TODO: get the response and store rsp.data in read_data
+    endtask
+
+endclass`}
+  solution={`// APB transaction
+class apb_txn extends uvm_sequence_item;
+\`uvm_object_utils(apb_txn)
+rand bit [31:0] addr;
+rand bit [31:0] data;
+rand bit write;
+function new(string n="apb_txn"); super.new(n); endfunction
+endclass
+
+// FIXED driver — captures PRDATA and sends response
+class apb_driver extends uvm_driver #(apb_txn);
+\`uvm_component_utils(apb_driver)
+virtual apb_if vif;
+
+    task run_phase(uvm_phase phase);
+        forever begin
+            apb_txn req, rsp;
+            seq_item_port.get_next_item(req);
+            @(posedge vif.clk);
+            vif.paddr  <= req.addr;
+            vif.pwrite <= req.write;
+            vif.psel   <= 1'b1;
+            vif.penable<= 1'b0;
+            @(posedge vif.clk iff vif.pready);
+            // Capture the read data for non-write transactions
+            rsp = apb_txn::type_id::create("rsp");
+            rsp.set_id_info(req);   // Route response to the right sequence
+            rsp.addr  = req.addr;
+            rsp.data  = (!req.write) ? vif.prdata : 32'h0;
+            rsp.write = req.write;
+            vif.psel   <= 1'b0;
+            vif.penable<= 1'b0;
+            seq_item_port.item_done(rsp);   // Send response
+        end
+    endtask
+
+endclass
+
+// FIXED sequence — collects the response
+class apb_read_seq extends uvm_sequence #(apb_txn);
+\`uvm_object_utils(apb_read_seq)
+bit [31:0] read_data;
+
+    task body();
+        apb_txn req, rsp;
+        req = apb_txn::type_id::create("req");
+        start_item(req);
+        req.addr  = 32'h1000;
+        req.write = 1'b0;
+        finish_item(req);
+        get_response(rsp);         // Receive the response from the driver
+        read_data = rsp.data;      // Store the returned data
+    endtask
+
+endclass`}
+testCases={[
+"Driver creates a response transaction rsp after the transaction completes",
+"Driver calls rsp.set_id_info(req) to copy the sequence ID",
+"Driver calls item_done(rsp) or put_response(rsp) + item_done()",
+"Sequence calls get_response(rsp) after finish_item",
+"Sequence stores rsp.data in read_data"
+]}
+/>
+
+## What's next
+
+Lesson H5-04 covers the virtual sequencer pattern in depth — how to structure the virtual sequencer class, pass sequencer handles via `uvm_config_db`, and coordinate complex multi-agent scenarios cleanly using `p_sequencer`.

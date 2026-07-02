@@ -1,0 +1,309 @@
+---
+title: "Event Groups, Task Notifications, and Software Timers"
+description: "The three FreeRTOS primitives beyond queues and mutexes: event groups for multi-condition sync, task notifications for fast point-to-point signaling, and software timers for deferred work."
+phase: 10
+module: "e-4-rtos-fundamentals"
+order: 3
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-4-rtos-fundamentals/02"
+standards:
+  primaryAnchor: "FreeRTOS"
+  cs2023: ["OS-Scheduling", "SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - event-group
+  - event-bits
+  - task-notification
+  - software-timer
+  - timer-daemon
+  - one-shot-timer
+  - auto-reload-timer
+  - xTaskNotify
+  - xEventGroupWaitBits
+learningOutcomes:
+  - "Use an event group to block a task until multiple conditions are satisfied simultaneously"
+  - "Send a task notification from an ISR as a lighter-weight alternative to a binary semaphore"
+  - "Create a software timer to schedule a callback without a dedicated task"
+  - "Select the correct synchronization primitive based on the number of senders, receivers, and conditions"
+professionalContext: "FreeRTOS ships with six synchronization primitives: queues, mutexes, counting semaphores, binary semaphores, event groups, and task notifications. Engineers who use only queues and mutexes write systems with unnecessary overhead or miss simpler solutions. The right primitive for the job halves code complexity and reduces RAM use."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A firmware system waits for three independent hardware peripherals to complete their initialization before starting the application: the IMU (I2C), the external flash (SPI), and the radio (UART). Each peripheral initialization runs in its own task. The application task must block until all three finish.
+
+A queue-based approach: three separate semaphores, three separate `xSemaphoreTake` calls in sequence. But this approach blocks on each semaphore in order — if IMU finishes last, the application waits for flash, then radio, then IMU, even if IMU finished first. An <VocabTooltip slug="event-group">event group</VocabTooltip> solves this in one call: block until bits 0, 1, AND 2 are all set simultaneously, regardless of order. The code is simpler and the application starts as soon as the last peripheral finishes.
+
+## Event groups
+
+An event group is a set of 24 bits. Tasks can set bits, clear bits, and block waiting for specific bit combinations.
+
+```c
+#include "event_groups.h"
+
+#define INIT_DONE_IMU    (1U << 0)
+#define INIT_DONE_FLASH  (1U << 1)
+#define INIT_DONE_RADIO  (1U << 2)
+#define ALL_INIT_DONE    (INIT_DONE_IMU | INIT_DONE_FLASH | INIT_DONE_RADIO)
+
+static EventGroupHandle_t init_events;
+
+void imu_init_task(void *params) {
+    (void)params;
+    imu_init_hardware();   /* Blocks until I2C init completes */
+    xEventGroupSetBits(init_events, INIT_DONE_IMU);
+    vTaskDelete(NULL);     /* One-shot task */
+}
+
+void flash_init_task(void *params) {
+    (void)params;
+    flash_init_hardware();
+    xEventGroupSetBits(init_events, INIT_DONE_FLASH);
+    vTaskDelete(NULL);
+}
+
+void radio_init_task(void *params) {
+    (void)params;
+    radio_init_hardware();
+    xEventGroupSetBits(init_events, INIT_DONE_RADIO);
+    vTaskDelete(NULL);
+}
+
+void application_task(void *params) {
+    (void)params;
+
+    /* Block until ALL three init bits are set.
+       xClearOnExit = pdTRUE clears the bits after unblocking.
+       xWaitForAllBits = pdTRUE requires all bits simultaneously. */
+    xEventGroupWaitBits(
+        init_events,
+        ALL_INIT_DONE,
+        pdTRUE,            /* clear bits on exit */
+        pdTRUE,            /* wait for ALL bits (not any) */
+        portMAX_DELAY
+    );
+
+    /* All three peripherals initialized — start application logic */
+    run_application();
+}
+
+void main(void) {
+    init_events = xEventGroupCreate();
+    xTaskCreate(imu_init_task,   "imu",  256, NULL, 3, NULL);
+    xTaskCreate(flash_init_task, "fl",   256, NULL, 3, NULL);
+    xTaskCreate(radio_init_task, "rad",  256, NULL, 3, NULL);
+    xTaskCreate(application_task,"app",  1024,NULL, 2, NULL);
+    vTaskStartScheduler();
+}
+```
+
+Setting `xWaitForAllBits = pdFALSE` gives OR semantics — unblock when ANY specified bit is set. This handles the "wake on sensor A OR sensor B" case.
+
+ISR variants exist: `xEventGroupSetBitsFromISR` (note: this goes through the timer daemon task, adding one context switch of latency — for tight ISR → task signaling, prefer task notifications).
+
+## Task notifications
+
+A <VocabTooltip slug="task-notification">task notification</VocabTooltip> is a 32-bit value and a one-bit "pending" flag embedded directly in the task control block. It's the lightest-weight signaling mechanism in FreeRTOS — no kernel object to allocate, no handle to store.
+
+The common case: ISR signals a single known task (e.g., the UART ISR wakes the UART handler task):
+
+```c
+/* ISR variant — lighter than a binary semaphore for point-to-point signaling */
+void USART2_IRQHandler(void) {
+    if (USART2_SR & SR_RXNE) {
+        uint8_t byte = USART2_DR;
+        /* Store the byte somewhere (ring buffer), then notify the handler */
+        ring_buf_push(&rx_ring, byte);
+
+        BaseType_t woken = pdFALSE;
+        vTaskNotifyGiveFromISR(uart_handler_task_handle, &woken);
+        portYIELD_FROM_ISR(woken);
+    }
+}
+
+void uart_handler_task(void *params) {
+    (void)params;
+    for (;;) {
+        /* Block until notified (like a binary semaphore take) */
+        ulTaskNotifyTake(pdTRUE,           /* clear on exit */
+                         portMAX_DELAY);
+        /* Process bytes from the ring buffer */
+        while (!ring_buf_empty(&rx_ring)) {
+            process_byte(ring_buf_pop(&rx_ring));
+        }
+    }
+}
+```
+
+The more general `xTaskNotify` / `xTaskNotifyWait` pair provides full 32-bit value semantics — you can set bits, increment a counter, or send an arbitrary value:
+
+```c
+/* Set bits in the notification value (like a lightweight event group for one task) */
+xTaskNotify(target_task, (1U << 3), eSetBits);
+
+/* Target task reads its notification bits */
+uint32_t notif_bits;
+xTaskNotifyWait(0, UINT32_MAX, &notif_bits, portMAX_DELAY);
+if (notif_bits & (1U << 3)) { /* handle bit 3 event */ }
+```
+
+Comparison:
+
+| Primitive         | Best for                                        | RAM cost          |
+| ----------------- | ----------------------------------------------- | ----------------- |
+| Queue             | Data transfer; multiple senders/receivers       | Items × item_size |
+| Binary semaphore  | Signaling, multiple senders                     | ~80 bytes object  |
+| Task notification | ISR → single task; one sender, one receiver     | 0 bytes (in TCB)  |
+| Event group       | Wait for multiple conditions (multi-bit OR/AND) | ~96 bytes object  |
+
+Task notifications cannot replace queues when:
+
+- Multiple tasks could send to the same receiver (the notification has only one slot; concurrent sends race)
+- Data needs to be passed with the signal
+
+## Software timers
+
+A <VocabTooltip slug="software-timer">software timer</VocabTooltip> runs a callback function in the context of the timer daemon task after a specified delay. They avoid creating a dedicated task just to "do X after Y milliseconds."
+
+```c
+#include "timers.h"
+
+static TimerHandle_t watchdog_reset_timer;
+
+/* Callback runs in the timer daemon task — keep it short; no blocking */
+void watchdog_reset_callback(TimerHandle_t timer) {
+    (void)timer;
+    IWDG->KR = 0xAAAA;   /* Pet the independent watchdog */
+}
+
+void timers_init(void) {
+    /* Auto-reload timer: fires every 500 ms indefinitely */
+    watchdog_reset_timer = xTimerCreate(
+        "wdg",                          /* debug name */
+        pdMS_TO_TICKS(500),             /* period */
+        pdTRUE,                         /* auto-reload */
+        NULL,                           /* timer ID (optional) */
+        watchdog_reset_callback
+    );
+    xTimerStart(watchdog_reset_timer, 0);
+}
+```
+
+One-shot timer (fires once, then stops):
+
+```c
+TimerHandle_t debounce_timer = xTimerCreate(
+    "dbnc",
+    pdMS_TO_TICKS(50),   /* 50 ms debounce delay */
+    pdFALSE,             /* one-shot */
+    NULL,
+    button_debounce_callback
+);
+
+/* In the GPIO ISR: restart the timer on each edge; callback fires only after
+   50 ms of quiet. This is the standard software debounce pattern. */
+void EXTI0_IRQHandler(void) {
+    EXTI->PR = (1U << 0);
+    BaseType_t woken = pdFALSE;
+    xTimerResetFromISR(debounce_timer, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+```
+
+Constraints:
+
+- Timer callbacks run in the timer daemon task, not in the task that started the timer. Do not block in a callback. Do not take mutexes with long waits.
+- The timer daemon task priority is set by `configTIMER_TASK_PRIORITY`. If this is too low, timers may fire late when higher-priority tasks are busy.
+- Software timers are not hard real-time. The FreeRTOS tick drives them — a timer scheduled for 50 ms may fire at 50 + (one tick period) ms. For hard real-time periodic events, use a hardware timer ISR.
+
+## Choosing the right primitive
+
+```
+One task signals one specific task, no data transfer?
+  → Task notification (vTaskNotifyGiveFromISR / ulTaskNotifyTake)
+
+One task signals multiple possible receivers, or multiple senders?
+  → Binary semaphore or queue of zero-length items
+
+Transferring data from sender to receiver?
+  → Queue
+
+Wait until multiple conditions are all true simultaneously?
+  → Event group (xEventGroupWaitBits with pdTRUE for all-bits)
+
+Wake on any one of multiple events?
+  → Event group (xEventGroupWaitBits with pdFALSE for any-bit)
+
+Run a function once after a delay, without a dedicated task?
+  → One-shot software timer
+
+Run a function periodically?
+  → Auto-reload software timer (if not hard-real-time)
+  → Hardware timer ISR (if hard-real-time required)
+```
+
+## Check your understanding
+
+<SandboxExercise
+  language="c"
+  instructions="Three sensors complete initialization in unknown order. Each calls sensor_ready(SENSOR_ID) when done. The application task must block until all three sensors have reported ready, then call run_application(). Implement sensor_ready() using an event group. The sensor IDs are SENSOR_A=0, SENSOR_B=1, SENSOR_C=2. The event group handle is extern EventGroupHandle_t sensor_events; Assume FreeRTOS headers are included."
+  initialCode={`#define SENSOR_A  0
+#define SENSOR_B  1
+#define SENSOR_C  2
+
+extern EventGroupHandle_t sensor_events;
+
+/_ Called from each sensor's init task when ready _/
+void sensor_ready(int sensor_id) {/* TODO: set the appropriate event bit */}
+
+/_ Application task — block until all three sensors are ready _/
+void application*task(void \_params) {
+(void)params;
+/* TODO: wait for all three bits, then call run_application() \*/
+run_application();
+}
+`}
+  solution={`#define SENSOR_A 0
+#define SENSOR_B 1
+#define SENSOR_C 2
+
+#define BIT_A (1U << SENSOR_A)
+#define BIT_B (1U << SENSOR_B)
+#define BIT_C (1U << SENSOR_C)
+#define ALL_BITS (BIT_A | BIT_B | BIT_C)
+
+extern EventGroupHandle_t sensor_events;
+
+void sensor_ready(int sensor_id) {
+xEventGroupSetBits(sensor_events, (1U << sensor_id));
+}
+
+void application*task(void \_params) {
+(void)params;
+xEventGroupWaitBits(
+sensor_events,
+ALL_BITS,
+pdTRUE, /* clear on exit _/
+pdTRUE, /_ wait for ALL bits \*/
+portMAX_DELAY
+);
+run_application();
+}
+`}
+testCases={[
+"sensor_ready sets the correct bit for each sensor ID",
+"xEventGroupWaitBits uses pdTRUE for xWaitForAllBits",
+"application_task blocks until all three bits are set",
+"bits are cleared on exit (pdTRUE for xClearOnExit)"
+]}
+/>
+
+## What's next
+
+Lesson 4 compares FreeRTOS with Zephyr — the modern open-source alternative with a broader hardware support story and built-in device-tree support. The concepts from E4 lessons 1-3 (tasks, queues, event groups, stack sizing) transfer directly; the API names and configuration conventions differ.

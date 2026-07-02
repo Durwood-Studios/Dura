@@ -1,0 +1,223 @@
+---
+title: "Sequencer Arbitration — Lock, Grab, and Priority"
+description: "How UVM resolves competing sequences on one sequencer. Priority modes, lock/grab for exclusive access, and when each arbitration policy belongs in your testbench."
+phase: 11
+module: "h-5-uvm-sequences"
+order: 2
+estimatedMinutes: 60
+difficulty: 4
+prerequisites:
+  - "h-5-uvm-sequences/01-sequence-library-and-virtual"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - uvm-sequencer
+  - arbitration
+  - lock
+  - grab
+  - seq-priority
+learningOutcomes:
+  - "Name the four UVM sequencer arbitration modes and explain when each applies"
+  - "Use lock() and grab() to give one sequence exclusive sequencer access"
+  - "Distinguish lock from grab and identify the ordering guarantee each provides"
+  - "Debug a testbench where two sequences are starving each other"
+professionalContext: "Production testbenches run multiple concurrent sequences on one sequencer — a background traffic sequence, an error-injection sequence, and a directed test sequence all competing simultaneously. Engineers who understand arbitration can write sequences that interleave correctly; engineers who don't produce testbenches where one sequence starves another in nondeterministic ways that make regression results unreliable."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The H5-01 lesson showed `seq.start(sequencer)` running one sequence at a time. Production testbenches are more complex: a background traffic generator, an error-injection sequence, and a directed test sequence all run concurrently on the same sequencer. The sequencer must decide which sequence gets to send the next transaction. That decision is arbitration, and getting it wrong produces testbenches where one sequence silently starves another.
+
+Arbitration bugs are among the hardest DV bugs to diagnose: the simulation passes, coverage looks normal, but one scenario the starvation prevents is the exact scenario that hides the DUT bug.
+
+## The four arbitration modes
+
+UVM sequencers support four built-in arbitration policies, set via `set_arbitration()`:
+
+```systemverilog
+sequencer.set_arbitration(UVM_SEQ_ARB_FIFO);       // Default
+sequencer.set_arbitration(UVM_SEQ_ARB_STRICT_FIFO);
+sequencer.set_arbitration(UVM_SEQ_ARB_WEIGHTED);
+sequencer.set_arbitration(UVM_SEQ_ARB_RANDOM);
+```
+
+### UVM_SEQ_ARB_FIFO (default)
+
+Sequences are granted access in first-in, first-out order. A sequence that calls `start_item` first gets the sequencer first, regardless of priority. Most testbenches use this; it's the simplest and most predictable.
+
+```
+Sequence A starts_item at t=0  ──► served first
+Sequence B starts_item at t=0  ──► served second (same cycle → A wins by call order)
+Sequence A starts_item at t=5  ──► served third
+```
+
+### UVM_SEQ_ARB_STRICT_FIFO
+
+Respects sequence priority. A sequence with a higher `priority` argument in `start()` always beats a lower-priority one, regardless of who called `start_item` first.
+
+```systemverilog
+// Background traffic: low priority
+bg_seq.start(sequencer, .priority(10));
+
+// Error injection: high priority, always preempts
+err_seq.start(sequencer, .priority(200));
+```
+
+With `STRICT_FIFO`, the high-priority sequence gets every item it needs before the low-priority sequence can proceed. Useful for watchdog sequences that must fire at specific moments.
+
+### UVM_SEQ_ARB_WEIGHTED
+
+Each competing sequence gets a share of accesses proportional to its priority value. Priority 200 vs priority 100: the first sequence gets roughly 2× as many slots. Not strict starvation, but biased.
+
+### UVM_SEQ_ARB_RANDOM
+
+The sequencer randomly selects which waiting sequence goes next. Priority is ignored. Useful for stress-testing with nondeterministic interleaving — produces rare orderings that FIFO-based testing misses.
+
+## Lock — exclusive access with queuing
+
+`lock()` asks the sequencer for exclusive access. Queued: if another sequence holds the lock, `lock()` blocks until the current holder releases.
+
+```systemverilog
+class atomic_read_modify_write_seq extends uvm_sequence #(my_txn);
+    `uvm_object_utils(atomic_read_modify_write_seq)
+
+    task body();
+        my_txn rd, wr;
+
+        // --- LOCK: no other sequence can interleave here ---
+        m_sequencer.lock(this);
+
+        rd = my_txn::type_id::create("rd");
+        start_item(rd);
+        rd.op = READ;
+        rd.addr = 32'hABCD_0000;
+        assert(rd.randomize() with { op == READ; });
+        finish_item(rd);   // Read completes
+
+        wr = my_txn::type_id::create("wr");
+        start_item(wr);
+        wr.op   = WRITE;
+        wr.addr = rd.addr;
+        wr.data = rd.data | 32'h0000_0001;   // Set bit 0
+        finish_item(wr);   // Write back — must be atomic with read
+
+        // --- UNLOCK ---
+        m_sequencer.unlock(this);
+    endtask
+endclass
+```
+
+While this sequence holds the lock, no other sequence can call `get_next_item` on the sequencer — even a higher-priority one. The lock guarantees the read and write are consecutive transactions with no interleaving.
+
+`unlock()` releases the lock. If you forget to call it, the sequencer is permanently blocked — a deadlock. Wrap lock/unlock in try/finally patterns where your simulator supports it.
+
+## Grab — immediate exclusive access
+
+`grab()` is similar to `lock()` but jumps the queue instead of waiting at the end:
+
+```systemverilog
+// grab() takes effect immediately — kicks out whoever was waiting
+m_sequencer.grab(this);
+// ... exclusive transactions ...
+m_sequencer.ungrab(this);
+```
+
+The distinction:
+
+- `lock()` waits for the current transaction to complete, then goes to the front of the queue.
+- `grab()` takes effect on the next call to `get_next_item`, preempting any pending `start_item`.
+
+Use `grab()` when you need to inject a sequence at a specific moment regardless of what else is happening — for example, a sequence that fires when a hardware interrupt is detected and must respond before any other activity.
+
+## Starvation — the classic failure mode
+
+```systemverilog
+// This testbench has a starvation bug
+initial begin
+    fork
+        forever begin
+            bg_seq.randomize();
+            bg_seq.start(sequencer);   // Runs a 10,000-transaction burst
+        end
+        begin
+            #5000;  // Wait 5000 time units, then fire error injection
+            err_seq.start(sequencer);  // STARVED — bg_seq holds the sequencer for 10K txns
+        end
+    join_any
+end
+```
+
+The background sequence issues 10,000 transactions without releasing. The error sequence never runs.
+
+Fix: either split the background sequence into shorter bursts that yield more frequently, or use priority + `STRICT_FIFO` so the error sequence can preempt:
+
+```systemverilog
+// Background traffic: small bursts, yielding often
+class bg_traffic_seq extends uvm_sequence #(my_txn);
+    task body();
+        repeat (10) begin   // 10 transactions per burst, not 10,000
+            my_txn tr = my_txn::type_id::create("tr");
+            start_item(tr);
+            assert(tr.randomize());
+            finish_item(tr);
+        end
+    endtask
+endclass
+```
+
+With small bursts, the error injection sequence gets to run between them.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A testbench runs a background sequence (priority 50) and a reset sequence (priority 200) concurrently on the same sequencer with UVM_SEQ_ARB_STRICT_FIFO. The reset sequence calls start_item but blocks indefinitely. What's the most likely cause?",
+      options: [
+        "Priority 200 is too high — cap at 100",
+        "The background sequence holds a lock via m_sequencer.lock(). With a lock active, NO sequence — regardless of priority — can access the sequencer until unlock() is called. Priority-based arbitration applies only to sequences waiting for an unlocked sequencer. A lock overrides all priority modes. Fix: ensure the background sequence does not lock the sequencer for long periods, or have it release the lock before the reset window.",
+        "STRICT_FIFO doesn't support priorities above 100",
+        "The reset sequence must use grab() instead of start()",
+      ],
+      correct: 1,
+      explanation:
+        "Lock() overrides all arbitration modes. A locked sequencer blocks every other sequence regardless of priority. If the background sequence called m_sequencer.lock() and forgot unlock(), the sequencer is permanently blocked. Always balance lock/unlock; long-held locks are a primary cause of deadlocks in multi-sequence testbenches.",
+    },
+    {
+      question:
+        "An engineer wants to model an atomic read-modify-write operation where no other master can issue transactions between the read and the write. Which mechanism correctly enforces atomicity?",
+      options: [
+        "Use high priority with STRICT_FIFO",
+        "Use m_sequencer.lock(this) before the read and m_sequencer.unlock(this) after the write. Priority only determines which sequence goes next in the queue — it doesn't prevent other sequences from being granted slots between two consecutive transactions. Lock() guarantees that from the moment the lock is granted until unlock(), no other sequence can call get_next_item. This is the correct mechanism for atomic multi-transaction operations.",
+        "Issue both transactions in a single start_item/finish_item pair",
+        "Use UVM_SEQ_ARB_RANDOM",
+      ],
+      correct: 1,
+      explanation:
+        "Priority arbitration determines ordering between competing transactions, not atomicity across multiple transactions. Only lock() creates the exclusive window needed for a read-modify-write. A single start_item/finish_item can only hold one transaction. Random arbitration makes atomicity impossible. Lock is the correct tool.",
+    },
+    {
+      question: "What is the difference between lock() and grab() in practical testbench use?",
+      options: [
+        "They are identical — different names for the same function",
+        "lock() queues behind the current transaction: the in-progress transaction completes, then the lock takes effect. grab() takes effect on the NEXT call to get_next_item, potentially preempting a sequence that had already queued a start_item. Use lock() when you can tolerate one more transaction completing before exclusivity; use grab() when you need exclusivity starting with the very next transaction slot.",
+        "lock() is for components, grab() is for sequences",
+        "grab() requires higher priority",
+      ],
+      correct: 1,
+      explanation:
+        "The ordering guarantee is the key distinction. lock() is polite — it waits for the current operation and queues. grab() is immediate — it claims the next slot preemptively. For interrupt-driven sequences that must respond to a hardware event within one transaction window, grab() is the right choice. For atomic protocol operations that can start after the current transaction completes, lock() is sufficient.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H5-03 covers response handling — how sequences receive the DUT's response to a transaction via `get_response()`, how drivers send responses back via `put_response()`, and why response IDs matter when multiple sequences share a sequencer.

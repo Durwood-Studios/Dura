@@ -1,0 +1,217 @@
+---
+title: "Power Profiling — Measuring Current Consumption on Embedded Hardware"
+description: "Datasheet numbers are typical. Your board has different PCB parasitics, different firmware behavior, and different temperature. Measure the actual current your firmware draws. This lesson teaches you how."
+phase: 10
+module: "10-9-power-management"
+order: 3
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "10-9-power-management/02"
+standards:
+  primaryAnchor: "Nordic Power Profiler Kit II documentation"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - power-profiler
+  - current-measurement
+  - shunt-resistor
+  - ppk2
+  - average-current
+  - peak-current
+  - duty-cycle
+  - coulomb-counter
+  - battery-life-estimate
+  - current-waveform
+learningOutcomes:
+  - "Set up a basic current measurement circuit using a shunt resistor and oscilloscope or bench meter"
+  - "Use firmware GPIO toggles to correlate current waveforms with code execution phases"
+  - "Calculate average current from a duty-cycle measurement and estimate battery life"
+  - "Identify the dominant current consumers in a sensor-node firmware from a current waveform"
+professionalContext: "Product engineers who can measure and reason about current consumption are rare and valuable. Most embedded engineers know firmware; few know how to actually connect an ammeter correctly, how to avoid measurement artifacts from series resistance, and how to interpret a current waveform. This lesson closes that gap."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A battery-powered sensor is specified to run for 1 year on two AA batteries (approximately 2,400 mAh combined). A rough model: 2,400 mAh / 8,760 hours = 274 µA average. The firmware team optimized the sleep mode and claims < 200 µA average. But no one has measured it — the claim is from datasheet numbers.
+
+First measurement: 1.2 mA average. The firmware had SysTick enabled in Stop mode (SysTick wakes the CPU every 1 ms, preventing deep sleep). After fixing: 180 µA average. The product ships with a 1-year battery life instead of 2 months.
+
+Measurement found the bug. Datasheet math did not.
+
+## Measurement equipment
+
+**Option 1: Bench ammeter or DMM in current mode (simple, low accuracy)**
+
+- Connect in series with the supply line
+- Best for: average current in stable operation (no fast transients)
+- Limitation: can't capture microsecond transients; safe for < 100 mA
+
+**Option 2: Shunt resistor + oscilloscope (accurate, requires setup)**
+
+- Place a known-value resistor (e.g., 10 Ω) in series with VDD
+- Measure voltage across it with the oscilloscope: V = I × R → I = V/R
+- For 1 mA through 10 Ω: Vmeasured = 10 mV. Oscilloscope must resolve millivolts.
+- Use a 1 Ω shunt for higher currents (1 mV/mA — easier to measure on a scope with low noise floor)
+
+**Option 3: Nordic Power Profiler Kit 2 (PPK2, recommended for serious work)**
+
+- A sub-10-µA resolution ammeter with USB streaming and a timeline visualization
+- Captures current vs time with microsecond resolution
+- Shows you exactly what the firmware is doing, correlated with GPIO markers
+- ~$50 from Mouser/Digikey — inexpensive for the capability
+
+**Option 4: J-Link Energy Profiler (for Segger J-Link users)**
+
+- Built into the J-Link debug probe
+- Millisecond resolution; adequate for Stop mode verification but not ISR-level analysis
+
+## Setting up GPIO correlation
+
+The key technique for power profiling: toggle GPIO pins at the entry/exit of every significant firmware phase. The oscilloscope (or PPK2 with GPIO input) shows you which code is running at each current level.
+
+```c
+/* Power profile GPIO markers */
+#define PROFILE_ACTIVE_START()    GPIOA->BSRR = (1U << 5)   /* PA5 high = CPU active */
+#define PROFILE_ACTIVE_END()      GPIOA->BSRR = (1U << 21)  /* PA5 low */
+
+#define PROFILE_ADC_START()       GPIOA->BSRR = (1U << 6)
+#define PROFILE_ADC_END()         GPIOA->BSRR = (1U << 22)
+
+#define PROFILE_UART_START()      GPIOA->BSRR = (1U << 7)
+#define PROFILE_UART_END()        GPIOA->BSRR = (1U << 23)
+
+#define PROFILE_SLEEP_START()     GPIOA->BSRR = (1U << 8)
+#define PROFILE_SLEEP_END()       GPIOA->BSRR = (1U << 24)
+
+/* In enter_stop_mode: */
+void enter_stop_mode(void) {
+    PROFILE_SLEEP_START();
+    /* ... WFI ... */
+    PROFILE_SLEEP_END();
+}
+```
+
+On the oscilloscope / PPK2, you now see: PA5 high → current at active CPU level, PA5 low → current at sleep level. Transitions correlate with what the code is doing.
+
+## A typical sensor-node current waveform
+
+A sensor that samples once per second, transmits via UART, then sleeps:
+
+```
+Current (mA)
+│
+│  ┌────┐    ┌──────────┐    ┌────┐
+50│    │ ADC │  UART TX  │sleep│    │
+│  │    │    │           │    │    │
+10│  ┌──┘    └──────────┘    └──┐  │
+│  │                            │  │
+0.1│──┘                          └──│
+   ─────────────────────────────────── time
+   0ms       10ms      50ms      1000ms
+```
+
+Reading from this waveform:
+
+- Active phase (ADC + UART): ~12 ms at ~30 mA average → 0.36 mAs per cycle
+- Sleep phase: ~988 ms at ~0.1 mA → 0.0988 mAs per cycle
+- Average current = (0.36 + 0.0988) / 1.0 = 0.459 mAs = 459 µA average
+
+Measured, not estimated. The 459 µA average is higher than the target 274 µA — investigation needed.
+
+## Identifying the dominant consumers
+
+To reduce 459 µA to < 274 µA, find what's consuming more than expected:
+
+**Step 1: Measure sleep current alone.** Disconnect everything except the MCU, put it in Stop mode, measure. Expected: 10–80 µA. If you measure 300 µA during "sleep," the firmware is not actually entering Stop mode (SysTick enabled? peripheral not gated? crystal oscillator running?).
+
+**Step 2: Measure active current at idle (main loop, no peripherals).** Expected for 168 MHz Cortex-M4: 50–80 mA. If you measure 120 mA, something is drawing excess — check peripheral LEDs, pull resistors, external components.
+
+**Step 3: Measure UART transmission current vs sleep + ADC.** Toggle GPIO at the start/end of each phase. Calculate mAs contribution per phase. The phase with disproportionate contribution is the optimization target.
+
+Common findings in real firmware:
+
+- UART transmission at a slow baud rate (9600) takes 10× longer than at 115200 → 10× more mAs per message
+- SysTick enabled in Stop mode wakes the CPU every 1 ms → blocks deep sleep
+- External pull resistors on I2C lines (4.7 kΩ on 3.3V = 700 µA continuous)
+- LED on for the entire active phase (20 mA LED, always on = 20 mA extra)
+
+## Battery life calculation
+
+```
+Average current: 270 µA (after optimization)
+Battery capacity: 2,400 mAh (two AA alkaline, best case)
+                  2,000 mAh (realistic, accounting for cutoff voltage)
+
+Battery life = 2,000 mAh / 0.27 mA = 7,407 hours = 308 days ≈ 10 months
+```
+
+The realistic target was 1 year (8,760 hours). At 270 µA average, you're at 10 months — still short. Options:
+
+- Reduce transmission frequency (once per 10 seconds instead of once per second → sleep duty cycle goes from 98.8% to 99.88% → cuts active contribution by 10×)
+- Use a 3.6V lithium primary battery (3,000+ mAh) instead of AA alkaline
+- Accept 10 months and refresh the batteries annually
+
+The decision is a product decision informed by the measurement. Without measurement, you can't make this decision.
+
+## Check your understanding
+
+<SandboxExercise
+  language="c"
+  instructions="A sensor node runs a cycle: 5 ms active at 25 mA (ADC + process), 2 ms active at 40 mA (UART transmit), then stops for 993 ms at 80 µA. Calculate: (1) the charge consumed in the active phases per cycle in mAs, (2) the charge consumed in the sleep phase per cycle in mAs, (3) the total average current in µA. Write your calculations as C comments, then implement the average_current_ua() function that returns the average current in µA as an integer."
+  initialCode={`#include <stdint.h>
+
+/_ Cycle parameters _/
+#define ADC_DURATION_MS 5U
+#define ADC_CURRENT_MA 25U
+#define UART_DURATION_MS 2U
+#define UART_CURRENT_MA 40U
+#define SLEEP_DURATION_MS 993U
+#define SLEEP_CURRENT_UA 80U
+#define CYCLE_MS 1000U
+
+/_ TODO: Calculate average current in µA _/
+uint32*t average_current_ua(void) {
+/* Step 1: active charge (mAs) = sum of (current*mA * duration*ms / 1000) */
+/_ Step 2: sleep charge (mAs) = sleep_current_mA _ sleep*duration_ms / 1000 */
+/_ Step 3: total charge (mAs) / cycle_seconds = average mA → convert to µA _/
+return 0; /_ replace with your calculation _/
+}
+`}
+  solution={`uint32*t average_current_ua(void) {
+/* Active charge in mAs = current*mA * time*ms / 1000 */
+/_ ADC phase: 25 mA × 5 ms = 125 mAs / 1000 = 0.125 mAs → stored as µAs: 125000 µAs _/
+/_ UART phase: 40 mA × 2 ms = 80 mAs / 1000 = 0.080 mAs → 80000 µAs _/
+/_ Sleep phase: 0.080 mA × 993 ms / 1000 = 0.07944 mAs → 79440 µAs _/
+/_ Total = 125000 + 80000 + 79440 = 284440 µAs per 1-second cycle _/
+/\_ Average = 284440 µAs / 1 s = 284440 µA → wait, that's mAs-per-cycle \*/
+
+    /* Correct calculation: charge in µAs divided by cycle duration in seconds */
+    uint32_t adc_charge_uas  = (ADC_CURRENT_MA  * 1000U) * ADC_DURATION_MS;   /* µA * ms */
+    uint32_t uart_charge_uas = (UART_CURRENT_MA * 1000U) * UART_DURATION_MS;
+    uint32_t sleep_charge_uas = SLEEP_CURRENT_UA * SLEEP_DURATION_MS;
+
+    /* Total charge in µAs (µA * ms) — divide by 1000 to get µA * seconds = µAs */
+    /* Average current [µA] = total charge [µAs] / cycle_time [s] */
+    /* Since cycle is 1 second, average [µA] = total [µAs] / 1000 [ms/s] */
+    uint32_t total_uas = adc_charge_uas + uart_charge_uas + sleep_charge_uas;
+    return total_uas / CYCLE_MS;
+    /* = (125000 + 80000 + 79440) / 1000 = 284440/1000 = 284 µA */
+
+}
+`}
+testCases={[
+"ADC charge contribution = 25 mA × 5 ms = 125 mA·ms",
+"UART charge contribution = 40 mA × 2 ms = 80 mA·ms",
+"Sleep charge contribution = 0.080 mA × 993 ms ≈ 79.44 mA·ms",
+"Average current ≈ 284 µA (±5 µA rounding)"
+]}
+/>
+
+## What's next
+
+Lesson 4 covers integrating power management with FreeRTOS — the tickless idle mode, the idle hook, and how to structure tasks so the CPU enters Stop mode during the FreeRTOS idle period without missing task deadlines.

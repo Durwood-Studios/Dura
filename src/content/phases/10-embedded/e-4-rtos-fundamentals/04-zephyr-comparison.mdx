@@ -1,0 +1,272 @@
+---
+title: "Zephyr RTOS — Concepts, Configuration, and FreeRTOS Comparison"
+description: "Zephyr's device-tree model, Kconfig build system, and thread API — mapped to FreeRTOS equivalents so the patterns you already know transfer immediately."
+phase: 10
+module: "e-4-rtos-fundamentals"
+order: 4
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-4-rtos-fundamentals/03"
+standards:
+  primaryAnchor: "Zephyr Project Documentation"
+  cs2023: ["OS-Scheduling", "SF-Foundations"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - zephyr-rtos
+  - device-tree
+  - kconfig
+  - zephyr-thread
+  - zephyr-kernel
+  - west
+  - devicetree-overlay
+  - zephyr-message-queue
+  - zephyr-semaphore
+learningOutcomes:
+  - "Explain Zephyr's device-tree and Kconfig build model versus FreeRTOS's header-based configuration"
+  - "Write a Zephyr thread equivalent to a FreeRTOS task"
+  - "Use Zephyr message queues and semaphores given knowledge of FreeRTOS equivalents"
+  - "Identify the hardware support and ecosystem differences that drive tool selection between FreeRTOS and Zephyr"
+professionalContext: "Zephyr is the Linux Foundation's embedded RTOS, now supported on over 500 boards. Nordic Semiconductor ships it by default for nRF9160 and nRF5340; Intel uses it for Zephyr-certified boards; automotive Tier 1s adopt it for AUTOSAR-alternative work. Engineers reading job descriptions for IoT, automotive, or industrial embedded roles encounter Zephyr alongside FreeRTOS — understanding both is a differentiator."
+thresholdConcept: false
+---
+
+## Why this matters
+
+FreeRTOS and Zephyr solve the same problem — concurrent task execution on resource-constrained hardware — but with architecturally different approaches to configuration, hardware abstraction, and ecosystem. A team picking FreeRTOS vs Zephyr for a new product makes a multi-year commitment; an engineer joining a team using the other RTOS needs to port their mental model quickly.
+
+The good news: the core patterns are identical. Tasks → threads. Queues → message queues. Mutexes → mutexes. Semaphores → semaphores. Event groups → event objects. The API names differ; the concepts don't.
+
+## The fundamental architectural differences
+
+| Aspect               | FreeRTOS                                           | Zephyr                                                     |
+| -------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| Configuration        | `FreeRTOSConfig.h` macros                          | Kconfig (menuconfig / prj.conf)                            |
+| Hardware abstraction | None built-in (vendor HAL + FreeRTOS port)         | Device tree + Zephyr HAL drivers (unified API)             |
+| Build system         | Makefile / CMake + vendor toolchain                | West + CMake (managed by Zephyr project)                   |
+| Board support        | ~40 official ports; vendor-maintained              | 500+ boards in-tree; Linux Foundation maintained           |
+| Thread creation      | `xTaskCreate()` at runtime                         | `K_THREAD_DEFINE()` at compile time OR `k_thread_create()` |
+| IPC primitives       | Queue, mutex, semaphore, event group, notification | Message queue, mutex, semaphore, event, condvar, FIFO      |
+| Networking stack     | External (e.g., LwIP separately integrated)        | Built-in (BSD sockets API)                                 |
+| License              | MIT                                                | Apache 2.0                                                 |
+
+## Kconfig and device tree
+
+FreeRTOS is configured by editing a C header. Zephyr uses two separate systems:
+
+**Kconfig** controls build-time features: which drivers to compile in, which protocol stacks to include, RTOS tick rate, thread stack sizes.
+
+```kconfig
+# prj.conf — Zephyr project configuration
+CONFIG_THREAD_STACK_INFO=y        # Enable stack introspection
+CONFIG_KERNEL_MEM_POOL=y
+CONFIG_UART_CONSOLE=y
+CONFIG_LOG=y
+CONFIG_LOG_DEFAULT_LEVEL=3        # Info level
+```
+
+**Device tree** describes the hardware: which pins are connected to which peripherals, which I2C bus address a sensor lives on, which UART is the console. This separates hardware description from driver code.
+
+```dts
+/* boards/arm/custom_board/custom_board.dts */
+/ {
+    chosen {
+        zephyr,console = &usart2;
+    };
+};
+
+&i2c1 {
+    status = "okay";
+    my_sensor: bme280@76 {
+        compatible = "bosch,bme280";
+        reg = <0x76>;
+        label = "BME280";
+    };
+};
+```
+
+The driver code never hardcodes `0x76` — it reads the address from device tree via macros. Board variants (same MCU, different PCB layout) use overlays to remap pins without touching driver code.
+
+## Threads vs tasks
+
+FreeRTOS task creation:
+
+```c
+/* FreeRTOS */
+xTaskCreate(sensor_task, "sensor", 512, NULL, 5, &sensor_task_handle);
+```
+
+Zephyr equivalent at compile time:
+
+```c
+/* Zephyr — stack and thread defined at compile time */
+K_THREAD_DEFINE(sensor_tid,          /* thread ID symbol */
+                1024,                /* stack size in bytes */
+                sensor_thread,       /* entry function */
+                NULL, NULL, NULL,    /* args p1, p2, p3 */
+                5,                   /* priority (lower = higher in Zephyr) */
+                0,                   /* options */
+                0);                  /* delay (0 = start immediately) */
+
+void sensor_thread(void *p1, void *p2, void *p3) {
+    ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+    for (;;) {
+        uint16_t val = adc_read_mv();
+        k_sleep(K_MSEC(1));
+    }
+}
+```
+
+`K_THREAD_DEFINE` is a macro that emits the stack buffer and thread struct into a linker section; Zephyr's kernel initializes them before `main` runs. Dynamic creation via `k_thread_create()` also exists.
+
+Key difference: Zephyr uses **cooperative** and **preemptive** threads differently from FreeRTOS. Threads with negative priority are cooperative (they don't preempt each other); threads with priority 0 and above are preemptive. FreeRTOS uses only preemptive scheduling in normal configuration.
+
+## Message queues
+
+```c
+/* FreeRTOS */
+QueueHandle_t q = xQueueCreate(10, sizeof(uint16_t));
+xQueueSend(q, &sample, portMAX_DELAY);
+xQueueReceive(q, &sample, portMAX_DELAY);
+
+/* Zephyr equivalent */
+K_MSGQ_DEFINE(sensor_msgq, sizeof(uint16_t), 10, 4); /* 4-byte alignment */
+
+k_msgq_put(&sensor_msgq, &sample, K_FOREVER);
+k_msgq_get(&sensor_msgq, &sample, K_FOREVER);
+```
+
+`K_FOREVER` is Zephyr's equivalent of `portMAX_DELAY`.
+
+ISR variant:
+
+```c
+/* From an ISR */
+k_msgq_put(&sensor_msgq, &sample, K_NO_WAIT);  /* Non-blocking only in ISR */
+```
+
+## Semaphores and mutexes
+
+```c
+/* FreeRTOS binary semaphore */
+SemaphoreHandle_t sem = xSemaphoreCreateBinary();
+xSemaphoreGive(sem);
+xSemaphoreTake(sem, portMAX_DELAY);
+
+/* Zephyr */
+struct k_sem my_sem;
+k_sem_init(&my_sem, 0, 1);   /* initial=0, limit=1 (binary) */
+k_sem_give(&my_sem);
+k_sem_take(&my_sem, K_FOREVER);
+
+/* Or compile-time: */
+K_SEM_DEFINE(my_sem, 0, 1);
+```
+
+```c
+/* FreeRTOS mutex */
+SemaphoreHandle_t mtx = xSemaphoreCreateMutex();
+xSemaphoreTake(mtx, portMAX_DELAY);
+/* ... */
+xSemaphoreGive(mtx);
+
+/* Zephyr */
+struct k_mutex my_mutex;
+k_mutex_init(&my_mutex);
+k_mutex_lock(&my_mutex, K_FOREVER);
+/* ... */
+k_mutex_unlock(&my_mutex);
+```
+
+Both FreeRTOS mutexes and Zephyr mutexes implement priority inheritance by default.
+
+## The west tool and build workflow
+
+Zephyr uses `west` as its meta-tool:
+
+```bash
+# Install Zephyr and toolchain (one time)
+west init ~/zephyrproject
+west update
+west sdk install
+
+# Build for STM32F4
+west build -b stm32f4_disco app/
+
+# Flash
+west flash
+
+# Debug via RTT or GDB
+west debug
+```
+
+FreeRTOS typically integrates via a Makefile or CMake that you manage directly. Zephyr's build system is more opinionated but handles board-specific linker scripts, startup code, and peripheral configuration automatically. The trade-off: less manual work, but less control over the exact build process.
+
+## When to choose Zephyr vs FreeRTOS
+
+Choose **FreeRTOS** when:
+
+- The chip vendor provides a FreeRTOS port (virtually all major vendors do)
+- The team needs minimal RTOS overhead with maximum control
+- The codebase already uses FreeRTOS or the vendor HAL tightly couples to it
+- Licensing must be MIT (Zephyr is Apache 2.0, which is permissive but requires attribution)
+
+Choose **Zephyr** when:
+
+- Using Nordic nRF5x/nRF9x, Intel embedded products, or a board with strong Zephyr in-tree support
+- Networking (BLE, Thread, Wi-Fi, Matter) is required — Zephyr's protocol stacks are production-grade
+- Device tree hardware abstraction adds clear value (e.g., firmware runs on multiple board variants with different pin assignments)
+- The team wants to contribute to or benefit from a large open-source ecosystem
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A team is building a Bluetooth sensor node using a Nordic nRF52840. They need Bluetooth LE advertising, a GATT server, and DFU over BLE. Which RTOS choice is most pragmatic, and why?",
+      options: [
+        "FreeRTOS — it's the industry standard",
+        "Zephyr — Nordic ships the nRF Connect SDK built on Zephyr, including a production-quality BLE stack (SoftDevice abstraction or open-source Bluetooth controller). Using Zephyr means using the same environment Nordic's documentation, examples, and support forums target. FreeRTOS on nRF52840 requires integrating a separate BLE stack (e.g., FreeRTOS + NimBLE), which is possible but requires more integration work with less vendor support.",
+        "Neither — bare metal is always better for BLE",
+        "Both simultaneously",
+      ],
+      correct: 1,
+      explanation:
+        "Pragmatism matters in tool selection. Nordic has invested years in Zephyr integration; their nRF Connect SDK is the default development environment and it's Zephyr-based. The BLE stack, DFU system, and peripheral drivers are all in-tree and well-documented for Zephyr. An engineer using FreeRTOS on nRF52840 can absolutely make it work, but they're swimming against the current of the vendor's ecosystem — more integration, less example code, less community support. Match the tool to the vendor's momentum.",
+    },
+    {
+      question:
+        "A Zephyr thread is defined with K_THREAD_DEFINE using priority -2. An engineer observes that this thread does not preempt other threads even when it has work to do. Why?",
+      options: [
+        "Priority -2 is invalid in Zephyr",
+        "In Zephyr, negative-priority threads are cooperative — they run to completion or explicitly yield before the scheduler can switch to another thread. Only priority 0 and above are preemptive. The thread with priority -2 won't preempt anyone; other cooperative threads must yield or block before it gets CPU time. If the intent is preemptive, change the priority to a non-negative value.",
+        "The thread was not initialized correctly",
+        "K_THREAD_DEFINE always creates cooperative threads",
+      ],
+      correct: 1,
+      explanation:
+        "Zephyr's scheduling model: cooperative threads (negative priority) rely on explicit yielding; preemptive threads (priority ≥ 0) can be scheduled at any context switch point. This differs from FreeRTOS, which uses preemptive scheduling throughout (cooperative mode is a compile-time option but uncommon). An engineer moving from FreeRTOS to Zephyr must internalize this distinction: priority numbers have a different semantic meaning, including whether preemption applies at all.",
+    },
+    {
+      question:
+        "A Zephyr board overlay changes the I2C address of a sensor from 0x76 to 0x77 (the sensor's alternate address, set by a resistor on the PCB). The driver code does not need any changes. Why?",
+      options: [
+        "Zephyr drivers always scan all I2C addresses",
+        "The device tree decouples hardware configuration from driver logic. The driver looks up the I2C address from its device tree binding (via DT_PROP or the Zephyr device API) rather than hardcoding it. Changing the overlay changes what the driver reads at initialization — no source code change required. This is the architectural advantage of the device tree model: the same driver binary can configure different hardware variants just by changing the overlay file.",
+        "I2C drivers cache addresses at compile time",
+        "The overlay change triggers a driver recompile with a new address",
+      ],
+      correct: 1,
+      explanation:
+        "Device tree's core value is hardware/software separation. The driver expresses 'I need an I2C address' via DT_PROP; the specific address lives in the board's .dts or .overlay file. Changing the address is a device tree edit, not a driver edit. This pattern becomes especially valuable on products that ship with multiple PCB revisions or regional variants — the driver is the same, the overlays differ. FreeRTOS has no equivalent built-in; the analogous pattern requires explicit compile-time defines in board-specific headers.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 5 covers RTOS debugging in practice: stack overflow detection, FreeRTOS tracealyzer-style visualization, common failure modes (priority inversion without inheritance, missed deadlines, heap corruption), and how to instrument firmware to expose bugs before they reach the field.

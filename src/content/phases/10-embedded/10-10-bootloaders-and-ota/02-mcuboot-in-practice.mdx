@@ -1,0 +1,233 @@
+---
+title: "MCUboot — Open-Source Bootloader for Production Firmware"
+description: "MCUboot is the reference open-source bootloader for Cortex-M and RISC-V. It implements dual-bank OTA, signature verification, and rollback in production-quality C. Use it rather than writing your own."
+phase: 10
+module: "10-10-bootloaders-and-ota"
+order: 2
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "10-10-bootloaders-and-ota/01"
+standards:
+  primaryAnchor: "MCUboot Project (mcuboot.com)"
+  cs2023: ["SE-Implementation", "SE-Quality", "SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - mcuboot
+  - image-trailer
+  - swap-mode
+  - overwrite-mode
+  - image-confirm
+  - swap-type
+  - tlv
+  - boot-magic
+  - imgtool
+  - sim-test
+learningOutcomes:
+  - "Explain MCUboot's image trailer and swap-type mechanism for dual-bank OTA"
+  - "Use imgtool to sign a firmware image with MCUboot's TLV format"
+  - "Configure MCUboot for STM32 using sysbuild or the config header"
+  - "Describe when to use overwrite mode vs swap mode and the trade-offs"
+professionalContext: "Writing a bootloader from scratch (as lesson 1 teaches architecturally) is a valuable exercise. Shipping a homegrown bootloader to production is a risk most teams should not take. MCUboot is used by Zephyr, the nRF Connect SDK, Mbed OS, and is supported by Nordic, STMicroelectronics, Microchip, NXP, and others. It's battle-tested at scale. Engineers who know MCUboot can integrate it in a day; engineers who write their own spend weeks and still miss edge cases."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The bootloader from lesson 1 taught the concepts: flash layout, descriptor, signature verification, VTOR, rollback counter. MCUboot implements all of those concepts — plus interrupt vector remapping, secondary image encryption, key management, HSM integration, and a simulator for automated testing — in ~50,000 lines of C that have been reviewed by hundreds of engineers and deployed to billions of devices (via Zephyr alone).
+
+The architectural knowledge from lesson 1 is why you understand MCUboot. This lesson is how you deploy it.
+
+## MCUboot architecture overview
+
+MCUboot extends lesson 1's concepts:
+
+```
+Flash layout (MCUboot):
+┌─────────────────────┐ 0x08000000
+│  MCUboot (bootloader)│ — Compiled from mcuboot/boot/cortex-m/
+│  ~48 KB             │
+├─────────────────────┤ 0x0800C000
+│  Primary slot       │ — Currently running application
+│  Application image  │   (includes MCUboot image header)
+│  + image trailer    │
+├─────────────────────┤ 0x08040000
+│  Secondary slot     │ — Pending update or backup
+│  Application image  │
+│  + image trailer    │
+├─────────────────────┤ 0x08070000
+│  Scratch area       │ — Used by swap mode during OTA
+└─────────────────────┘ 0x0807FFFF
+```
+
+The **image header** (prepended by `imgtool`) replaces lesson 1's descriptor. It contains magic bytes, image length, TLV pointer, and flags. The **image trailer** at the end of each slot contains the swap-type byte, boot magic, and counters. MCUboot reads the trailer to decide whether to boot the primary, swap slots, or roll back.
+
+## Image signing with imgtool
+
+```bash
+# Install imgtool
+pip3 install imgtool
+
+# Generate an Ed25519 signing key pair (do this once; store private key securely)
+imgtool keygen -k signing-key.pem -t ecdsa-p256   # or ed25519
+
+# Extract public key for embedding in MCUboot binary
+imgtool getpub -k signing-key.pem -e c > src/public_key.c
+
+# Sign a compiled firmware binary
+imgtool sign \
+  --key signing-key.pem \
+  --align 4 \
+  --version 1.2.3 \
+  --header-size 0x200 \
+  --slot-size 0x30000 \
+  --pad-header \
+  build/firmware.bin \
+  build/firmware_signed.bin
+```
+
+The signed binary includes:
+
+- A 0x200-byte image header with version, length, and TLV pointer
+- The application binary
+- A TLV (Type-Length-Value) trailer with the Ed25519 signature
+
+MCUboot verifies this signature at boot using the public key embedded in the MCUboot binary. An unsigned or incorrectly signed image is rejected before execution.
+
+## Swap mode vs overwrite mode
+
+**Swap mode** (default, recommended):
+
+- MCUboot copies the secondary slot to the primary slot, saving the old primary into the secondary slot as a backup.
+- If the new image confirms itself healthy, the swap is permanent.
+- If the new image fails (crash, watchdog, assertion), MCUboot detects the failed boot attempt and swaps BACK to the old image.
+- Downside: requires a scratch area (flash sector), and the swap takes longer than overwrite.
+
+**Overwrite mode** (simpler, less safe):
+
+- MCUboot copies the secondary slot directly to the primary, overwriting it.
+- No rollback: if the new image is bad, the old image is gone.
+- Use only when the system has a recovery mechanism (serial recovery mode, external flash backup).
+- Faster and requires no scratch area.
+
+Configure in `mcuboot_config.h`:
+
+```c
+/* mcuboot_config.h */
+#define MCUBOOT_OVERWRITE_ONLY    /* Uncomment for overwrite mode */
+/* Leave commented for swap mode (default) */
+
+#define MCUBOOT_VALIDATE_PRIMARY_SLOT  1  /* Always verify signature on primary */
+#define MCUBOOT_VALIDATE_SLOT0_ON_BOOT /* Also verify on every boot, not just on update */
+```
+
+## Application: confirming an update
+
+The application must call the MCUboot image-confirm API after boot to signal that it's healthy. Without confirmation, MCUboot treats each boot as a failed attempt and rolls back:
+
+```c
+/* In the application's init function — after all hardware initializes successfully */
+#include "bootutil/image.h"
+
+void app_confirm_update_if_pending(void) {
+    /* Check if we just booted a new (unconfirmed) image */
+    struct boot_rsp rsp;
+    /* MCUboot provides a status API — simplified here */
+    if (boot_is_image_pending_confirm()) {
+        int rc = boot_set_confirmed();   /* Mark this image as permanent */
+        if (rc != 0) {
+            /* Failed to write confirmation — try again or log */
+        }
+    }
+}
+```
+
+If the application crashes before reaching this call (due to a firmware bug), MCUboot detects the failed-to-confirm state on the next boot and swaps back to the previous image.
+
+## MCUboot with Zephyr (sysbuild)
+
+MCUboot integrates directly into the Zephyr build system:
+
+```yaml
+# west.yml sysbuild configuration
+sysbuild:
+  cmake-args:
+    - -DSB_CONFIG_BOOTLOADER_MCUBOOT=y
+
+# Add to application prj.conf:
+CONFIG_BOOTLOADER_MCUBOOT=y
+CONFIG_MCUBOOT_SIGNATURE_KEY_FILE="signing-key.pem"
+```
+
+```bash
+# Build application + MCUboot together
+west build -b nrf52840dk/nrf52840 -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y
+
+# The build produces:
+# build/mcuboot/zephyr/zephyr.bin  — the MCUboot binary
+# build/app/zephyr/zephyr.signed.bin  — signed application
+
+# Flash both (mcuboot first, then application)
+west flash --domain mcuboot
+west flash --domain app
+```
+
+MCUboot handles the flash layout, linker scripts, and slot sizing automatically when integrated via sysbuild.
+
+## Testing MCUboot with the simulator
+
+MCUboot ships a Rust-based simulator (`sim/`) that tests swap logic, signature verification, and rollback without any hardware:
+
+```bash
+cd sim/
+cargo test
+
+# Output:
+# test swap_within_state ... ok
+# test swap_across_image ... ok
+# test bad_signature_rejected ... ok
+# test rollback_on_unconfirmed ... ok
+# 47 tests passed
+```
+
+Run the simulator after any MCUboot configuration change to verify the swap logic still works correctly. This is free regression testing that any team contributing to MCUboot must pass.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An application using MCUboot swap mode receives an OTA update, boots the new image, but crashes before calling boot_set_confirmed(). The device is remote with no physical access. What happens on the next boot?",
+      options: [
+        "The device bricks — the old image is gone",
+        "MCUboot detects the unconfirmed new image (swap-type is REVERT, boot counter incremented). After the configured number of failed boots (typically 3), MCUboot swaps back to the previous image, which is stored in the secondary slot from the original swap. The device reboots into the old (confirmed) firmware and resumes operation — possibly with degraded functionality if the update was fixing a bug, but at least functional. This is the core value of swap mode: automatic recovery without physical access.",
+        "The device tries the new image until manually reflashed",
+        "MCUboot requests a re-download via the OTA transport",
+      ],
+      correct: 1,
+      explanation:
+        "MCUboot swap mode is designed for exactly this scenario. The image trailer's swap-type byte and boot counter track boot attempts. When a new image fails to confirm, the counter increments on each boot. After reaching the limit, MCUboot reverses the swap: the old image (preserved in the secondary slot) moves back to the primary slot, becomes confirmed, and the device resumes operation on the old firmware. The OTA system can then investigate the failure and prepare a fixed update. This automatic recovery is the reason swap mode exists — overwrite mode loses this protection.",
+    },
+    {
+      question:
+        "A team is choosing between MCUboot swap mode and overwrite mode for an IoT gateway with 1 MB flash (no external flash). The gateway has a serial recovery mode accessible via a physical button + UART cable. Swap mode requires a scratch area that reduces the effective slot size. Which mode is more appropriate, and why?",
+      options: [
+        "Always use swap mode — it's the safer default",
+        "For this specific case, overwrite mode may be appropriate. The physical recovery mechanism (serial recovery mode + UART cable) provides a fallback if an update bricks the device — technicians with UART cables can reflash. The 1 MB flash constraint means the scratch area cost is significant. Overwrite mode recovers that flash for a larger application slot. The decision: if technician availability and cost of recovery is acceptable, and the OTA process has pre-deployment testing to minimize bad-update probability, overwrite mode is a reasonable engineering trade-off. If remote-only deployment with no technician access, swap mode is mandatory.",
+        "Build your own swap implementation without the scratch area",
+        "Use overwrite mode — swap mode is only for Zephyr",
+      ],
+      correct: 1,
+      explanation:
+        "Engineering decisions are trade-offs, not absolute rules. Swap mode's automatic rollback is valuable primarily for devices that cannot be physically accessed for recovery. If a recovery mechanism exists (serial recovery via UART, a maintenance port, a technician program), the value of automatic rollback is lower and the flash cost of the scratch area may not be justified. The analysis: map the cost of a failed OTA (technician dispatched) against the probability of failure × cost of flash savings. For enterprise gateways with physical access, overwrite mode is a standard choice. For geographically distributed IoT sensors with no physical access, swap mode is mandatory.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 3 covers the OTA transport layer — how a device discovers, downloads, authenticates, and installs a firmware update over BLE, MQTT, or HTTPS before handing off to MCUboot. The bootloader handles the install; the transport layer handles the delivery.

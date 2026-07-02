@@ -1,0 +1,330 @@
+---
+title: "Driver Error Handling and Bus Recovery"
+description: "Production drivers handle bus failures gracefully — no ACK, stuck SDA, framing errors, DMA timeout. Learn the recovery procedures for I2C, SPI, UART, and how to make error paths testable."
+phase: 10
+module: "e-5-drivers"
+order: 3
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-5-drivers/02"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations", "SE-CodeQuality"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - ack-failure
+  - bus-stuck-low
+  - clock-recovery
+  - framing-error
+  - overrun-error
+  - timeout
+  - error-code
+  - bus-reset
+  - i2c-recovery
+learningOutcomes:
+  - "Implement timeout-guarded bus transactions that abort cleanly instead of hanging forever"
+  - "Apply the I2C bus-stuck-low recovery procedure in C"
+  - "Return typed error codes from driver functions and propagate them to the caller"
+  - "Recognize which UART status register bits indicate framing, overrun, and parity errors"
+professionalContext: "A driver that works in the lab and hangs in the field costs more than a driver written correctly the first time. Field environments have noise, power glitches, partially initialized sensors, and devices that miss ACKs under temperature extremes. The recovery procedures in this lesson are the difference between a product that self-heals and one that requires a power cycle."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A temperature logger is installed in 2,000 refrigeration units at a grocery chain. After six months, 3% of units stop logging. Post-mortem: the I2C temperature sensor sometimes misses an ACK during a power glitch. The driver hangs waiting for the ACK flag to clear — it has no timeout. The CPU loops forever, the RTOS watchdog was never kicked, but the reset logic was never tested. Each stuck unit requires a technician visit.
+
+The fix: a 5-millisecond timeout in the I2C driver and a bus-stuck recovery procedure. Two hours of work that would have prevented $150,000 in service calls.
+
+## Typed error codes
+
+Driver functions must return a status to the caller. The C pattern:
+
+```c
+/* driver_errors.h — shared across all drivers */
+#pragma once
+
+typedef enum {
+    DRV_OK            =  0,
+    DRV_TIMEOUT       = -1,
+    DRV_NO_ACK        = -2,
+    DRV_BUS_ERROR     = -3,
+    DRV_OVERFLOW      = -4,
+    DRV_INVALID_ARG   = -5,
+    DRV_NOT_INIT      = -6,
+} drv_status_t;
+```
+
+Every driver function that can fail returns `drv_status_t`. The caller is required to check it:
+
+```c
+drv_status_t i2c_read_register(i2c_t *bus, uint8_t addr, uint8_t reg, uint8_t *out);
+
+/* Application */
+drv_status_t rc = i2c_read_register(i2c1, BME280_ADDR, TEMP_REG, &temp_raw);
+if (rc != DRV_OK) {
+    /* Log and handle — e.g., retry, mark sensor unavailable, trigger alarm */
+    sensor_mark_unavailable(BME280);
+    return rc;
+}
+```
+
+Never return a raw status register value to the application — the caller shouldn't need to know which peripheral or which error bit is set. Abstract it behind the enum.
+
+## Timeout guards: universal pattern
+
+Every polled wait in a driver must have a deadline:
+
+```c
+/* Generic timeout guard — use this in every flag-polling loop */
+#define DRV_TIMEOUT_US   5000U   /* 5 ms default for most bus operations */
+
+static drv_status_t wait_flag(volatile uint32_t *reg, uint32_t flag,
+                               uint32_t expected, uint32_t timeout_us) {
+    uint32_t deadline = timer_get_us() + timeout_us;
+    while ((*reg & flag) != expected) {
+        if (timer_get_us() >= deadline) {
+            return DRV_TIMEOUT;
+        }
+    }
+    return DRV_OK;
+}
+```
+
+Applied to I2C:
+
+```c
+static drv_status_t wait_i2c_flag(I2C_TypeDef *i2c, uint32_t flag, uint32_t timeout_us) {
+    return wait_flag(&i2c->SR1, flag, flag, timeout_us);
+}
+```
+
+Every flag poll (`while (!(SR1 & ADDR))`) becomes a call to `wait_i2c_flag`. If the flag never sets, the function returns `DRV_TIMEOUT` instead of hanging.
+
+## I2C no-ACK and bus-stuck-low recovery
+
+### No-ACK during address phase
+
+```c
+drv_status_t i2c_write_register(i2c_t *bus, uint8_t addr, uint8_t reg, uint8_t val) {
+    I2C_TypeDef *i2c = bus->regs;
+
+    /* Wait for bus idle */
+    if (wait_flag(&i2c->SR2, I2C_SR2_BUSY, 0, DRV_TIMEOUT_US) != DRV_OK) {
+        return DRV_TIMEOUT;
+    }
+
+    /* START */
+    i2c->CR1 |= I2C_CR1_START;
+    if (wait_i2c_flag(i2c, I2C_SR1_SB, DRV_TIMEOUT_US) != DRV_OK) {
+        i2c->CR1 |= I2C_CR1_STOP;
+        return DRV_TIMEOUT;
+    }
+
+    /* Address + write */
+    i2c->DR = (addr << 1U) | 0U;
+    if (wait_i2c_flag(i2c, I2C_SR1_ADDR, DRV_TIMEOUT_US) != DRV_OK) {
+        /* Check AF (acknowledge failure) flag */
+        if (i2c->SR1 & I2C_SR1_AF) {
+            i2c->SR1 &= ~I2C_SR1_AF;
+            i2c->CR1 |= I2C_CR1_STOP;
+            return DRV_NO_ACK;   /* Device at this address not responding */
+        }
+        i2c->CR1 |= I2C_CR1_STOP;
+        return DRV_TIMEOUT;
+    }
+    (void)i2c->SR2;   /* Clear ADDR by reading SR2 */
+
+    /* Register address byte */
+    i2c->DR = reg;
+    if (wait_i2c_flag(i2c, I2C_SR1_TXE, DRV_TIMEOUT_US) != DRV_OK) {
+        i2c->CR1 |= I2C_CR1_STOP;
+        return DRV_TIMEOUT;
+    }
+
+    /* Data byte */
+    i2c->DR = val;
+    if (wait_i2c_flag(i2c, I2C_SR1_BTF, DRV_TIMEOUT_US) != DRV_OK) {
+        i2c->CR1 |= I2C_CR1_STOP;
+        return DRV_TIMEOUT;
+    }
+
+    i2c->CR1 |= I2C_CR1_STOP;
+    return DRV_OK;
+}
+```
+
+Every flag wait has a timeout. Every error path sends a STOP before returning — leaving the bus in a half-completed transaction is worse than returning an error.
+
+### Bus-stuck-low recovery
+
+When a transaction is interrupted mid-byte (MCU reset, brown-out, cable glitch), the slave may hold SDA low waiting for more clock pulses. The bus appears permanently busy. The recovery:
+
+```c
+void i2c_bus_recovery(i2c_t *bus) {
+    /* 1. Disable the I2C peripheral — take manual control of the pins */
+    bus->regs->CR1 &= ~I2C_CR1_PE;
+
+    /* 2. Configure SDA and SCL as GPIO outputs */
+    gpio_set_mode_output(bus->sda_pin);
+    gpio_set_mode_output(bus->scl_pin);
+    gpio_set(bus->sda_pin);    /* SDA high */
+    gpio_set(bus->scl_pin);    /* SCL high */
+
+    /* 3. Toggle SCL 9 times — enough to clock out any pending slave byte */
+    for (int i = 0; i < 9; i++) {
+        gpio_clear(bus->scl_pin);
+        delay_us(5);   /* Half-period at 100 kHz */
+        gpio_set(bus->scl_pin);
+        delay_us(5);
+
+        /* If SDA went high, the slave released it — done early */
+        if (gpio_read(bus->sda_pin)) {
+            break;
+        }
+    }
+
+    /* 4. Generate a STOP condition: SDA rises while SCL is high */
+    gpio_clear(bus->sda_pin);
+    delay_us(5);
+    gpio_set(bus->sda_pin);
+    delay_us(5);
+
+    /* 5. Return pins to I2C peripheral control and re-enable */
+    gpio_set_mode_alternate(bus->sda_pin, bus->i2c_af);
+    gpio_set_mode_alternate(bus->scl_pin, bus->i2c_af);
+    bus->regs->CR1 |= I2C_CR1_PE;
+
+    /* 6. Wait for busy to clear */
+    wait_flag(&bus->regs->SR2, I2C_SR2_BUSY, 0, 1000U);
+}
+```
+
+Call `i2c_bus_recovery()` at startup and whenever `wait_flag` returns `DRV_TIMEOUT` for the BUSY flag.
+
+## SPI error handling
+
+SPI's main failure modes:
+
+**BSY (busy) flag not clearing before CS deassert**:
+
+```c
+void spi_transaction_end(spi_t *spi, gpio_t *cs) {
+    /* Wait for BSY to clear before deasserting CS.
+       BSY stays set while the last bit is still clocking out. */
+    wait_flag(&spi->regs->SR, SPI_SR_BSY, 0, DRV_TIMEOUT_US);
+    gpio_set(cs->pin);
+}
+```
+
+**Overrun (OVR)**: The receive data register was not read before the next transfer completed:
+
+```c
+drv_status_t spi_xfer_checked(spi_t *spi, uint8_t tx, uint8_t *rx) {
+    /* Clear any stale overrun flag before writing */
+    if (spi->regs->SR & SPI_SR_OVR) {
+        (void)spi->regs->DR;     /* Read DR to clear OVR */
+        (void)spi->regs->SR;
+    }
+    spi->regs->DR = tx;
+    if (wait_flag(&spi->regs->SR, SPI_SR_RXNE, SPI_SR_RXNE, DRV_TIMEOUT_US) != DRV_OK) {
+        return DRV_TIMEOUT;
+    }
+    if (spi->regs->SR & SPI_SR_OVR) {
+        return DRV_OVERFLOW;   /* Ran too slow; double-buffering overran */
+    }
+    *rx = (uint8_t)spi->regs->DR;
+    return DRV_OK;
+}
+```
+
+## UART error status bits
+
+UART errors arrive in the status register alongside valid data:
+
+```c
+void USART2_IRQHandler(void) {
+    uint32_t sr = USART2->SR;
+
+    /* Check error flags before reading the data register */
+    if (sr & USART_SR_FE) {
+        /* Framing error — stop bit not detected. Wrong baud rate or noise. */
+        (void)USART2->DR;   /* Must read DR to clear the flag */
+        uart_stats.framing_errors++;
+        return;
+    }
+    if (sr & USART_SR_ORE) {
+        /* Overrun — new byte arrived before previous one was read */
+        (void)USART2->DR;
+        uart_stats.overrun_errors++;
+        return;
+    }
+    if (sr & USART_SR_PE) {
+        /* Parity error */
+        (void)USART2->DR;
+        uart_stats.parity_errors++;
+        return;
+    }
+
+    if (sr & USART_SR_RXNE) {
+        uint8_t byte = (uint8_t)USART2->DR;
+        ring_buf_push(&rx_ring, byte);
+    }
+}
+```
+
+Expose error counters via a diagnostic API:
+
+```c
+typedef struct {
+    uint32_t framing_errors;
+    uint32_t overrun_errors;
+    uint32_t parity_errors;
+} uart_error_stats_t;
+
+const uart_error_stats_t *uart_get_stats(uart_t *uart);
+void uart_clear_stats(uart_t *uart);
+```
+
+A monitoring task reads these counters periodically. An escalating framing-error count indicates a baud-rate mismatch or connector issue; an increasing overrun rate indicates the processing task can't keep up.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An I2C driver times out waiting for the ADDR flag to clear during address phase. The AF (acknowledge failure) flag in SR1 is NOT set. What does this indicate, and what should the driver do?",
+      options: [
+        "The device is missing — return DRV_NO_ACK",
+        "The AF flag not being set means the address phase did not even complete — this is likely a bus-stuck or arbitration issue, not a no-ACK. The driver should send a STOP, run the bus recovery procedure (9 SCL toggles), and return DRV_TIMEOUT. A subsequent retry may succeed after recovery. DRV_NO_ACK is specifically for when ADDR times out AND AF is set — that's the 'device heard the address and NAKed' case.",
+        "Increase the timeout — the device is slow",
+        "The I2C peripheral is broken — reset it",
+      ],
+      correct: 1,
+      explanation:
+        "Distinguishing timeout types matters for correct recovery. AF set = device was reached but didn't ACK (wrong address, device not ready). AF not set = the address phase didn't complete at all (bus stuck, start condition failed, arbitration lost). Each has a different recovery: AF → retry with backoff or mark device unavailable; no-AF timeout → bus recovery procedure (SCL toggle sequence) then retry. A driver that sends the wrong recovery action makes the situation worse.",
+    },
+    {
+      question:
+        "A production UART driver has no error checking in its RX ISR. In the field, some data corruption is observed. Investigation shows the status register sometimes has ORE set when RXNE is also set. The developer reads USART_DR to get the byte. What data does the read return, and what data is lost?",
+      options: [
+        "The read returns garbage; all data is lost",
+        "When ORE and RXNE are both set, reading DR returns the newly arrived byte that triggered ORE — the byte that arrived BEFORE it (which caused the overrun) was lost because the shift register overwrote the data register before it was read. The new byte is recovered; the previous byte is permanently lost. The driver must detect ORE, increment an error counter, and the application must handle potential sequence gaps.",
+        "The read returns the overrun byte; the new byte is in the shift register",
+        "Both bytes are returned by two reads",
+      ],
+      correct: 1,
+      explanation:
+        "UART overrun mechanics: the USART has a one-byte data register (DR) and a shift register. When a byte completes shifting in while DR still holds the previous unread byte, ORE is set and the new byte OVERWRITES DR (on STM32 — some UARTs lose the new byte instead; check the datasheet). Reading DR returns the new byte; the old byte is gone. The error counter tracks the loss so the application knows a gap occurred. Recovery: read DR to clear ORE, increment counter, continue. The lost byte cannot be recovered — the application must handle potential data gaps in its protocol.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 4 applies everything from E5 lessons 1-3 to a real device: writing a complete driver for the BME280 environmental sensor (temperature, pressure, humidity on I2C/SPI). The BME280 datasheet is a typical production sensor datasheet — reading it and translating it to driver code is the core embedded skill this lesson exercises.

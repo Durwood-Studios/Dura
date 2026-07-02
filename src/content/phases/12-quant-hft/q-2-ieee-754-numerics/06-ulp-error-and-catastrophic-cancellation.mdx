@@ -1,0 +1,242 @@
+---
+title: "ULP Error Analysis and Catastrophic Cancellation"
+description: "How floating-point error grows through arithmetic chains, why subtracting two nearly-equal numbers destroys relative precision, and how to detect and mitigate catastrophic cancellation in financial formulas."
+phase: 12
+module: "q-2-ieee-754-numerics"
+order: 6
+estimatedMinutes: 40
+difficulty: 5
+prerequisites:
+  - "q-2-ieee-754-numerics/05-fixed-point-tick-arithmetic"
+standards:
+  primaryAnchor: "IEEE 754-2019"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - unit-in-the-last-place
+  - catastrophic-cancellation
+  - relative-error
+  - absolute-error
+  - condition-number
+  - error-amplification
+  - forward-error-analysis
+  - backward-error-analysis
+  - numerically-stable
+  - numerically-unstable
+  - machine-epsilon
+  - significand
+learningOutcomes:
+  - "After this lesson you can compute the ULP of a binary64 value at a given magnitude and state the maximum relative error of a single correctly-rounded operation"
+  - "After this lesson you can identify catastrophic cancellation in a formula by inspection and measure the loss of significant digits it produces"
+  - "After this lesson you can rewrite the quadratic formula and the difference-of-squares to avoid cancellation"
+  - "After this lesson you can evaluate whether a given financial formula is numerically stable at the parameter values of interest"
+professionalContext: "The Black-Scholes formula for near-the-money options involves a difference of two nearly-equal cumulative-normal values (d1 and d2 converge as the option approaches expiry). In that regime, naive evaluation loses half its significant digits to cancellation — exactly when precision matters most for delta hedging. Quant developers who recognize cancellation-prone formulas and reach for numerically stable rewrites produce risk systems that do not degrade at the boundaries. Those who do not produce models whose Greeks blow up near expiry and whose hedge ratios require manual overrides every expiration. This lesson trains the pattern recognition."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Your delta-hedging model works perfectly all month. Then, as an option approaches expiry, the delta starts behaving strangely — oscillating, snapping to 0 or 1, requiring manual overrides by the risk desk. Nothing changed in the code. The market moved normally. The model is computing exactly what you told it to compute.
+
+What changed is the input: as expiry approaches, the difference `d1 - d2` in Black-Scholes shrinks toward zero. And subtracting two nearly-equal floating-point numbers is the one operation where IEEE 754's guarantee of correctly-rounded results does not protect you — because by the time the subtraction runs, both inputs have already accumulated rounding error that dwarfs the difference. The result is computed exactly, to zero error — but it is the exact answer to the wrong question.
+
+## ULP: the unit of floating-point precision
+
+The <VocabTooltip slug="unit-in-the-last-place">unit in the last place</VocabTooltip> (ULP) of a floating-point number is the distance between that number and the next representable value. It is the precision atomic unit.
+
+```cpp
+#include <cmath>
+#include <cstdio>
+#include <cfloat>
+#include <bit>
+
+// Exact ULP for any finite binary64 value.
+// Uses the IEEE 754 bit-level representation directly.
+double ulp(double x) {
+    if (x == 0.0) return DBL_TRUE_MIN;  // smallest positive denormal
+    // Next representable value above |x|.
+    double ax = std::abs(x);
+    return std::nextafter(ax, std::numeric_limits<double>::infinity()) - ax;
+}
+
+int main() {
+    // ULP grows with magnitude — precision is relative, not absolute.
+    printf("ulp(1.0)      = %.6e\n", ulp(1.0));       // ~2.2e-16
+    printf("ulp(1000.0)   = %.6e\n", ulp(1000.0));    // ~1.1e-13
+    printf("ulp(1e15)     = %.6e\n", ulp(1e15));      // ~0.125
+    printf("ulp(1e16)     = %.6e\n", ulp(1e16));      // ~2.0
+    // At 1e16, the nearest representable double to "1e16 + 1" is still 1e16.
+    printf("1e16 + 1 == 1e16? %d\n",
+           (1e16 + 1.0) == 1e16);  // 1 (true) — the 1 is below 1 ULP
+}
+```
+
+IEEE 754 guarantees that a single correctly-rounded operation has error at most ½ ULP of the result. That is the best possible guarantee for any single operation. The problem arises when operations chain.
+
+### Machine epsilon
+
+<VocabTooltip slug="machine-epsilon">Machine epsilon</VocabTooltip> (εₘ ≈ 2.22 × 10⁻¹⁶ for binary64)
+is defined as the ULP of 1.0. It is the maximum relative error of a single floating-point operation
+near 1. For a result of magnitude `m`, the single-operation error bound is `½ × m × εₘ`.
+
+```cpp
+constexpr double EPS = std::numeric_limits<double>::epsilon();  // 2.22e-16
+// A multiplication a*b has result error ≤ (a*b) * (EPS/2)
+// after n additions the accumulated error grows ≤ n * (EPS/2) * (max |term|)
+```
+
+This is well-behaved for sequences of additions of same-sign values — n terms means error grows linearly in n. Kahan summation (Lesson Q2-03) reduces this to O(εₘ) regardless of n. The catastrophe happens elsewhere.
+
+## Catastrophic cancellation: losing digits to subtraction
+
+When two nearly-equal numbers are subtracted, the leading significant digits cancel exactly — leaving only the low-order digits, which carry all the rounding error.
+
+```
+x = 1.23456789012345_6  (16 sig figs, last digit uncertain due to prior rounding)
+y = 1.23456789012344_9  (16 sig figs, last digit uncertain)
+x - y = 0.00000000000000_7  (1 sig fig — all 15 leading digits cancelled)
+```
+
+The result has only one significant digit remaining, even though both inputs had 15. The _absolute_ error of the subtraction is bounded (the IEEE guarantee holds), but the _relative_ error — error relative to the result's magnitude — is enormous.
+
+Concretely:
+
+```cpp
+#include <cstdio>
+#include <cmath>
+
+int main() {
+    // Quadratic formula: roots of x^2 - 10000x + 1 = 0
+    // Roots are approximately 9999.9999 and 0.0001
+    double a = 1.0, b = -10000.0, c = 1.0;
+    double disc = std::sqrt(b*b - 4*a*c);  // ≈ 9999.9998
+
+    // Standard formula: (-b ± sqrt(disc)) / (2a)
+    double r1_naive = (-b + disc) / (2.0 * a);  // large root — fine
+    double r2_naive = (-b - disc) / (2.0 * a);  // PROBLEM: -b ≈ disc
+
+    // True small root: c / (a * r1_naive) [by Vieta's formula]
+    double r2_stable = c / (a * r1_naive);
+
+    printf("r1 naive:  %.15f\n", r1_naive);   // ≈ 9999.999900000001
+    printf("r2 naive:  %.15f\n", r2_naive);   // ≈ 0.000100000000 (loses digits)
+    printf("r2 stable: %.15f\n", r2_stable);  // ≈ 0.000100010001 (better)
+    // The exact small root is 1/9999.9999... ≈ 0.0001000100010001...
+}
+```
+
+In the naive small-root computation, `(-b - disc)` is subtracting two values that agree to 8 significant digits. The result loses 8 digits of precision. The stable form avoids the subtraction entirely using Vieta's formula: if `r1 × r2 = c/a`, then `r2 = c/(a × r1)`.
+
+## Recognizing cancellation by inspection
+
+Cancellation occurs whenever a formula subtracts two quantities that become nearly equal in the regime of interest. Red flags:
+
+- **`a - b` where `a ≈ b`** — look for this in difference calculations, differential approximations, finite differences.
+- **`log(1 + x)` for small x** — `1 + x ≈ 1`, causing `x` to be cancelled. Use `std::log1p(x)` which is specifically designed for this.
+- **`exp(x) - 1` for small x** — use `std::expm1(x)`.
+- **`sqrt(1 + x) - 1` for small x** — rewrite as `x / (sqrt(1 + x) + 1)`.
+- **Black-Scholes N(d1) - N(d2) near expiry** — d1 ≈ d2 so their CDF values are nearly equal.
+
+```cpp
+#include <cmath>
+
+// WRONG: cancels precision for small x
+double wrong_log1p(double x) { return std::log(1.0 + x); }
+
+// RIGHT: uses the identity log(1+x) = x - x^2/2 + x^3/3 - ...
+// std::log1p is correctly implemented in every standard library.
+double right_log1p(double x) { return std::log1p(x); }
+
+// Demonstrate the difference at small x:
+// x = 1e-10
+// 1.0 + 1e-10 in double = 1.0000000001 (exact)
+// log(1.0000000001) ≈ 9.9999999995e-11 (loses 10 digits to cancellation)
+// std::log1p(1e-10) = 9.999999999500000e-11 (15 significant digits)
+```
+
+## The condition number: amplification factor
+
+The <VocabTooltip slug="condition-number">condition number</VocabTooltip> of a problem is the ratio of relative change in output to relative change in input. It quantifies how much input rounding error is amplified into output error.
+
+For subtraction `f(a,b) = a - b`:
+
+```
+condition number ≈ |a| / |a - b|
+```
+
+When `a ≈ b`, the denominator is tiny and the condition number is huge — input errors of εₘ (unavoidable from previous roundings) are amplified by the condition number into output errors that can be orders of magnitude larger.
+
+This is why cancellation-prone formulas are called <VocabTooltip slug="numerically-unstable">numerically unstable</VocabTooltip>: small perturbations in input (unavoidable in floating-point) produce large perturbations in output.
+
+```cpp
+// Condition number of (a - b):
+double condition(double a, double b) {
+    return std::abs(a) / std::abs(a - b);
+}
+
+// condition(10000.0001, 10000.0000) ≈ 1e8
+// A 1 ULP error in either input produces ~1e8 ULPs of error in the result.
+```
+
+## Stable reformulations in HFT contexts
+
+Three patterns appear frequently:
+
+```cpp
+// 1. Finite difference approximation (e.g., numerical delta)
+// Unstable: (f(x+h) - f(x)) / h   — cancellation when f(x+h) ≈ f(x)
+// Stable: use complex-step differentiation or automatic differentiation
+// or choose h large enough that f(x+h) - f(x) >> εₘ × f(x)
+
+// 2. Sum of squared differences (e.g., variance)
+// Unstable: sum(x_i^2) - n * mean^2  (Cramer's formula)
+// Stable: Welford's online algorithm (no large intermediate sums)
+
+// Welford's one-pass variance — no cancellation
+struct Welford {
+    double mean = 0.0, M2 = 0.0;
+    int64_t n = 0;
+
+    void update(double x) {
+        ++n;
+        double delta = x - mean;
+        mean += delta / n;
+        M2 += delta * (x - mean);  // uses the NEW mean
+    }
+
+    double variance() const { return n > 1 ? M2 / (n - 1) : 0.0; }
+};
+
+// 3. Difference of exponentials (e.g., option pricing)
+// exp(a) - exp(b) when a ≈ b
+// Rewrite as: exp(b) * expm1(a - b)
+// — now only one value is computed near zero, where expm1 is accurate
+double stable_exp_diff(double a, double b) {
+    return std::exp(b) * std::expm1(a - b);
+}
+```
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A function computes `(exp(x) - exp(y)) / (x - y)` for `x = 1.0000001` and `y = 1.0000000`. Which statement correctly describes the numerical behavior?",
+      options: [
+        "Both the numerator and denominator suffer catastrophic cancellation, so the result has near-zero relative precision",
+        "Only the denominator suffers catastrophic cancellation; the numerator is computed accurately",
+        "Only the numerator suffers catastrophic cancellation; the denominator is computed accurately",
+        "Neither term suffers cancellation because exp is a well-conditioned function",
+      ],
+      correct: 0,
+      explanation:
+        "Both terms cancel. The denominator x - y = 1e-7 has 7 digits cancelled from two values that agree to 7 decimal places — it retains about 9 significant figures. The numerator exp(x) - exp(y) ≈ exp(1) * (x-y) ≈ 2.718e-7 has the same problem: exp(1.0000001) ≈ exp(1.0000000) to 7 digits, so about 7 digits cancel there too. The ratio is approximately exp(midpoint) by the mean value theorem, but computing it naively loses 7 digits in each operand. The stable approach uses expm1 and direct computation: the mean value theorem gives (exp(x)-exp(y))/(x-y) ≈ exp((x+y)/2) * sinh((x-y)/2) / ((x-y)/2), but even simpler: just compute exp((x+y)/2) * cosh((x-y)/2) or use the formula exp(y) * expm1(x-y) / (x-y).",
+    },
+  ]}
+/>
+
+## What's next
+
+With IEEE 754 precision analysis complete, the next module takes you to the place where floating-point errors interact with hardware architecture: cache lines and memory layout. The lesson shows why the order of data in memory can matter more than the precision of the arithmetic that operates on it.

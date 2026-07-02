@@ -1,0 +1,291 @@
+---
+title: "HAL Abstraction Layer Design — Vendor-Independent Drivers"
+description: "Structure a driver so it works on STM32, nRF52, and RP2040 without rewriting. Define the platform port, write the driver against the interface, swap the chip in an hour."
+phase: 10
+module: "e-5-drivers"
+order: 2
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-5-drivers/01"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations", "SE-Design"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - hal-abstraction
+  - driver-interface
+  - platform-port
+  - dependency-injection
+  - function-pointer-table
+  - vtable
+  - opaque-handle
+  - driver-instance
+learningOutcomes:
+  - "Define a C driver interface using a function-pointer table (vtable) that separates driver logic from platform specifics"
+  - "Implement a platform port for STM32 that satisfies the interface"
+  - "Explain why opaque handles enable multiple driver instances without global state"
+  - "Evaluate a concrete driver design for testability and portability"
+professionalContext: "Production embedded products change chips. Cost pressures, supply chain shortages, and platform evolution mean a product might start on STM32F4 and need to run on STM32G4 or RP2040 two years later. Engineers who write drivers against a clear interface swap platforms in a day; engineers who write drivers directly against registers spend weeks porting. This lesson is about designing for the change you can see coming."
+thresholdConcept: false
+---
+
+## Why this matters
+
+An IoT sensor node project starts on STM32F411. Six months before launch, the chip becomes unavailable due to a supply chain shortage. The team pivots to RP2040. Every driver that directly addresses STM32 registers must be rewritten. If the team spent the original six months writing against an abstraction layer, the pivot costs one afternoon of implementing a RP2040 platform port — the driver logic itself does not change.
+
+The abstraction layer has a cost: two extra files and slightly more verbose initialization. The portability is worth it from the first platform change. Engineers who have lived through a chip pivot never write register-direct drivers for production code again.
+
+## The three-layer model
+
+```
+┌──────────────────────────────────────────┐
+│  Application (uses the driver via handle) │
+├──────────────────────────────────────────┤
+│  Driver (platform-independent logic)      │
+│  e.g., uart.c / uart.h                   │
+├──────────────────────────────────────────┤
+│  Platform port (register-level code)      │
+│  e.g., uart_stm32.c / uart_nrf52.c       │
+└──────────────────────────────────────────┘
+```
+
+The application calls the driver. The driver calls the platform port via function pointers. The platform port touches the registers. Swapping chips means replacing only the platform port.
+
+## Defining the interface: a UART example
+
+```c
+/* uart.h — the driver interface */
+#pragma once
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+/* Opaque handle — the application holds a pointer to this type;
+   the platform port defines what's inside. */
+typedef struct uart_s uart_t;
+
+/* Platform port function signatures */
+typedef bool     (*uart_init_fn)   (uart_t *self, uint32_t baud);
+typedef void     (*uart_putc_fn)   (uart_t *self, uint8_t c);
+typedef int      (*uart_getc_fn)   (uart_t *self, uint8_t *out, uint32_t timeout_ms);
+typedef void     (*uart_flush_fn)  (uart_t *self);
+typedef void     (*uart_deinit_fn) (uart_t *self);
+
+/* The vtable: a struct of function pointers.
+   Each platform port fills in one of these at compile time. */
+typedef struct {
+    uart_init_fn   init;
+    uart_putc_fn   putc;
+    uart_getc_fn   getc;
+    uart_flush_fn  flush;
+    uart_deinit_fn deinit;
+} uart_vtable_t;
+
+/* The driver struct — opaque to the caller, owned by the platform port */
+struct uart_s {
+    const uart_vtable_t *vtbl;   /* Points to the platform's vtable */
+    void                *priv;   /* Platform-specific data (register base, DMA, etc.) */
+};
+
+/* Public driver API — these are the functions the application calls */
+static inline bool uart_init(uart_t *u, uint32_t baud) {
+    return u->vtbl->init(u, baud);
+}
+static inline void uart_putc(uart_t *u, uint8_t c) {
+    u->vtbl->putc(u, c);
+}
+static inline int uart_getc(uart_t *u, uint8_t *out, uint32_t timeout_ms) {
+    return u->vtbl->getc(u, out, timeout_ms);
+}
+static inline void uart_flush(uart_t *u) {
+    u->vtbl->flush(u);
+}
+static inline void uart_deinit(uart_t *u) {
+    u->vtbl->deinit(u);
+}
+```
+
+The `static inline` wrappers eliminate the function-call overhead of calling through the vtable in most cases — the compiler inlines the pointer dereference and call sequence. In code where this overhead matters (very tight loops), macros serve the same purpose.
+
+## STM32 platform port
+
+```c
+/* uart_stm32.c — platform port for STM32F4 USART2 */
+#include "uart.h"
+#include "stm32f4xx.h"
+
+/* Platform-specific private data embedded in the opaque handle */
+typedef struct {
+    USART_TypeDef *regs;      /* e.g., USART2 */
+    volatile uint8_t tx_buf[256];
+    volatile uint16_t tx_head, tx_tail;
+} stm32_uart_priv_t;
+
+static bool stm32_uart_init(uart_t *self, uint32_t baud) {
+    stm32_uart_priv_t *p = (stm32_uart_priv_t *)self->priv;
+    /* Enable clocks, configure pins, set baud rate divisor */
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN;
+    /* ... register configuration ... */
+    p->regs->CR1 |= USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
+    return true;
+}
+
+static void stm32_uart_putc(uart_t *self, uint8_t c) {
+    stm32_uart_priv_t *p = (stm32_uart_priv_t *)self->priv;
+    while (!(p->regs->SR & USART_SR_TXE)) { }
+    p->regs->DR = c;
+}
+
+static int stm32_uart_getc(uart_t *self, uint8_t *out, uint32_t timeout_ms) {
+    stm32_uart_priv_t *p = (stm32_uart_priv_t *)self->priv;
+    uint32_t deadline = get_tick_ms() + timeout_ms;
+    while (!(p->regs->SR & USART_SR_RXNE)) {
+        if (get_tick_ms() > deadline) { return -1; }  /* Timeout */
+    }
+    *out = (uint8_t)p->regs->DR;
+    return 0;
+}
+
+static void stm32_uart_flush(uart_t *self) {
+    stm32_uart_priv_t *p = (stm32_uart_priv_t *)self->priv;
+    while (!(p->regs->SR & USART_SR_TC)) { }   /* Wait for TX complete */
+}
+
+static void stm32_uart_deinit(uart_t *self) {
+    stm32_uart_priv_t *p = (stm32_uart_priv_t *)self->priv;
+    p->regs->CR1 &= ~USART_CR1_UE;
+}
+
+/* Compile-time vtable for the STM32 port */
+static const uart_vtable_t stm32_uart_vtable = {
+    .init   = stm32_uart_init,
+    .putc   = stm32_uart_putc,
+    .getc   = stm32_uart_getc,
+    .flush  = stm32_uart_flush,
+    .deinit = stm32_uart_deinit,
+};
+
+/* Static allocation of the platform-specific private data */
+static stm32_uart_priv_t uart2_priv = { .regs = USART2 };
+
+/* The driver instance — the application code gets a pointer to this */
+static uart_t uart2_instance = {
+    .vtbl = &stm32_uart_vtable,
+    .priv = &uart2_priv,
+};
+
+/* Factory function: returns the handle for UART2 */
+uart_t *uart_stm32_get_uart2(void) {
+    return &uart2_instance;
+}
+```
+
+## Application code
+
+```c
+/* main.c — platform-independent */
+#include "uart.h"
+#include "uart_stm32.h"   /* Only this include changes per platform */
+
+int main(void) {
+    uart_t *console = uart_stm32_get_uart2();
+    uart_init(console, 115200);
+
+    const char *msg = "Hello, embedded world\r\n";
+    for (size_t i = 0; msg[i] != '\0'; i++) {
+        uart_putc(console, (uint8_t)msg[i]);
+    }
+    uart_flush(console);
+
+    for (;;) {
+        uint8_t c;
+        if (uart_getc(console, &c, 100) == 0) {
+            uart_putc(console, c);  /* Echo */
+        }
+    }
+}
+```
+
+To port to RP2040: write `uart_rp2040.c` with the RP2040 vtable and private struct, replace the `#include "uart_stm32.h"` and `uart_stm32_get_uart2()` call with `#include "uart_rp2040.h"` and `uart_rp2040_get_uart0()`. The rest of `main.c` is unchanged.
+
+## Multiple instances from one driver
+
+The opaque-handle pattern supports multiple driver instances naturally:
+
+```c
+/* Two UARTs from the same driver code */
+uart_t *debug_uart    = uart_stm32_get_uart2();  /* Console */
+uart_t *gps_uart      = uart_stm32_get_uart1();  /* GPS module */
+
+uart_init(debug_uart, 115200);
+uart_init(gps_uart,   9600);
+```
+
+Without this pattern, global state (current baud rate, current instance, head/tail indices) bleeds between instances. Each instance has its own `stm32_uart_priv_t` with independent state.
+
+## Testability
+
+The vtable pattern enables host-side unit testing with a mock platform port:
+
+```c
+/* uart_mock.c — for unit tests running on a development host (not the chip) */
+static uint8_t mock_tx_buf[4096];
+static size_t  mock_tx_len = 0;
+
+static bool   mock_init(uart_t *self, uint32_t baud) { (void)self; (void)baud; return true; }
+static void   mock_putc(uart_t *self, uint8_t c)     { mock_tx_buf[mock_tx_len++] = c; }
+static int    mock_getc(uart_t *self, uint8_t *out, uint32_t t) { return -1; }  /* Empty */
+static void   mock_flush(uart_t *self)  { }
+static void   mock_deinit(uart_t *self) { }
+
+static const uart_vtable_t mock_vtable = {
+    .init = mock_init, .putc = mock_putc, .getc = mock_getc,
+    .flush = mock_flush, .deinit = mock_deinit,
+};
+static uart_t mock_uart_instance = { .vtbl = &mock_vtable, .priv = NULL };
+uart_t *uart_mock_get(void) { return &mock_uart_instance; }
+```
+
+Higher-layer code that calls `uart_putc` and `uart_flush` is testable on a PC without hardware. This is how embedded driver tests run in CI.
+
+## Check your understanding
+
+<SandboxExercise
+  language="c"
+  instructions="A SPI driver interface is defined below. Complete the spi_read_byte() application-level function that: (1) asserts chip-select low, (2) transfers 0xFF as a dummy byte to clock in the response, (3) asserts chip-select high, (4) returns the received byte. Use only the spi_t interface functions — no direct register access. Assume spi_t *spi and gpio_t *cs are available."
+  initialCode={`/* Assume these types and functions are defined */
+typedef struct spi_s spi_t;
+typedef struct gpio_s gpio_t;
+
+uint8*t spi_transfer(spi_t \_spi, uint8_t tx); /* Full-duplex: send tx, return rx */
+void gpio_set(gpio_t *pin); /_ Set pin high _/
+void gpio*clear(gpio_t \_pin); /* Set pin low \*/
+
+/_ Write the function _/
+uint8*t spi_read_byte(spi_t *spi, gpio_t *cs) {
+/* TODO _/
+return 0;
+}
+`}
+  solution={`uint8_t spi_read_byte(spi_t *spi, gpio_t *cs) {
+gpio_clear(cs); /_ Assert CS (active low) _/
+uint8_t rx = spi_transfer(spi, 0xFF); /_ Dummy write, capture read _/
+gpio_set(cs); /_ Deassert CS \_/
+return rx;
+}`}
+testCases={[
+"gpio_clear(cs) is called before spi_transfer",
+"spi_transfer is called with 0xFF as the tx byte",
+"gpio_set(cs) is called after spi_transfer",
+"the return value is the result of spi_transfer",
+"no direct register access (GPIOA, SPI1, etc.)"
+]}
+/>
+
+## What's next
+
+Lesson 3 covers driver error handling and bus recovery: what happens when an I2C slave doesn't ACK, when a UART framing error occurs, and when a SPI transaction is interrupted mid-byte. Robust drivers handle these gracefully — silent failure is not acceptable in production.

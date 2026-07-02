@@ -1,0 +1,280 @@
+---
+title: "Timers — PWM Generation, Input Capture, and Output Compare"
+description: "General-purpose timers as more than delay machines. Configure TIM1 for motor-control PWM, TIM2 for input capture to measure frequency, and output-compare mode for precisely-timed single events. The timer skills that appear in motor control, servo drive, and signal generation."
+phase: 10
+module: "e-3-interrupts-and-dma"
+order: 4
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-3-interrupts-and-dma/03"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - pwm
+  - duty-cycle
+  - input-capture
+  - output-compare
+  - capture-compare-register
+  - period
+  - prescaler
+  - auto-reload-register
+  - center-aligned
+  - complementary-output
+  - dead-time
+  - tim1
+  - tim2
+  - ccr
+learningOutcomes:
+  - "Configure TIM1 for center-aligned PWM with two complementary outputs and programmable dead time"
+  - "Change PWM duty cycle at runtime by writing to CCR without stopping the timer"
+  - "Set up TIM2 input capture to measure the period of an external signal"
+  - "Use output-compare mode to generate a one-shot interrupt at a specific timer count"
+  - "Calculate the correct PSC and ARR values for a given PWM frequency and resolution"
+professionalContext: "PWM is how microcontrollers control power: motor speed, LED brightness, heater power, servo position. Input capture is how they measure external signals: encoder speed, pulse width from a sensor, RC receiver timing. These are the two most common advanced timer uses in production embedded systems. Engineers who understand them from the register level can implement any timing-critical control application."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Delay loops and SysTick let you count milliseconds. But real embedded work requires more: a motor controller needs 20 kHz PWM with microsecond-precise dead time between complementary switches; a servo controller needs to measure 1-2 ms pulse widths on an RC receiver with microsecond resolution; a sonar needs a 10 µs transmit pulse followed by a capture window starting at a specific count. General-purpose timers on Cortex-M can do all of this in hardware, with interrupt overhead only at the event — not per clock cycle.
+
+## PSC and ARR: frequency and resolution
+
+Every timer has two parameters that set its operating point:
+
+- **PSC (Prescaler)** — divides the input clock: timer clock = input clock / (PSC + 1)
+- **ARR (Auto-Reload Register)** — sets the period: the counter counts from 0 to ARR, then reloads
+
+Timer period = (PSC + 1) × (ARR + 1) / input_clock_Hz
+
+For TIM1 on STM32F4 (APB2 timer clock = 168 MHz) at 20 kHz PWM with 12-bit resolution (4096 steps):
+
+```
+Period = 1/20000 Hz = 50 µs
+ARR = 4095 (12-bit range: 0-4095)
+(PSC + 1) × 4096 / 168,000,000 = 50 µs
+(PSC + 1) = 50e-6 × 168e6 / 4096 ≈ 2.05 → round to 2
+Actual PSC = 1
+Actual period = 2 × 4096 / 168,000,000 = 48.76 µs → 20.5 kHz
+```
+
+Close enough for most motor control. Fine-tune by adjusting ARR or PSC.
+
+## PWM generation with TIM1 — complementary outputs
+
+TIM1 is the STM32F4 "advanced control timer" — it has complementary output pairs (OCn and OCnN) with programmable dead time, essential for H-bridge motor control where both switches must never be on simultaneously.
+
+```c
+#include <stdint.h>
+
+/* TIM1 base 0x40010000, on APB2 */
+#define TIM1_BASE  0x40010000UL
+#define TIM1_CR1   (*(volatile uint32_t *)(TIM1_BASE + 0x00))
+#define TIM1_BDTR  (*(volatile uint32_t *)(TIM1_BASE + 0x44))  /* Break and dead-time */
+#define TIM1_CCER  (*(volatile uint32_t *)(TIM1_BASE + 0x20))  /* Capture/compare enable */
+#define TIM1_CCMR1 (*(volatile uint32_t *)(TIM1_BASE + 0x18))  /* CC mode register 1 */
+#define TIM1_PSC   (*(volatile uint32_t *)(TIM1_BASE + 0x28))
+#define TIM1_ARR   (*(volatile uint32_t *)(TIM1_BASE + 0x2C))
+#define TIM1_CCR1  (*(volatile uint32_t *)(TIM1_BASE + 0x34))  /* Ch1 compare value */
+#define TIM1_EGR   (*(volatile uint32_t *)(TIM1_BASE + 0x14))
+
+void tim1_pwm_init(void) {
+    /* Enable TIM1 clock on APB2 */
+    *(volatile uint32_t *)(0x40023800UL + 0x44) |= (1U << 0);
+
+    /* GPIO: PA8 = TIM1_CH1 (AF1), PA7 = TIM1_CH1N (AF1) — actual pins chip-specific */
+    /* (GPIO setup omitted for brevity — same pattern as E2 lessons) */
+
+    /* Stop timer before configuration */
+    TIM1_CR1 = 0;
+
+    /* PSC and ARR for ~20 kHz with 4095 steps */
+    TIM1_PSC = 1U;         /* Divides 168 MHz by 2 = 84 MHz timer clock */
+    TIM1_ARR = 4095U;      /* Period: 4096 counts = 48.76 µs ≈ 20.5 kHz */
+
+    /* Center-aligned mode (CMS=01): counter counts up then down.
+       This doubles the effective period but produces symmetric PWM suitable
+       for three-phase motor control. For simple PWM, use edge-aligned (CMS=00). */
+    TIM1_CR1 = (0b01U << 5);   /* CMS = 01: center-aligned mode 1 */
+
+    /* CH1: PWM mode 1 (OC1M = 110), preload enable (OC1PE = 1) */
+    TIM1_CCMR1 = (0b110U << 4) | (1U << 3);
+
+    /* Enable CH1 (CC1E) and CH1N complementary (CC1NE) outputs */
+    TIM1_CCER = (1U << 0) | (1U << 2);   /* CC1E | CC1NE */
+
+    /* Dead time: DTG[7:0] in BDTR. For DTG < 128: dead_time = DTG × t_DTS
+       t_DTS = 1 / (168 MHz / 2) ≈ 11.9 ns. For 500 ns dead time:
+       DTG = 500 ns / 11.9 ns ≈ 42 */
+    TIM1_BDTR = (1U << 15) |   /* MOE: main output enable */
+                42U;            /* DTG: dead time ≈ 500 ns */
+
+    /* Initial duty: 50% = CCR1 / ARR = 2048 / 4096 */
+    TIM1_CCR1 = 2048U;
+
+    /* Generate update event to load PSC/ARR/BDTR into shadow registers */
+    TIM1_EGR = (1U << 0);
+
+    /* Enable timer */
+    TIM1_CR1 |= (1U << 0);    /* CEN */
+}
+
+/* Change duty cycle at any time — new value loads on next update event */
+void pwm_set_duty(uint32_t duty_0_to_4095) {
+    TIM1_CCR1 = duty_0_to_4095;   /* Write is buffered in shadow register */
+}
+```
+
+The `OC1PE` bit (preload enable) makes CCR1 writes buffered: the new duty cycle takes effect at the next timer update event, not immediately mid-cycle. Without preload, writing CCR1 while the counter is running can produce a glitch where the current cycle is truncated.
+
+## Input capture — measuring external pulse width
+
+TIM2 in input-capture mode measures the time between two external edges. The capture/compare register (CCR) latches the current counter value on each edge.
+
+Measuring the period of a 50 Hz (20 ms) RC receiver pulse on PA0 (TIM2_CH1):
+
+```c
+#define TIM2_BASE  0x40000000UL
+#define TIM2_CR1   (*(volatile uint32_t *)(TIM2_BASE + 0x00))
+#define TIM2_SMCR  (*(volatile uint32_t *)(TIM2_BASE + 0x08))
+#define TIM2_CCMR1 (*(volatile uint32_t *)(TIM2_BASE + 0x18))
+#define TIM2_CCER  (*(volatile uint32_t *)(TIM2_BASE + 0x20))
+#define TIM2_PSC   (*(volatile uint32_t *)(TIM2_BASE + 0x28))
+#define TIM2_ARR   (*(volatile uint32_t *)(TIM2_BASE + 0x2C))
+#define TIM2_CCR1  (*(volatile uint32_t *)(TIM2_BASE + 0x34))
+#define TIM2_DIER  (*(volatile uint32_t *)(TIM2_BASE + 0x0C))
+#define TIM2_SR    (*(volatile uint32_t *)(TIM2_BASE + 0x10))
+
+static volatile uint32_t last_capture = 0U;
+static volatile uint32_t pulse_width_us = 0U;
+
+void tim2_input_capture_init(void) {
+    /* APB1 timer clock = 84 MHz */
+    *(volatile uint32_t *)(0x40023800UL + 0x40) |= (1U << 0);  /* TIM2EN */
+
+    /* PA0 → TIM2_CH1 (AF1) — GPIO setup omitted */
+
+    TIM2_PSC  = 84U - 1U;    /* 84 MHz / 84 = 1 MHz → 1 µs per count */
+    TIM2_ARR  = 0xFFFFFFFFU; /* 32-bit counter, wrap at maximum */
+
+    /* CH1 in input capture mode (CC1S = 01: map to TI1 = PA0) */
+    TIM2_CCMR1 = (0b01U << 0);   /* CC1S = 01: input mapped to TI1 */
+
+    /* Capture on rising edge (CC1P=0, CC1NP=0) */
+    TIM2_CCER = (1U << 0);        /* CC1E: enable capture */
+
+    /* Enable capture interrupt */
+    TIM2_DIER = (1U << 1);        /* CC1IE */
+
+    NVIC_SetPriority(TIM2_IRQn, 6U);
+    NVIC_EnableIRQ(TIM2_IRQn);
+
+    TIM2_CR1 = (1U << 0);         /* CEN: start */
+}
+
+void TIM2_IRQHandler(void) {
+    if (TIM2_SR & (1U << 1)) {    /* CC1IF: capture event */
+        TIM2_SR &= ~(1U << 1);
+
+        uint32_t captured = TIM2_CCR1;   /* Reading CCR1 clears CC1IF too */
+
+        /* First capture: record timestamp; second: compute difference */
+        if (last_capture == 0U) {
+            last_capture = captured;
+        } else {
+            pulse_width_us = captured - last_capture;
+            last_capture = captured;
+        }
+    }
+}
+```
+
+For a 50 Hz input, `pulse_width_us` gives the period in microseconds. For pulse-width measurement (servo: 1000-2000 µs HIGH), reconfigure to capture rising edge, record timestamp, configure to capture falling edge, compute the HIGH duration.
+
+## Output compare — precise one-shot timing
+
+Output-compare mode fires an interrupt when the counter reaches CCR, without affecting the GPIO pin:
+
+```c
+/* Generate an interrupt exactly 500 µs after calling this function */
+void tim2_oc_oneshot(uint32_t delay_us) {
+    /* TIM2 runs at 1 MHz from the input-capture setup above */
+    uint32_t target = TIM2_CNT + delay_us;
+
+    /* CH2 output compare (CC2S = 00 = output), no waveform (OC2M = 000) */
+    TIM2_CCMR1 &= ~((0b11U << 8) | (0b111U << 12));
+    TIM2_CCR2   = target;
+    TIM2_DIER  |= (1U << 2);   /* CC2IE */
+    TIM2_CCER  |= (1U << 4);   /* CC2E */
+    TIM2_SR    &= ~(1U << 2);  /* Clear any pending CC2IF */
+}
+
+void TIM2_IRQHandler(void) {
+    if (TIM2_SR & (1U << 2)) { /* CC2IF */
+        TIM2_SR   &= ~(1U << 2);
+        TIM2_DIER &= ~(1U << 2);   /* One-shot: disable after firing */
+        TIM2_CCER &= ~(1U << 4);
+        /* Execute the timed action */
+        do_timed_action();
+    }
+    /* ... handle CC1IF for input capture above ... */
+}
+```
+
+Output compare is used for single-shot delays without busy-waiting, for generating precisely timed pulses on multiple pins, and in RTIC (Lesson E6) for scheduling async tasks at specific instants.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "TIM1 ARR = 4095, PSC = 1, center-aligned mode. What is the effective PWM frequency when the APB2 timer clock is 168 MHz?",
+      options: [
+        "20 kHz — center-aligned doubles the period",
+        "Center-aligned mode counts up to ARR then back to 0, so the effective period is 2 × ARR counts = 2 × 4096 = 8192 counts. Timer clock = 168 MHz / (PSC+1) = 168 MHz / 2 = 84 MHz. Period = 8192 / 84,000,000 ≈ 97.5 µs. Frequency ≈ 10.25 kHz. Not 20 kHz — center-aligned halves the frequency for a given ARR compared to edge-aligned.",
+        "40 kHz — center-aligned doubles the frequency",
+        "168 kHz — the full timer clock",
+      ],
+      correct: 1,
+      explanation:
+        "Center-aligned mode counts up to ARR then back down to 0, making the full period 2×(ARR+1) counts instead of (ARR+1). For the same ARR and PSC, center-aligned PWM has half the frequency of edge-aligned PWM. To get 20 kHz in center-aligned mode with 12-bit resolution, set ARR = 2047 (halved), not 4095. This is a common mistake when converting edge-aligned PWM configurations to center-aligned.",
+    },
+    {
+      question:
+        "An input-capture ISR measures pulse width by computing `CCR1_current - CCR1_previous`. After running for 71 minutes, the measurements suddenly become very large (in the billions). What happened?",
+      options: [
+        "The timer hardware failed",
+        "TIM2 is a 32-bit counter that overflows at 0xFFFFFFFF. At 1 MHz, it wraps every 4294 seconds (about 71 minutes). When the counter wraps, CCR1_current < CCR1_previous and the subtraction underflows. However, because both are uint32_t, unsigned subtraction wraps correctly: if previous = 0xFFFF0000 and current = 0x00001000, then current - previous = 0x00011000 = 69,632, not a huge negative number. If the computed value IS very large, the issue is that the code casts to a signed type or the capture values are narrowed incorrectly. The fix: ensure the subtraction is done in uint32_t throughout.",
+        "The prescaler value drifted at high temperature",
+        "Input capture overflows the CCR register",
+      ],
+      correct: 1,
+      explanation:
+        "32-bit unsigned wraparound arithmetic is defined in C and handles counter rollover correctly, but ONLY if the subtraction stays uint32_t throughout. The common bug: the ISR computes `int32_t width = ccr_current - ccr_previous` where a large unsigned difference (spanning the wrap) becomes a large positive int32_t that the application interprets as a wildly wrong measurement. The fix: use uint32_t for capture values and differences, and cast to signed only AFTER the subtraction if needed.",
+    },
+    {
+      question:
+        "Why does TIM1 PWM need preload enable (OC1PE bit set) for glitch-free duty cycle changes?",
+      options: [
+        "Preload is required for all timer operations",
+        "Without preload, a write to CCR1 takes effect immediately on the running timer. If the write happens when the counter is between the old CCR1 value and the new one, the current PWM cycle is immediately truncated or extended — a glitch. With preload enabled, the CCR1 write is buffered in a shadow register and the new value loads at the next update event (when the counter rolls over), so the transition is always at a clean cycle boundary. This is mandatory for motor control where glitches cause current spikes.",
+        "Preload doubles the PWM frequency",
+        "Without preload, the CCR register is read-only",
+      ],
+      correct: 1,
+      explanation:
+        "Preload (shadow register buffering) is the mechanism for glitch-free parameter updates in running timers. Without it, writes to ARR and CCR are immediate and can split a cycle, producing a pulse that's shorter or longer than either the old or new duty cycle. With preload, writes to the shadow register take effect only at the update event — the clean rollover boundary. For motor control (where short glitches produce current spikes that can damage MOSFETs) and audio (where they produce clicks), preload is non-optional.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 05 covers fault handlers and the watchdog — HardFault investigation, the precise diagnosis of a hard fault from the stacked registers, and the independent watchdog that forces a safe reset if firmware gets stuck. These are the mechanisms that turn a system that crashes silently into one that crashes informatively and recovers automatically.

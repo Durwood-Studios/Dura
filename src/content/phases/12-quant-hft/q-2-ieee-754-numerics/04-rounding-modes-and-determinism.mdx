@@ -1,0 +1,235 @@
+---
+title: "Rounding Modes and Reproducible Floating-Point"
+description: "The four IEEE 754 rounding modes, how the C compiler and CPU choose among them, and the conditions under which two machines produce bit-identical floating-point results."
+phase: 12
+module: "q-2-ieee-754-numerics"
+order: 4
+estimatedMinutes: 35
+difficulty: 4
+prerequisites:
+  - "q-2-ieee-754-numerics/02-ieee-754-numerics"
+  - "q-2-ieee-754-numerics/03-kahan-summation"
+standards:
+  primaryAnchor: "IEEE 754-2019"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - rounding-mode
+  - round-to-nearest-even
+  - round-toward-zero
+  - round-toward-positive-infinity
+  - round-toward-negative-infinity
+  - floating-point-environment
+  - fesetround
+  - mxcsr
+  - reproducible-floating-point
+  - deterministic-pricing
+  - strict-fp
+  - contract-expression
+learningOutcomes:
+  - "After this lesson you can name the four IEEE 754 rounding modes and predict which one is active in a default C++ compilation"
+  - "After this lesson you can modify the rounding mode at runtime with fesetround and explain why this is almost never the right answer in production code"
+  - "After this lesson you can state the four conditions all co-processors must satisfy to guarantee bit-identical floating-point results across machines"
+  - "After this lesson you can identify at least three compilation or runtime factors that silently break floating-point reproducibility"
+professionalContext: "A quant trading desk running a P&L risk model across multiple servers must produce the same number on every machine, every time, or the control team cannot distinguish a legitimate rounding artifact from a data-integrity problem. This is harder than it sounds: the x87 FPU historically kept 80-bit intermediates, GCC contracts multiply-add into FMA by default, and -O2 reorders expressions in ways IEEE 754 permits but determinism does not. Understanding which knobs control reproducibility — and which ones cost performance when you tighten them — is the skill that separates the engineer who says 'floating-point is nondeterministic' from the one who says 'here are the four conditions and here is the compilation flag that enforces each one.'"
+thresholdConcept: false
+---
+
+## Why this matters
+
+Two instances of your pricing model run on two machines: one a production server in a co-location cage, one a risk replica in a data center across town. They receive the same market data, run the same code, compute the same formula. The production instance reports a mid-price of `184.520000001`. The replica reports `184.520000000`. A one-billionth-of-a-dollar difference.
+
+That difference should not exist. Finding it costs three engineers a day. The culprit turns out to be a single flag: the production binary was compiled with `-ffast-math`, which permitted the compiler to contract two operations into an FMA (fused multiply-add), while the replica was compiled without it. One rounding step versus two. One ULP of difference. Three engineers.
+
+This lesson makes you the engineer who finds that in ten minutes.
+
+## The four rounding modes
+
+IEEE 754-2019 defines four rounding modes for floating-point operations. Every <VocabTooltip slug="floating-point-environment">floating-point environment</VocabTooltip> (CPU + runtime) implements all four; the active mode determines what happens when an exact mathematical result cannot be represented as a floating-point number.
+
+| Mode                           | C name                   | What it does                                                                               |
+| ------------------------------ | ------------------------ | ------------------------------------------------------------------------------------------ |
+| Round-to-nearest, ties-to-even | `FE_TONEAREST` (default) | Pick the nearest representable value; if exactly halfway, pick the one whose last bit is 0 |
+| Round toward +∞                | `FE_UPWARD`              | Always pick the representable value ≥ the exact result                                     |
+| Round toward −∞                | `FE_DOWNWARD`            | Always pick the representable value ≤ the exact result                                     |
+| Round toward zero              | `FE_TOWARDZERO`          | Truncate — always pick the representable value closer to zero                              |
+
+<VocabTooltip slug="round-to-nearest-even">Round-to-nearest-even</VocabTooltip> (also called
+_banker's rounding_) is the default on every platform you will encounter. The "ties-to-even"
+tie-breaking rule ensures that accumulated rounding is statistically unbiased — if you round a
+million values that are exactly halfway between two representable values, roughly half round up and
+half round down.
+
+```cpp
+#include <cfenv>
+#include <cstdio>
+
+int main() {
+    // Show the default rounding mode.
+    int mode = fegetround();
+    // On every mainstream platform this prints FE_TONEAREST (== 0 on Linux x86-64).
+    printf("default mode: %d (FE_TONEAREST == %d)\n", mode, FE_TONEAREST);
+
+    // Round toward +infinity: 0.1 rounds UP to the next representable double.
+    fesetround(FE_UPWARD);
+    volatile double x = 0.1;  // volatile defeats constant folding
+    printf("0.1 rounded up:   %.20f\n", x);
+
+    // Back to nearest-even.
+    fesetround(FE_TONEAREST);
+    volatile double y = 0.1;
+    printf("0.1 nearest-even: %.20f\n", y);
+}
+```
+
+Output on x86-64:
+
+```
+default mode: 0 (FE_TONEAREST == 0)
+0.1 rounded up:   0.10000000000000001110
+0.1 nearest-even: 0.10000000000000000555
+```
+
+The difference is one <VocabTooltip slug="unit-in-the-last-place">ULP</VocabTooltip>. Tiny. But if every price in a portfolio calculation rounds in the same direction, the error accumulates.
+
+### When would you change the rounding mode?
+
+Rarely, and almost never on a hot path. The primary use case is **interval arithmetic**: to compute a guaranteed enclosure of the true result, compute the operation twice — once rounding down (`FE_DOWNWARD`) for the lower bound and once rounding up (`FE_UPWARD`) for the upper bound. The enclosure contains the true result by construction.
+
+```cpp
+#include <cfenv>
+#include <cmath>
+#include <cstdio>
+
+// Compute a guaranteed interval for a*b + c.
+void fma_interval(double a, double b, double c,
+                  double& lo, double& hi) {
+    fesetround(FE_DOWNWARD);
+    lo = std::fma(a, b, c);    // lower bound
+    fesetround(FE_UPWARD);
+    hi = std::fma(a, b, c);    // upper bound
+    fesetround(FE_TONEAREST);  // restore default
+}
+```
+
+In practice, changing <VocabTooltip slug="fesetround">`fesetround`</VocabTooltip> is expensive: it modifies the <VocabTooltip slug="mxcsr">MXCSR</VocabTooltip> register (the SSE control register on x86-64), which is a serializing operation. On a hot path this is forbidden. For guaranteed bounds in risk calculations, use dedicated interval-arithmetic libraries that operate on packed pairs without repeatedly switching modes.
+
+## The four conditions for bit-identical results
+
+Given the same inputs and the same formula, two machines produce identical binary floating-point results if and only if all four conditions hold simultaneously:
+
+### Condition 1: Same floating-point format
+
+Both machines must use the same floating-point type (`float` = binary32, `double` = binary64). The historical trap was the x87 FPU, which computed everything internally in 80-bit extended precision and rounded only when storing to memory. Code compiled for x87 (`-mfpmath=387`) can produce different results than code compiled for SSE2 (`-mfpmath=sse`), even with identical source.
+
+Since 2000, all mainstream x86-64 compilers default to SSE2 for scalar floating-point (x87 is only used for `long double`). As long as you avoid `long double`, this condition is automatically satisfied on modern x86-64.
+
+```bash
+# Verify your compiler uses SSE2 for double:
+gcc -march=x86-64 -mfpmath=sse -Q --help=target | grep mfpmath
+```
+
+### Condition 2: Same operations in the same order
+
+IEEE 754 guarantees that each individual operation (addition, multiplication, FMA) is correctly rounded — the computed result is the closest representable value to the exact mathematical result. But it does **not** guarantee that two different sequences of operations computing the "same" formula give the same answer.
+
+```cpp
+double a = 1e15, b = 1.0, c = -1e15;
+
+// Two ways to compute a + b + c:
+double r1 = (a + b) + c;  // 1e15 + 1 loses precision for b; then -1e15
+double r2 = a + (b + c);  // b + c = -1e15+1 ≈ -1e15; then a + (-1e15) ≈ 0
+
+// r1 may equal 0.0; r2 may equal 1.0 or 0.0 depending on exactness.
+// Same formula, different order, potentially different result.
+```
+
+Compilers are free to reorder expressions within a single statement unless you use `volatile` or `-fno-unsafe-math-optimizations`. Function call boundaries are sequence points that prevent reordering across them.
+
+### Condition 3: No contracted expressions (no implicit FMA)
+
+A <VocabTooltip slug="contract-expression">contracted expression</VocabTooltip> computes a multiply-add as a single fused multiply-add (FMA), eliminating the intermediate rounding step. The exact mathematical result is rounded once at the end instead of twice (once for the multiply, once for the add). The result is _more accurate_ than the separate operations — but _different_, by one ULP.
+
+```cpp
+double x = 1.0, y = 1.0 + 1e-15, z = -1.0;
+
+// Naively: (x * y) + z — two rounding steps.
+// With FMA: fma(x, y, z) — one rounding step.
+// The two results may differ by one ULP.
+
+double naive = (x * y) + z;
+double fused  = std::fma(x, y, z);  // explicit FMA — always one rounding step
+// naive != fused in general
+```
+
+The relevant compiler flags:
+
+- GCC/Clang: `-ffp-contract=off` disables implicit FMA contraction (ISO C default is `on`)
+- GCC: `-ffast-math` enables aggressive contraction and other transformations
+- MSVC: `/fp:precise` (default) permits contraction; `/fp:strict` disables it
+
+For reproducible results across machines with different FMA support, use either explicit `std::fma()` calls (so intent is unambiguous) or `-ffp-contract=off` (so the compiler never contracts).
+
+### Condition 4: Same compiler flags and optimization level
+
+`-O2` and `-O3` enable vectorization. Auto-vectorized loops reorder additions across iterations (horizontal reduction) in ways that are mathematically equivalent but numerically different. The result depends on the SIMD width (4-wide SSE, 8-wide AVX, 16-wide AVX-512), which varies by machine.
+
+```bash
+# Disable only the reproducibility-breaking optimisations, keep the rest:
+-fno-unsafe-math-optimizations   # no reordering, no NaN/inf ignoring
+-ffp-contract=off                 # no implicit FMA
+-mfpmath=sse -msse2               # SSE2 only (no x87 80-bit intermediate)
+```
+
+If you need cross-machine reproducibility and still want vectorisation, you must control the reduction order explicitly — use fixed-order loops, not `std::reduce` with execution policies, which is explicitly non-deterministic in the standard.
+
+## The <VocabTooltip slug="strict-fp">`[[strict_fp]]`</VocabTooltip> attribute (C++23)
+
+C++23 adds `[[strict_fp]]` as a function-level attribute that requests the compiler produce operations in exactly the source order with no contraction:
+
+```cpp
+[[strict_fp]]
+double price_midpoint(double bid, double ask) {
+    // Within this function, no reordering or contraction is permitted.
+    return (bid + ask) * 0.5;
+}
+```
+
+Support is new and compiler-specific; as of 2026 it is recognised by GCC 14+. For production use, explicit pragma controls (`#pragma STDC FP_CONTRACT OFF`) are more portable.
+
+## Practical checklist for reproducible pricing
+
+```
+✓  -mfpmath=sse -msse2           (SSE2 scalar, no x87 intermediates)
+✓  -ffp-contract=off             (no implicit FMA)
+✓  -fno-unsafe-math-optimizations (no reordering, no NaN ignoring)
+✗  -ffast-math                   (breaks all four conditions)
+✓  Same compiler version on all machines
+✓  Explicit std::fma() where you want FMA semantics
+✓  Fixed-order reduction loops (not std::reduce with par_unseq)
+```
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A risk model runs on two machines that are identical except one compiled with -ffast-math and one without. The results differ by one ULP on every price. The most likely cause is:",
+      options: [
+        "The rounding mode is different at runtime because fesetround was called",
+        "The compiler with -ffast-math contracted a multiply-add into a single FMA instruction, eliminating one rounding step",
+        "The x87 FPU is being used on one machine and SSE2 on the other",
+        "The two machines have different DRAM latency which changes floating-point timing",
+      ],
+      correct: 1,
+      explanation:
+        "-ffast-math permits the compiler to contract expressions like a*b+c into a single fused multiply-add instruction (FMA), which rounds only once instead of twice. The result is one ULP more accurate than the uncontracted version — but different. This is the most common cause of a one-ULP difference between a -ffast-math binary and a strict binary computing the same formula. Rounding modes (A) affect the direction of rounding but the default FE_TONEAREST is the same on both. x87 vs SSE2 (C) would produce much larger differences due to 80-bit intermediates. DRAM latency (D) does not affect floating-point computation results.",
+    },
+  ]}
+/>
+
+## What's next
+
+Now that you understand rounding and reproducibility at the operation level, the next lesson applies that knowledge to a concrete design decision every HFT system makes: whether to represent prices as `double` or as integer ticks, and exactly how much precision you lose at which price magnitudes.

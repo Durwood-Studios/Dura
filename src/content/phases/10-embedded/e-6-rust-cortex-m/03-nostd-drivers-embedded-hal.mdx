@@ -1,0 +1,340 @@
+---
+title: "Writing no_std Drivers with embedded-hal Traits"
+description: "Port the BME280 driver from C to Rust using embedded-hal traits. The result compiles for STM32, nRF52, RP2040 — any chip with an I2C HAL — without changing a line of driver code."
+phase: 10
+module: "e-6-rust-cortex-m"
+order: 3
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-6-rust-cortex-m/02"
+  - "e-5-drivers/04"
+standards:
+  primaryAnchor: "embedded-hal 1.0 (docs.rs/embedded-hal)"
+  cs2023: ["PL-LangIndep", "SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - embedded-hal-traits
+  - i2c-trait
+  - error-kind
+  - generic-driver
+  - trait-bound
+  - no-std-alloc
+  - driver-crate
+learningOutcomes:
+  - "Implement a device driver generic over an embedded-hal I2cbus trait"
+  - "Return typed errors from a Rust embedded driver using associated error types"
+  - "Explain how trait bounds make a driver cross-platform without conditional compilation"
+  - "Publish a no_std driver crate with a minimal Cargo.toml"
+professionalContext: "The embedded-hal ecosystem on crates.io has over 2,000 driver crates as of 2026, all written against the same trait interface. Engineers who can write and publish drivers in this ecosystem contribute to a pool used by the entire embedded Rust community. More practically: a driver written against embedded-hal traits compiles for any MCU without changes, which is the same portability goal E5 lesson 2 achieved in C — but enforced by the type system."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The C vtable pattern from E5 lesson 2 achieves portability by convention — if every platform port correctly fills in the vtable, the driver works. A developer can fill in the wrong function signature, pass the wrong number of bytes, or skip a required function and the C compiler may not catch it.
+
+Rust's trait system enforces the same contract at compile time. A platform that does not correctly implement the `I2c` trait cannot compile a driver that depends on it. The portability guarantee is stronger.
+
+## embedded-hal 1.0 traits
+
+The `embedded-hal` crate (version 1.0, stable since 2023) defines the core interfaces:
+
+```rust
+// From embedded-hal 1.0 — simplified signatures
+pub trait I2c<A = SevenBitAddress> {
+    type Error: Error;
+
+    fn read(&mut self, address: A, buffer: &mut [u8]) -> Result<(), Self::Error>;
+    fn write(&mut self, address: A, bytes: &[u8]) -> Result<(), Self::Error>;
+    fn write_read(&mut self, address: A, bytes: &[u8], buffer: &mut [u8])
+        -> Result<(), Self::Error>;
+    fn transaction(&mut self, address: A, operations: &mut [Operation<'_>])
+        -> Result<(), Self::Error>;
+}
+```
+
+Any chip with a HAL crate implements this trait for its I2C peripheral. The driver code uses `impl I2c<u8>` as a bound — it doesn't know or care which chip it's running on.
+
+## BME280 driver in Rust
+
+```rust
+// bme280.rs — no_std driver, works on any chip with embedded-hal 1.0
+#![no_std]
+
+use embedded_hal::i2c::I2c;
+
+const BME280_CHIP_ID: u8 = 0x60;
+const REG_ID: u8 = 0xD0;
+const REG_RESET: u8 = 0xE0;
+const REG_CTRL_HUM: u8 = 0xF2;
+const REG_CTRL_MEAS: u8 = 0xF4;
+const REG_CONFIG: u8 = 0xF5;
+const REG_PRESS_MSB: u8 = 0xF7;
+const REG_CALIB00: u8 = 0x88;
+const REG_CALIB26: u8 = 0xE1;
+
+/// Calibration coefficients stored in device non-volatile memory
+#[derive(Default, Clone)]
+struct Calibration {
+    dig_t1: u16,
+    dig_t2: i16,
+    dig_t3: i16,
+    dig_p1: u16,
+    dig_p2: i16,
+    // ... (abbreviated for clarity; full implementation has all 18 coefficients)
+    dig_h1: u8,
+    dig_h2: i16,
+    dig_h3: u8,
+    dig_h4: i16,
+    dig_h5: i16,
+    dig_h6: i8,
+}
+
+/// Sensor data with physical units
+pub struct Bme280Data {
+    /// Temperature in hundredths of degrees Celsius (2508 = 25.08 °C)
+    pub temperature_centidegc: i32,
+    /// Absolute pressure in Pascals
+    pub pressure_pa: u32,
+    /// Relative humidity in units of 1/1024 percent
+    pub humidity_1024ths: u32,
+}
+
+/// Driver errors — separate from the bus error type
+#[derive(Debug)]
+pub enum Bme280Error<E> {
+    /// I2C bus error
+    Bus(E),
+    /// Chip ID did not match — wrong sensor or wrong address
+    WrongChipId(u8),
+}
+
+impl<E> From<E> for Bme280Error<E> {
+    fn from(e: E) -> Self {
+        Bme280Error::Bus(e)
+    }
+}
+
+/// BME280 driver, generic over any embedded-hal I2c implementation
+pub struct Bme280<I2C> {
+    bus: I2C,
+    addr: u8,
+    cal: Calibration,
+    t_fine: i32,
+}
+
+impl<I2C: I2c> Bme280<I2C> {
+    /// Create and initialize the driver.
+    ///
+    /// # Arguments
+    /// * `bus` — any type implementing `embedded_hal::i2c::I2c`
+    /// * `addr` — I2C address: 0x76 (SDO low) or 0x77 (SDO high)
+    pub fn new(mut bus: I2C, addr: u8) -> Result<Self, Bme280Error<I2C::Error>> {
+        // Read chip ID
+        let mut id_buf = [0u8; 1];
+        bus.write_read(addr, &[REG_ID], &mut id_buf)?;
+        if id_buf[0] != BME280_CHIP_ID {
+            return Err(Bme280Error::WrongChipId(id_buf[0]));
+        }
+
+        // Soft reset
+        bus.write(addr, &[REG_RESET, 0xB6])?;
+        // Delay handled by the caller (embassy Timer::after or cortex_m::delay::Delay)
+
+        // Read calibration (abbreviated — full driver reads all 26+7 bytes)
+        let mut cal_buf = [0u8; 26];
+        bus.write_read(addr, &[REG_CALIB00], &mut cal_buf)?;
+
+        let cal = Calibration {
+            dig_t1: u16::from_le_bytes([cal_buf[0], cal_buf[1]]),
+            dig_t2: i16::from_le_bytes([cal_buf[2], cal_buf[3]]),
+            dig_t3: i16::from_le_bytes([cal_buf[4], cal_buf[5]]),
+            dig_p1: u16::from_le_bytes([cal_buf[6], cal_buf[7]]),
+            dig_p2: i16::from_le_bytes([cal_buf[8], cal_buf[9]]),
+            // ... remaining coefficients
+            ..Default::default()
+        };
+
+        // Configure: humidity ×1, temp ×2, pressure ×16, normal mode, IIR filter 4
+        bus.write(addr, &[REG_CTRL_HUM, 0x01])?;  // Must precede ctrl_meas
+        bus.write(addr, &[REG_CTRL_MEAS, (0x02 << 5) | (0x05 << 2) | 0x03])?;
+        bus.write(addr, &[REG_CONFIG,   (0x02 << 5) | (0x02 << 2)])?;
+
+        Ok(Bme280 { bus, addr, cal, t_fine: 0 })
+    }
+
+    /// Read temperature, pressure, and humidity from the sensor.
+    pub fn read(&mut self) -> Result<Bme280Data, Bme280Error<I2C::Error>> {
+        // Burst-read 8 data registers starting at 0xF7
+        let mut raw = [0u8; 8];
+        self.bus.write_read(self.addr, &[REG_PRESS_MSB], &mut raw)?;
+
+        let adc_p = (raw[0] as i32) << 12 | (raw[1] as i32) << 4 | (raw[2] >> 4) as i32;
+        let adc_t = (raw[3] as i32) << 12 | (raw[4] as i32) << 4 | (raw[5] >> 4) as i32;
+        let adc_h = (raw[6] as i32) << 8  |  raw[7] as i32;
+
+        // Temperature must come first — sets self.t_fine for subsequent formulas
+        let temp  = self.compensate_temperature(adc_t);
+        let press = self.compensate_pressure(adc_p);
+        let hum   = self.compensate_humidity(adc_h);
+
+        Ok(Bme280Data {
+            temperature_centidegc: temp,
+            pressure_pa: press,
+            humidity_1024ths: hum,
+        })
+    }
+
+    fn compensate_temperature(&mut self, adc_t: i32) -> i32 {
+        let t1 = self.cal.dig_t1 as i32;
+        let t2 = self.cal.dig_t2 as i32;
+        let t3 = self.cal.dig_t3 as i32;
+        let var1 = ((((adc_t >> 3) - (t1 << 1)) * t2) >> 11) as i32;
+        let var2 = ((((adc_t >> 4) - t1) * ((adc_t >> 4) - t1)) >> 12
+                    * t3) >> 14;
+        self.t_fine = var1 + var2;
+        (self.t_fine * 5 + 128) >> 8
+    }
+
+    fn compensate_pressure(&self, adc_p: i32) -> u32 {
+        // Uses i64 to avoid overflow — identical to C version
+        let var1 = (self.t_fine as i64) - 128000;
+        let p2 = self.cal.dig_p2 as i64;
+        // ... (full formula; abbreviated for readability)
+        // returns Pa
+        101325  // Placeholder — full implementation below E5 lesson 4
+    }
+
+    fn compensate_humidity(&self, adc_h: i32) -> u32 {
+        // Integer humidity compensation from datasheet
+        let v = self.t_fine - 76800;
+        let _ = v; // suppress unused warning in abbreviated code
+        51200  // Placeholder — full implementation mirrors C
+    }
+}
+```
+
+## Using the driver on STM32 (Embassy)
+
+```rust
+use embassy_stm32::i2c::I2c;
+use embassy_stm32::time::Hertz;
+use bme280::Bme280;
+
+#[embassy_executor::task]
+async fn sensor_task(i2c: embassy_stm32::peripherals::I2C1, scl: ..., sda: ...) {
+    let i2c_bus = I2c::new(i2c, scl, sda, Hertz(400_000), Default::default());
+
+    // The Bme280 driver accepts any type implementing embedded_hal::i2c::I2c
+    let mut sensor = Bme280::new(i2c_bus, 0x76).unwrap();
+    Timer::after_millis(10).await;  // Wait for sensor after reset
+
+    loop {
+        match sensor.read() {
+            Ok(data) => defmt::info!(
+                "T={} P={} H={}",
+                data.temperature_centidegc,
+                data.pressure_pa,
+                data.humidity_1024ths
+            ),
+            Err(e) => defmt::error!("sensor error: {:?}", e),
+        }
+        Timer::after_secs(1).await;
+    }
+}
+```
+
+The same `bme280::Bme280` struct works unchanged on nRF52 (using nrf52840-hal's I2c impl), RP2040 (using rp2040-hal's I2c), or any other chip with an embedded-hal 1.0 I2c implementation. The driver crate has zero platform-specific code.
+
+## Publishing the driver crate
+
+```toml
+# Cargo.toml for the standalone driver crate
+[package]
+name = "bme280-embedded-hal"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "BME280 environmental sensor driver for embedded-hal 1.0"
+repository = "https://github.com/yourname/bme280-embedded-hal"
+keywords = ["embedded", "bme280", "no_std", "embedded-hal"]
+categories = ["embedded", "no-std"]
+
+[dependencies]
+embedded-hal = "1.0"
+
+[dev-dependencies]
+# For host-side tests using an embedded-hal mock
+embedded-hal-mock = "0.10"
+```
+
+```toml
+# lib.rs
+#![no_std]
+```
+
+A published driver crate with `no_std` and embedded-hal 1.0 can be used by any Rust embedded project. This is the Rust embedded ecosystem's contribution model.
+
+## Host-side testing with embedded-hal-mock
+
+```rust
+#[cfg(test)]
+mod tests {
+    use embedded_hal_mock::eh1::i2c::{Mock, Transaction};
+    use super::*;
+
+    #[test]
+    fn test_wrong_chip_id() {
+        // Program the mock to return 0xFF for the chip-ID read
+        let expectations = [
+            Transaction::write_read(0x76, vec![0xD0], vec![0xFF]),
+        ];
+        let i2c = Mock::new(&expectations);
+        let result = Bme280::new(i2c, 0x76);
+        assert!(matches!(result, Err(Bme280Error::WrongChipId(0xFF))));
+    }
+}
+```
+
+`embedded-hal-mock` implements the `I2c` trait with programmed expectations. Tests fail if the driver calls the bus in the wrong order or with the wrong bytes. No hardware required.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A Rust BME280 driver is written with the signature `impl<I2C: I2c> Bme280<I2C>`. An engineer wants to use it on a chip whose I2C peripheral struct is `MyChipI2c`. What must be true for the driver to compile?",
+      options: [
+        "MyChipI2c must be named exactly 'I2c' to match the trait name",
+        "MyChipI2c must implement the embedded_hal::i2c::I2c trait. The driver's generic parameter `I2C: I2c` is a trait bound — it constrains that whatever concrete type fills in `I2C` must implement `I2c`. If the chip's HAL crate provides `impl I2c for MyChipI2c`, the driver compiles with `MyChipI2c` as `I2C`. If not, the compiler reports the missing impl, not a runtime error.",
+        "MyChipI2c must import the bme280 crate",
+        "The driver must be rewritten for each chip",
+      ],
+      correct: 1,
+      explanation:
+        "Trait bounds in Rust are compile-time constraints, not runtime checks. `I2C: I2c` means 'I2C must implement the I2c trait.' If the chip's HAL provides that implementation, the driver compiles. If not, the compiler reports the specific missing trait impl, which is the only change needed. This is the portable embedded Rust pattern: drivers written against trait bounds compile anywhere the trait is implemented, without conditional compilation or code duplication.",
+    },
+    {
+      question:
+        "An engineer uses `embedded-hal-mock` to test a driver and programs expectations incorrectly (the mock expects write(addr, [REG_ID]) but the driver calls write_read). The test panics immediately. Is this a test framework bug?",
+      options: [
+        "Yes — the mock should be more permissive",
+        "No — this is the correct behavior. embedded-hal-mock panics when the driver calls a transaction that doesn't match the next programmed expectation. This is how the mock enforces that the driver uses the bus correctly: in the exact right order, with the right transactions, right bytes, right lengths. A driver that calls write when write_read was expected has a bug. The mock found it before any hardware was involved. This is the value of mock-based testing.",
+        "The mock library has a bug",
+        "The driver should use write, not write_read",
+      ],
+      correct: 1,
+      explanation:
+        "Strict expectation matching is intentional. If the mock were permissive, it would allow incorrect driver behavior to pass tests. The point is to verify that the driver interacts with the bus EXACTLY as the datasheet specifies. A driver that uses write when write_read is required may work on some hardware (if the bus happens to respond correctly) and fail on others. The mock catches this discrepancy at the unit-test stage, which is far cheaper to fix than at the hardware integration stage.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 4 covers debugging Rust embedded firmware with probe-rs and defmt — the modern alternatives to OpenOCD and printf-debugging. defmt (deferred formatting) encodes log strings as integers, transmitting them via SEGGER RTT at near-zero overhead, with the full formatted string reconstructed on the host.

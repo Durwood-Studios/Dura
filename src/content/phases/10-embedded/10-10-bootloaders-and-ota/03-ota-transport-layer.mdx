@@ -1,0 +1,224 @@
+---
+title: "OTA Transport Layer — BLE, MQTT, and HTTPS Firmware Delivery"
+description: "The bootloader installs the image; the transport delivers it. This lesson covers the application-layer protocols that securely download firmware updates over BLE, MQTT, and HTTPS — and the integrity checks that bridge transport and bootloader."
+phase: 10
+module: "10-10-bootloaders-and-ota"
+order: 3
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "10-10-bootloaders-and-ota/02"
+standards:
+  primaryAnchor: "IETF RFC 9019 (SUIT) and RFC 8152 (COSE)"
+  cs2023: ["SE-Implementation", "SE-Quality", "SF-Foundations"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - ota-transport
+  - ble-dfu
+  - mqtt-ota
+  - https-ota
+  - chunk-transfer
+  - checksum-streaming
+  - tls-mutual-auth
+  - manifest
+  - suit-manifest
+  - resume-transfer
+learningOutcomes:
+  - "Describe the responsibilities of the OTA transport layer versus the bootloader layer"
+  - "Implement a chunked BLE DFU download with CRC verification per chunk"
+  - "Identify the security properties required for an HTTPS OTA endpoint and why TLS alone is insufficient"
+  - "Explain the SUIT manifest format and why it separates update policy from image content"
+professionalContext: "A secure bootloader with Ed25519 signature verification is only as strong as its transport. If the update channel can be intercepted and the image replaced, an attacker doesn't need to forge a signature — they just need to serve their image. Transport security and bootloader security are complementary; both are required. Engineers who understand the full stack from download through verification are the ones who can design secure OTA systems rather than just integrate existing solutions."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The bootloader from lessons 1-2 verifies every image it boots. But what decides which image lands in the secondary slot? The transport layer. If the transport is insecure, an attacker can serve any image — the bootloader's CRC will pass (attacker computed it), and only the Ed25519 signature will catch it. If the transport also verifies the signature before writing to flash, the attack surface shrinks further.
+
+Defense in depth: verify at transport (does the image come from the right source?), verify at bootloader (is the image signed by the right key?). Both layers operating independently makes the system robust even if one layer is compromised.
+
+## Responsibilities: transport vs bootloader
+
+| Responsibility                          | Transport layer                                | Bootloader             |
+| --------------------------------------- | ---------------------------------------------- | ---------------------- |
+| Discover update availability            | Yes                                            | No                     |
+| Download image                          | Yes                                            | No                     |
+| Verify TLS certificate                  | Yes                                            | No                     |
+| Check manifest (version, target device) | Yes                                            | No                     |
+| Write image to secondary slot           | Yes                                            | No                     |
+| Verify image CRC                        | Both (transport pre-check, bootloader at boot) | Yes                    |
+| Verify image signature                  | Optional (transport)                           | Mandatory (bootloader) |
+| Execute the update                      | No                                             | Yes                    |
+| Rollback on failure                     | No (triggers the bootloader mechanism)         | Yes                    |
+
+The transport layer handles discovery and delivery. The bootloader handles verification and execution. The two layers communicate via the flash slot (image written by transport, read by bootloader) and the persistent state (pending_update flag set by transport, read by bootloader).
+
+## BLE OTA: chunked DFU
+
+BLE has a Maximum Transmission Unit (MTU) of 20-244 bytes depending on negotiation. Firmware images are 100s of KB. The transport must chunk the image and assemble it in flash:
+
+```c
+/* BLE DFU — application side (pseudo-code for clarity) */
+
+#define CHUNK_SIZE    128U    /* Bytes per BLE write */
+#define FLASH_SECTOR  131072U /* Bytes per flash sector */
+
+typedef struct {
+    uint32_t total_size;
+    uint32_t offset;
+    uint32_t running_crc;
+} dfu_state_t;
+
+/* Called by BLE stack on each received chunk */
+void on_dfu_data_received(const uint8_t *chunk, uint16_t len) {
+    /* Erase flash sector when offset aligns with sector boundary */
+    if ((dfu_state.offset % FLASH_SECTOR) == 0U) {
+        flash_erase_sector(SECONDARY_SLOT_BASE + dfu_state.offset);
+    }
+
+    /* Write chunk to secondary slot */
+    flash_write(SECONDARY_SLOT_BASE + dfu_state.offset, chunk, len);
+
+    /* Update running CRC for final verification */
+    dfu_state.running_crc = crc32_update(dfu_state.running_crc, chunk, len);
+    dfu_state.offset += len;
+}
+
+/* Called after all chunks received */
+bool dfu_finalize(uint32_t expected_crc) {
+    if (dfu_state.running_crc != expected_crc) {
+        /* CRC mismatch — download corrupted; erase secondary slot */
+        flash_erase_range(SECONDARY_SLOT_BASE, dfu_state.total_size);
+        return false;
+    }
+    /* Write pending-update flag to persistent state */
+    persistent_state.pending_update = true;
+    flash_write_persistent_state(&persistent_state);
+    return true;
+}
+```
+
+Chunked transfer with a running CRC means no complete-image CRC computation at the end (which would require reading back the entire secondary slot). The CRC is computed as each chunk arrives and verified against the expected value from the DFU manifest.
+
+Nordic's DFU SDK (used with nRF52840 and MCUboot) implements this pattern in production, including retry logic and transfer resumption after BLE disconnection.
+
+## MQTT OTA: delta updates and manifest-first approach
+
+MQTT OTA is common in IoT fleets. The pattern:
+
+```
+Device ──subscribe──► "device/firmware/update/{device_id}" topic
+Fleet manager ──publish──► manifest JSON on that topic
+Device ──parses manifest, evaluates policy (is this newer? right target?)──►
+Device ──downloads image from URL in manifest via HTTPS──►
+Device ──writes to secondary slot, sets pending_update──►
+Device ──reboots into MCUboot──►
+```
+
+A manifest JSON:
+
+```json
+{
+  "manifest_version": 1,
+  "firmware_version": "2.1.0",
+  "target_hardware": "sensor-node-v3",
+  "image_url": "https://firmware.example.com/release/sensor-node-v3-2.1.0.bin",
+  "image_sha256": "a1b2c3d4...",
+  "image_size": 131072,
+  "signature": "base64-encoded-Ed25519-sig-over-all-above-fields",
+  "rollout_percentage": 10
+}
+```
+
+The device verifies the manifest signature before downloading the image. If the manifest is tampered (wrong URL, substituted hash), the signature check fails. Only if the manifest is valid does the device download and write the image.
+
+The `rollout_percentage` field enables canary releases: only 10% of the fleet receives the update initially. After 48 hours with no failure reports, the percentage increases. This is how large IoT fleets (millions of devices) roll out firmware safely.
+
+## HTTPS OTA: TLS alone is not enough
+
+HTTPS with TLS server authentication protects against network eavesdropping and man-in-the-middle attacks against the connection. It does NOT protect against:
+
+- A compromised update server that serves a malicious image
+- A misconfigured CDN that caches the wrong version
+- A developer who accidentally publishes the wrong binary
+
+The complete security chain for HTTPS OTA:
+
+1. **TLS with certificate pinning** — the device verifies the server's certificate against a pinned public key, not just against a trusted CA. This prevents certificate compromise attacks.
+2. **HTTPS image download** — transport layer integrity (no MITM in transit)
+3. **SHA-256 image hash verification** — integrity check from a signed manifest
+4. **Ed25519 signature verification** — authenticity check in the bootloader
+
+Certificate pinning in C using mbedTLS:
+
+```c
+/* Pinned server certificate (DER-encoded, embedded in firmware) */
+static const uint8_t server_cert_der[] = {
+    /* ... DER bytes of the known-good server certificate ... */
+};
+
+mbedtls_x509_crt server_cert;
+mbedtls_x509_crt_init(&server_cert);
+mbedtls_x509_crt_parse_der(&server_cert, server_cert_der, sizeof(server_cert_der));
+
+mbedtls_ssl_conf_ca_chain(&ssl_conf, &server_cert, NULL);
+mbedtls_ssl_conf_authmode(&ssl_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+/* If the server presents a different certificate, TLS handshake fails */
+```
+
+Certificate pinning has a maintenance cost: when the server certificate expires or is rotated, pinned clients need an update to pin the new certificate. Mitigations: pin the CA certificate instead of the leaf, use long-lived certificates, or include both old and new pinned certificates during a rotation window.
+
+## The SUIT manifest standard
+
+IETF RFC 9019 defines the SUIT (Software Update for IoT) manifest — a standardized, CBOR-encoded format for describing firmware updates. SUIT manifests include:
+
+- Target device class and hardware version
+- Fetch instructions (where to download the image)
+- Condition checks (minimum space, current version, etc.)
+- Processing directives (decrypt before writing, apply delta)
+- Signature (COSE-Sign, using Ed25519 or ECDSA)
+
+SUIT separates the update POLICY (conditions, directives) from the image content. The bootloader evaluates the manifest before downloading anything. This is more expressive than a simple JSON manifest and is the direction the embedded industry is moving for standardized OTA.
+
+MCUboot added experimental SUIT support in 2024. Zephyr's DFU subsystem targets SUIT as the manifest format for future versions.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An OTA system uses HTTPS to download firmware images signed by Ed25519. A security auditor identifies that the device trusts any certificate signed by the system's CA. An attacker obtains a fraudulent certificate from the CA (via social engineering). What images can the attacker serve to the device?",
+      options: [
+        "None — Ed25519 signature verification at the bootloader catches all attacks",
+        "The attacker can serve any image they control to the device over HTTPS (their certificate validates against the compromised CA). The device downloads and writes the image to flash. The Ed25519 bootloader signature verification then rejects the image (attacker doesn't have the signing private key). The device boots the old firmware via rollback. The transport attack failed at the bootloader layer. However: if the device has no rollback and uses overwrite mode, the flash slot is overwritten with an unsigned image and the device may brick (or boot into MCUboot recovery).",
+        "The attacker can serve any image and bypass Ed25519 verification",
+        "The attacker cannot serve any image — TLS prevents all attacks",
+      ],
+      correct: 1,
+      explanation:
+        "This illustrates why both layers are required. Transport security (TLS) prevents eavesdropping and MitM against LEGITIMATE connections. A compromised CA allows an attacker to impersonate the legitimate server — the TLS connection appears valid but delivers attacker content. The bootloader's signature verification is the second layer: it rejects any image not signed by the private key, which the attacker doesn't have. Defense in depth: the transport attack downloads a malicious image, but the bootloader refuses to boot it. Certificate pinning would have stopped the attack at the transport layer too — the fraudulent CA cert wouldn't match the pinned cert.",
+    },
+    {
+      question:
+        "A BLE DFU transfer is interrupted mid-way (BLE disconnection) after 60% of the image is written to the secondary slot. The device loses power. On reconnection, the OTA client must resume. What's the minimum state the device must persist to safely resume the transfer?",
+      options: [
+        "Nothing — restart the transfer from scratch",
+        "The current write offset (how many bytes were written), the running CRC accumulated so far, and the total expected image size. With offset, the transfer can resume from where it stopped (download bytes offset through total_size). With the running CRC, the per-chunk integrity check continues correctly without recomputing over already-written bytes. The total size confirms the transfer is for the same image. All three should be in persistent storage (e.g., RTC backup registers or a dedicated flash page) so they survive power loss. Without persistence, the transfer always restarts from 0 — fine for small images but impractical for 200 KB images over a slow BLE link.",
+        "The full image downloaded so far (stored in RAM)",
+        "The transfer session ID from the BLE stack",
+      ],
+      correct: 1,
+      explanation:
+        "Resumable transfers require persisting exactly enough state to continue correctly. The minimum: write offset (resume position), running CRC (continue integrity check without recomputing), total size (verify we're resuming for the same image). Optional: the manifest version and target hardware (prevent resuming an update that was superseded during the outage). Storing the partial image in RAM fails on power loss; storing the full downloaded-so-far image in flash wastes the secondary slot (since the partial image is already there). The goal is to persist only the state needed to safely continue — not the data itself.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 4 covers secure boot chain and key management — how to protect the signing private key, how to rotate keys in the field without bricking devices, and the trust anchor model that makes the bootloader's signature verification meaningful at scale.

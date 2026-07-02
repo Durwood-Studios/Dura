@@ -1,0 +1,299 @@
+---
+title: "Testing Embedded Drivers on the Host — Mocks, Unity, and CI"
+description: "Run embedded driver tests on a development machine without hardware. Mock the platform port, test compensation formulas and state machines with Unity, and wire it into CI."
+phase: 10
+module: "e-5-drivers"
+order: 5
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-5-drivers/04"
+standards:
+  primaryAnchor: "Unity Test Framework"
+  cs2023: ["SE-Testing", "SE-CodeQuality"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - host-side-test
+  - unity-test-framework
+  - mock-driver
+  - test-fixture
+  - platform-abstraction
+  - cross-compiled-test
+  - injection-point
+  - on-target-test
+learningOutcomes:
+  - "Write Unity test cases for embedded driver logic that runs natively on a development host"
+  - "Build a mock I2C platform port that simulates sensor register reads"
+  - "Structure a driver so its logic is testable without hardware by separating platform-specific calls"
+  - "Describe the limits of host-side testing and what must be tested on target"
+professionalContext: "Embedded engineers spend enormous time debugging on hardware — flashing, attaching a debugger, reproducing timing-sensitive bugs. Host-side testing eliminates 60-80% of this for driver logic, compensation formulas, and protocol state machines. Teams that skip unit testing spend 3× longer finding bugs. Teams that unit test spend more time adding features. This lesson pays back on the first bug it catches."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The BME280 compensation formulas from lesson 4 contain about 40 lines of integer arithmetic. They can be verified in 10 minutes on a PC with known reference inputs and expected outputs from the Bosch datasheet appendix. On hardware, verifying the same formulas requires a calibrated temperature/humidity reference, a hardware setup, a debug session, and manual comparison.
+
+The PC test is 10 minutes. The hardware verification is 4 hours. Every formula bug caught on the PC saves 4 hours on hardware.
+
+## The Unity test framework
+
+<VocabTooltip slug="unity-test-framework">Unity</VocabTooltip> is a lightweight C test framework
+designed for embedded systems. It compiles for both host (x86/x64) and target (Cortex-M), has no
+dependencies except the C standard library, and is the most widely used embedded unit test
+framework.
+
+```c
+/* test_bme280_compensation.c */
+#include "unity.h"
+#include "bme280.h"
+
+/* Bosch datasheet provides reference calibration coefficients and expected outputs */
+static bme280_t dev;
+
+void setUp(void) {
+    /* Reference coefficients from BME280 datasheet appendix */
+    dev.dig_T1 = 27504;
+    dev.dig_T2 = 26435;
+    dev.dig_T3 = -1000;
+    dev.dig_P1 = 36477;
+    dev.dig_P2 = -10685;
+    dev.dig_P3 = 3024;
+    dev.dig_P4 = 2855;
+    dev.dig_P5 = 140;
+    dev.dig_P6 = -7;
+    dev.dig_P7 = 15500;
+    dev.dig_P8 = -14600;
+    dev.dig_P9 = 6000;
+    dev.dig_H1 = 75;
+    dev.dig_H2 = 370;
+    dev.dig_H3 = 0;
+    dev.dig_H4 = 313;
+    dev.dig_H5 = 50;
+    dev.dig_H6 = 30;
+    dev.t_fine = 0;
+}
+
+void tearDown(void) { }
+
+void test_temperature_compensation_known_reference(void) {
+    /* Bosch reference input: adc_T = 519888 → expected 25.08°C (2508 in centidegC) */
+    int32_t temp = compensate_temperature_exposed(&dev, 519888);
+    TEST_ASSERT_INT32_WITHIN(10, 2508, temp);   /* ±0.1°C tolerance */
+}
+
+void test_pressure_compensation_reference(void) {
+    /* Must run temperature first to set t_fine */
+    compensate_temperature_exposed(&dev, 519888);
+    /* Bosch reference input: adc_P = 415148 → expected 100653 Pa */
+    uint32_t press = compensate_pressure_exposed(&dev, 415148);
+    TEST_ASSERT_UINT32_WITHIN(100, 100653, press);   /* ±100 Pa */
+}
+
+void test_temperature_clamps_overflow(void) {
+    /* Verify formula doesn't overflow for ADC extremes */
+    int32_t temp_min = compensate_temperature_exposed(&dev, 0);
+    int32_t temp_max = compensate_temperature_exposed(&dev, 1048575);
+    /* Results should be in a physically plausible range, not garbage */
+    TEST_ASSERT_GREATER_THAN_INT32(-10000, temp_min);  /* > -100°C */
+    TEST_ASSERT_LESS_THAN_INT32(12000, temp_max);       /* < 120°C */
+}
+
+int main(void) {
+    UNITY_BEGIN();
+    RUN_TEST(test_temperature_compensation_known_reference);
+    RUN_TEST(test_pressure_compensation_reference);
+    RUN_TEST(test_temperature_clamps_overflow);
+    return UNITY_END();
+}
+```
+
+The compensation functions (`compensate_temperature`, `compensate_pressure`, `compensate_humidity`) are `static` in the driver — not directly callable from tests. The standard pattern: rename them to non-static when `UNIT_TESTING` is defined:
+
+```c
+/* bme280.c */
+#ifdef UNIT_TESTING
+int32_t compensate_temperature_exposed(bme280_t *d, int32_t adc_T) {
+    return compensate_temperature(d, adc_T);
+}
+#endif
+```
+
+## Mock I2C platform port
+
+A mock platform port simulates sensor register reads by returning pre-programmed bytes:
+
+```c
+/* mock_i2c.h / mock_i2c.c */
+#pragma once
+#include "i2c.h"
+#include <stdint.h>
+#include <string.h>
+
+#define MOCK_REG_COUNT 256
+
+typedef struct {
+    uint8_t regs[MOCK_REG_COUNT];
+    /* Track which registers were written for assertion */
+    uint8_t written_regs[MOCK_REG_COUNT];
+    uint8_t written_vals[MOCK_REG_COUNT];
+    int     write_count;
+    int     read_error_on_reg;   /* -1 = no error; N = force error on reg N */
+} mock_i2c_state_t;
+
+static mock_i2c_state_t mock_state;
+
+static drv_status_t mock_read_register(i2c_t *bus, uint8_t addr,
+                                        uint8_t reg, uint8_t *out) {
+    (void)bus; (void)addr;
+    if (reg == (uint8_t)mock_state.read_error_on_reg) {
+        return DRV_TIMEOUT;    /* Simulate a bus error */
+    }
+    *out = mock_state.regs[reg];
+    return DRV_OK;
+}
+
+static drv_status_t mock_read_registers(i2c_t *bus, uint8_t addr,
+                                         uint8_t reg, uint8_t *buf, size_t len) {
+    (void)bus; (void)addr;
+    memcpy(buf, &mock_state.regs[reg], len);
+    return DRV_OK;
+}
+
+static drv_status_t mock_write_register(i2c_t *bus, uint8_t addr,
+                                         uint8_t reg, uint8_t val) {
+    (void)bus; (void)addr;
+    mock_state.regs[reg] = val;
+    mock_state.written_regs[mock_state.write_count] = reg;
+    mock_state.written_vals[mock_state.write_count] = val;
+    mock_state.write_count++;
+    return DRV_OK;
+}
+
+void mock_i2c_reset(void) {
+    memset(&mock_state, 0, sizeof(mock_state));
+    mock_state.read_error_on_reg = -1;
+}
+
+void mock_i2c_set_reg(uint8_t reg, uint8_t val) {
+    mock_state.regs[reg] = val;
+}
+
+void mock_i2c_force_error_on(int reg) {
+    mock_state.read_error_on_reg = reg;
+}
+```
+
+## Testing initialization with the mock
+
+```c
+void test_bme280_init_verifies_chip_id(void) {
+    mock_i2c_reset();
+    mock_i2c_set_reg(0xD0, 0x60);   /* REG_ID = 0x60 (correct) */
+    /* Populate calibration registers with plausible values */
+    /* ... (set 0x88–0xA1, 0xE1–0xF0 to reference values) ... */
+
+    i2c_t fake_bus = { /* mock vtable */ };
+    bme280_t dev;
+    drv_status_t rc = bme280_init(&dev, &fake_bus, 0x76);
+    TEST_ASSERT_EQUAL(DRV_OK, rc);
+}
+
+void test_bme280_init_fails_wrong_chip_id(void) {
+    mock_i2c_reset();
+    mock_i2c_set_reg(0xD0, 0xFF);   /* Wrong chip ID */
+
+    i2c_t fake_bus = { /* mock vtable */ };
+    bme280_t dev;
+    drv_status_t rc = bme280_init(&dev, &fake_bus, 0x76);
+    TEST_ASSERT_EQUAL(DRV_BUS_ERROR, rc);
+}
+
+void test_bme280_init_propagates_i2c_error(void) {
+    mock_i2c_reset();
+    mock_i2c_force_error_on(0xD0);   /* REG_ID read fails */
+
+    i2c_t fake_bus = { /* mock vtable */ };
+    bme280_t dev;
+    drv_status_t rc = bme280_init(&dev, &fake_bus, 0x76);
+    TEST_ASSERT_EQUAL(DRV_TIMEOUT, rc);
+}
+```
+
+These tests run in milliseconds on a PC. They validate that init handles chip-ID failures, I2C errors, and wrong addresses before a single line is flashed to hardware.
+
+## Build system integration
+
+```makefile
+# Makefile target for host-side tests
+CC_HOST = gcc
+CFLAGS_HOST = -Wall -Wextra -DUNIT_TESTING -Isrc -Iunity/src
+
+test: test_bme280_compensation test_bme280_init
+	./test_bme280_compensation && ./test_bme280_init
+
+test_bme280_compensation: src/bme280.c tests/test_bme280_compensation.c unity/src/unity.c
+	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^
+
+test_bme280_init: src/bme280.c src/mock_i2c.c tests/test_bme280_init.c unity/src/unity.c
+	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^
+```
+
+Running `make test` in CI catches compensation formula bugs and init error-path regressions without hardware.
+
+## The limits of host-side testing
+
+Host-side tests cover:
+
+- Compensation formula correctness against reference inputs
+- Error propagation (does a DRV_NO_ACK from the bus reach the caller?)
+- State machine logic (does init verify chip ID before calibration load?)
+- Protocol sequencing (is ctrl_hum written before ctrl_meas?)
+
+Host-side tests do NOT cover:
+
+- **Hardware timing**: does the 62.5 ms standby time actually produce stable readings?
+- **Electrical behavior**: is the I2C pull-up resistor correct for the bus capacitance?
+- **DMA interaction**: does the ADC DMA transfer complete before the task reads the buffer?
+- **Real interrupt latency**: does the ISR execute within the required window on this chip?
+- **Power-up sequencing**: does the sensor's `delay_ms(5)` after reset actually wait long enough?
+
+The rule: test logic on the host; test timing and electrical behavior on the target. Host-side testing does not replace on-target testing — it complements it by catching logical bugs cheaply so on-target time is spent on what only hardware can reveal.
+
+## Check your understanding
+
+<FillBlank
+  prompt="Host-side tests cannot catch ___ bugs because the test environment does not have the actual ___. For protocol sequencing (e.g. writing ctrl_hum before ctrl_meas), host-side tests ___ catch these bugs using a ___ platform port."
+  answers={["hardware timing", "hardware", "can", "mock"]}
+  hints={[
+    "Things that depend on the real chip's clock and peripherals",
+    "The physical chip and its peripherals",
+    "Whether host tests are capable of testing protocol sequencing",
+    "A fake implementation of the platform interface",
+  ]}
+/>
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A compensation formula produces the correct result for the Bosch reference input (adc_T=519888 → 25.08°C) but gives wrong results for adc_T near 0 and near 1048575 (the 20-bit ADC limits). The formula's structure suggests intermediate values may overflow int32_t. What test would most efficiently locate the overflow?",
+      options: [
+        "Run the firmware on the real BME280 at extreme temperatures",
+        "Add boundary tests in the host-side test suite: call compensate_temperature with adc_T=0, adc_T=1, adc_T=1048574, and adc_T=1048575. Compare against expected outputs computed by the Bosch reference implementation (available in their GitHub repo). If the host tests reveal the overflow, fix it by casting intermediate results to int64_t at the overflowing step. This is the correct division of labor: formula bugs are logic bugs, testable on host in seconds, no hardware needed.",
+        "Request a BME280 sample for cold-room testing",
+        "The formula is correct — the datasheet guarantees valid output at all ADC values",
+      ],
+      correct: 1,
+      explanation:
+        "Boundary tests for integer arithmetic are quintessential host-side tests. The formula arithmetic is pure computation — no hardware involved. Running it with boundary inputs (ADC min/max) on the host costs milliseconds and finds overflow bugs immediately. On-target testing for extreme temperatures requires environmental chambers and calibrated references — far more expensive for what is fundamentally a math bug. The Bosch BME280 GitHub repository includes a reference implementation you can compare against. Use the fast tool for the fast problem.",
+    },
+  ]}
+/>
+
+## What's next
+
+Module E6 takes the driver skill set and applies it in Rust — writing embedded drivers with embedded-hal traits and testing them with the same mock-platform approach. The patterns are identical; the language's ownership rules prevent several classes of driver bugs at compile time.

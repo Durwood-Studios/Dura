@@ -1,0 +1,237 @@
+---
+title: "The Virtual Sequencer Pattern"
+description: "Structuring the virtual sequencer class, passing sequencer handles via config_db, and p_sequencer — the canonical way to coordinate multi-agent scenarios."
+phase: 11
+module: "h-5-uvm-sequences"
+order: 4
+estimatedMinutes: 70
+difficulty: 4
+prerequisites:
+  - "h-5-uvm-sequences/03-response-handling"
+  - "h-2-uvm-testbench-architecture/02-uvm-phases-and-config-db"
+standards:
+  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - virtual-sequencer
+  - p-sequencer
+  - uvm-declare-p-sequencer
+  - multi-agent
+  - sequencer-handle
+learningOutcomes:
+  - "Write a uvm_virtual_sequencer class that holds handles to sub-sequencers"
+  - "Pass sequencer handles to the virtual sequencer via uvm_config_db"
+  - "Use the `uvm_declare_p_sequencer macro to type-safe access p_sequencer in a virtual sequence"
+  - "Build a three-agent scenario using a single virtual sequence"
+professionalContext: "Real SoC verification runs scenarios across multiple interfaces simultaneously — a CPU writing via AXI while a DMA controller transfers via an AHB interface while an interrupt controller fires — all choreographed and timed relative to each other. The virtual sequencer pattern is the structural mechanism that makes this possible in a single testbench without a rats-nest of handles and raw task calls."
+thresholdConcept: false
+---
+
+## The coordination problem
+
+H5-01 showed a virtual sequence that stored sequencer handles directly as class fields:
+
+```systemverilog
+class scenario_seq extends uvm_sequence;
+    axi_sequencer  axi_seq;   // Set manually before start()
+    apb_sequencer  apb_seq;
+    task body();
+        fork
+            ...axi_seq...
+            ...apb_seq...
+        join_all
+    endtask
+endclass
+```
+
+This works, but the test class must know about each sequencer and set each field. As the testbench grows to 5-10 agents, the test class becomes a wiring diagram. The cleaner pattern uses a **virtual sequencer**: a dedicated UVM component whose only job is to hold the per-agent sequencer handles.
+
+## The virtual sequencer
+
+```systemverilog
+// soc_vseqr.sv
+class soc_vseqr extends uvm_sequencer;
+    `uvm_component_utils(soc_vseqr)
+
+    // One handle per agent's sequencer
+    axi_sequencer   axi_seqr;
+    apb_sequencer   apb_seqr;
+    irq_sequencer   irq_seqr;
+    dma_sequencer   dma_seqr;
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+endclass
+```
+
+It extends `uvm_sequencer` but with a null item type — it doesn't generate items directly. Its only value is the handles it holds.
+
+The environment creates and wires it in `connect_phase`:
+
+```systemverilog
+// soc_env.sv
+class soc_env extends uvm_env;
+    `uvm_component_utils(soc_env)
+
+    axi_agent   m_axi_agent;
+    apb_agent   m_apb_agent;
+    irq_agent   m_irq_agent;
+    dma_agent   m_dma_agent;
+    soc_vseqr   m_vseqr;
+
+    function void build_phase(uvm_phase phase);
+        m_axi_agent = axi_agent::type_id::create("m_axi_agent", this);
+        m_apb_agent = apb_agent::type_id::create("m_apb_agent", this);
+        m_irq_agent = irq_agent::type_id::create("m_irq_agent", this);
+        m_dma_agent = dma_agent::type_id::create("m_dma_agent", this);
+        m_vseqr     = soc_vseqr::type_id::create("m_vseqr", this);
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        // Wire the per-agent sequencers into the virtual sequencer
+        m_vseqr.axi_seqr = m_axi_agent.sequencer;
+        m_vseqr.apb_seqr = m_apb_agent.sequencer;
+        m_vseqr.irq_seqr = m_irq_agent.sequencer;
+        m_vseqr.dma_seqr = m_dma_agent.sequencer;
+    endfunction
+endclass
+```
+
+The wiring happens once in the environment. Every test and every virtual sequence benefits.
+
+## The `uvm_declare_p_sequencer macro
+
+Virtual sequences need a typed handle to the virtual sequencer. The `\`uvm_declare_p_sequencer`macro creates a field`p_sequencer` of the declared type, automatically cast and checked at sequence start:
+
+```systemverilog
+class soc_boot_scenario extends uvm_sequence;
+    `uvm_object_utils(soc_boot_scenario)
+    `uvm_declare_p_sequencer(soc_vseqr)   // Creates: soc_vseqr p_sequencer;
+
+    task body();
+        // p_sequencer is now a typed soc_vseqr handle
+        // Access per-agent sequencers through it:
+        apb_reset_seq rst = apb_reset_seq::type_id::create("rst");
+        rst.start(p_sequencer.apb_seqr);
+
+        axi_init_seq init = axi_init_seq::type_id::create("init");
+        init.start(p_sequencer.axi_seqr);
+
+        // Wait for DMA ready, then trigger a transfer
+        wait_dma_ready_seq wait_dma = wait_dma_ready_seq::type_id::create("wait_dma");
+        wait_dma.start(p_sequencer.dma_seqr);
+
+        fork
+            begin
+                dma_transfer_seq dma_xfr = dma_transfer_seq::type_id::create("dma_xfr");
+                dma_xfr.start(p_sequencer.dma_seqr);
+            end
+            begin
+                // IRQ monitoring happens concurrently
+                irq_monitor_seq irq = irq_monitor_seq::type_id::create("irq");
+                irq.start(p_sequencer.irq_seqr);
+            end
+        join_any
+    endtask
+endclass
+```
+
+The scenario reads like a protocol: reset the APB bus, initialize AXI, wait for DMA ready, then concurrently run DMA transfer while monitoring interrupts.
+
+## Running a virtual sequence from the test
+
+```systemverilog
+class boot_test extends uvm_test;
+    `uvm_component_utils(boot_test)
+    soc_env env;
+
+    function void build_phase(uvm_phase phase);
+        env = soc_env::type_id::create("env", this);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        soc_boot_scenario boot = soc_boot_scenario::type_id::create("boot");
+        phase.raise_objection(this);
+        boot.start(env.m_vseqr);   // Start on the virtual sequencer
+        phase.drop_objection(this);
+    endtask
+endclass
+```
+
+The test is three meaningful lines: create the scenario, raise objection, start it, drop objection. All agent-level coordination lives in the scenario class.
+
+## Passing the virtual sequencer via config_db
+
+For testbench reuse across multiple environments, set the virtual sequencer in the config DB instead of hardcoding it in the test:
+
+```systemverilog
+// In the environment's end_of_elaboration_phase (after connect_phase):
+function void end_of_elaboration_phase(uvm_phase phase);
+    uvm_config_db #(soc_vseqr)::set(this, "*.vseqr", "vseqr", m_vseqr);
+endfunction
+
+// In the test, retrieve it:
+task run_phase(uvm_phase phase);
+    soc_vseqr vseqr;
+    if (!uvm_config_db #(soc_vseqr)::get(this, "", "vseqr", vseqr))
+        `uvm_fatal("TEST", "No virtual sequencer in config DB")
+    boot.start(vseqr);
+endtask
+```
+
+This pattern lets the same test class work with different environments (a real environment for full regression, a stub environment for unit tests) by substituting a different virtual sequencer in the config DB.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "What problem does a virtual sequencer solve that the approach of passing sequencer handles as class fields in a virtual sequence does not?",
+      options: [
+        "Virtual sequencers run faster",
+        "The virtual sequencer centralizes all per-agent sequencer handles in one UVM component. With field-based handles, every test that creates a virtual sequence must manually set each field to point to each agent's sequencer — the wiring is repeated in every test. With a virtual sequencer, the wiring happens once in the environment's connect_phase; every sequence that uses uvm_declare_p_sequencer gets typed access to all agents' sequencers automatically. As the number of agents grows, this difference is the difference between maintainable and unmanageable testbenches.",
+        "Sequences can't hold component handles",
+        "Virtual sequencers enable parallel execution",
+      ],
+      correct: 1,
+      explanation:
+        "The virtual sequencer's value is centralized wiring. One connect_phase wires all agents; every virtual sequence benefits. Field-based handle passing scales linearly with tests × agents — an O(N×M) maintenance problem. The virtual sequencer reduces it to O(N+M).",
+    },
+    {
+      question:
+        "The `uvm_declare_p_sequencer(soc_vseqr) macro is placed in a virtual sequence class. What does it create, and when is it populated?",
+      options: [
+        "Creates p_sequencer as a uvm_sequencer handle, populated at runtime by the user",
+        "Creates a typed field `soc_vseqr p_sequencer` and populates it automatically when the sequence is started via .start(vseqr) — UVM casts the passed sequencer to soc_vseqr and stores the result in p_sequencer. If the cast fails (wrong sequencer type passed), UVM reports a fatal. The macro eliminates the need for manual $cast in every sequence.",
+        "Creates a macro for performance optimization",
+        "Must be paired with uvm_implement_p_sequencer",
+      ],
+      correct: 1,
+      explanation:
+        "The macro generates: (1) a typed p_sequencer field, and (2) a pre_body() that casts the sequencer handle passed to .start() into the typed field, with a fatal on cast failure. This provides type safety at runtime and eliminates boilerplate $cast code in every virtual sequence.",
+    },
+    {
+      question:
+        "A test runs a virtual sequence on env.m_vseqr. The AXI sub-sequence within it hangs indefinitely. Where is the first place to look for the bug?",
+      options: [
+        "The virtual sequencer's arbitration mode",
+        "The AXI sub-sequence is calling start(p_sequencer.axi_seqr), and that sequencer may not have a driver connected — meaning get_next_item() returns immediately but the transaction never completes, so finish_item() never unblocks. Check: (1) is the AXI agent in active mode with a driver? (2) is the AXI agent's sequencer wired in connect_phase? (3) does the AXI driver call item_done()? A sequencer with no active driver causes sequences to block permanently on finish_item.",
+        "The p_sequencer handle is null",
+        "Virtual sequences can't call start() on sub-sequencers",
+      ],
+      correct: 1,
+      explanation:
+        "A hanging finish_item() almost always means either: (1) no driver is connected to the sequencer so get_next_item() blocks forever; (2) the driver connected but never calls item_done(), so the sequencer never acknowledges completion; or (3) the agent is in passive mode with no driver at all. Check the agent mode and the driver's item_done() call first.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H5-05 covers sequence parameterization and test-pattern libraries — writing sequences that are configurable via constructor arguments or `uvm_config_db`, building a reusable sequence library that a regression test can call with different parameters per test.

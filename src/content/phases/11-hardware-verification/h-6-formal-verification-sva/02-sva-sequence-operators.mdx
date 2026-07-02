@@ -1,0 +1,263 @@
+---
+title: "SVA Sequence Operators — Repetition, Throughout, Within"
+description: "Temporal sequence operators that express complex multi-cycle protocol behavior: repetition, non-consecutive matches, containment, and intersection."
+phase: 11
+module: "h-6-formal-verification-sva"
+order: 2
+estimatedMinutes: 70
+difficulty: 4
+prerequisites:
+  - "h-6-sva-and-formal"
+standards:
+  primaryAnchor: "IEEE 1800-2023 §16 (SystemVerilog Assertions)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - consecutive-repetition
+  - non-consecutive-repetition
+  - throughout
+  - within
+  - intersect
+  - first-match
+  - goto-repetition
+  - implication-antecedent
+learningOutcomes:
+  - "Write a sequence using consecutive repetition [*N] and range [*N:M]"
+  - "Distinguish consecutive [*] from non-consecutive (goto [->] and nonconsec [=]) repetition"
+  - "Use throughout to assert a condition holds during an entire sequence"
+  - "Use within to check that one sequence is contained inside another"
+professionalContext: "Protocol handshakes rarely fit a two-cycle pattern. AXI4 requires valid to hold stable until ready; a burst can last 1–256 cycles; grant must stay high for exactly the burst length. The sequence operators from IEEE 1800-2023 §16 are how DV engineers write these properties precisely. Engineers who only know ## and |-> hit a wall at the first real protocol. Engineers who know the full operator set write one-line properties that cover every edge case."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Lesson H6-1 introduced the core SVA building blocks: `##N`, `|->`, `$rose`, `$fell`. Those are enough for simple handshakes. Real protocols are not simple. Consider AXI4 AWVALID: once asserted it must stay high — with AWADDR stable — until AWREADY is seen. That constraint can't be expressed with a single `##`. The operators this lesson covers — repetition, `throughout`, `within` — are how you write it.
+
+Every complex protocol property that looks hard reduces to a combination of these operators. Knowing them changes SVA from "I can write a two-cycle check" to "I can write the full AXI spec as a set of properties."
+
+## Consecutive repetition — [*N] and [*N:M]
+
+`[*N]` repeats a boolean expression over exactly N consecutive clock cycles:
+
+```systemverilog
+// Signal must be high for exactly 4 consecutive cycles
+sequence s_4_high;
+    valid [*4];         // valid is true on cycles 0, 1, 2, 3
+endsequence
+
+// Range: 1 to 4 consecutive cycles
+sequence s_burst_len;
+    valid [*1:4];       // matches 1, 2, 3, or 4 consecutive cycles
+endsequence
+
+// Unbounded upper end — 1 to infinity
+sequence s_until_done;
+    valid [*1:$];       // at least one cycle; $ = unlimited
+endsequence
+```
+
+The AXI valid-stable requirement uses this directly:
+
+```systemverilog
+// AXI4: once awvalid is asserted, it must stay high until awready
+property p_awvalid_stable;
+    @(posedge clk) disable iff (!rst_n)
+        $rose(awvalid) |-> awvalid [*1:$] ##0 awready;
+        //                 ^^^^^^^^^^^^^^^^^^ valid stays high until...
+        //                                             ^^ ready arrives same cycle
+endproperty
+assert property (p_awvalid_stable);
+```
+
+Reading this: "Once awvalid rises, it stays high for 1 or more cycles, and at the end of that run, awready is also high."
+
+## Non-consecutive repetition — [->N] and [=N]
+
+Sometimes a condition must happen N times but not necessarily consecutively.
+
+**Goto repetition `[->N]`** — matches exactly N occurrences, ending on the last:
+
+```systemverilog
+// Exactly 3 grants issued before request drops
+sequence s_three_grants;
+    grant [->3];     // grant appears exactly 3 times (non-consecutive OK)
+endsequence
+
+property p_req_gets_three_grants;
+    @(posedge clk)
+        req |-> ##1 grant [->3] ##1 !req;
+endproperty
+```
+
+The sequence ends on the third `grant` assertion. `[->N]` is "goto" — it advances to the next match.
+
+**Non-consecutive [=N]** — matches N occurrences but allows trailing cycles after the last:
+
+```systemverilog
+// grant appears exactly 3 times within 10 cycles (not necessarily last)
+sequence s_three_grants_bounded;
+    grant [=3] ##[0:5] done;  // 3 grants, then done within 5 cycles after
+endsequence
+```
+
+**In practice**: use `[->N]` when you care about the ending point, `[=N]` when you care about count but the sequence continues beyond the last occurrence.
+
+## throughout — condition holds across the entire sequence
+
+`throughout` asserts that a condition is true on every cycle of the sequence:
+
+```systemverilog
+// Data must remain stable throughout a burst (no changes while valid)
+property p_data_stable_during_burst;
+    @(posedge clk) disable iff (!rst_n)
+        (wvalid && !wready) |->
+            ($stable(wdata) && $stable(wstrb)) throughout (wvalid [*1:$]);
+endproperty
+assert property (p_data_stable_during_burst);
+```
+
+Reading this: "If wvalid is asserted and wready isn't (mid-burst), then wdata and wstrb must be stable throughout the run of wvalid."
+
+Another common use — clock enable must stay high during a multi-cycle operation:
+
+```systemverilog
+property p_clk_en_during_mult;
+    @(posedge clk)
+        start_mult |-> clk_en throughout (start_mult ##[1:8] done_mult);
+endproperty
+```
+
+## within — one sequence contained in another
+
+`s1 within s2` succeeds when sequence s1 completes entirely inside sequence s2:
+
+```systemverilog
+// The full AXI read data transfer must complete within the burst window
+sequence s_rdata_phase;
+    rvalid ##[0:3] rready;    // One rdata transfer
+endsequence
+
+sequence s_burst_window;
+    ##[1:256] burst_done;     // Burst window
+endsequence
+
+property p_rdata_in_burst;
+    @(posedge clk)
+        start_burst |-> (s_rdata_phase within s_burst_window);
+endproperty
+```
+
+`within` is less commonly used than `throughout` because it requires both sequences to start on the same cycle, which limits its applicability. Know it for the protocol specs that do need it (specifically, checking that sub-events finish inside a parent event window).
+
+## intersect — both sequences match, same total length
+
+`intersect` requires both sequences to match AND finish in the same clock cycle:
+
+```systemverilog
+// req lasts exactly as long as gnt — both must end together
+property p_req_gnt_aligned;
+    @(posedge clk)
+        req |-> req [*1:$] intersect gnt [*1:$];
+endproperty
+```
+
+This is stricter than `and` (which just requires both to eventually complete). `intersect` is the right operator when two signals must have the same pulse width.
+
+## first_match — stop at earliest completion
+
+When a sequence can match in multiple ways, `first_match` stops at the earliest:
+
+```systemverilog
+// Multiple possible end points — stop at first valid ack
+sequence s_fast_ack;
+    first_match(req ##[1:5] ack);   // Match as soon as ack appears
+endsequence
+```
+
+Without `first_match`, the sequence engine forks at each possible end point and checks them all. This affects how `|->` interacts with sequences that have `[*]` operators — `first_match` tightens the semantics.
+
+## A complete AXI4 write channel property
+
+Combining everything:
+
+```systemverilog
+// AXI4 write channel: AWVALID stable until AWREADY;
+//                     WVALID must follow within 0-100 cycles;
+//                     WDATA stable throughout each WVALID cycle.
+package axi4_pkg;
+
+property p_aw_stable_until_rdy;
+    @(posedge clk) disable iff (!rst_n)
+        $rose(awvalid) |->
+            (awvalid && $stable(awaddr) && $stable(awlen)) throughout
+            (awvalid [*1:$] ##0 awready);
+endproperty
+
+property p_w_follows_aw;
+    @(posedge clk) disable iff (!rst_n)
+        awvalid |-> ##[0:100] wvalid;
+endproperty
+
+property p_wdata_stable;
+    @(posedge clk) disable iff (!rst_n)
+        (wvalid && !wready) |->
+            $stable(wdata) && $stable(wstrb);
+endproperty
+
+endpackage
+```
+
+These three properties together cover the core AXI4 write-address + write-data correctness. Each is one line (or close to it) once you know the operators.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question: "What does `req [*1:$] ##0 ack` express in an SVA sequence?",
+      options: [
+        "req is high for exactly one cycle, then ack",
+        "req stays high for one or more consecutive cycles, and in the final cycle of that run, ack is also high — i.e., req stays asserted until ack arrives. The ##0 means the ack check happens in the same cycle as the last req cycle. This is the standard 'handshake wait' pattern: req stays high until acknowledged.",
+        "req and ack are high simultaneously for any number of cycles",
+        "req [*1:$] is equivalent to req [+]",
+      ],
+      correct: 1,
+      explanation:
+        "req [*1:$] matches one or more consecutive cycles where req is true. ##0 means 'same cycle' — so the sequence ends on the cycle where req is still high AND ack is high simultaneously. This is the precise encoding of 'req remains asserted until ack is received.' Using ##1 instead would require ack to arrive one cycle AFTER the last req high, which is a different protocol.",
+    },
+    {
+      question:
+        "An engineer wants to assert that signal `done` appears exactly twice within a 20-cycle window after `start`. Which repetition operator fits?",
+      options: [
+        "done [*2] ##[0:18] start — consecutive repetition",
+        "`$rose(start) |-> ##[1:20] done [=2]` — non-consecutive repetition with count 2. The [=2] form matches exactly 2 occurrences of done within the sequence, non-consecutively. [->2] would work equally well if you want the sequence to end on the second done. [*2] requires TWO CONSECUTIVE cycles of done, which is not what's needed.",
+        "start ##1 done [->2] is correct",
+        "done [*1:$] with a counter in the testbench",
+      ],
+      correct: 1,
+      explanation:
+        "done [=2] or done [->2] are both valid for 'exactly 2 occurrences.' [=2] allows the sequence to continue after the second done; [->2] ends the sequence at the second done. [*2] requires two consecutive cycles of done (done high on cycle N and N+1) which is a much stricter requirement. The non-consecutive operators are the right fit when the condition can appear at any two cycles within the window.",
+    },
+    {
+      question:
+        "Why is `$stable(wdata) throughout (wvalid [*1:$])` a better property than `!$changed(wdata) throughout (wvalid [*1:$])`?",
+      options: [
+        "They're equivalent — same behavior",
+        "$stable(x) is the correct SVA system function for 'x did not change between this clock edge and the previous.' $changed(x) is its opposite (x DID change). Writing !$changed() is logically equivalent but less readable; more importantly, $stable is designed as a sampling function relative to clock edges, while $changed has slightly different semantics in some simulators for the first cycle. The convention in AXI and other VIP specs is to use $stable. Use $stable for clarity and portability.",
+        "$stable is faster in simulation",
+        "$changed has a bug in some SVA implementations",
+      ],
+      correct: 1,
+      explanation:
+        "$stable(x) and !$changed(x) are semantically equivalent in IEEE 1800. The preference for $stable is style and readability — it reads 'the value is stable' which maps directly to the intent. The AXI4 VIP spec and most protocol documentation use $stable. Using the idiomatic form reduces cognitive load for reviewers and reduces the chance of misreading the negation in !$changed.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H6-3 covers liveness and safety properties — the two structural categories of formal property, how `assume property` constrains the environment model, and how vacuity defeats assertions that appear to pass but never fire.

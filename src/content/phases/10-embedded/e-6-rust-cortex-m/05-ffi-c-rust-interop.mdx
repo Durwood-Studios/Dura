@@ -1,0 +1,250 @@
+---
+title: "FFI — Calling C from Rust and Rust from C in Embedded Firmware"
+description: "Most real-world embedded Rust projects start inside a C codebase. FFI lets you call vendor C libraries from Rust, wrap existing drivers incrementally, and gradually migrate without a big-bang rewrite."
+phase: 10
+module: "e-6-rust-cortex-m"
+order: 5
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-6-rust-cortex-m/04"
+standards:
+  primaryAnchor: "Rust Reference — Foreign Function Interface"
+  cs2023: ["PL-LangIndep", "SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - ffi
+  - extern-c
+  - unsafe
+  - bindgen
+  - cbindgen
+  - abi
+  - link-attr
+  - repr-c
+  - no-mangle
+learningOutcomes:
+  - "Declare an extern C function in Rust and call a C library function from Rust code"
+  - "Expose a Rust function to C with #[no_mangle] and extern C"
+  - "Use bindgen to generate Rust bindings from a C header automatically"
+  - "Explain why FFI calls require unsafe and what invariants must be upheld manually"
+professionalContext: "Large embedded C codebases are not rewritten from scratch. The practical adoption path is: add Rust for new modules, call existing C drivers via FFI, migrate incrementally. Ferrocene (ISO 26262-certified Rust toolchain) supports this model. Engineers who can bridge C and Rust operate in both ecosystems simultaneously and are the engineers who enable teams to adopt Rust without halting product development."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A 200,000-line C firmware has a vendor-provided CAN stack, a custom RTOS port, and five years of battle-tested driver code. The team wants to write new modules in Rust — safer ownership, better type system, fewer CVEs — but cannot rewrite the existing code. FFI is the bridge.
+
+With FFI, new Rust modules call the existing C CAN stack. Safety-critical new code is written in Rust. The C code stays exactly as it is until resources allow migrating it — possibly never. The team gets the benefit of Rust for new code without paying the cost of a full rewrite.
+
+## Calling C from Rust
+
+The simplest case: a C function you want to call from Rust.
+
+```c
+/* vendor_hal.h — C header for an existing GPIO HAL */
+#ifndef VENDOR_HAL_H
+#define VENDOR_HAL_H
+#include <stdint.h>
+
+void gpio_set_pin(uint32_t port, uint8_t pin);
+void gpio_clear_pin(uint32_t port, uint8_t pin);
+uint8_t gpio_read_pin(uint32_t port, uint8_t pin);
+#endif
+```
+
+Declare the external C functions in Rust:
+
+```rust
+// vendor_hal.rs — hand-written FFI declarations
+// In practice, use bindgen to generate these automatically (see below)
+
+unsafe extern "C" {
+    fn gpio_set_pin(port: u32, pin: u8);
+    fn gpio_clear_pin(port: u32, pin: u8);
+    fn gpio_read_pin(port: u32, pin: u8) -> u8;
+}
+
+// Safe wrapper — the unsafe boundary is contained here
+pub fn led_on() {
+    // SAFETY: gpio_set_pin is a correctly linked C function with no side effects
+    // that would violate Rust's memory safety rules. port=0x40020C00 (GPIOD),
+    // pin=12. These are valid hardware constants.
+    unsafe { gpio_set_pin(0x40020C00, 12) }
+}
+
+pub fn led_off() {
+    unsafe { gpio_clear_pin(0x40020C00, 12) }
+}
+```
+
+The `unsafe` block is required because Rust cannot verify the safety of C functions — they might access shared memory, read from invalid pointers, or have platform-specific preconditions. The Rust programmer is responsible for documenting and verifying those invariants in the `SAFETY` comment.
+
+## Telling the linker where the C code lives
+
+```toml
+# Cargo.toml
+[build-dependencies]
+cc = "1.0"   # Build script helper for compiling C files
+```
+
+```rust
+// build.rs — runs before compilation
+fn main() {
+    // Compile the C vendor HAL and link it into the Rust binary
+    cc::Build::new()
+        .file("vendor/vendor_hal.c")
+        .include("vendor")
+        .compile("vendor_hal");
+
+    // Tell Cargo to re-run the build script if these files change
+    println!("cargo:rerun-if-changed=vendor/vendor_hal.c");
+    println!("cargo:rerun-if-changed=vendor/vendor_hal.h");
+}
+```
+
+`cc::Build` invokes the cross-compiler (`arm-none-eabi-gcc` when the target is Cortex-M) and produces a static library that the linker includes in the final ELF.
+
+## Using bindgen for automatic binding generation
+
+Hand-writing FFI declarations is error-prone — a wrong type or wrong function signature causes undefined behavior. <VocabTooltip slug="bindgen">bindgen</VocabTooltip> reads C headers and generates correct Rust FFI declarations automatically.
+
+```toml
+# build-dependencies
+bindgen = "0.69"
+```
+
+```rust
+// build.rs
+fn main() {
+    let bindings = bindgen::Builder::default()
+        .header("vendor/vendor_hal.h")
+        .use_core()              // no_std: use core instead of std
+        .ctypes_prefix("cty")   // use cty crate for C type aliases
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .generate()
+        .expect("bindgen failed");
+
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    bindings.write_to_file(out.join("vendor_hal_bindings.rs"))
+        .expect("write failed");
+}
+```
+
+```rust
+// In your Rust source, include the generated bindings
+include!(concat!(env!("OUT_DIR"), "/vendor_hal_bindings.rs"));
+```
+
+Generated output for `void gpio_set_pin(uint32_t port, uint8_t pin)`:
+
+```rust
+extern "C" {
+    pub fn gpio_set_pin(port: u32, pin: u8);
+}
+```
+
+With structs:
+
+```c
+typedef struct { uint32_t x; uint32_t y; } Point;
+void draw_point(Point p);
+```
+
+bindgen generates:
+
+```rust
+#[repr(C)]                 // matches C struct layout exactly
+pub struct Point {
+    pub x: u32,
+    pub y: u32,
+}
+extern "C" {
+    pub fn draw_point(p: Point);
+}
+```
+
+`#[repr(C)]` guarantees field ordering and padding matches the C ABI — required for any struct passed between Rust and C.
+
+## Exposing Rust to C
+
+To call Rust functions from existing C code:
+
+```rust
+// Rust function callable from C
+#[no_mangle]                    // Prevent name mangling — keeps the symbol as 'rust_process_sample'
+pub extern "C" fn rust_process_sample(value: u16) -> u16 {
+    // Purely safe Rust — no unsafe needed to be called from C
+    value.saturating_mul(2)
+}
+```
+
+```c
+/* C side — declare the Rust function */
+extern uint16_t rust_process_sample(uint16_t value);
+
+/* Call it from C */
+uint16_t result = rust_process_sample(sensor_adc_read());
+```
+
+The `#[no_mangle]` attribute prevents Rust from mangling the symbol name. `extern "C"` ensures the C calling convention (ABI). The function body is safe Rust.
+
+For a header file consumers can use, <VocabTooltip slug="cbindgen">cbindgen</VocabTooltip> reads Rust source and generates a C header:
+
+```bash
+cbindgen --config cbindgen.toml --crate my_crate --output include/my_crate.h
+```
+
+## Incremental migration pattern
+
+The practical embedded Rust adoption path:
+
+```
+Week 1: Add Rust to the build system (build.rs, Cargo.toml)
+Week 2: Write new utilities in Rust, call existing C HAL via FFI
+Week 3: Wrap C HAL in safe Rust abstractions (safe wrappers over unsafe calls)
+Week 4+: New modules written entirely in Rust, calling the wrapped C HAL
+Month 3+: Migrate mature C drivers to Rust, shrinking the FFI surface
+```
+
+The C code never knows Rust is involved. The Rust code talks to C via FFI for platform access. Each new module adds safety without touching the existing code.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        'An engineer declares `unsafe extern "C" fn i2c_read(addr: u8, reg: u8, out: *mut u8) -> i32;` in Rust. The C function writes one byte to `*out`. What invariants must the caller uphold, and why is the block marked unsafe?',
+      options: [
+        "None — the C function handles its own safety",
+        "The caller must ensure: (1) `out` is a valid non-null pointer to at least one writable byte; (2) `out` is not aliased by any other reference for the duration of the call; (3) the memory `out` points to remains live (not freed, not a local variable that goes out of scope before the call returns). These invariants cannot be checked by Rust's borrow checker across the FFI boundary. The `unsafe` block is required because the programmer, not the compiler, is taking responsibility for these guarantees. A null `out`, a dangling pointer, or aliased memory causes undefined behavior.",
+        "The unsafe is a formality — the C function is actually safe",
+        "Only the C side needs to be safe; Rust side is automatically safe",
+      ],
+      correct: 1,
+      explanation:
+        "FFI's safety model: Rust's borrow checker stops at the FFI boundary. On the Rust side of `unsafe`, the programmer must manually verify the preconditions the C function requires. For a C function that writes through a pointer: the pointer must be valid, aligned, non-null, non-aliased, and pointing to live memory. The `unsafe` block doesn't make the code unsafe — it says 'I, the programmer, have verified these invariants and take responsibility for them.' This is the contractual interface between Rust's memory safety and C's implicit contracts.",
+    },
+    {
+      question:
+        "A struct passed between C and Rust is declared in Rust without `#[repr(C)]`. The C code reads the struct's fields and gets wrong values. What's the cause?",
+      options: [
+        "The C code has a bug",
+        "Without `#[repr(C)]`, Rust is free to reorder struct fields and add padding in whatever way the compiler determines optimal for Rust code. This differs from C's struct layout rules. If C code reads a Rust struct by field offset, it reads wrong fields or misinterprets padding as data. The fix: always add `#[repr(C)]` to any struct shared across the FFI boundary. This locks the layout to C's rules, ensuring both sides agree on field positions and sizes.",
+        "Rust structs cannot be shared with C",
+        "The padding rules are identical in C and Rust",
+      ],
+      correct: 1,
+      explanation:
+        "Rust makes no guarantees about struct field ordering or padding without `#[repr(C)]`. The compiler may reorder fields for optimal alignment or cache behavior. C's struct layout is defined by the ABI and follows predictable rules (fields in declaration order, with specific alignment padding). Without `#[repr(C)]`, a shared struct is a ticking time bomb: it may work by coincidence on one compiler version and break on the next. `#[repr(C)]` is mandatory for all FFI-shared structs.",
+    },
+  ]}
+/>
+
+## What's next
+
+Module E7 covers MISRA-C:2023 in depth — the static analysis discipline required for safety-critical C embedded software. After this module, you have two complete embedded stacks: safe C + MISRA, and Rust + embedded-hal. The capstone (E8) lets you choose between them for the final project.

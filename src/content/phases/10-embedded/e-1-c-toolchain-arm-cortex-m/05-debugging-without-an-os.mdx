@@ -1,0 +1,218 @@
+---
+title: "Debugging Without an OS — Semihosting, RTT, and OpenOCD"
+description: "Three mechanisms for getting log output out of firmware running on real hardware: semihosting over JTAG, SEGGER RTT for zero-overhead streaming, and GDB with OpenOCD for source-level debugging."
+phase: 10
+module: "e-1-c-toolchain-arm-cortex-m"
+order: 5
+estimatedMinutes: 25
+difficulty: 3
+prerequisites:
+  - "e-1-c-toolchain-arm-cortex-m/04"
+standards:
+  primaryAnchor: "ARM Semihosting Specification"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - semihosting
+  - segger-rtt
+  - openocd
+  - jtag
+  - swd
+  - gdb
+  - debug-probe
+  - breakpoint
+  - watchpoint
+  - itm
+  - swo
+learningOutcomes:
+  - "Explain what semihosting is and when its overhead makes it unsuitable for production use"
+  - "Set up SEGGER RTT for non-intrusive log output from firmware running at full speed"
+  - "Connect OpenOCD and GDB to a Cortex-M target and use source-level debugging"
+  - "Use a hardware watchpoint to find the instruction that writes to a specific address"
+professionalContext: "printf-style debugging is the first tool most engineers reach for. In embedded, there is no terminal — you need a mechanism to transmit log data from the microcontroller to the host. Semihosting costs the target CPU cycles for every character; RTT is zero-overhead and runs at full MCU speed; GDB with OpenOCD catches bugs that logging can't find (memory corruption, timing bugs, ISR races). Engineers who know all three can debug any embedded firmware in hours instead of days."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You've built firmware that builds and links correctly. Now you need to know what it's doing when it runs. Without some form of output channel, debugging an embedded program means toggling GPIOs and checking oscilloscopes — functional but slow.
+
+There are three tools that professional embedded engineers reach for, each with a different overhead profile and capability set:
+
+1. **Semihosting** — the CPU calls host OS services (including printf) via a BKPT instruction over JTAG. Dead simple. Has measurable overhead on every print.
+2. **SEGGER RTT** — a small ring buffer in SRAM; the debug probe reads it autonomously, no CPU interruption. Near-zero overhead.
+3. **GDB over OpenOCD** — source-level debugging: breakpoints, watchpoints, register inspection. Catches the bugs that logs can't see.
+
+## Semihosting — the easy path with a cost
+
+Semihosting uses ARM's debug interface to tunnel host OS calls (file I/O, `printf`, `exit`) through the JTAG/SWD connection. GCC's newlib-nano provides a `syscalls.c` that implements `_write` by triggering semihosting. With the debug probe attached, `printf` works and output appears on the host terminal.
+
+```c
+// Nothing to add — just use printf after linking -lrdimon and -specs=rdimon.specs
+#include <stdio.h>
+
+int main(void) {
+    printf("hello from firmware\n");
+    while (1) { }
+}
+```
+
+Link flags:
+
+```makefile
+LDFLAGS += --specs=rdimon.specs -lrdimon
+```
+
+The catch: each `printf` call executes a `BKPT #0xAB` instruction. The debugger traps it, forwards the data to the host, and resumes the CPU. At 168 MHz, a single `printf("hello\n")` can stall the CPU for **hundreds of microseconds**. For timing-sensitive code — anything with ISRs, timers, or tight protocol windows — semihosting breaks the timing.
+
+**Use semihosting only during early bring-up when timing doesn't matter. Remove it before any timing-sensitive testing.**
+
+## SEGGER RTT — production-grade logging
+
+SEGGER RTT (Real-Time Transfer) solves the overhead problem. Instead of calling the host on every print, RTT writes characters into a ring buffer in SRAM. The J-Link debug probe's DMA reads that buffer continuously, at the probe's own pace, without halting the CPU. From the CPU's perspective, logging is a memcpy into SRAM — typically under 100 ns.
+
+### Setup
+
+1. Download the SEGGER RTT library from segger.com/jlink (free). Drop `SEGGER_RTT.c` and `SEGGER_RTT.h` into your project.
+2. Call `SEGGER_RTT_printf` instead of `printf`.
+
+```c
+#include "SEGGER_RTT.h"
+
+int main(void) {
+    SEGGER_RTT_printf(0, "ADC sample: %u\n", adc_read());
+    while (1) {
+        uint16_t val = adc_read();
+        SEGGER_RTT_printf(0, "val=%u\n", val);
+        for (volatile int i = 0; i < 100000; i++) { }
+    }
+}
+```
+
+On the host, run `JLinkRTTViewer` (GUI) or `JLinkRTTClient` (CLI) to read the stream. The output updates continuously without halting the chip.
+
+### RTT without a J-Link
+
+If your probe is an ST-Link or CMSIS-DAP (not J-Link), use **OpenOCD's RTT support** (OpenOCD 0.11+):
+
+```bash
+# In your OpenOCD config
+rtt setup 0x20000000 0x4000 "SEGGER RTT"
+rtt start
+rtt server start 9090 0
+```
+
+Then `telnet localhost 9090` to see the stream.
+
+## OpenOCD and GDB — source-level debugging
+
+OpenOCD (Open On-Chip Debugger) bridges GDB to the debug probe over USB. Once connected, GDB can:
+
+- Set breakpoints (halt at a source line)
+- Set watchpoints (halt when memory at an address is read or written)
+- Read/write registers and memory
+- Step instruction-by-instruction
+
+### Starting OpenOCD
+
+```bash
+# Start OpenOCD with an ST-Link and STM32F4 config
+openocd \
+  -f interface/stlink.cfg \
+  -f target/stm32f4x.cfg
+# OpenOCD starts a GDB server on port 3333
+```
+
+### Connecting GDB
+
+```bash
+arm-none-eabi-gdb firmware.elf
+(gdb) target extended-remote :3333
+(gdb) monitor reset halt
+(gdb) break main
+(gdb) continue
+# GDB halts at main
+(gdb) next          # Step one C line
+(gdb) print counter # Print a variable
+(gdb) info registers # All registers
+```
+
+Because you built with `-g` (debug info), GDB knows the mapping between machine instructions and C source lines. When GDB halts at a breakpoint, it shows you the C line, not the assembly.
+
+### Watchpoints — finding silent memory corruption
+
+The most powerful debugging tool in embedded: a **watchpoint** halts the CPU the instant a specific memory address is written.
+
+```bash
+(gdb) watch *(uint32_t *)0x20000100   # Halt when this address is written
+(gdb) continue
+# GDB halts and shows exactly which instruction wrote to that address
+# and what the new value is
+```
+
+This finds stack-corruption bugs in seconds that would take hours of printf debugging. When a global variable mysteriously changes to a garbage value, a watchpoint on its address reveals the culprit instruction on the first occurrence.
+
+Cortex-M hardware supports 4 watchpoints (via the DWT unit). GDB allocates them automatically for `watch` commands.
+
+## Comparing the three approaches
+
+| Approach    | CPU overhead                | Setup effort            | Catches bugs logging can't | Works at full speed? |
+| ----------- | --------------------------- | ----------------------- | -------------------------- | -------------------- |
+| Semihosting | High (hundreds of µs/print) | Minimal (link flags)    | No                         | No                   |
+| SEGGER RTT  | ~100 ns/call                | Low (2 files)           | No                         | Yes                  |
+| GDB/OpenOCD | Halts at events             | Medium (OpenOCD config) | YES                        | N/A (halts)          |
+
+The professional workflow: RTT for continuous trace, GDB/watchpoints for hard bugs.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A UART driver has a timing window where it misses the TX-empty interrupt at high baud rates. Adding printf debug calls makes the timing window larger (the bug disappears). Removing them makes it reappear. What debugging approach is appropriate?",
+      options: [
+        "Keep the printf calls and accept the behavior",
+        "Use SEGGER RTT (zero-CPU-cost output) to observe variable values without perturbing timing; or use a GPIO toggle visible on an oscilloscope to measure the exact window; or use a GDB watchpoint to halt when the interrupt flag is missed. Semihosting and printf both change timing too much to debug timing-sensitive ISR races — a non-intrusive or hardware approach is mandatory for this class of bug.",
+        "Increase the baud rate so the window closes",
+        "Disable optimization so the bug appears consistently",
+      ],
+      correct: 1,
+      explanation:
+        "A bug that disappears when you add debug output is a Heisenbug — the observation changes the system. Semihosting and printf both have measurable latency that changes interrupt timing. SEGGER RTT's ~100 ns write overhead is typically small enough to not perturb timing-sensitive bugs. GPIO toggles + oscilloscope add literally zero software overhead. GDB watchpoints can find the exact instruction that causes the wrong state. The choice of debugging tool is part of the skill — the wrong tool gives you bugs that only exist when you're not watching.",
+    },
+    {
+      question:
+        "A global struct `device_state` at address 0x20001000 is being corrupted between function calls — a field changes to 0xDEAD without any visible cause. What's the fastest way to find the culprit?",
+      options: [
+        "Add printf at every write to device_state",
+        "Set a GDB hardware watchpoint: `watch device_state.corrupted_field` or `watch *(uint32_t *)0x20001004`. GDB will halt the CPU the exact instant that address is written and show the call stack and source line. This gives you the root cause in one run, not days of instrumenting every write site.",
+        "Binary-search by commenting out code blocks",
+        "Use valgrind to detect the write",
+      ],
+      correct: 1,
+      explanation:
+        "Hardware watchpoints are purpose-built for exactly this problem. Cortex-M DWT hardware watches up to four addresses simultaneously; when any of them is written (or read, depending on the watchpoint type), the CPU halts and hands control to GDB, which shows the instruction, the source line, the call stack, and the value written. There is no faster way to find a silent memory write. Printf instrumentation requires knowing WHERE to add the prints; watchpoints don't — they find the needle in the haystack automatically. Valgrind is a Linux-hosted tool and doesn't run on bare-metal firmware.",
+    },
+    {
+      question:
+        "After adding SEGGER RTT logging to an ISR that fires at 10 kHz, a performance analysis shows 0.8% CPU load added. After switching to semihosting printf, the same ISR causes 45% CPU load. What accounts for this difference?",
+      options: [
+        "Semihosting uses more characters than RTT",
+        "Semihosting issues a BKPT #0xAB instruction that traps to the debug probe, which forwards data to the host and resumes the CPU. This round-trip costs hundreds of microseconds per call. At 10 kHz ISR rate, that cost accumulates to a significant fraction of total CPU time. RTT writes directly to a SRAM ring buffer in ~100 ns; the probe reads the buffer asynchronously without interrupting the CPU. At 10 kHz, the RTT cost is negligible; the semihosting cost is not.",
+        "RTT uses DMA; semihosting doesn't",
+        "Semihosting only works at low baud rates",
+      ],
+      correct: 1,
+      explanation:
+        "The mechanism difference drives the cost difference. Semihosting is a synchronous host call — BKPT halts the pipeline, the probe responds, the CPU waits. RTT is an asynchronous buffer write — the CPU writes to SRAM and continues; the probe reads the buffer at its own pace. This design choice is why RTT is suitable for production telemetry and semihosting is for early bring-up only. At 10 kHz ISR rate, even 100 µs semihosting overhead per call would consume 100 µs × 10,000 = 1,000,000 µs = 1 second per second of CPU time — effectively infinite overhead. The 45% number implies around 45 µs overhead per semihosting call at this sample rate, which is consistent with JTAG round-trip latency.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 06 takes the debuggable, optimized toolchain from lessons 01-05 and solves one final practical problem: writing a minimal `printf` for embedded that writes to UART. The standard newlib-nano printf is 6.5 KB; a minimal embedded printf can be under 500 bytes. That size delta matters on chips with 32 KB flash.

@@ -1,0 +1,276 @@
+---
+title: "Debugging RTOS Systems — Stack Overflow, Priority Traps, and Tracealyzer"
+description: "The five most common RTOS failure modes with reproduction recipes and fixes. Instrument your firmware so bugs surface in development, not in the field."
+phase: 10
+module: "e-4-rtos-fundamentals"
+order: 5
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-4-rtos-fundamentals/04"
+standards:
+  primaryAnchor: "FreeRTOS"
+  cs2023: ["OS-Scheduling", "SF-Foundations"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - tracealyzer
+  - percepio
+  - assert
+  - watchdog
+  - task-starvation
+  - deadlock
+  - livelock
+  - coredump
+  - jtag-postmortem
+  - runtime-assert
+learningOutcomes:
+  - "Enable FreeRTOS stack overflow detection and implement the overflow hook correctly"
+  - "Distinguish deadlock, livelock, and task starvation by their observable symptoms"
+  - "Instrument RTOS firmware with runtime assertions and GPIO toggles for logic-analyzer measurement"
+  - "Describe how Tracealyzer-style visualization reveals scheduling problems invisible in logs"
+professionalContext: "RTOS bugs are the most time-consuming debugging category in embedded firmware. They are intermittent, timing-dependent, and often disappear under a debugger. Engineers who learn to instrument their RTOS early and recognize the signature patterns of common failures save days or weeks of hunting. This lesson is the difference between a junior engineer saying 'it just crashes sometimes' and a senior engineer saying 'I need five minutes to reproduce the priority inversion in task B'."
+thresholdConcept: false
+---
+
+## Why this matters
+
+An IoT gateway ships to 50,000 units. Six weeks after deployment, 1 in 400 units starts resetting every 2 hours. No crashlog. No reproducible trigger in the lab. The bug is a task starvation leading to a missed watchdog kick — the low-priority housekeeping task that pets the watchdog gets starved by two medium-priority tasks fighting over a shared SPI bus.
+
+This is a known pattern. Recognized in under an hour by an engineer who has seen it. Unknown pattern. Costs two weeks and a firmware update to 50,000 units for an engineer who hasn't.
+
+RTOS debugging fluency is a professional force multiplier.
+
+## The five failure modes and their fingerprints
+
+### 1. Stack overflow
+
+**Symptom**: System crashes or produces garbage values unpredictably. Usually a HardFault, with the program counter in completely unexpected code.
+
+**Root cause**: A task's stack grew beyond its allocated region and corrupted adjacent memory.
+
+**Detection**:
+
+```c
+/* FreeRTOSConfig.h */
+#define configCHECK_FOR_STACK_OVERFLOW  2
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
+    /* pcTaskName has the task name (up to configMAX_TASK_NAME_LEN chars) */
+    /* Log it via RTT or a GPIO toggle pattern before asserting */
+    rtt_printf("STACK OVERFLOW in task: %s\n", pcTaskName);
+    __BKPT(0);   /* Break in debug; in production, trigger controlled reset */
+    while (1) { }
+}
+```
+
+**Instrument**: After the system has been running for 30 minutes under load, call `uxTaskGetStackHighWaterMark` on every task. Any task with HWM < 20% of its allocation needs more stack.
+
+### 2. Priority inversion (without inheritance)
+
+**Symptom**: High-priority task misses deadlines at random intervals. System appears to work most of the time.
+
+**Root cause**: A binary semaphore (no priority inheritance) is held by a low-priority task; a medium-priority task preempts it and prevents the mutex release, blocking the high-priority task.
+
+**Detection**: Use FreeRTOS mutexes instead of binary semaphores for resource protection — mutexes implement priority inheritance by default. Binary semaphores should only be used for signaling (no resource ownership).
+
+```c
+/* WRONG: binary semaphore for resource protection */
+SemaphoreHandle_t spi_guard = xSemaphoreCreateBinary();
+xSemaphoreGive(spi_guard);  /* Start "available" */
+
+/* RIGHT: mutex for resource protection */
+SemaphoreHandle_t spi_mutex = xSemaphoreCreateMutex();
+/* No initial Give needed — mutex starts "available" */
+```
+
+**Instrument**: Add a GPIO toggle when the high-priority task misses a deadline (compares actual execution time against budget). Capture with a logic analyzer.
+
+### 3. Deadlock
+
+**Symptom**: Multiple tasks freeze permanently. Watchdog fires. No work is done.
+
+**Root cause**: Task A holds mutex 1 and waits for mutex 2; task B holds mutex 2 and waits for mutex 1. Neither can proceed.
+
+```c
+/* Deadlock recipe — do NOT do this */
+void task_a(void *p) {
+    for (;;) {
+        xSemaphoreTake(mutex1, portMAX_DELAY);
+        xSemaphoreTake(mutex2, portMAX_DELAY);  /* Task B holds mutex2 here */
+        /* ... */
+        xSemaphoreGive(mutex2);
+        xSemaphoreGive(mutex1);
+    }
+}
+
+void task_b(void *p) {
+    for (;;) {
+        xSemaphoreTake(mutex2, portMAX_DELAY);
+        xSemaphoreTake(mutex1, portMAX_DELAY);  /* Task A holds mutex1 here → DEADLOCK */
+        /* ... */
+        xSemaphoreGive(mutex1);
+        xSemaphoreGive(mutex2);
+    }
+}
+```
+
+**Fix**: Total ordering — always acquire mutexes in the same global order. Enforced by convention (comment at each lock site: "Lock order: mutex1, then mutex2") or by a lock-order checker.
+
+**Detection**: Use a watchdog with a sufficiently short timeout. If the system deadlocks, the watchdog fires. The reset reason register tells you it was a watchdog reset, not a sporadic power glitch.
+
+### 4. Task starvation
+
+**Symptom**: Low-priority task makes no progress while higher-priority tasks are busy. In FreeRTOS with `configUSE_TIME_SLICING=1`, tasks of equal priority share the CPU; lower-priority tasks get nothing if a higher-priority task never blocks.
+
+**Fingerprint**: Enable `configGENERATE_RUN_TIME_STATS` and `uxTaskGetRunTimeStats()`:
+
+```c
+/* FreeRTOSConfig.h for run-time stats */
+#define configGENERATE_RUN_TIME_STATS     1
+#define configUSE_TRACE_FACILITY          1
+#define configUSE_STATS_FORMATTING_FUNCTIONS 1
+
+/* Must provide a timer that counts faster than the RTOS tick,
+   typically a free-running hardware timer at 10× tick rate */
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()  timer_init_for_stats()
+#define portGET_RUN_TIME_COUNTER_VALUE()           timer_get_count()
+```
+
+```c
+void print_task_stats(void) {
+    char buf[512];
+    vTaskGetRunTimeStats(buf);
+    rtt_printf("%s\n", buf);
+    /* Output: task name, absolute run time, % CPU */
+}
+```
+
+A task with 0% CPU when it should be doing useful work is either blocked on a resource or starved. Print at intervals to observe.
+
+**Fix**: Raise the starved task's priority, reduce the busy tasks' CPU usage (add blocking calls), or re-architect to ensure the critical task gets time.
+
+### 5. ISR calling blocking kernel functions
+
+**Symptom**: System crashes immediately when the ISR fires. HardFault with the stack showing a kernel function inside an ISR.
+
+**Root cause**: An ISR calls `xQueueSend` instead of `xQueueSendFromISR`, or takes a mutex from an ISR. FreeRTOS will assert in debug builds; in release builds, it corrupts kernel state.
+
+**Prevention**: Enable asserts in development:
+
+```c
+/* FreeRTOSConfig.h */
+#define configASSERT(x)  if ((x) == 0) { taskDISABLE_INTERRUPTS(); for(;;){} }
+```
+
+This makes any FreeRTOS policy violation a deterministic hang rather than silent corruption — far easier to catch in development.
+
+## GPIO instrumentation
+
+The simplest RTOS instrumentation is a scope or logic analyzer on GPIO pins. Define a set of debug pins and toggle them at key points:
+
+```c
+/* debug_pins.h */
+#define DBG_SENSOR_TASK_START()  GPIOE->BSRR = (1U << 8)
+#define DBG_SENSOR_TASK_END()    GPIOE->BSRR = (1U << 24)   /* bit 8 + 16 = reset */
+#define DBG_ISR_ENTRY()          GPIOE->BSRR = (1U << 9)
+#define DBG_ISR_EXIT()           GPIOE->BSRR = (1U << 25)
+
+/* In the task: */
+void sensor_task(void *p) {
+    for (;;) {
+        DBG_SENSOR_TASK_START();
+        adc_read();
+        DBG_SENSOR_TASK_END();
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+```
+
+A logic analyzer capture shows: which tasks are running, when ISRs fire, how long each task runs, whether tasks are blocked longer than expected. This is the poor-man's Tracealyzer and costs nothing except a few GPIO pins.
+
+## Percepio Tracealyzer and equivalent tools
+
+<VocabTooltip slug="tracealyzer">Tracealyzer</VocabTooltip> is a commercial tool that hooks into
+FreeRTOS's trace facility and produces a visual timeline of all task switches, ISR entries/exits,
+queue operations, and mutex acquisitions. The open-source alternative is Segger SystemView, which
+integrates with SEGGER RTT and produces similar visualizations.
+
+A Tracealyzer capture of a priority-inversion bug is immediately visible: the high-priority task's timeline shows a gap (blocked), the low-priority task's timeline shows it running while it should be releasing the mutex, and the medium-priority task's timeline shows it preempting the low task during that gap.
+
+To enable Tracealyzer in FreeRTOS:
+
+```c
+/* FreeRTOSConfig.h */
+#define configUSE_TRACE_FACILITY            1
+#define INCLUDE_xTaskGetCurrentTaskHandle   1
+
+/* Include the TraceRecorder library from Percepio */
+#include "trcRecorder.h"
+```
+
+The free tier of Tracealyzer supports up to a few seconds of trace. Sufficient to catch most bugs.
+
+## A debugging checklist before field deployment
+
+Before shipping firmware to production:
+
+1. Run `uxTaskGetStackHighWaterMark` on all tasks after 30 minutes of peak-load testing. All HWMs should be > 30%.
+2. Verify `vApplicationStackOverflowHook` is implemented and tested.
+3. Verify all resource-protection mutexes are `xSemaphoreCreateMutex()`, not binary semaphores.
+4. Verify all ISRs use `FromISR` variants of kernel calls.
+5. Enable an independent watchdog (IWDG on STM32) with a timeout that catches a deadlocked system. Verify the watchdog cannot be kicked from an ISR alone (so task starvation still triggers it).
+6. Check `xPortGetMinimumEverFreeHeapSize()` — it should never approach zero during the test run.
+7. Enable `configASSERT` in development; disable (or redirect to reset) in production if ROM is constrained.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A system has three tasks. The highest-priority task (H) misses its 1 ms deadline every 30-50 seconds. Task M (medium) and L (low) share a binary semaphore protecting an SPI bus. H does not use the SPI bus. What's the most likely cause?",
+      options: [
+        "H has a stack overflow",
+        "Priority inversion: L holds the binary semaphore, M preempts L (binary semaphores have no priority inheritance, so L is NOT boosted), and H must wait for some indirect resource gated by the SPI bus — or M is consuming enough CPU that H's scheduling is affected. The correct diagnosis depends on whether H's deadline miss is deterministic with L and M's SPI activity. Fix: replace the binary semaphore with a mutex (priority inheritance). L gets temporarily boosted when H waits, preventing M from preempting.",
+        "H's priority is too high",
+        "The SPI bus is too slow",
+      ],
+      correct: 1,
+      explanation:
+        "The signature — high-priority task missing deadlines intermittently while lower-priority tasks contend on a binary semaphore — is classic priority inversion. Binary semaphores have no ownership and no priority inheritance; only FreeRTOS mutexes (xSemaphoreCreateMutex) implement the priority boost. The fix is structural: replace the binary semaphore protecting the shared resource with a mutex. After the fix, when H blocks for any reason gated through the semaphore holder, L gets temporarily boosted and M can no longer preempt it.",
+    },
+    {
+      question:
+        "After enabling configGENERATE_RUN_TIME_STATS and running the system under load for 60 seconds, vTaskGetRunTimeStats shows the 'housekeeping' task at 0.0% CPU utilization. The housekeeping task is responsible for petting the watchdog. What's the likely systemic failure, and when will it manifest?",
+      options: [
+        "The housekeeping task is working correctly — 0% is fine",
+        "The housekeeping task is starved: higher-priority tasks are consuming 100% of available CPU without blocking long enough to let the housekeeping task run. The watchdog will fire as soon as the housekeeping task misses its kick interval — which may happen as soon as the currently busy tasks enter a peak-load period. This is a ticking time bomb. Fix: increase the housekeeping task's priority OR reduce the CPU consumption of the busy tasks (add or extend blocking calls). The watchdog should never be starved — kicking it must be treated as a hard-real-time requirement.",
+        "The watchdog will never fire — FreeRTOS handles this automatically",
+        "0% CPU means the task ran too fast to be measured",
+      ],
+      correct: 1,
+      explanation:
+        "Task starvation is dangerous when the starved task has safety-critical duties (watchdog, health monitoring, fault detection). 0% CPU over 60 seconds under load means the task has not run — or has run so rarely that it's measured as 0%. The watchdog will fire when the housekeeping task hasn't kicked it within the watchdog period. The fix: restructure task priorities or reduce the busy tasks' CPU monopoly. A watchdog kick should never be starved; if it can be, the product architecture has a safety gap.",
+    },
+    {
+      question:
+        "An engineer adds debugging instrumentation by toggling GPIO pins at task entry and exit, then captures with a logic analyzer. The capture shows Task A running for 15 ms without interruption, then Task B running for 1 ms, repeating. Task C never appears. What does this tell us?",
+      options: [
+        "Task C is lower priority and is starved by A and B",
+        "The capture alone doesn't tell us why C doesn't appear. It could be: (1) C is starved by A and B at higher priorities; (2) C is blocked on a resource A or B holds permanently; (3) C has a bug in its main loop that prevents it from yielding (infinite loop without vTaskDelay). To disambiguate: check if C has pending work (event flag, queue item), examine C's priority vs A and B, add a 'C entered' toggle to verify it ever runs. The capture identifies the SYMPTOM (C not running); the root cause requires further investigation.",
+        "Task C does not exist",
+        "Task A is in an infinite loop",
+      ],
+      correct: 1,
+      explanation:
+        "Instrumentation identifies symptoms; root cause analysis requires interpretation. A task not appearing on the logic analyzer trace means it's not running, but not WHY. Three candidate explanations — starvation, blocking, infinite-loop-without-yield — require different evidence. The next diagnostic step: verify C has CPU-requesting work (not intentionally waiting), check its priority vs A and B (starvation), check what resource it might be blocked on (deadlock/starvation on mutex), and add a toggle at C's loop top to see if it ever enters its main loop at all. Good debugging is hypothesis generation + targeted evidence gathering, not random probing.",
+    },
+  ]}
+/>
+
+## What's next
+
+Module E5 covers peripheral drivers — UART, SPI, I2C, and ADC — in polled, interrupt, and DMA-driven implementations. The RTOS patterns from E4 (ISR queues, task structure) become the scaffolding that hosts these drivers in a complete firmware system.

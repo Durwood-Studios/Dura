@@ -1,0 +1,274 @@
+---
+title: "Watchdog Timers and HardFault Handlers — Production Resilience"
+description: "A capstone that never resets itself is not production-ready. Add an independent watchdog, a HardFault handler that captures register state, and a boot-reason log — the three mechanisms that turn a demo into a field-deployable product."
+phase: 10
+module: "e-8-capstone"
+order: 2
+estimatedMinutes: 22
+difficulty: 5
+prerequisites:
+  - "e-8-capstone/01"
+standards:
+  primaryAnchor: "ARMv7-M Architecture Reference Manual"
+  cs2023: ["SF-Foundations", "SE-CodeQuality"]
+  swebok: []
+  bloom: "apply"
+  sfia: 5
+  dreyfus: "proficient"
+vocabulary:
+  - iwdg
+  - wwdg
+  - hardfault
+  - cortex-m-fault
+  - fault-status-register
+  - cfsr
+  - mmfsr
+  - bfsr
+  - ufsr
+  - boot-reason
+  - rcc-csr
+learningOutcomes:
+  - "Configure the STM32 Independent Watchdog (IWDG) with a timeout appropriate for the capstone's task structure"
+  - "Implement a HardFault handler that captures CFSR, MMFAR, BFAR, and the faulting PC before resetting"
+  - "Read the boot-reason register (RCC_CSR) to distinguish cold boot from watchdog reset"
+  - "Explain why the watchdog must be kicked from a task, not from an ISR, to detect task starvation"
+professionalContext: "Products that ship without a watchdog eventually brick themselves in the field when firmware gets stuck in an unexpected state. Products without a HardFault handler cannot diagnose the root cause of crashes that happened before the engineer was watching. These two mechanisms — watchdog and fault handler — are the minimum viable production-resilience layer for any embedded firmware."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The capstone sensor pipeline from lesson 1 runs correctly when everything works. Production firmware must also handle the failure modes: task starvation, null-pointer dereferences, stack overflows, unhandled exceptions. Without a watchdog, the firmware hangs. Without a HardFault handler, the crash is invisible.
+
+Adding these two mechanisms takes under 200 lines of code and converts a demo into a product.
+
+## Independent Watchdog (IWDG)
+
+The STM32 <VocabTooltip slug="iwdg">Independent Watchdog</VocabTooltip> is clocked by the internal LSI oscillator (~32 kHz on STM32F4) — it runs independently of the main clock and cannot be stopped by software after it is started. If the application doesn't "kick" (reload) the watchdog within the configured timeout, the IWDG resets the MCU.
+
+Key design decision: **kick the watchdog from the highest-level supervisory task, not from individual ISRs or low-level drivers.** Kicking from an ISR would mask a deadlocked task (the ISR still fires even when the CPU is stuck in a task's infinite loop).
+
+```c
+/* iwdg.h */
+#pragma once
+#include <stdint.h>
+
+void iwdg_init(uint32_t timeout_ms);
+void iwdg_kick(void);
+
+/* iwdg.c */
+#include "iwdg.h"
+#include "stm32f4xx.h"
+
+/* IWDG key registers */
+#define IWDG_KR_ENABLE    0xCCCCUL
+#define IWDG_KR_RELOAD    0xAAAAUL
+#define IWDG_KR_UNLOCK    0x5555UL
+
+void iwdg_init(uint32_t timeout_ms) {
+    /* LSI ~32 kHz. Prescaler 256 → tick = 8 ms. Max timeout = 4095 × 8 ms ≈ 32 s */
+    uint32_t prescaler_div = 256U;
+    uint32_t lsi_hz        = 32000U;
+    uint32_t tick_ms       = (prescaler_div * 1000U) / lsi_hz;   /* ~8 ms */
+    uint32_t reload_val    = timeout_ms / tick_ms;
+    if (reload_val > 0xFFFU) { reload_val = 0xFFFU; }
+
+    IWDG->KR  = IWDG_KR_ENABLE;   /* Enable IWDG clock */
+    IWDG->KR  = IWDG_KR_UNLOCK;   /* Unlock PR and RLR */
+    IWDG->PR  = 6U;                /* Prescaler /256 */
+    IWDG->RLR = reload_val;
+
+    /* Wait for IWDG registers to be updated */
+    while (IWDG->SR & 0x7U) { }   /* Wait for PVU, RVU, WVU bits clear */
+
+    IWDG->KR = IWDG_KR_RELOAD;    /* Start the countdown */
+}
+
+void iwdg_kick(void) {
+    IWDG->KR = IWDG_KR_RELOAD;
+}
+```
+
+In the capstone's FreeRTOS structure, add a dedicated supervisor task:
+
+```c
+/* Supervisor task — lowest priority, only runs when all others are idle */
+void supervisor_task(void *params) {
+    (void)params;
+    /* 2-second watchdog. Kick every 500 ms. If this task doesn't run
+       for 2 seconds, the system is stalled. */
+    iwdg_init(2000U);
+
+    for (;;) {
+        iwdg_kick();
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+```
+
+If the process_task or telemetry_task deadlocks or priority-starves the supervisor, the supervisor stops kicking, the watchdog fires, and the system resets — producing a watchdog-reset entry in the boot log.
+
+## HardFault handler
+
+A HardFault occurs when the CPU encounters an illegal instruction, invalid memory access, bus error, or usage fault. The default handler (the one in the weak symbol table) spins in an infinite loop — completely opaque.
+
+A useful HardFault handler captures the fault context before resetting:
+
+```c
+/* hardfault.c */
+#include "stm32f4xx.h"
+#include <stdint.h>
+
+/* Store fault info in a non-initialized section that survives software reset */
+typedef struct __attribute__((packed)) {
+    uint32_t cfsr;    /* Configurable Fault Status Register */
+    uint32_t mmfar;   /* MemManage Fault Address */
+    uint32_t bfar;    /* Bus Fault Address */
+    uint32_t hfsr;    /* HardFault Status Register */
+    uint32_t r0, r1, r2, r3, r12;
+    uint32_t lr;      /* Link register at fault */
+    uint32_t pc;      /* Program counter — the faulting instruction */
+    uint32_t xpsr;    /* Program status register */
+} FaultSnapshot;
+
+/* __noinit__ prevents zero-fill on startup — snapshot persists through reset */
+static volatile FaultSnapshot fault_snapshot __attribute__((section(".noinit")));
+static volatile uint32_t fault_valid __attribute__((section(".noinit")));
+
+#define FAULT_MAGIC  0xDEADBEEFUL
+
+/* The real HardFault handler — called from the naked assembly stub below */
+void hard_fault_handler_c(uint32_t *fault_stack) {
+    fault_snapshot.r0   = fault_stack[0];
+    fault_snapshot.r1   = fault_stack[1];
+    fault_snapshot.r2   = fault_stack[2];
+    fault_snapshot.r3   = fault_stack[3];
+    fault_snapshot.r12  = fault_stack[4];
+    fault_snapshot.lr   = fault_stack[5];
+    fault_snapshot.pc   = fault_stack[6];   /* The faulting instruction address */
+    fault_snapshot.xpsr = fault_stack[7];
+
+    fault_snapshot.cfsr  = SCB->CFSR;
+    fault_snapshot.mmfar = SCB->MMFAR;
+    fault_snapshot.bfar  = SCB->BFAR;
+    fault_snapshot.hfsr  = SCB->HFSR;
+
+    fault_valid = FAULT_MAGIC;
+
+    /* Clear CFSR for next boot */
+    SCB->CFSR = 0xFFFFFFFFUL;
+
+    /* Force a system reset — the snapshot is in .noinit and will survive */
+    NVIC_SystemReset();
+}
+
+/* Naked assembly stub: determine which stack was in use at fault time,
+   then call the C handler with a pointer to the exception frame */
+__attribute__((naked)) void HardFault_Handler(void) {
+    __asm volatile (
+        "tst  lr, #4            \n"   /* LR bit 2: 0=MSP, 1=PSP was active */
+        "ite  eq                \n"
+        "mrseq r0, msp          \n"   /* r0 = fault stack pointer */
+        "mrsne r0, psp          \n"
+        "b    hard_fault_handler_c \n"
+        : : : "r0"
+    );
+}
+```
+
+At the next boot, the application checks for the magic value and logs the snapshot:
+
+```c
+void check_previous_fault(void) {
+    if (fault_valid == FAULT_MAGIC) {
+        /* Log to UART or flash */
+        uart_printf("FAULT! PC=0x%08lX LR=0x%08lX CFSR=0x%08lX\n",
+                    fault_snapshot.pc, fault_snapshot.lr, fault_snapshot.cfsr);
+        fault_valid = 0UL;   /* Clear so next boot doesn't re-log */
+    }
+}
+```
+
+With the faulting PC (program counter), `arm-none-eabi-addr2line -e firmware.elf 0x08001234` gives the exact source file and line number that caused the fault.
+
+## Boot reason register
+
+After any reset, `RCC->CSR` contains flags identifying why the reset occurred:
+
+```c
+void log_boot_reason(void) {
+    uint32_t csr = RCC->CSR;
+    RCC->CSR |= RCC_CSR_RMVF;   /* Clear flags for next boot */
+
+    if (csr & RCC_CSR_PORRSTF)  { uart_printf("Boot: Power-on reset\n"); }
+    if (csr & RCC_CSR_PINRSTF)  { uart_printf("Boot: NRST pin reset\n"); }
+    if (csr & RCC_CSR_IWDGRSTF) { uart_printf("Boot: IWDG watchdog reset\n"); }
+    if (csr & RCC_CSR_WWDGRSTF) { uart_printf("Boot: WWDG watchdog reset\n"); }
+    if (csr & RCC_CSR_SFTRST)   { uart_printf("Boot: Software reset\n"); }
+    if (csr & RCC_CSR_LPWRRSTF) { uart_printf("Boot: Low-power reset\n"); }
+}
+```
+
+The boot log in the sensor pipeline's telemetry stream now includes the reset reason on every boot. A field device showing "IWDG watchdog reset" repeatedly indicates a task-starvation or deadlock problem that warrants investigation.
+
+## Integration into the capstone
+
+Add to `main()` at the top, before task creation:
+
+```c
+int main(void) {
+    system_clock_init();
+    gpio_init();
+    uart_init(115200U);
+
+    /* Production resilience layer — first thing at boot */
+    log_boot_reason();
+    check_previous_fault();
+
+    /* Rest of init and RTOS startup */
+    /* ... */
+
+    xTaskCreate(supervisor_task, "sup", 256U, NULL, 1U, NULL);  /* Lowest priority */
+    /* ... other tasks ... */
+    vTaskStartScheduler();
+}
+```
+
+The supervisor task at priority 1 (the lowest application priority) is the correct placement. If any higher-priority task hogs the CPU permanently, the supervisor starves, the watchdog fires, and the system resets with an IWDG flag. The boot log then shows the pattern — repeated IWDG resets indicate a real scheduling problem.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer kicks the IWDG from the DMA transfer-complete ISR (which fires every 50 ms) rather than from a supervisor task. Why is this incorrect, even though it prevents watchdog resets?",
+      options: [
+        "ISRs cannot access the IWDG registers",
+        "Kicking the watchdog from an ISR defeats its purpose. The IWDG is supposed to detect stuck firmware — infinite loops, deadlocks, priority starvation in tasks. ISRs run at a higher priority than all tasks; they can fire even when the RTOS task scheduler is stuck or a task is deadlocked. If the ISR kicks the watchdog, the watchdog never fires even when all tasks are frozen. The watchdog must be kicked from task-level code — specifically from a low-priority supervisor task that only runs when the scheduler is working and higher-priority tasks are yielding.",
+        "The IWDG period must match the DMA period exactly",
+        "Multiple watchdog kicks per period cause undefined behavior",
+      ],
+      correct: 1,
+      explanation:
+        "The watchdog's job is to detect stuck tasks. If an ISR kicks it, a deadlocked task system looks healthy because the ISR still fires. Kicking from a dedicated low-priority task means: the task only runs when the scheduler is scheduling tasks correctly AND higher-priority tasks are yielding their CPU time. If anything prevents the supervisor task from running — deadlock, infinite loop, priority starvation — the supervisor doesn't kick, and the watchdog fires. This is the correct failure mode: detect the problem and reset, rather than silently continue in a broken state.",
+    },
+    {
+      question:
+        "A HardFault handler captures PC=0x08001234 before resetting. The engineer runs `arm-none-eabi-addr2line -e firmware.elf 0x08001234` and gets `src/sensor.c:87`. Line 87 is `uint8_t val = *ptr;` where `ptr` is a pointer to a buffer. What does CFSR bit 7 (BFARVALID in BFSR byte) being set, along with BFAR=0x00000000, indicate?",
+      options: [
+        "The fault was a usage fault",
+        "BFARVALID=1 means BFAR contains the address that caused the bus fault; BFAR=0x00000000 means the CPU tried to read from address 0 (a null pointer dereference). The variable `ptr` was NULL when dereferenced. The HardFault triggered because address 0 on Cortex-M maps to the vector table (aliased from flash), and reading from it is not a bus error per se — but if MPU is enabled protecting this region, it triggers a MemManage fault; or if the pointer points to an invalid peripheral space, it's a bus fault. The key insight: PC points to the exact instruction, BFAR reveals the address it tried to access.",
+        "The stack overflowed at address 0",
+        "The fault occurred in the bootloader",
+      ],
+      correct: 1,
+      explanation:
+        "The Configurable Fault Status Register (CFSR) distinguishes fault types. BFSR byte (bits [15:8] of CFSR) covers bus faults; BFARVALID (bit 15) indicates BFAR is valid. BFAR=0 combined with a dereference in the code is the null-pointer dereference signature. With the PC from the exception frame and the fault address from BFAR, you have enough to diagnose the bug without a live debugger session: the instruction at 0x08001234 (src/sensor.c:87) dereferenced a null pointer. The fix is wherever `ptr` is initialized — it was never assigned a valid address.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 3 covers the testing strategies for the capstone sensor pipeline — what can be tested on-host (compensation formulas, state machines), what requires hardware-in-the-loop (DMA timing, interrupt latency), and how to produce a test evidence document suitable for inclusion in the capstone portfolio artifact.

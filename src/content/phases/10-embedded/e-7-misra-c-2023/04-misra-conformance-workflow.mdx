@@ -1,0 +1,239 @@
+---
+title: "MISRA Conformance Workflow — From Code to Report"
+description: "The end-to-end workflow for achieving MISRA-C:2023 conformance: baseline analysis, deviation log, CI gate, and conformance evidence package. What a safety audit actually looks for."
+phase: 10
+module: "e-7-misra-c-2023"
+order: 4
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-7-misra-c-2023/03"
+standards:
+  primaryAnchor: "MISRA-C:2023"
+  cs2023: ["SE-CodeQuality", "SE-Testing"]
+  swebok: []
+  bloom: "evaluate"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - conformance-evidence
+  - deviation-log
+  - misra-baseline
+  - permit-file
+  - rule-adoption
+  - safety-case
+  - audit-trail
+  - guideline-re-categorization
+learningOutcomes:
+  - "Define a project's MISRA rule adoption profile (mandatory, required, advisory, non-adopted)"
+  - "Produce a deviation log entry that satisfies a safety audit"
+  - "Structure the conformance evidence package a certification body expects"
+  - "Evaluate whether a team's MISRA process is sufficient for ISO 26262 ASIL B"
+professionalContext: "Safety auditors review the MISRA process, not just the code. A project with zero analyzer warnings but no deviation log, no rule adoption decision, and no evidence that anyone checked the code satisfies no certification body. This lesson is the process side of MISRA compliance — what you produce alongside the code."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A medical device project is audited for IEC 62304 Class C compliance. The code is MISRA-C:2023 conformant per Cppcheck output (zero warnings). The auditor asks: "Where is the deviation log? Which rules are adopted? Who reviewed the deviations? How do you know the analyzer is configured correctly?" The team has no answers. The audit fails on process, not code quality.
+
+MISRA compliance is a process claim, not just a code property. The evidence package that supports the claim is what auditors look for.
+
+## Step 1: Rule adoption decision
+
+Not every project uses every MISRA rule. The project team's first MISRA decision is which rules they **adopt**. The adoption decision is documented, reviewed, and baselined before analysis begins.
+
+A typical adoption document structure:
+
+```
+PROJECT: Sensor Node Firmware v3.0
+MISRA EDITION: MISRA-C:2023
+DATE: 2026-06-30
+AUTHOR: J. Smith, Lead Engineer
+APPROVED: K. Jones, Safety Manager
+
+Rule Adoption Decisions:
+━━━━━━━━━━━━━━━━━━━━━━
+Mandatory rules (11): ALL ADOPTED — no deviations permitted.
+
+Required rules (120): ALL ADOPTED with deviation permitted per
+  project deviation policy.
+
+Advisory rules (45):
+  - Rules 18.4, 18.5 (pointer arithmetic): ADOPTED — deviation permitted
+    for DMA address computation (pre-approved deviation template available).
+  - Rule 21.3 (no malloc): ADOPTED — static allocation is project policy.
+  - Rule 1.1 (C language standard): ADOPTED — C17 used, compiler flags
+    validated to produce conforming compilation unit.
+
+Guideline Re-categorization (GRC): None — all rules used at their
+  standard MISRA categorization level.
+```
+
+The GRC mechanism allows projects to promote Advisory rules to Required (stricter) or demote Required to Advisory (less strict, with justification). Demotion requires a strong safety argument.
+
+## Step 2: Static analyzer configuration verification
+
+The analyzer itself must be configured correctly. An analyzer that misses findings is as bad as no analyzer. The configuration evidence:
+
+```
+Analyzer: Cppcheck 2.14.0 with MISRA-C:2023 addon
+Target: ARM Cortex-M4 (32-bit int, 32-bit pointer, IEEE 754 float)
+Configuration flags:
+  --addon=misra
+  --enable=all
+  -DSTM32F407xx
+  -Isrc/ -Ivendor/CMSIS/
+
+Verification:
+  Test suite run against known-violation test cases (Cppcheck MISRA test suite).
+  All 11 Mandatory rule test cases detected: PASS.
+  Selected Required rule test cases (30 of 120): PASS.
+  Known false-positive test cases: 3 suppressed with inline comments.
+
+Date run: 2026-06-30
+```
+
+The test suite run is key: it proves the analyzer is finding what it should. A correctly configured analyzer is part of the evidence.
+
+## Step 3: Baseline analysis and triage
+
+Run the analyzer on the full codebase and produce the baseline report. Categorize all findings:
+
+```
+BASELINE ANALYSIS REPORT — Sensor Node Firmware v3.0
+Total findings: 287
+
+Category breakdown:
+  Mandatory rule violations:  0   (must be zero — fixed before baseline)
+  Required rule violations:  12   (each must have a deviation or be fixed)
+  Advisory rule violations:  45   (documented in deviation log)
+  Tool suppressed (FP):      230  (documented with suppression rationale)
+```
+
+Every non-zero finding in the Mandatory category blocks release — fix it, don't deviate. Required violations each need a deviation document. Advisory violations need a deviation or a batch-deviation covering the pattern.
+
+## Step 4: Deviation log entries
+
+A complete deviation log entry:
+
+```
+DEVIATION LOG — Sensor Node Firmware v3.0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Entry: DEV-2026-004
+Rule: MISRA-C:2023 Rule 18.4 (Advisory)
+Scope: src/dma_uart.c, lines 89 and 103
+Source locations:
+  dma_uart.c:89   DMA1_S6M0AR = (uint32_t)(tx_buf + tx_offset);
+  dma_uart.c:103  DMA1_S6PAR  = (uint32_t)(rx_buf + rx_offset);
+
+Justification:
+  DMA source and destination address registers require absolute memory addresses.
+  Computing these from a base buffer pointer and an offset is the only portable
+  pattern for selecting sub-regions of a statically allocated DMA buffer.
+  Array indexing (`tx_buf[tx_offset]`) produces a reference, not an address.
+
+Safety analysis:
+  tx_buf and rx_buf are statically allocated arrays of known size.
+  tx_offset and rx_offset are range-checked prior to use (assertions in debug
+  builds; bounds-checks in production at buffer-size constants).
+  The pointer arithmetic cannot produce an out-of-bounds address given the
+  preconditions.
+
+Risk: LOW. The arithmetic is bounded and reviewed.
+Impact if deviation not applied: Forced workaround (memcpy to a temporary
+  with no offset) would increase memory use and reduce DMA efficiency.
+
+Reviewed by: K. Jones, Safety Manager
+Date: 2026-06-30
+```
+
+Each deviation must have: rule, scope, justification, safety analysis, risk rating, reviewer, date. The reviewer must be someone other than the author.
+
+## Step 5: Inline suppression annotations
+
+Each deviation location in source code gets an inline annotation that:
+
+1. Tells the analyzer to suppress the finding at that location
+2. References the deviation log entry
+
+```c
+/* MISRA-2023 Rule 18.4 deviation: see DEV-2026-004 */
+/* cppcheck-suppress misra-c2012-18.4 */
+DMA1_S6M0AR = (uint32_t)(tx_buf + tx_offset);
+```
+
+The analyzer does not flag this line. The deviation document provides the audit trail. The comment makes the deviation visible in code review without looking up the log.
+
+## Step 6: CI gate and ongoing compliance
+
+```yaml
+# .github/workflows/safety-gate.yml
+- name: MISRA conformance check
+  run: |
+    cppcheck --addon=misra --error-exitcode=1 \
+      --enable=all --suppress=missingIncludeSystem \
+      -DSTM32F407xx -Isrc/ -Ivendor/ \
+      src/
+  # Any new MISRA violation fails the CI job.
+  # All deviations must have inline suppression annotations.
+  # Suppressions without inline comments fail the annotation check below.
+
+- name: Check deviation annotations present
+  run: |
+    python3 tools/check_suppressions.py src/
+    # Verifies every cppcheck-suppress comment has a corresponding DEV- reference
+```
+
+The CI gate ensures new code cannot introduce MISRA violations without explicit deviation documentation. Engineers cannot silently add violations — the check fails and they must either fix the code or add a reviewed deviation entry.
+
+## What a safety audit reviews
+
+An ISO 26262 or IEC 62304 auditor reviewing the MISRA evidence will look for:
+
+1. **Rule adoption document** — which rules are used, who decided, when
+2. **Analyzer configuration evidence** — tool version, flags, test-suite verification
+3. **Baseline analysis report** — total findings by category, all Mandatory = 0
+4. **Deviation log** — one entry per Required/Advisory violation, with reviewer signatures
+5. **Source code annotations** — inline suppression comments referencing deviation IDs
+6. **CI integration** — proof the check runs on every commit, failures block merge
+
+A project with zero Cppcheck warnings but missing items 1, 2, 4, or 5 fails the audit. The code is not the evidence — the process artifacts are.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer adds a deviation for MISRA Rule 21.3 (no malloc) covering the entire project with justification 'malloc is needed for flexibility.' A safety auditor rejects the deviation. Why?",
+      options: [
+        "Rule 21.3 cannot be deviated under any circumstances",
+        "A deviation for 'the entire project' with a generic justification fails the MISRA deviation discipline. Deviations must be: (1) scoped to specific code locations, not entire projects; (2) justified with technical reasoning for that specific use (why malloc is structurally required HERE, not generally 'for flexibility'); (3) accompanied by a safety analysis (what happens if malloc returns NULL, what's the fragmentation risk, how bounded is the allocation). A project-wide deviation without specific technical justification is not a deviation — it's a blanket suppression, which defeats MISRA's purpose.",
+        "malloc is always acceptable in embedded code",
+        "The auditor needs to approve malloc in advance",
+      ],
+      correct: 1,
+      explanation:
+        "MISRA deviations are surgical, not blanket. 'The entire project' is not a scope — it's an admission that the rule is not being followed at all. A valid deviation covers specific file:line locations, explains why malloc is required AT THAT LOCATION (not generally), analyzes the risk (fragmentation? NULL return?), and has a named reviewer. Projects that legitimately need dynamic allocation in specific places (e.g., a communication stack that creates a buffer per connection) document exactly those places with exactly that technical justification. Everything else is static allocation.",
+    },
+    {
+      question:
+        "A project's CI MISRA gate passes. The project manager declares 'we are MISRA-C:2023 conformant.' A safety auditor reviewing the deliverables asks for the conformance evidence package. Which item, if missing, causes the auditor to reject the conformance claim immediately?",
+      options: [
+        "A printed copy of the MISRA-C:2023 guidelines",
+        "The deviation log with reviewer signatures. A CI gate that passes means the code has no unaddressed analyzer findings — but MISRA conformance also requires documented deviations for every finding that was deviated (suppressed inline). Without the deviation log, there is no way to verify that suppressions were reviewed, have technical justification, and have a named approver. CI passing proves code was analyzed; the deviation log proves deviations were reviewed. Both are required.",
+        "A zero-error report from the analyzer",
+        "Source code in a specific format",
+      ],
+      correct: 1,
+      explanation:
+        "MISRA conformance has a process layer above the code layer. The CI gate proves analysis happened and flagged findings were addressed. The deviation log proves that 'addressed' means 'reviewed and justified' rather than 'suppressed to hide the problem.' Safety bodies use the deviation log to sample-audit deviations: pick deviation DEV-2026-004, find the source file annotation, read the justification, verify the reviewer is named. If the log doesn't exist, the audit path is broken. The zero-error report is necessary but not sufficient; the deviation log is the process evidence that makes the zero-error report meaningful.",
+    },
+  ]}
+/>
+
+## What's next
+
+Module E8 is the capstone — integrating everything from E1-E7 into a complete real-time sensor pipeline. The MISRA conformance workflow from this lesson applies if you choose the C path; the Rust path from E6 provides equivalent safety properties via the type system. The capstone produces the portfolio artifact that represents Phase E mastery.

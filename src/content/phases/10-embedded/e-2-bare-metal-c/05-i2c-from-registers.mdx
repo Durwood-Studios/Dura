@@ -1,0 +1,340 @@
+---
+title: "I2C from the Reference Manual"
+description: "Implement polled I2C1 on STM32F4 from register definitions. Read from an addressed sensor, handle the no-ACK failure, and implement the bus-stuck-low recovery that every production I2C driver must have."
+phase: 10
+module: "e-2-bare-metal-c"
+order: 5
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-2-bare-metal-c/04"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - i2c
+  - start-condition
+  - stop-condition
+  - ack
+  - nack
+  - sda
+  - scl
+  - open-drain
+  - bus-stuck-low
+  - address-bit
+  - arbitration-loss
+  - clock-stretching
+  - repeated-start
+learningOutcomes:
+  - "Initialize I2C1 on STM32F4 for 400 kHz fast-mode from register definitions"
+  - "Implement a polled I2C read of N bytes from a sensor register address"
+  - "Detect a no-ACK condition and return an error without hanging the bus"
+  - "Implement the 9-clock bus-stuck-low recovery procedure"
+  - "Explain the open-drain bus structure and why external pull-up resistors are required"
+professionalContext: "I2C is everywhere: temperature sensors, humidity sensors, IMUs, EEPROMs, I/O expanders, fuel gauges, RTCs — all on two wires, all sharing the same bus. Engineers who understand the protocol at the register level can integrate any I2C device from its datasheet. Engineers who only use vendor HAL functions struggle when the device doesn't behave as expected, because the HAL hides the state machine and makes bugs nearly impossible to diagnose."
+thresholdConcept: false
+---
+
+## Why this matters
+
+I2C is the "last mile" bus for most sensors. Two wires (SDA for data, SCL for clock) connect potentially dozens of devices, each with a 7-bit address. When something goes wrong — device missing, bus corruption, partial transfer — the failure mode is often a bus stuck at LOW that freezes the entire application. Engineers who don't implement recovery leave their products dead-in-field. This lesson teaches both the happy path and the recovery procedure.
+
+## I2C fundamentals: the open-drain bus
+
+Unlike SPI, I2C is an open-drain bus. Both SDA and SCL are driven LOW by devices but released (not driven HIGH) to allow pull-up resistors to pull the lines HIGH. This allows any device to "hold" a line LOW and gives the protocol collision detection for multi-master operation.
+
+A transaction frame:
+
+```
+SDA: [START] [A6 A5 A4 A3 A2 A1 A0 R/W] [ACK] [D7..D0] [ACK] ... [STOP]
+SCL:         ___/‾‾‾\___/‾‾‾\___                                 ___
+```
+
+- **START condition** — SDA falls while SCL is HIGH (master initiates)
+- **Address + R/W bit** — 7 address bits then 1 read/write bit, clocked by master
+- **ACK** — slave pulls SDA LOW for one clock after each byte it accepts
+- **Data bytes** — master or slave sends data bytes
+- **STOP condition** — SDA rises while SCL is HIGH
+
+Every byte transfer ends with an ACK from the receiver. If the device is absent or doesn't recognize the address, there is no ACK — the master must detect this and generate a STOP.
+
+## I2C1 registers on STM32F4
+
+I2C1 base: `0x40005400`. The STM32F4 I2C peripheral has a famously complex state machine with many status flags. The key ones:
+
+```c
+#define I2C1_BASE  0x40005400UL
+#define I2C1_CR1   (*(volatile uint32_t *)(I2C1_BASE + 0x00))
+#define I2C1_CR2   (*(volatile uint32_t *)(I2C1_BASE + 0x04))
+#define I2C1_OAR1  (*(volatile uint32_t *)(I2C1_BASE + 0x08))
+#define I2C1_DR    (*(volatile uint32_t *)(I2C1_BASE + 0x10))
+#define I2C1_SR1   (*(volatile uint32_t *)(I2C1_BASE + 0x14))
+#define I2C1_SR2   (*(volatile uint32_t *)(I2C1_BASE + 0x18))
+#define I2C1_CCR   (*(volatile uint32_t *)(I2C1_BASE + 0x1C))
+#define I2C1_TRISE (*(volatile uint32_t *)(I2C1_BASE + 0x20))
+
+/* SR1 flags */
+#define I2C_SR1_SB    (1U << 0)   /* Start bit generated */
+#define I2C_SR1_ADDR  (1U << 1)   /* Address sent and acknowledged */
+#define I2C_SR1_TXE   (1U << 7)   /* Data register empty (TX) */
+#define I2C_SR1_RXNE  (1U << 6)   /* Data register not empty (RX) */
+#define I2C_SR1_BTF   (1U << 2)   /* Byte transfer finished */
+#define I2C_SR1_AF    (1U << 10)  /* Acknowledge failure */
+#define I2C_SR1_BERR  (1U << 8)   /* Bus error */
+#define I2C_SR1_ARLO  (1U << 9)   /* Arbitration lost */
+
+/* CR1 bits */
+#define I2C_CR1_PE    (1U << 0)   /* Peripheral enable */
+#define I2C_CR1_START (1U << 8)   /* Generate START */
+#define I2C_CR1_STOP  (1U << 9)   /* Generate STOP */
+#define I2C_CR1_ACK  (1U << 10)  /* Acknowledge enable */
+```
+
+## Initialization — 400 kHz fast mode
+
+```c
+#define RCC_BASE      0x40023800UL
+#define RCC_AHB1ENR  (*(volatile uint32_t *)(RCC_BASE + 0x30))
+#define RCC_APB1ENR  (*(volatile uint32_t *)(RCC_BASE + 0x40))
+
+/* GPIOB: PB6=SCL, PB7=SDA for I2C1 */
+#define GPIOB_BASE    0x40020400UL
+#define GPIOB_MODER   (*(volatile uint32_t *)(GPIOB_BASE + 0x00))
+#define GPIOB_OTYPER  (*(volatile uint32_t *)(GPIOB_BASE + 0x04))
+#define GPIOB_OSPEEDR (*(volatile uint32_t *)(GPIOB_BASE + 0x08))
+#define GPIOB_PUPDR   (*(volatile uint32_t *)(GPIOB_BASE + 0x0C))
+#define GPIOB_AFRL    (*(volatile uint32_t *)(GPIOB_BASE + 0x20))
+
+void i2c1_init(void) {
+    /* Enable clocks */
+    RCC_AHB1ENR |= (1U << 1);    /* GPIOBEN */
+    RCC_APB1ENR |= (1U << 21);   /* I2C1EN */
+
+    /* Disable I2C1 before configuration */
+    I2C1_CR1 = 0;
+
+    /* PB6 (SCL) and PB7 (SDA) as Alternate Function 4 (I2C1), open-drain */
+    GPIOB_MODER   &= ~((0b11U << 12) | (0b11U << 14));
+    GPIOB_MODER   |=  ((0b10U << 12) | (0b10U << 14));  /* AF mode */
+    GPIOB_OTYPER  |=  ((1U << 6) | (1U << 7));           /* Open-drain (mandatory for I2C) */
+    GPIOB_OSPEEDR |=  ((0b11U << 12) | (0b11U << 14));   /* High speed */
+    GPIOB_PUPDR   |=  ((0b01U << 12) | (0b01U << 14));   /* Pull-up (supplement external) */
+    /* AF4 for both PB6 and PB7 */
+    GPIOB_AFRL    &= ~((0xFU << 24) | (0xFU << 28));
+    GPIOB_AFRL    |=  ((4U   << 24) | (4U   << 28));
+
+    /* I2C1 on APB1 at 42 MHz.
+       CR2 FREQ field must be set to peripheral clock in MHz */
+    I2C1_CR2 = 42U;             /* FREQ = 42 (MHz) */
+
+    /* 400 kHz fast mode (Fm): CCR = f_PCLK / (3 × f_I2C) for Duty=0 */
+    /* CCR = 42 MHz / (3 × 400 kHz) = 35 */
+    I2C1_CCR = (1U << 15) | 35U;   /* F/S=1 (fast mode), DUTY=0, CCR=35 */
+
+    /* TRISE for fast mode: max rise time = 300 ns; TRISE = (300 ns × f_PCLK) + 1 */
+    /* TRISE = (300e-9 × 42e6) + 1 = 13.6 → 14 */
+    I2C1_TRISE = 14U;
+
+    /* Enable I2C1, enable ACK by default */
+    I2C1_CR1 = I2C_CR1_PE | I2C_CR1_ACK;
+}
+```
+
+## Polled read — N bytes from a register address
+
+The read transaction for a register-based device (most sensors):
+
+1. START + [address + WRITE] → address the device for writing
+2. [register address] → tell the device which register to read
+3. REPEATED START + [address + READ] → switch to reading
+4. Clock in N bytes, NAKing on the last byte to signal "stop here"
+5. STOP
+
+```c
+/* Returns 0 on success, -1 on error (no-ACK, bus error, timeout) */
+int i2c1_read_registers(uint8_t dev_addr, uint8_t reg_addr,
+                         uint8_t *buf, uint16_t len) {
+    uint32_t timeout;
+
+    /* --- Phase 1: Send register address --- */
+
+    /* Generate START */
+    I2C1_CR1 |= I2C_CR1_START;
+    timeout = 100000U;
+    while (!(I2C1_SR1 & I2C_SR1_SB)) {
+        if (--timeout == 0U) return -1;
+    }
+
+    /* Send device address + WRITE (bit 0 = 0) */
+    I2C1_DR = (uint8_t)((dev_addr << 1U) | 0U);
+    timeout = 100000U;
+    while (!(I2C1_SR1 & I2C_SR1_ADDR)) {
+        if (I2C1_SR1 & I2C_SR1_AF) {
+            /* Acknowledge failure — device at this address didn't respond */
+            I2C1_SR1 &= ~I2C_SR1_AF;
+            I2C1_CR1 |= I2C_CR1_STOP;
+            return -1;
+        }
+        if (--timeout == 0U) return -1;
+    }
+    /* Clear ADDR flag by reading SR2 after SR1 */
+    (void)I2C1_SR2;
+
+    /* Send register address byte */
+    while (!(I2C1_SR1 & I2C_SR1_TXE)) { }
+    I2C1_DR = reg_addr;
+    while (!(I2C1_SR1 & I2C_SR1_BTF)) { }
+
+    /* --- Phase 2: Repeated START + read --- */
+
+    I2C1_CR1 |= I2C_CR1_START;
+    while (!(I2C1_SR1 & I2C_SR1_SB)) { }
+
+    /* Send device address + READ (bit 0 = 1) */
+    I2C1_DR = (uint8_t)((dev_addr << 1U) | 1U);
+
+    if (len == 1U) {
+        /* Single-byte receive: disable ACK before clearing ADDR */
+        I2C1_CR1 &= ~I2C_CR1_ACK;
+        while (!(I2C1_SR1 & I2C_SR1_ADDR)) {
+            if (I2C1_SR1 & I2C_SR1_AF) {
+                I2C1_SR1 &= ~I2C_SR1_AF;
+                I2C1_CR1 |= I2C_CR1_STOP;
+                return -1;
+            }
+        }
+        (void)I2C1_SR2;             /* Clear ADDR */
+        I2C1_CR1 |= I2C_CR1_STOP;  /* STOP request before reading DR */
+        while (!(I2C1_SR1 & I2C_SR1_RXNE)) { }
+        buf[0] = (uint8_t)I2C1_DR;
+    } else {
+        while (!(I2C1_SR1 & I2C_SR1_ADDR)) {
+            if (I2C1_SR1 & I2C_SR1_AF) {
+                I2C1_SR1 &= ~I2C_SR1_AF;
+                I2C1_CR1 |= I2C_CR1_STOP;
+                return -1;
+            }
+        }
+        (void)I2C1_SR2;             /* Clear ADDR */
+
+        for (uint16_t i = 0U; i < len; i++) {
+            if (i == (len - 1U)) {
+                /* Last byte: NAK + STOP before reading DR */
+                I2C1_CR1 &= ~I2C_CR1_ACK;
+                I2C1_CR1 |= I2C_CR1_STOP;
+            }
+            while (!(I2C1_SR1 & I2C_SR1_RXNE)) { }
+            buf[i] = (uint8_t)I2C1_DR;
+        }
+    }
+
+    /* Re-enable ACK for next transaction */
+    I2C1_CR1 |= I2C_CR1_ACK;
+    return 0;
+}
+```
+
+The single-byte case has its own path because disabling ACK must happen before clearing ADDR (before the byte starts clocking in), not after. This is documented in the STM32F4 reference manual's "I2C EV7_1" errata section — and is one of the famous STM32 I2C quirks.
+
+## Bus-stuck-low recovery
+
+After any interrupted transaction (MCU reset mid-byte, power glitch, wire noise), a slave may be holding SDA LOW waiting for more clock edges to complete the byte it was sending. The I2C bus is stuck: the master can't generate a START (SDA must be HIGH), so every transaction fails.
+
+Recovery procedure (from the I2C specification, §3.1.16):
+
+```c
+/* Temporarily take I2C pins back to GPIO mode to bit-bang recovery */
+void i2c1_bus_recovery(void) {
+    /* Disable I2C1 peripheral */
+    I2C1_CR1 &= ~I2C_CR1_PE;
+
+    /* Configure PB6 (SCL) and PB7 (SDA) as GPIO outputs, open-drain */
+    GPIOB_MODER &= ~((0b11U << 12) | (0b11U << 14));
+    GPIOB_MODER |=  ((0b01U << 12) | (0b01U << 14));  /* Output */
+    /* OTYPER stays open-drain from init */
+
+    /* Drive SCL HIGH, SDA HIGH */
+    GPIOB_BSRR = (1U << 6) | (1U << 7);   /* Set PB6=1, PB7=1 */
+
+    /* Toggle SCL nine times while SDA stays HIGH.
+       A stuck slave must release SDA within 9 SCL cycles.
+       Delay values: ~5 µs HIGH, ~5 µs LOW at 100 kHz standard mode */
+    for (int i = 0; i < 9; i++) {
+        GPIOB_BSRR = (1U << (6 + 16));   /* SCL LOW */
+        delay_us(5U);
+        GPIOB_BSRR = (1U << 6);           /* SCL HIGH */
+        delay_us(5U);
+    }
+
+    /* Generate a STOP: SDA goes LOW while SCL HIGH, then SDA goes HIGH */
+    GPIOB_BSRR = (1U << (7 + 16));   /* SDA LOW */
+    delay_us(5U);
+    GPIOB_BSRR = (1U << 7);           /* SDA HIGH (STOP) */
+    delay_us(5U);
+
+    /* Switch PB6/PB7 back to Alternate Function for I2C */
+    GPIOB_MODER &= ~((0b11U << 12) | (0b11U << 14));
+    GPIOB_MODER |=  ((0b10U << 12) | (0b10U << 14));
+
+    /* Re-enable I2C1 and wait for PE to set */
+    I2C1_CR1 |= I2C_CR1_PE;
+    while (!(I2C1_CR1 & I2C_CR1_PE)) { }
+    I2C1_CR1 |= I2C_CR1_ACK;
+}
+```
+
+Call this at startup and after any failed transaction. A robust I2C driver calls recovery at boot, retries each operation twice, and calls recovery again before each retry.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "Why must the ADDR flag be cleared by reading SR2 after SR1, rather than directly clearing a bit in SR1?",
+      options: [
+        "SR1 is read-only",
+        "The ADDR flag is a hardware-latched status that the I2C peripheral uses internally to sequence the bus state machine. The hardware requires SR2 to be read after SR1 to atomically clear ADDR and advance the peripheral's state machine. Simply writing 0 to the ADDR bit in SR1 doesn't advance the state machine correctly — the peripheral may re-set ADDR or mis-sequence the next byte. The SR1+SR2 read pair is a specific hardware protocol, not a software convention.",
+        "SR2 contains the acknowledge bit that must be read",
+        "Reading SR2 generates the ACK pulse on the bus",
+      ],
+      correct: 1,
+      explanation:
+        "The STM32F4 I2C peripheral's ADDR clearing mechanism is a hardware-specified two-step: read SR1, then read SR2. This sequence atomically clears ADDR and signals to the peripheral's state machine that the host has acknowledged the address phase. The ADDR bit in SR1 cannot be cleared by direct write — the hardware ignores it. This is documented in RM0090 under 'I2C master transmitter' and is a source of significant confusion. Every STM32 I2C driver must follow this pattern or face subtle sequencing failures.",
+    },
+    {
+      question:
+        "An embedded system checks temperature via I2C every second. On one unit, the temperature readings freeze at a fixed value. Resetting the MCU doesn't help. Cycling power restores it for a random period before it freezes again. What's the most likely cause?",
+      options: [
+        "The temperature sensor is overheating",
+        "The I2C bus is stuck low — a prior transaction was interrupted mid-byte, leaving the sensor's shift register waiting for more clock pulses. The sensor is holding SDA low. MCU reset doesn't help because the MCU reinitializes I2C normally, immediately issues a START (which requires SDA HIGH), and the sensor ignores it because it's waiting for clocks. Power cycling releases the open-drain pull-ups to HIGH, which resets the sensor's serial state. The fix is to implement bus-stuck-low recovery at startup and after any failed transaction.",
+        "The SDA pull-up resistor has failed",
+        "The MCU's I2C peripheral has a silicon bug",
+      ],
+      correct: 1,
+      explanation:
+        "Bus-stuck-low is the dominant I2C field failure mode. The symptom exactly matches: intermittent (depending on when the interruption occurs), frozen readings (every read fails silently), unresponsive to MCU reset, resolved by power cycling (which resets the sensor's internal state). The 9-clock recovery procedure is the specified fix from the I2C standard — it clocks out any partial byte the slave is waiting on, then generates a STOP. Production drivers must run this recovery at boot and after detected failures.",
+    },
+    {
+      question:
+        "A developer reads the 6-byte register block of an MPU-6050 IMU (at device address 0x68, starting register 0x3B). The code reads 6 bytes into a buf[]. The last byte reads as 0x00 every time, even though the sensor has valid data. What's most likely wrong?",
+      options: [
+        "The device address is wrong",
+        "The NAK + STOP for the last byte must be requested BEFORE reading DR for the final byte — if the driver enables NAK only after reading the 6th byte, the peripheral has already ACKed the 6th byte and started clocking in a 7th (garbage) byte. The sequence must be: when receiving byte N-1, disable ACK so the peripheral NAKs byte N; set STOP before reading DR for byte N. Reading DR prematurely for the wrong byte is the second failure mode here — always check the reference manual's 'last byte receive' procedure.",
+        "6 bytes require DMA, not polled reads",
+        "The register address 0x3B is incorrect for MPU-6050",
+      ],
+      correct: 1,
+      explanation:
+        "The STM32F4 I2C peripheral's N-byte receive procedure requires NAK to be asserted before the last byte is clocked in, not after it's received. If you set NAK after reading byte N, the peripheral has already sent ACK for byte N and is clocking byte N+1 — a garbage extra byte that corrupts the next transaction. The STM32 reference manual calls this 'Method 2 for N≥3 bytes' and has specific sequencing for N=1, N=2, and N>2. Getting this wrong is the most common STM32 I2C driver bug.",
+    },
+  ]}
+/>
+
+## What's next
+
+Module E3 formalizes the interrupt model: NVIC priority levels, nested interrupts, and the BASEPRI-based critical sections that make the shared-variable patterns from E1 and E2 safe. The I2C driver you wrote here is polled; E3's patterns let you upgrade it to interrupt-driven without races.

@@ -1,0 +1,274 @@
+---
+title: "Kahan Summation and Compensated Arithmetic"
+description: "Why naive floating-point accumulation loses precision, how Kahan's algorithm keeps a running error compensation term, and when to use Neumaier's variant for robustness."
+phase: 12
+module: "q-2-ieee-754-numerics"
+order: 3
+estimatedMinutes: 30
+difficulty: 4
+prerequisites:
+  - "q-2-ieee-754-numerics/02-ieee-754-numerics"
+standards:
+  primaryAnchor: "IEEE 754-2019"
+  cs2023: []
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - kahan-summation
+  - compensated-summation
+  - running-compensation
+  - neumaier-summation
+  - pairwise-summation
+  - catastrophic-cancellation
+  - error-bound
+  - accumulator
+learningOutcomes:
+  - "After this lesson you can implement Kahan compensated summation and explain the role of the compensation variable"
+  - "After this lesson you can identify when naive summation loses significant digits and Kahan summation is warranted"
+  - "After this lesson you can implement Neumaier's variant and explain when it improves on Kahan"
+  - "After this lesson you can evaluate the trade-off between Kahan accuracy and the 2x throughput cost on the hot path"
+professionalContext: "A P&L calculation sums thousands of fill prices multiplied by quantities. Over a trading day this accumulation can differ by hundreds of dollars between a naive loop and a Kahan-compensated loop, purely from rounding. The difference is not a logic bug — it is floating-point arithmetic doing exactly what IEEE 754 specifies. Risk systems and end-of-day reconciliation reports use Kahan summation wherever the sum has a large dynamic range (many small fills interspersed with a few large ones). Knowing when naive is good enough and when compensated summation is required is the mark of a quant developer who owns their numerics."
+thresholdConcept: false
+---
+
+## Why this matters
+
+End of day. Your P&L report says $1,247,831.43. The matching engine's tally says $1,247,831.29. Fourteen cents. You both summed 47,000 fills with the same prices and quantities. The source of the difference is not a bug in any line of code — it is the fact that you computed the sum in a different order, and IEEE 754 says the two sums can be different in the last few significant digits.
+
+Fourteen cents is nothing until the controls team flags it. Then it is a two-hour incident that stops trading while someone proves it is rounding. The fix is Kahan summation: a four-line algorithm that reduces floating-point summation error from O(n ε) to O(ε) regardless of n. This lesson shows you exactly why naive summation loses those cents and exactly how Kahan keeps them.
+
+## The mechanics of accumulated summation error
+
+Every `+=` to a `double` accumulator rounds the exact result to the nearest representable value. The error on each individual addition is bounded by ½ ULP at the accumulator's current magnitude. When the accumulator is much larger than the addend, that ULP is larger than the addend itself — the addend is lost.
+
+```cpp
+#include <cstdio>
+
+int main() {
+    // Catastrophic cancellation in accumulation.
+    // sum many small values into a large accumulator.
+    double large = 1e15;   // 10^15 — today's notional in the accumulator
+    double small = 1.0;    // one dollar fill
+
+    // Adding 1.0 to 1e15: the ULP of 1e15 is about 0.125, so 1.0 is representable —
+    // BUT if the accumulator were 1e16, the ULP is ~2, and 1.0 would be rounded to 0.
+    // Let's see where the cliff is:
+    double acc = 1e16;
+    acc += 1.0;
+    // acc is still exactly 1e16 — the 1.0 was below the ULP of 1e16.
+    std::printf("1e16 + 1.0 = %.1f (the 1.0 was lost)\n", acc);  // 10000000000000000.0
+
+    // After 10,000 fills of $1 each into a $10^16 accumulator, the total is still $10^16.
+    // The fills are gone. The reconciliation break is 10,000 dollars.
+}
+```
+
+This is the core problem: the relative error of a naive sum can grow with n because each addition that is below the accumulator's ULP contributes nothing.
+
+## Kahan summation: compensate for the rounding
+
+<VocabTooltip slug="kahan-summation">Kahan compensated summation</VocabTooltip> keeps a
+<VocabTooltip slug="running-compensation">running compensation</VocabTooltip> variable `c` that
+accumulates the low-order bits that the accumulator `sum` drops on each addition. Before the next
+addition, the lost bits are added back.
+
+```cpp
+#include <cstddef>
+
+// Kahan-Babuška compensated summation.
+// Error is bounded by O(eps * max|xi|) — independent of n —
+// instead of the naive O(n * eps * |sum|).
+struct KahanAccumulator {
+    double sum = 0.0;
+    double c   = 0.0;   // running compensation for lost low-order bits
+
+    void add(double x) noexcept {
+        // y is x corrected for the compensation from the previous step.
+        double y = x - c;
+        // t is the new sum. Because sum is big and y is small, the low-order
+        // bits of y are lost when forming t.
+        double t = sum + y;
+        // (t - sum) recovers what DID make it in — subtracting y gives
+        // what was LOST. That lost amount becomes the next compensation.
+        c = (t - sum) - y;
+        sum = t;
+    }
+
+    double result() const noexcept { return sum; }
+};
+
+// Equivalent as a free function (zero-overhead, same algorithm).
+double kahan_sum(const double* data, std::size_t n) noexcept {
+    double sum = 0.0;
+    double c   = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        double y = data[i] - c;
+        double t = sum + y;
+        c   = (t - sum) - y;
+        sum = t;
+    }
+    return sum;
+}
+```
+
+The line `c = (t - sum) - y` is the heart of the algorithm. `(t - sum)` recovers the part of `y` that was representable at `sum`'s magnitude; subtracting `y` gives the part that was lost. That lost part is fed back in on the next addition, so no bits accumulate as wasted rounding error.
+
+> **Mental model.** A plain `double accumulator` keeps only the high-order bits of the running sum — the low-order rounding is thrown away at every step. A Kahan accumulator is two doubles: one for the high-order bits (sum) and one for the low-order bits that overflowed the high-order part (c). Together they represent more precision than a single double, and the cost is four operations per element instead of one.
+
+## Neumaier's variant: robust to large addends
+
+Kahan summation has a corner case: when the current `x` is larger than `sum` in magnitude (a large fill into a nearly-zero accumulator), the compensation is assigned to the wrong term and the algorithm reduces back to naive. <VocabTooltip slug="neumaier-summation">Neumaier's variant</VocabTooltip> fixes this by choosing which of `t` or `x` is the larger:
+
+```cpp
+// Neumaier (Kahan-Babuška-Neumaier) summation.
+// Handles the case where |x| > |sum| correctly.
+// Reference: Neumaier, A. (1974) "Rundungsfehleranalyse einiger Verfahren zur
+// Summiaton endlicher Folgen", Z. Angew. Math. Mech.
+double neumaier_sum(const double* data, std::size_t n) noexcept {
+    double sum = 0.0;
+    double c   = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        double t = sum + data[i];
+        if (std::abs(sum) >= std::abs(data[i])) {
+            // Standard Kahan: sum is bigger, data[i] lost low-order bits.
+            c += (sum - t) + data[i];
+        } else {
+            // Neumaier extension: data[i] is bigger, sum lost low-order bits.
+            c += (data[i] - t) + sum;
+        }
+        sum = t;
+    }
+    return sum + c;   // apply the compensation at the end
+}
+```
+
+Note the difference in when `c` is applied: in Neumaier, compensation is accumulated through the loop and added once at the end. This avoids the extra round-trip that standard Kahan performs per step when x is larger than sum.
+
+Use Neumaier when the input values have a wide dynamic range — for example, summing a large notional with many small penny-lot fills where some fills may be larger than the current running total at the start of the day.
+
+## The throughput cost
+
+Kahan adds roughly 3 extra floating-point operations per element (two subtractions and a reassignment). On a modern out-of-order CPU with FP units that can do 2 operations per cycle:
+
+- Naive sum: 1 FP op per element → ~0.5 ns/element at 2 GHz
+- Kahan: 4 FP ops per element → ~2 ns/element
+
+The 4x throughput cost is real. The decision rule on a desk:
+
+- **Always Kahan (or Neumaier)** for end-of-day P&L reconciliation, risk model aggregations, option premium sums — correctness trumps speed.
+- **Naive acceptable** for a fast mid-price estimate, a volatility estimate for display (not risk), or any sum whose result is printed but never compared to another system's sum.
+- **Pairwise summation** (divide-and-conquer, sum pairs, then pairs of pairs) achieves O(log n) error growth and is as fast as the naive loop when vectorized — the middle ground used by NumPy and BLAS.
+
+## Apply it
+
+<SandboxExercise
+  language="javascript"
+  instructions="Implement kahanSum(arr) using the Kahan compensated summation algorithm. Then call it on an array of 10,000 ones mixed with one large value to show it produces a more accurate result than a naive sum. Compare to the naive sum and to the exact answer (10001)."
+  initialCode={`function naiveSum(arr) {
+  let sum = 0;
+  for (const x of arr) sum += x;
+  return sum;
+}
+
+function kahanSum(arr) {
+let sum = 0;
+let c = 0;
+for (const x of arr) {
+// TODO: implement Kahan compensation
+// y = x - c
+// t = sum + y
+// c = (t - sum) - y
+// sum = t
+}
+return sum;
+}
+
+// Build array: one large value followed by 10,000 ones.
+// Exact sum = 1e16 + 10000 = 10000000000010000
+const arr = [1e16, ...Array(10000).fill(1)];
+const exact = 1e16 + 10000;
+
+console.log("Exact: ", exact);
+console.log("Naive: ", naiveSum(arr));
+console.log("Kahan: ", kahanSum(arr));`}
+  solution={`function naiveSum(arr) {
+let sum = 0;
+for (const x of arr) sum += x;
+return sum;
+}
+
+function kahanSum(arr) {
+let sum = 0;
+let c = 0;
+for (const x of arr) {
+const y = x - c;
+const t = sum + y;
+c = (t - sum) - y;
+sum = t;
+}
+return sum;
+}
+
+const arr = [1e16, ...Array(10000).fill(1)];
+const exact = 1e16 + 10000;
+
+console.log("Exact: ", exact);
+console.log("Naive: ", naiveSum(arr));
+console.log("Kahan: ", kahanSum(arr));`}
+testCases={[
+"kahanSum produces a result closer to the exact answer than naiveSum for the given array",
+"kahanSum correctly accumulates small values after a large value without losing them",
+]}
+/>
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "In Kahan summation, what does the compensation variable c represent after each iteration?",
+      options: [
+        "The total error accumulated so far across all previous additions",
+        "The low-order bits of y that were lost when y was added to sum — i.e., the part of the current addend that the accumulator was too large to absorb exactly",
+        "The difference between the naive sum and the exact sum",
+        "A running estimate of the sum's standard error",
+      ],
+      correct: 1,
+      explanation:
+        "In each step, y = x - c corrects x for previous compensation. t = sum + y adds the corrected value. The expression (t - sum) recovers what DID make it from y into t; subtracting y gives what was lost. So c after the step is 'the part of y that sum was too large to absorb' — the low-order bits that fell below sum's ULP. On the next step, this lost amount is fed back in, preventing its contribution from accumulating as wasted error.",
+    },
+    {
+      question:
+        "You are summing 50,000 fills. The fills range from $0.01 to $100,000. Standard Kahan summation has a corner case for this distribution. What is it, and which variant fixes it?",
+      options: [
+        "Kahan fails when any addend is negative; use pairwise summation instead",
+        "Kahan fails when |data[i]| > |sum| — e.g. when a large fill arrives early when sum is still small — because the compensation is assigned to the wrong term; Neumaier's variant tests which of t or data[i] is larger and compensates the correct term regardless",
+        "Kahan fails for more than 1,000 elements; use double-precision recursion",
+        "Kahan is exact for all sums of positive values; no variant is needed",
+      ],
+      correct: 1,
+      explanation:
+        "Standard Kahan assumes the accumulator sum is larger in magnitude than the current addend x. When |x| > |sum| (e.g., the very first large fill into a zero accumulator), the compensation is formed incorrectly — the algorithm still works, but not as accurately as possible. Neumaier's variant checks this case: if |sum| >= |data[i]|, it uses the standard Kahan compensation; otherwise it uses the symmetric form (data[i] - t) + sum. The result is a summation that is accurate whether or not the addends arrive in sorted order.",
+    },
+    {
+      question:
+        "Your desk's real-time P&L display runs 5 million additions per second. You are deciding between a naive loop and Kahan. The display is purely visual — no system downstream consumes the value programmatically. What is the appropriate choice?",
+      options: [
+        "Always use Kahan — the 4x cost is worth it for any financial calculation",
+        "Use naive for the display: the displayed value is approximate by nature (it will be replaced next millisecond), no downstream system reconciles against it, and the 4x throughput difference matters when you are summing millions of values per second",
+        "Use pairwise summation, which is both accurate and as fast as naive",
+        "Use integer arithmetic instead",
+      ],
+      correct: 1,
+      explanation:
+        "The decision rule is: use Kahan where the result must reconcile against another system's result, or where accumulated error changes a downstream decision. A real-time display value that is immediately replaced is not such a case — if the display shows $1.247M instead of $1.248M for 50 ms before the next update, no trading decision is affected and no system reconciles against it. Kahan's 4x throughput cost is a real budget item at 5 million additions per second. Pairwise summation (option C) is a valid alternative — it achieves O(log n) error and can be vectorized to match naive throughput — but it requires more implementation complexity and is overkill for a display value.",
+    },
+  ]}
+/>
+
+## What's next
+
+The next lesson addresses a different class of floating-point surprise: NaN and Infinity propagation. A single NaN input to a pricing chain silently poisons every downstream value — the Black-Scholes delta becomes NaN, the risk report fills with NaN, and nothing triggers a runtime error. You will learn the IEEE 754 rules for how NaN propagates, how to detect and quarantine it, and when Infinity is a useful sentinel versus a correctness trap.

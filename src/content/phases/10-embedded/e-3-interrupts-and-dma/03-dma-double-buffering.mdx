@@ -1,0 +1,280 @@
+---
+title: "DMA Double-Buffering — Zero-Loss Streaming"
+description: "The circular DMA + half-transfer interrupt pattern. While the application processes one half of the buffer, DMA fills the other. No data loss at any sample rate. The canonical solution for ADC streaming, audio capture, and serial data logging."
+phase: 10
+module: "e-3-interrupts-and-dma"
+order: 3
+estimatedMinutes: 22
+difficulty: 4
+prerequisites:
+  - "e-3-interrupts-and-dma/02"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - double-buffer
+  - circular-dma
+  - half-transfer-interrupt
+  - transfer-complete-interrupt
+  - ping-pong-buffer
+  - dma-stream
+  - dma-channel
+  - dma-lisr
+  - dma-lifcr
+  - memory-barrier
+learningOutcomes:
+  - "Configure DMA in circular mode with half-transfer and transfer-complete interrupts"
+  - "Implement the double-buffer handoff so the application processes data while DMA fills the other half"
+  - "Identify the aliasing hazard when the application takes too long to process a half-buffer"
+  - "Explain why DMA buffers must be statically allocated and aligned"
+  - "Measure DMA processing latency with a GPIO toggle and a logic analyzer"
+professionalContext: "Audio capture, high-rate ADC logging, USB streaming, SDIO card writes — every high-bandwidth embedded application eventually needs double-buffered DMA. Engineers who understand this pattern can design systems that reliably capture data at rates far exceeding what ISR-per-sample approaches can handle. The pattern appears in audio codecs, motor-control current sensing, RF baseband processing, and sensor data fusion. It's not advanced — it's the normal solution for anything above ~10 kHz sample rate."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A single DMA buffer can transfer N samples. When the buffer is full, DMA stops or wraps. If the application is still processing the previous buffer when DMA wraps, the new data overwrites the old. You lose data.
+
+The double-buffer (ping-pong) pattern solves this: the buffer is split in half. DMA fills the first half; when half-full, an interrupt fires and the application starts processing the first half. DMA continues into the second half. When the second half is full, a second interrupt fires, DMA wraps back to the first half, and the application switches to processing the second half. The two halves alternate indefinitely.
+
+Zero data loss, provided the application can process one half before DMA wraps to the other.
+
+## Circular DMA on STM32F4
+
+STM32F4's DMA controller supports circular mode natively: when the transfer counter (NDTR) reaches zero, it automatically reloads the count and wraps back to the start address. Two interrupts are generated:
+
+- **HTIF (Half-Transfer Interrupt)** — fires when NDTR reaches N/2. First half is complete.
+- **TCIF (Transfer-Complete Interrupt)** — fires when NDTR reaches 0. Second half is complete.
+
+Together they give you 2×(N/2) = N continuous coverage with perfect interleaving.
+
+```c
+#include <stdint.h>
+#include <string.h>
+
+/* Buffer: 200 samples, split into two halves of 100 */
+#define TOTAL_SAMPLES   200U
+#define HALF_SAMPLES    100U
+
+/* MUST be static (not stack-local) — DMA runs after the function returns */
+static volatile uint16_t adc_dma_buf[TOTAL_SAMPLES];
+
+/* Flag set by ISR, read by main */
+static volatile uint8_t half_buffer_ready = 0U;
+static volatile uint8_t half_buffer_index  = 0U;   /* 0 = first half, 1 = second half */
+
+/* Define the DMA2 Stream 0 registers (ADC1 uses DMA2 S0 Ch0 on STM32F4) */
+#define DMA2_BASE     0x40026400UL
+#define DMA2_LISR     (*(volatile uint32_t *)(DMA2_BASE + 0x00))
+#define DMA2_LIFCR    (*(volatile uint32_t *)(DMA2_BASE + 0x08))
+#define DMA2_S0CR     (*(volatile uint32_t *)(DMA2_BASE + 0x10))
+#define DMA2_S0NDTR   (*(volatile uint32_t *)(DMA2_BASE + 0x14))
+#define DMA2_S0PAR    (*(volatile uint32_t *)(DMA2_BASE + 0x18))
+#define DMA2_S0M0AR   (*(volatile uint32_t *)(DMA2_BASE + 0x1C))
+
+/* ADC1 data register */
+#define ADC1_DR       (*(volatile uint32_t *)(0x40012000UL + 0x4C))
+
+void adc_dma_circular_init(void) {
+    /* Enable DMA2 clock */
+    *(volatile uint32_t *)(0x40023800UL + 0x30) |= (1U << 22);  /* RCC_AHB1ENR DMA2EN */
+
+    /* Disable stream before configuring — required by reference manual */
+    DMA2_S0CR &= ~(1U << 0);
+    while (DMA2_S0CR & (1U << 0)) { }   /* Wait for DIS to propagate */
+
+    DMA2_S0PAR  = (uint32_t)&ADC1_DR;            /* Peripheral: ADC1 data register */
+    DMA2_S0M0AR = (uint32_t)adc_dma_buf;          /* Memory: our static buffer */
+    DMA2_S0NDTR = TOTAL_SAMPLES;                   /* Number of transfers */
+
+    DMA2_S0CR =
+        (0U << 25) |   /* Channel 0 (ADC1) */
+        (0U << 6)  |   /* DIR: peripheral-to-memory */
+        (1U << 8)  |   /* CIRC: circular mode */
+        (1U << 10) |   /* MINC: memory address auto-increment */
+        (0U << 11) |   /* PSIZE: 16-bit peripheral size */
+        (1U << 11) |   /* PSIZE: 16-bit (bits [12:11] = 01) */
+        (1U << 13) |   /* MSIZE: 16-bit memory size (bits [14:13] = 01) */
+        (1U << 4)  |   /* TCIE: transfer-complete interrupt */
+        (1U << 3);     /* HTIE: half-transfer interrupt */
+
+    /* Enable DMA2 Stream 0 IRQ in NVIC */
+    NVIC_SetPriority(DMA2_Stream0_IRQn, 5U);
+    NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+
+    /* Enable stream — starts counting */
+    DMA2_S0CR |= (1U << 0);
+}
+```
+
+## The ISR — minimal work, correct handoff
+
+```c
+void DMA2_Stream0_IRQHandler(void) {
+    /* Check for half-transfer interrupt (HTIF0 = bit 4 of LISR) */
+    if (DMA2_LISR & (1U << 4)) {
+        DMA2_LIFCR = (1U << 4);         /* Clear HTIF0 flag */
+        half_buffer_index = 0U;          /* First half is ready */
+        half_buffer_ready = 1U;
+    }
+
+    /* Check for transfer-complete interrupt (TCIF0 = bit 5 of LISR) */
+    if (DMA2_LISR & (1U << 5)) {
+        DMA2_LIFCR = (1U << 5);         /* Clear TCIF0 flag */
+        half_buffer_index = 1U;          /* Second half is ready */
+        half_buffer_ready = 1U;
+    }
+
+    /* ISR exits. DMA continues filling the other half automatically.
+       The application processes the ready half before the next interrupt fires. */
+}
+```
+
+## The main loop — process while DMA fills
+
+```c
+int main(void) {
+    system_clock_init();
+    adc_init_continuous();       /* Configure ADC1 for continuous DMA trigger */
+    adc_dma_circular_init();
+
+    uint16_t work_buf[HALF_SAMPLES];   /* Working copy — keeps DMA buffer clean */
+
+    while (1U) {
+        /* Poll for ready signal — in a real system this would be an RTOS queue */
+        if (half_buffer_ready) {
+            uint8_t idx = half_buffer_index;
+            half_buffer_ready = 0U;
+
+            /* Copy the ready half OUT of the DMA buffer before processing.
+               While we process, DMA is filling the OTHER half. */
+            const volatile uint16_t *src = &adc_dma_buf[idx * HALF_SAMPLES];
+            for (uint16_t i = 0U; i < HALF_SAMPLES; i++) {
+                work_buf[i] = src[i];   /* Read from volatile DMA buffer */
+            }
+
+            /* Process the working copy — DMA does not touch work_buf */
+            process_samples(work_buf, HALF_SAMPLES);
+        }
+    }
+}
+```
+
+The copy-then-process pattern is important: we copy out of the DMA buffer into a non-volatile working buffer before processing. This avoids reading the DMA buffer while DMA might be writing to it (which would produce corrupted reads on some architectures), and it prevents the `volatile` qualifier from adding barriers to every sample access during processing.
+
+## The aliasing hazard
+
+Double-buffering only works if the application finishes processing one half before DMA fills it again. The timing budget:
+
+```
+Half-transfer at t=0   → ISR fires, signals "first half ready"
+                       → App starts copying + processing (budget = time for 100 more samples)
+Second-complete at t=T → ISR fires, signals "second half ready"
+                       → App must be DONE with first half by now
+
+T = HALF_SAMPLES / sample_rate = 100 / 10000 Hz = 10 ms
+```
+
+If the application takes longer than 10 ms to process 100 samples, DMA wraps and starts overwriting the half the application is still using. Data is lost and the output is corrupted.
+
+Measure with a GPIO toggle:
+
+```c
+void DMA2_Stream0_IRQHandler(void) {
+    if (DMA2_LISR & (1U << 4)) {
+        DMA2_LIFCR = (1U << 4);
+        GPIOD_BSRR = (1U << 12);     /* PD12 HIGH — start timing */
+        half_buffer_index = 0U;
+        half_buffer_ready = 1U;
+    }
+    if (DMA2_LISR & (1U << 5)) {
+        DMA2_LIFCR = (1U << 5);
+        GPIOD_BSRR = (1U << 12);     /* Same pin — second half start */
+        half_buffer_index = 1U;
+        half_buffer_ready = 1U;
+    }
+}
+
+/* In process_samples: */
+void process_samples(uint16_t *buf, uint16_t count) {
+    /* ... processing ... */
+    GPIOD_BSRR = (1U << (12 + 16));  /* PD12 LOW — processing done */
+}
+```
+
+On a logic analyzer: the HIGH duration must be less than T (the half-buffer fill time) at all times. If it occasionally exceeds T, you need either a larger buffer, a faster CPU, or a more efficient algorithm.
+
+## Buffer alignment and placement
+
+DMA hardware on STM32F4 has constraints:
+
+1. **Must be in SRAM** — DMA cannot access flash (except via specific memory-to-memory paths that aren't relevant here).
+2. **16-bit transfers require 2-byte alignment** — `uint16_t adc_dma_buf[]` is naturally 2-byte aligned by the compiler.
+3. **32-bit transfers require 4-byte alignment** — use `__attribute__((aligned(4)))` if needed.
+4. **Must outlive the transfer** — `static` ensures the buffer persists across calls.
+
+```c
+/* Correct: static, naturally aligned, in .bss (SRAM) */
+static volatile uint16_t adc_dma_buf[TOTAL_SAMPLES];
+
+/* WRONG: stack-local — buffer disappears when the function returns */
+void bad_init(void) {
+    uint16_t buf[TOTAL_SAMPLES];  /* On the stack */
+    DMA2_S0M0AR = (uint32_t)buf;  /* DMA writes here after function returns → corruption */
+}
+```
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A circular DMA transfer of 512 16-bit samples fires a half-transfer interrupt and a transfer-complete interrupt. The sample rate is 48 kHz (audio). How much time does the application have to process each half-buffer?",
+      options: [
+        "512 / 48000 = 10.67 ms per full buffer; 5.33 ms per half-buffer. The application must process 256 samples and be ready for the next interrupt within 5.33 ms. If the application takes 6 ms, it overruns the next half before DMA switches, producing audio glitches.",
+        "1 ms — audio always has tight deadlines",
+        "Unlimited — DMA pauses while the application processes",
+        "10.67 ms — the full buffer time is the budget",
+      ],
+      correct: 0,
+      explanation:
+        "The half-buffer budget is HALF_SAMPLES / sample_rate. 256 samples at 48 kHz = 256/48000 = 5.33 ms. The application must start and finish processing 256 samples within 5.33 ms. Exceeding this causes DMA to start overwriting the half being processed. Circular DMA does NOT pause — it runs continuously. The full buffer time (10.67 ms) is the period between same-half interrupts, not the available processing time.",
+    },
+    {
+      question:
+        "A DMA buffer is declared as a local variable inside `init_dma()`. The function returns and main() runs for 100 ms before the transfer completes. What failure mode occurs?",
+      options: [
+        "No failure — the stack grows downward and doesn't affect the buffer",
+        "The local variable lives on the stack frame of init_dma(). When the function returns, that stack frame is freed and the compiler (or subsequent function calls) may reuse that memory for other variables. DMA is still writing to the original address — it overwrites whatever is now at that stack location. The buffer contents become corrupted, and worse, other variables or return addresses may be overwritten. This is a classic embedded bug: silent, non-deterministic, often only manifests after a specific call sequence.",
+        "The DMA controller detects the freed buffer and stops automatically",
+        "The bus error handler catches it and the system resets",
+      ],
+      correct: 1,
+      explanation:
+        "DMA has no knowledge of C's scope or stack discipline. It holds a raw memory address and writes to it regardless of what C thinks that address is used for. Local variables are valid only within their scope. After init_dma() returns, the stack space is available for reuse. When another function is called, the DMA buffer address is overwritten with the new function's local variables and return address. DMA then corrupts those values. The symptom is bizarre, non-reproducible failures that look like bugs in completely unrelated code. Always make DMA buffers static.",
+    },
+    {
+      question:
+        "The half-transfer ISR sets a flag. The main loop polls the flag and starts processing. A GPIO toggle shows that processing takes 4.5 ms and the half-buffer period is 5.0 ms. An engineer adds a 1 ms logging call inside the processing function. What happens?",
+      options: [
+        "Logging is fine — the extra 1 ms is within the buffer period",
+        "4.5 ms processing + 1 ms logging = 5.5 ms total. The half-buffer period is 5.0 ms. The application now takes 0.5 ms longer than the period, meaning it's still processing the first half when DMA switches back to it. The first half gets partially overwritten while the application is still reading from it. The output has data-corruption artifacts — for audio, these are clicks or dropouts; for ADC data, they are erroneous sample values. Logging must be done outside the processing window or to a separate buffer.",
+        "Nothing — the RTOS task scheduler prevents the overrun",
+        "The DMA controller will buffer the extra data automatically",
+      ],
+      correct: 1,
+      explanation:
+        "Processing budget overruns are the most common double-buffer bug in production. The budget is absolute: processing must complete before DMA wraps to the same half. Adding any overhead — logging, printing, unnecessary copies, slow algorithms — eats into the budget. The fix is to move non-critical work (logging, display updates) to a separate lower-priority task that runs when processing is done, not inside the processing function. The GPIO toggle measurement is the diagnostic: any single measurement that exceeds the half-buffer period indicates a budget violation.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 04 covers timer peripherals in depth — PWM generation, input capture for frequency measurement, and the output-compare mode used for precisely timed single-shot events. Timers work closely with DMA (many DMA triggers are timer-based) and with interrupts (timer update events are among the most common ISR sources in motor control and signal generation).

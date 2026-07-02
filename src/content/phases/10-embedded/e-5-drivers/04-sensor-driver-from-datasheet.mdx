@@ -1,0 +1,344 @@
+---
+title: "Writing a Sensor Driver From a Datasheet — BME280"
+description: "Translate a real sensor datasheet into a working I2C driver. BME280 (temperature, pressure, humidity) is the canonical example: factory calibration coefficients, compensation formulas, and power modes, all from the reference document."
+phase: 10
+module: "e-5-drivers"
+order: 4
+estimatedMinutes: 25
+difficulty: 4
+prerequisites:
+  - "e-5-drivers/03"
+standards:
+  primaryAnchor: "Bosch BME280 Datasheet v1.6"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - compensation-formula
+  - calibration-coefficient
+  - oversampling
+  - forced-mode
+  - normal-mode
+  - standby-time
+  - osrs
+  - dig-t1
+  - register-map
+learningOutcomes:
+  - "Read a sensor datasheet register map and write a driver that initializes the sensor correctly"
+  - "Implement BME280 compensation formulas that convert raw ADC readings to physical units"
+  - "Configure BME280 oversampling and power mode via register writes"
+  - "Trace the initialization sequence for any I2C sensor given only the datasheet"
+professionalContext: "Reading a datasheet and writing a driver from scratch is the core embedded engineering skill that separates engineers who can bring up new hardware from engineers who can only use parts the vendor has already written a library for. Most embedded roles require exactly this. The BME280 is a canonical example because its datasheet is public, its compensation formulas are representative of real sensor complexity, and its I2C protocol is a clean worked example of every concept from E5 lessons 1-3."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A vendor HAL or Arduino library exists for the BME280. Engineers who reach for it first miss the learning opportunity that generalizes. The sensor after this one — an IMU, a GNSS module, a custom ASIC — won't have a library. The datasheet will. Engineers who can read the datasheet and write the driver do not need the library to exist.
+
+This lesson works through the BME280 driver in the order a professional would: understand what the device does, read the power-on sequence, understand the register map, implement init, implement a read, implement the compensation formulas.
+
+## BME280 overview (from the datasheet)
+
+The BME280 measures temperature (−40 to +85°C, ±1°C typical), barometric pressure (300–1100 hPa, ±1 hPa), and relative humidity (0–100%, ±3% RH). It supports both I2C (up to 3.4 MHz) and SPI (up to 10 MHz). I2C address is 0x76 (SDO pulled to GND) or 0x77 (SDO pulled to VDDIO).
+
+Internally: ADC outputs are raw 20-bit values that require factory calibration coefficients stored in the device's non-volatile memory to convert to physical units. The compensation formulas are specified in the datasheet. You must read the calibration coefficients at startup.
+
+## Register map (relevant registers)
+
+| Register        | Address   | Description                              |
+| --------------- | --------- | ---------------------------------------- |
+| id              | 0xD0      | Chip ID — should read 0x60 for BME280    |
+| reset           | 0xE0      | Write 0xB6 to perform soft reset         |
+| calib00–calib25 | 0x88–0xA1 | Temperature and pressure calibration     |
+| ctrl_hum        | 0xF2      | Humidity oversampling setting            |
+| status          | 0xF3      | Measuring bit, IM_UPDATE bit             |
+| ctrl_meas       | 0xF4      | Temp + pressure oversampling, mode       |
+| config          | 0xF5      | Standby time, filter coefficient, SPI3W  |
+| press_msb       | 0xF7      | Pressure raw data [19:12]                |
+| press_lsb       | 0xF8      | Pressure raw data [11:4]                 |
+| press_xlsb      | 0xF9      | Pressure raw data [3:0] in bits [7:4]    |
+| temp_msb        | 0xFA      | Temperature raw data [19:12]             |
+| temp_lsb        | 0xFB      | Temperature raw data [11:4]              |
+| temp_xlsb       | 0xFC      | Temperature raw data [3:0] in bits [7:4] |
+| hum_msb         | 0xFD      | Humidity raw data [15:8]                 |
+| hum_lsb         | 0xFE      | Humidity raw data [7:0]                  |
+| calib26–calib41 | 0xE1–0xF0 | Humidity calibration                     |
+
+## Driver structure
+
+```c
+/* bme280.h */
+#pragma once
+#include "i2c.h"
+#include "driver_errors.h"
+#include <stdint.h>
+
+typedef struct {
+    /* Calibration coefficients — read from device at init */
+    uint16_t dig_T1;
+    int16_t  dig_T2, dig_T3;
+    uint16_t dig_P1;
+    int16_t  dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9;
+    uint8_t  dig_H1, dig_H3;
+    int16_t  dig_H2, dig_H4, dig_H5;
+    int8_t   dig_H6;
+
+    /* Platform handle */
+    i2c_t   *bus;
+    uint8_t  addr;          /* 0x76 or 0x77 */
+
+    /* Fine temperature for pressure/humidity compensation */
+    int32_t  t_fine;
+} bme280_t;
+
+typedef struct {
+    int32_t  temperature_centidegC;  /* e.g. 2350 = 23.50 °C */
+    uint32_t pressure_pa;            /* e.g. 101325 */
+    uint32_t humidity_1024ths;       /* e.g. 51200 = 50.00 %RH */
+} bme280_data_t;
+
+drv_status_t bme280_init(bme280_t *dev, i2c_t *bus, uint8_t addr);
+drv_status_t bme280_read(bme280_t *dev, bme280_data_t *out);
+```
+
+## Initialization
+
+```c
+/* bme280.c */
+#include "bme280.h"
+
+#define BME280_CHIP_ID      0x60U
+#define REG_ID              0xD0U
+#define REG_RESET           0xE0U
+#define REG_CTRL_HUM        0xF2U
+#define REG_CTRL_MEAS       0xF4U
+#define REG_CONFIG          0xF5U
+#define REG_PRESS_MSB       0xF7U
+#define REG_CALIB00         0x88U
+#define REG_CALIB26         0xE1U
+
+/* Read a single register */
+static drv_status_t read_reg(bme280_t *d, uint8_t reg, uint8_t *val) {
+    return i2c_read_register(d->bus, d->addr, reg, val);
+}
+
+/* Read multiple consecutive registers */
+static drv_status_t read_regs(bme280_t *d, uint8_t reg, uint8_t *buf, size_t len) {
+    return i2c_read_registers(d->bus, d->addr, reg, buf, len);
+}
+
+/* Write a single register */
+static drv_status_t write_reg(bme280_t *d, uint8_t reg, uint8_t val) {
+    return i2c_write_register(d->bus, d->addr, reg, val);
+}
+
+static drv_status_t load_calibration(bme280_t *d) {
+    uint8_t buf[26];
+    drv_status_t rc;
+
+    /* Temperature and pressure calibration: registers 0x88–0xA1 */
+    rc = read_regs(d, REG_CALIB00, buf, 26);
+    if (rc != DRV_OK) { return rc; }
+
+    d->dig_T1 = (uint16_t)(buf[1] << 8) | buf[0];
+    d->dig_T2 = (int16_t)((buf[3] << 8) | buf[2]);
+    d->dig_T3 = (int16_t)((buf[5] << 8) | buf[4]);
+    d->dig_P1 = (uint16_t)(buf[7] << 8) | buf[6];
+    d->dig_P2 = (int16_t)((buf[9] << 8) | buf[8]);
+    d->dig_P3 = (int16_t)((buf[11] << 8) | buf[10]);
+    d->dig_P4 = (int16_t)((buf[13] << 8) | buf[12]);
+    d->dig_P5 = (int16_t)((buf[15] << 8) | buf[14]);
+    d->dig_P6 = (int16_t)((buf[17] << 8) | buf[16]);
+    d->dig_P7 = (int16_t)((buf[19] << 8) | buf[18]);
+    d->dig_P8 = (int16_t)((buf[21] << 8) | buf[20]);
+    d->dig_P9 = (int16_t)((buf[23] << 8) | buf[22]);
+    /* buf[24] unused; buf[25] is dig_H1 */
+    d->dig_H1 = buf[25];
+
+    /* Humidity calibration: registers 0xE1–0xF0 */
+    uint8_t hbuf[7];
+    rc = read_regs(d, REG_CALIB26, hbuf, 7);
+    if (rc != DRV_OK) { return rc; }
+
+    d->dig_H2 = (int16_t)((hbuf[1] << 8) | hbuf[0]);
+    d->dig_H3 = hbuf[2];
+    d->dig_H4 = (int16_t)((hbuf[3] << 4) | (hbuf[4] & 0x0F));
+    d->dig_H5 = (int16_t)((hbuf[5] << 4) | (hbuf[4] >> 4));
+    d->dig_H6 = (int8_t)hbuf[6];
+
+    return DRV_OK;
+}
+
+drv_status_t bme280_init(bme280_t *dev, i2c_t *bus, uint8_t addr) {
+    dev->bus  = bus;
+    dev->addr = addr;
+
+    /* Step 1: Verify chip ID */
+    uint8_t chip_id;
+    drv_status_t rc = read_reg(dev, REG_ID, &chip_id);
+    if (rc != DRV_OK)                { return rc; }
+    if (chip_id != BME280_CHIP_ID)   { return DRV_BUS_ERROR; }
+
+    /* Step 2: Soft reset */
+    rc = write_reg(dev, REG_RESET, 0xB6U);
+    if (rc != DRV_OK) { return rc; }
+    delay_ms(5);   /* Wait for reset to complete (datasheet: 2 ms typical) */
+
+    /* Step 3: Load calibration coefficients */
+    rc = load_calibration(dev);
+    if (rc != DRV_OK) { return rc; }
+
+    /* Step 4: Configure oversampling and power mode
+       ctrl_hum: humidity ×1 (osrs_h = 0b001)
+       ctrl_meas: temp ×2 (osrs_t = 0b010), pressure ×16 (osrs_p = 0b101)
+       mode = 11 (normal mode — continuous measurement) */
+    rc = write_reg(dev, REG_CTRL_HUM,  0x01U);  /* Must be written before ctrl_meas */
+    if (rc != DRV_OK) { return rc; }
+    rc = write_reg(dev, REG_CTRL_MEAS, (0x02U << 5) | (0x05U << 2) | 0x03U);
+    if (rc != DRV_OK) { return rc; }
+
+    /* config: standby 62.5 ms, IIR filter coefficient 4 */
+    rc = write_reg(dev, REG_CONFIG, (0x02U << 5) | (0x02U << 2));
+    return rc;
+}
+```
+
+## Compensation formulas (from BME280 datasheet §4.2.3)
+
+The datasheet provides these formulas verbatim. The `int32_t` math avoids floating point — required for embedded systems without an FPU.
+
+```c
+static int32_t compensate_temperature(bme280_t *d, int32_t adc_T) {
+    int32_t var1, var2, T;
+    var1 = ((((adc_T >> 3) - ((int32_t)d->dig_T1 << 1)))
+             * ((int32_t)d->dig_T2)) >> 11;
+    var2 = (((((adc_T >> 4) - ((int32_t)d->dig_T1))
+              * ((adc_T >> 4) - ((int32_t)d->dig_T1))) >> 12)
+             * ((int32_t)d->dig_T3)) >> 14;
+    d->t_fine = var1 + var2;
+    T = (d->t_fine * 5 + 128) >> 8;   /* In hundredths of degrees C */
+    return T;
+}
+
+static uint32_t compensate_pressure(bme280_t *d, int32_t adc_P) {
+    int64_t var1, var2, p;
+    var1 = ((int64_t)d->t_fine) - 128000LL;
+    var2 = var1 * var1 * (int64_t)d->dig_P6;
+    var2 = var2 + ((var1 * (int64_t)d->dig_P5) << 17);
+    var2 = var2 + (((int64_t)d->dig_P4) << 35);
+    var1 = ((var1 * var1 * (int64_t)d->dig_P3) >> 8)
+           + ((var1 * (int64_t)d->dig_P2) << 12);
+    var1 = (((((int64_t)1) << 47) + var1)) * ((int64_t)d->dig_P1) >> 33;
+    if (var1 == 0) { return 0; }    /* Avoid division by zero */
+    p = 1048576LL - adc_P;
+    p = (((p << 31) - var2) * 3125LL) / var1;
+    var1 = (((int64_t)d->dig_P9) * (p >> 13) * (p >> 13)) >> 25;
+    var2 = (((int64_t)d->dig_P8) * p) >> 19;
+    p = ((p + var1 + var2) >> 8) + (((int64_t)d->dig_P7) << 4);
+    return (uint32_t)(p >> 8);   /* In Pa */
+}
+
+static uint32_t compensate_humidity(bme280_t *d, int32_t adc_H) {
+    int32_t v;
+    v = d->t_fine - 76800L;
+    v = (((((adc_H << 14) - ((int32_t)d->dig_H4 << 20)
+            - ((int32_t)d->dig_H5 * v)) + 16384L) >> 15)
+         * (((((((v * (int32_t)d->dig_H6) >> 10)
+                * (((v * (int32_t)d->dig_H3) >> 11) + 32768L)) >> 10)
+               + 2097152L) * (int32_t)d->dig_H2 + 8192L) >> 14));
+    v = v - (((((v >> 15) * (v >> 15)) >> 7) * (int32_t)d->dig_H1) >> 4);
+    v = (v < 0) ? 0 : v;
+    v = (v > 419430400) ? 419430400 : v;
+    return (uint32_t)(v >> 12);   /* In 1/1024 %RH */
+}
+```
+
+## Reading measurements
+
+```c
+drv_status_t bme280_read(bme280_t *dev, bme280_data_t *out) {
+    /* Burst-read all 8 data registers in one I2C transaction (more efficient) */
+    uint8_t raw[8];
+    drv_status_t rc = read_regs(dev, REG_PRESS_MSB, raw, 8);
+    if (rc != DRV_OK) { return rc; }
+
+    /* Assemble 20-bit raw values */
+    int32_t adc_P = ((int32_t)raw[0] << 12) | ((int32_t)raw[1] << 4) | (raw[2] >> 4);
+    int32_t adc_T = ((int32_t)raw[3] << 12) | ((int32_t)raw[4] << 4) | (raw[5] >> 4);
+    int32_t adc_H = ((int32_t)raw[6] << 8)  |  raw[7];
+
+    /* Temperature must be compensated first — it sets t_fine used by press/hum */
+    out->temperature_centidegC = compensate_temperature(dev, adc_T);
+    out->pressure_pa            = compensate_pressure(dev, adc_P);
+    out->humidity_1024ths       = compensate_humidity(dev, adc_H);
+
+    return DRV_OK;
+}
+```
+
+## Using the driver
+
+```c
+bme280_t bme280;
+bme280_data_t env;
+
+void sensor_task(void *params) {
+    (void)params;
+    drv_status_t rc = bme280_init(&bme280, i2c1, 0x76);
+    if (rc != DRV_OK) {
+        /* Log and handle — sensor unavailable */
+        vTaskDelete(NULL);
+    }
+
+    for (;;) {
+        rc = bme280_read(&bme280, &env);
+        if (rc == DRV_OK) {
+            /* temperature_centidegC / 100 = degrees C */
+            /* pressure_pa = Pa */
+            /* humidity_1024ths / 1024 = %RH */
+            post_telemetry(&env);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+```
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "The BME280 datasheet specifies that ctrl_hum must be written before ctrl_meas for the humidity setting to take effect. An engineer writes ctrl_meas first, then ctrl_hum, and observes humidity readings of 0. Why?",
+      options: [
+        "The BME280 doesn't support humidity",
+        "The BME280's ctrl_hum register is shadowed — changes only take effect when ctrl_meas is next written. Writing ctrl_hum AFTER ctrl_meas means the humidity setting is staged but not activated until the next ctrl_meas write. The engineer's driver will never apply the humidity oversampling unless ctrl_meas is written again. This is a common sensor gotcha: the datasheet specifies write ordering that is not merely advisory but architecturally required by the device's register logic.",
+        "The humidity calibration was not loaded",
+        "The I2C address is wrong",
+      ],
+      correct: 1,
+      explanation:
+        "Register write ordering is a real hardware constraint for many sensors. The BME280's ctrl_hum has a shadow register that latches the value only when ctrl_meas is written. Writing ctrl_hum after ctrl_meas means the setting is stored but not applied — readings will use the previous (default: disabled) humidity oversampling. The fix: always write ctrl_hum before ctrl_meas, as the datasheet specifies. This kind of constraint appears in many sensors and must be read from the datasheet; a library author who missed this would ship a broken library.",
+    },
+    {
+      question:
+        "A temperature reading from the BME280 returns 25.00°C in the lab but 50.00°C in the field when the ambient temperature is 30°C. The hardware is identical. What's the most likely driver bug?",
+      options: [
+        "The compensation formula is wrong",
+        "The calibration coefficients were not loaded from the sensor — the driver is using all-zeros or uninitialized values for dig_T1, dig_T2, dig_T3. Each BME280 has unique factory-trimmed calibration values stored in its non-volatile memory; using wrong values produces wildly incorrect compensation output. The fix: verify that load_calibration() succeeded at init, log the raw coefficient values, and confirm they're non-zero and in the expected range (dig_T1 is typically 27000–30000).",
+        "The I2C bus speed is too high for field conditions",
+        "The sensor is running in the wrong mode",
+      ],
+      correct: 1,
+      explanation:
+        "Calibration coefficient loading is the most common BME280 driver bug. If bme280_init returns early (e.g., chip ID check fails, I2C times out), the calibration struct is uninitialized and the compensation formulas produce garbage. Always log the calibration coefficients at startup in development builds — if dig_T1 is 0, the compensation math will produce wrong temperatures. Verify the I2C read of 0x88–0xA1 succeeds and returns plausible values before proceeding with the init.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 5 covers host-side unit testing for embedded drivers: running the BME280 compensation formulas against known reference inputs on a development host (without hardware), using the mock platform port from lesson 2 to test driver logic. Testing embedded drivers before touching hardware saves hours of JTAG debugging.

@@ -1,0 +1,265 @@
+---
+title: "Static Analysis in Practice — Running Cppcheck Against Embedded C"
+description: "Configure and run Cppcheck on a real embedded firmware project. Interpret findings, suppress false positives correctly, and wire the analyzer into CI so compliance regressions are caught before review."
+phase: 10
+module: "e-7-misra-c-2023"
+order: 2
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-7-misra-c-2023/01"
+standards:
+  primaryAnchor: "MISRA-C:2023"
+  cs2023: ["SE-CodeQuality"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - cppcheck
+  - static-analyzer
+  - false-positive
+  - inline-suppression
+  - misra-addon
+  - checker-profile
+  - ci-gate
+  - sarif
+learningOutcomes:
+  - "Configure Cppcheck with the MISRA-C:2023 addon for an embedded C project"
+  - "Distinguish a true finding from a false positive and suppress false positives correctly"
+  - "Integrate Cppcheck into a Makefile or CMake build so it runs in CI"
+  - "Triage a real Cppcheck output and categorize findings by severity and fix effort"
+professionalContext: "Every major safety-critical embedded project uses at least one static analyzer. Cppcheck is the most widely deployed open-source option; PC-lint Plus (now Parasoft C/C++test), Polyspace, and Helix QAC are commercial alternatives. The skill being exercised in this lesson — configuring the tool, interpreting its output, and suppressing false positives responsibly — transfers directly to any of these tools."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A team adopts MISRA-C:2023 compliance as a project requirement. The first Cppcheck run produces 847 findings. The team is paralyzed: which ones are real bugs? Which are false positives? Which are style-only? Which must be fixed before the next milestone?
+
+Triage is a skill. This lesson teaches it: what Cppcheck's output categories mean, how to distinguish code issues from tool limitations, and how to reduce 847 findings to a manageable list of actionable items.
+
+## Installing and configuring Cppcheck with the MISRA addon
+
+```bash
+# Install Cppcheck (macOS)
+brew install cppcheck
+
+# Linux
+sudo apt install cppcheck
+
+# Verify version — 2.x or later required for MISRA-C:2023
+cppcheck --version
+```
+
+The MISRA addon ships with Cppcheck:
+
+```bash
+# Check a single file against MISRA-C:2023
+cppcheck \
+  --addon=misra \
+  --enable=all \
+  --error-exitcode=1 \
+  --suppress=missingIncludeSystem \
+  --include=src/stm32f4xx.h \
+  -DSTM32F407xx \
+  src/uart.c
+```
+
+Key flags:
+
+- `--addon=misra` — enable the MISRA checker (uses a Python addon)
+- `--enable=all` — enable all checks (style, performance, portability, information, error)
+- `--error-exitcode=1` — exit with code 1 if any errors found (for CI gating)
+- `--suppress=missingIncludeSystem` — suppress noise from missing system headers (expected in embedded)
+- `--include` / `-D` — provide the compiler's defines and include paths so Cppcheck can resolve macros
+
+## Reading a Cppcheck finding
+
+```
+[src/uart.c:47]: (error) misra-c2012-17.3: Missing declaration for function 'uart_compute_brr'.
+[src/uart.c:83]: (style) misra-c2012-10.1: Operands shall not be of inappropriate essential type.
+[src/uart.c:92]: (style) misra-c2012-18.4: The +, -, += and -= operators shall not be applied to pointer types.
+[src/uart.c:102]: (information) Cppcheck cannot find the function 'UART_FLUSH'.
+```
+
+Anatomy of a finding:
+
+- **[file:line]** — location in source
+- **(severity)** — `error`, `warning`, `style`, `performance`, `portability`, `information`
+- **misra-c2012-X.Y** — the specific MISRA-C rule number
+- **Description** — brief explanation
+
+Severity mapping to action:
+| Cppcheck severity | MISRA rule type | Typical action |
+| ----------------- | ----------------- | -------------------------- |
+| `error` | Mandatory/Required| Must fix — no deviation |
+| `warning` | Required | Fix or document deviation |
+| `style` | Advisory | Fix, defer with justification, or document deviation |
+| `information` | Tool limitation | Investigate; often suppressible |
+
+## True findings vs false positives
+
+### True finding: Rule 17.3 (missing declaration)
+
+```c
+/* uart.c — line 47 */
+uint32_t brr = uart_compute_brr(baud, apb_clk);  /* Function not declared */
+```
+
+This is a real issue. `uart_compute_brr` is defined in `uart_private.c` but has no declaration before this call. The compiler defaults to an implicit int return — wrong. Fix: add a declaration in `uart_private.h` and include it.
+
+### True finding: Rule 10.1 (type operand)
+
+```c
+uint16_t a = 0xFFFF;
+int16_t  b = -1;
+if (a < b) {  /* Line 83: mixing signed and unsigned */
+```
+
+Real issue. Fix: explicit cast to make the comparison intent clear:
+
+```c
+if (a < (uint16_t)b) {   /* Explicit: wraps to large positive value */
+```
+
+Or restructure the logic to avoid the mixed comparison.
+
+### False positive: Rule 18.4 (pointer arithmetic) with a legitimate DMA setup
+
+```c
+/* Line 92 */
+DMA1_S6M0AR = (uint32_t)(tx_buf + offset);  /* Pointer + integer */
+```
+
+Cppcheck flags this as Rule 18.4 (pointer arithmetic advisory). In this context, computing a DMA address by offsetting into a known-valid buffer is intentional and bounded. This is a candidate for deviation, not a bug.
+
+Suppress it inline with deviation documentation:
+
+```c
+/* cppcheck-suppress misra-c2012-18.4 */
+/* MISRA deviation: DMA base-address computation requires pointer arithmetic.
+   Buffer is statically allocated, offset is bounds-checked. See ADR-015. */
+DMA1_S6M0AR = (uint32_t)(tx_buf + offset);
+```
+
+### Non-finding: `information` about unresolved function
+
+```
+[src/uart.c:102]: (information) Cppcheck cannot find the function 'UART_FLUSH'.
+```
+
+`UART_FLUSH` is a macro expanding to a register write. Cppcheck doesn't evaluate macros from `stm32f4xx.h` fully without the full build environment. This is a tool limitation — suppress globally for this project:
+
+```bash
+--suppress=information:src/uart.c
+```
+
+## Running against a project
+
+```makefile
+# Makefile target for MISRA check
+SOURCES := $(wildcard src/*.c)
+INCLUDES := -Isrc -Ivendor/include
+DEFINES := -DSTM32F407xx
+
+.PHONY: misra-check
+misra-check:
+	cppcheck \
+	  --addon=misra \
+	  --enable=all \
+	  --error-exitcode=1 \
+	  --suppress=missingIncludeSystem \
+	  $(INCLUDES) \
+	  $(DEFINES) \
+	  --output-file=build/misra-report.txt \
+	  $(SOURCES)
+	@echo "MISRA report: build/misra-report.txt"
+```
+
+CI integration:
+
+```yaml
+# .github/workflows/ci.yml (excerpt)
+- name: MISRA-C static analysis
+  run: make misra-check
+  # Exit code 1 from Cppcheck fails the CI job
+```
+
+## Triaging 847 findings
+
+A systematic triage process:
+
+1. **Group by rule number** — `sort misra-report.txt | grep misra-c | awk '{print $2}' | sort | uniq -c | sort -rn`
+2. **Fix all Mandatory rule violations first** — no deviation allowed; these are often simple (add missing declaration, add explicit cast)
+3. **Categorize Required violations** — fix or create a deviation document per location
+4. **Batch Advisory violations** — pointer arithmetic, similar patterns — one deviation policy covers all instances of the same pattern
+5. **Suppress tool limitations with inline comments** — keep the suppression count visible in a summary report
+
+A project might go from 847 findings to:
+
+- 12 real bugs (fix in sprint)
+- 45 style issues with documented deviations (deviation log updated)
+- 790 suppressions for tool limitations (documented once in the project's MISRA baseline)
+
+The 12 real bugs are the value. The rest is process.
+
+## Check your understanding
+
+<SandboxExercise
+  language="c"
+  instructions="The function below has two MISRA-C:2023 violations that Cppcheck would flag. Identify both violations, name the MISRA rule each violates, and rewrite the function to be compliant. Hint: look at the unsigned/signed comparison and the dynamic allocation."
+  initialCode={`#include <stdint.h>
+#include <stdlib.h>
+
+/_ Fill a buffer with increasing values, return pointer to caller _/
+uint8*t *fill_buffer(uint16_t size, int16_t start_value) {
+uint8_t *buf = malloc(size); /* Violation 1: ? \_/
+if (buf == NULL) { return NULL; }
+
+    for (uint16_t i = 0; i < size; i++) {
+        if (i > start_value) {      /* Violation 2: ? */
+            buf[i] = (uint8_t)(i + start_value);
+        }
+    }
+    return buf;
+
+}
+`}
+  solution={`#include <stdint.h>
+
+/_ Static buffer — no dynamic allocation (MISRA-C 21.3 compliance) _/
+#define MAX_BUFFER_SIZE 256U
+static uint8_t buffer_storage[MAX_BUFFER_SIZE];
+
+/_ fill_buffer: fills buffer_storage, returns NULL on invalid args _/
+uint8*t \_fill_buffer(uint16_t size, uint16_t start_value) { /* Changed: int16_t → uint16_t \*/
+if (size > MAX_BUFFER_SIZE) { return NULL; }
+
+    for (uint16_t i = 0U; i < size; i++) {
+        if (i > start_value) {    /* Now both are uint16_t — compliant */
+            buffer_storage[i] = (uint8_t)((uint32_t)i + (uint32_t)start_value);
+        }
+    }
+    return buffer_storage;
+
+}
+
+/\* Deviations eliminated:
+
+1.  malloc replaced with static storage (Rule 21.3: no stdlib allocation)
+2.  int16_t start_value changed to uint16_t to match uint16_t i in comparison
+    (Rule 10.1: inappropriate essential type — signed/unsigned comparison)
+    \*/
+    `}
+    testCases={[
+    "malloc is not used (Rule 21.3 violation removed)",
+    "signed/unsigned comparison is resolved (Rule 10.1 violation removed)",
+    "buffer has static storage duration",
+    "function still fills buffer with increasing values"
+    ]}
+    />
+
+## What's next
+
+Lesson 3 covers MISRA-C integer arithmetic pitfalls in depth — the type promotion rules, safe patterns, and how to handle the real-world need for bitwise operations on mixed types that MISRA restricts. The integer rules are the most commonly violated MISRA rules in real embedded code.

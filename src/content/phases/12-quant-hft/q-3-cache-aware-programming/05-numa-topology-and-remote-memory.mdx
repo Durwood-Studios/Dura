@@ -1,0 +1,233 @@
+---
+title: "NUMA Topology — Remote Memory Latency and Core Affinity"
+description: "How dual-socket servers create two distinct memory pools, why crossing the NUMA boundary multiplies memory latency by 2–3×, and how HFT systems pin threads to cores to stay local."
+phase: 12
+module: "q-3-cache-aware-programming"
+order: 5
+estimatedMinutes: 45
+difficulty: 4
+prerequisites:
+  - "q-3-cache-aware-programming/04-aos-vs-soa-layout"
+standards:
+  primaryAnchor: "Intel 64 and IA-32 Architectures Optimization Reference Manual"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - numa
+  - numa-node
+  - local-memory
+  - remote-memory
+  - numa-latency
+  - qpi-upi
+  - cpu-affinity
+  - memory-binding
+  - numactl
+  - libnuma
+  - memory-interleaving
+  - first-touch-policy
+learningOutcomes:
+  - "After this lesson you can draw the memory topology of a dual-socket server and label which memory pool each socket owns"
+  - "After this lesson you can predict when a thread's memory accesses go remote and quantify the latency penalty using measured numbers"
+  - "After this lesson you can pin a thread to a specific NUMA node with pthread affinity and verify the binding with numactl"
+  - "After this lesson you can pre-allocate shared data on the correct NUMA node using numa_alloc_onnode and first-touch policy"
+professionalContext: "Production HFT colocations typically use dual-socket servers — two physical CPUs sharing a chassis. The network card connects to socket 0, the strategy process runs on socket 1, and every packet the strategy touches crosses the inter-socket bus (QPI/UPI) — doubling memory latency. Colo operators have measured 400–800 ns added to tick-to-trade just from misconfigured NUMA binding. Thread pinning and memory binding are not optional tuning steps; they are table-stakes configuration that every HFT infrastructure engineer checks before a system goes live."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Your tick-to-trade latency from the last few lessons is 1.2 microseconds on your laptop. You move the same binary to the colo box — a dual-socket server, the kind every serious HFT firm runs — and the latency jumps to 2.1 microseconds. Nothing changed in the code. The build is identical. The benchmark is the same.
+
+The extra 900 nanoseconds are crossing a wire — literally. The dual-socket server has two CPUs, each with its own attached memory. When a thread on socket 0 reads data that was allocated on socket 1's memory, the read crosses the <VocabTooltip slug="qpi-upi">QPI/UPI inter-socket link</VocabTooltip> — an off-chip bus with roughly 2–3× the latency of local memory. The process was doing this on every packet without anyone noticing, because on a single-socket laptop the problem doesn't exist.
+
+## The NUMA hardware picture
+
+<VocabTooltip slug="numa">NUMA</VocabTooltip> stands for Non-Uniform Memory Access. "Non-uniform"
+means memory latency is not the same from all cores — it depends on whether the memory is attached
+to the same socket the core is on.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Dual-Socket Server                       │
+│                                                               │
+│  Socket 0 (NUMA Node 0)           Socket 1 (NUMA Node 1)    │
+│  ┌──────────────────────┐         ┌──────────────────────┐  │
+│  │  CPU 0  │  CPU 1     │         │  CPU 16 │  CPU 17    │  │
+│  │  L1 4K  │  L1 4K     │         │  L1 4K  │  L1 4K     │  │
+│  │  L2 256K│  L2 256K   │         │  L2 256K│  L2 256K   │  │
+│  │       L3 32MB        │         │       L3 32MB        │  │
+│  └──────────────────────┘         └──────────────────────┘  │
+│          │                                   │               │
+│   Memory Controllers                  Memory Controllers     │
+│          │                                   │               │
+│  ┌────────────────┐    QPI/UPI   ┌────────────────┐         │
+│  │  DRAM Node 0   │◄────────────►│  DRAM Node 1   │         │
+│  │  128 GB        │              │  128 GB        │         │
+│  └────────────────┘              └────────────────┘         │
+│          ▲                                                    │
+│          │                                                    │
+│     PCIe NIC (attached to socket 0)                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Typical latency numbers on a 2022-era Xeon:**
+
+- L1 hit: ~4 cycles (~1.5 ns at 3 GHz)
+- L2 hit: ~12 cycles (~4 ns)
+- L3 hit: ~40 cycles (~13 ns)
+- Local DRAM: ~70 ns
+- **Remote DRAM (cross-socket): ~130–200 ns**
+
+The remote penalty is not a constant multiplier. It depends on the inter-socket interconnect bandwidth, the QPI/UPI link speed, and how many other threads are competing for the bus. Under load, remote memory accesses can push past 300 ns — 4× local DRAM.
+
+## Observing the NUMA topology
+
+```bash
+# Show NUMA topology
+numactl --hardware
+
+# Example output on a dual-socket server:
+# available: 2 nodes (0-1)
+# node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+# node 0 size: 128 GiB
+# node 0 free: 112 GiB
+# node 1 cpus: 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
+# node 1 size: 128 GiB
+# node 1 free: 109 GiB
+# node distances:
+# node   0   1
+#   0:  10  21    ← local=10, remote=21 (2.1× penalty)
+#   1:  21  10
+
+# Show which NUMA node each CPU belongs to
+lscpu | grep NUMA
+
+# Show NUMA stats for a running process
+numastat -p <pid>
+```
+
+The `node distances` matrix is the key number. A value of 10 means local (normalized). A value of 21 means 2.1× slower. On EPYC processors the penalty can reach 32 (3.2×) because AMD's chiplet architecture adds hops even within a socket.
+
+## The first-touch policy
+
+Linux allocates memory on the NUMA node where the **first touch** happens — the first thread to write to a page determines which node's physical memory backs that page. This default policy is correct when a thread allocates and uses memory itself, and catastrophic when one thread allocates a buffer that another thread on a different node uses.
+
+```cpp
+#include <cstring>
+#include <cstdlib>
+
+// WRONG: main thread (socket 0) allocates and initializes the buffer
+// Strategy thread (socket 1) reads it → every access is remote
+std::byte* buf = (std::byte*)std::aligned_alloc(64, 1 << 20);
+std::memset(buf, 0, 1 << 20);  // first touch on socket 0
+// ... pass buf to strategy thread on socket 1
+// Result: all strategy reads go over QPI
+
+// RIGHT: allocate on the NUMA node the consumer will use
+#include <numa.h>
+
+std::byte* alloc_on_node(size_t bytes, int node) {
+    void* p = numa_alloc_onnode(bytes, node);
+    if (!p) throw std::bad_alloc{};
+    // Touch the memory on the correct node before handing to consumer
+    std::memset(p, 0, bytes);  // ensure physical pages are allocated on node
+    return static_cast<std::byte*>(p);
+}
+
+void free_numa(void* p, size_t bytes) {
+    numa_free(p, bytes);
+}
+```
+
+Alternatively, use `numactl --membind=1 ./strategy` to bind all allocations for the process to node 1 — coarser but effective when the process runs entirely on one socket.
+
+## Thread and memory binding in C++
+
+```cpp
+#include <pthread.h>
+#include <sched.h>
+#include <numa.h>
+#include <stdexcept>
+
+// Pin the calling thread to a specific CPU core
+void pin_thread_to_core(int cpu) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu, &cpuset);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset) != 0)
+        throw std::runtime_error{"pthread_setaffinity_np failed"};
+}
+
+// Pin the calling thread to all CPUs on a NUMA node
+void pin_thread_to_numa_node(int node) {
+    if (numa_available() < 0)
+        throw std::runtime_error{"libnuma not available"};
+    struct bitmask* cpumask = numa_allocate_cpumask();
+    numa_node_to_cpus(node, cpumask);
+    numa_run_on_node(node);
+    numa_bitmask_free(cpumask);
+}
+
+// Strategy thread: pin to node 1 (away from NIC interrupts on node 0)
+void launch_strategy_thread() {
+    std::thread t([] {
+        pin_thread_to_core(16);          // first core on socket 1
+        // All memory allocated here goes to node 1's DRAM by first-touch
+        auto ring = std::make_unique<StrategyRing>();
+        ring->run();
+    });
+    t.detach();
+}
+```
+
+The standard HFT NUMA layout on a dual-socket colo box:
+
+| Thread                | NUMA Node | Reason                                           |
+| --------------------- | --------- | ------------------------------------------------ |
+| NIC interrupt handler | Node 0    | NIC is PCIe-attached to socket 0                 |
+| Market-data decoder   | Node 0    | Reads DMA buffer on node 0                       |
+| Strategy / pricing    | Node 1    | Away from NIC interrupt contention               |
+| Order sender          | Node 1    | Sends to strategy's ring without crossing socket |
+| Risk check            | Node 1    | Co-located with strategy for cache sharing       |
+
+The market-data decoder writes to a <VocabTooltip slug="spsc-ring-buffer">SPSC ring</VocabTooltip> that the strategy reads. Allocate that ring on **the node where the strategy lives** — the consumer. The producer (decoder) writes to remote memory, which is slower, but writing is pipelined in the store buffer; a cache miss on a write stalls less than a cache miss on a read that the critical path is waiting for.
+
+## Verifying NUMA behavior
+
+```bash
+# Run a process and observe NUMA hit/miss rates
+perf stat -e node-loads,node-load-misses,node-stores,node-store-misses \
+    ./strategy_binary
+
+# If node-load-misses is high, you have remote DRAM accesses.
+# If node-load-misses / node-loads > 0.01 (1%), investigate NUMA binding.
+
+# Check which NUMA node a process's memory is actually on
+numastat -p $(pgrep strategy_binary)
+# Shows: N0/N1 MBs for anonymous/mapped/heap memory
+```
+
+<Quiz
+  questions={[
+    {
+      question:
+        "The NIC is attached to socket 0. The strategy thread runs on socket 1. The DMA ring buffer (where the NIC writes incoming packets) is allocated by the main thread (socket 0) at startup. What happens to the strategy thread's reads from the ring buffer?",
+      options: [
+        "They hit local DRAM because the kernel migrates pages to the reading socket automatically",
+        "They cross the QPI/UPI inter-socket link and incur 2–3× higher latency than local reads",
+        "They hit the L3 cache on socket 1 because L3 is shared across sockets",
+        "They are unaffected because the DMA ring is in I/O memory, not DRAM",
+      ],
+      correct: 1,
+      explanation:
+        "Linux uses the first-touch policy: the physical pages backing the DMA ring are on socket 0's DRAM because the main thread (on socket 0) allocated and first-touched them. The strategy thread on socket 1 must cross the QPI/UPI link on every read — incurring the remote NUMA penalty. L3 caches are per-socket, not shared across sockets on Intel Xeon. The kernel does not automatically migrate pages. The fix: allocate the DMA ring on the strategy's NUMA node using numa_alloc_onnode, or bind the entire process to one socket.",
+    },
+  ]}
+/>
+
+## What's next
+
+You know how the CPU moves memory in 64-byte lines and how NUMA topology determines which lines are fast and which are expensive. The next step is telling the CPU to start loading lines before you need them — software prefetching and the conditions under which it helps versus hurts.

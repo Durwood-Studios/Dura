@@ -1,0 +1,313 @@
+---
+title: "ros2_control — Hardware Abstraction for Industrial Arms"
+description: "The controller-manager / hardware-interface contract that decouples trajectory controllers from robot hardware, making the same controller run on simulation and a real UR arm."
+phase: 13
+module: "r-6-ros-industrial"
+order: 4
+estimatedMinutes: 70
+difficulty: 4
+prerequisites:
+  - "r-6-ros-industrial-03"
+standards:
+  primaryAnchor: "ROS 2 Jazzy (LTS)"
+  cs2023: []
+  swebok: ["Software Construction", "Software Engineering Design"]
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "competent"
+vocabulary:
+  - ros2-control
+  - controller-manager
+  - hardware-interface
+  - joint-trajectory-controller
+  - state-interface
+  - command-interface
+  - realtime-loop
+  - ros2-control-yaml
+learningOutcomes:
+  - "After this lesson you can: explain the ros2_control architecture in three layers (controllers, controller manager, hardware interfaces)"
+  - "After this lesson you can: write a ros2_control YAML configuration that maps a 2-joint arm to a JointTrajectoryController"
+  - "After this lesson you can: identify when a hardware interface should be real-time safe and what that requires"
+  - "After this lesson you can: distinguish the update() function contract from the on_activate() contract in a hardware interface plugin"
+professionalContext: "ros2_control is the standard that separates motion commands from hardware-specific code in ROS 2. Every serious industrial ROS 2 integration — Universal Robots, Fanuc, ABB, KUKA, Clearpath — ships a ros2_control hardware interface. An engineer who can configure and debug ros2_control is immediately productive on any of them; an engineer who bypasses it is writing throw-away hardware code."
+thresholdConcept: false
+---
+
+## Why a hardware abstraction layer matters
+
+Without ros2_control, every controller that wants to move a joint has to know the robot's specific communication protocol: USB HID for a hobby servo, EtherCAT for an ABB IRC5, the Universal Robots RTDE protocol for a UR arm. When you switch robots, you rewrite the controller.
+
+<VocabTooltip slug="ros2-control">ros2_control</VocabTooltip> inverts this. The controller talks to
+a generic interface: "set joint_1 position to 1.2 rad." The hardware interface translates that into
+whatever the physical hardware needs. The controller does not change when you swap robots.
+
+This is the same abstraction pattern as POSIX between application and OS, or JDBC between application code and a specific database.
+
+## The three-layer architecture
+
+```
+┌──────────────────────────────────────────────┐
+│              CONTROLLERS                      │
+│  JointTrajectoryController                   │
+│  JointGroupVelocityController                │
+│  ForwardCommandController                    │
+│  (loaded/activated by the controller manager)│
+└────────────────────┬─────────────────────────┘
+                     │  reads/writes StateInterface + CommandInterface
+┌────────────────────▼─────────────────────────┐
+│         CONTROLLER MANAGER (CM)              │
+│  - owns the real-time update loop            │
+│  - manages controller lifecycle              │
+│  - exposes /controller_manager/* services    │
+└────────────────────┬─────────────────────────┘
+                     │  owns ResourceManager, calls read()/write()
+┌────────────────────▼─────────────────────────┐
+│           HARDWARE INTERFACES                │
+│  robot_hardware::SystemInterface plugin      │
+│  (one per physical robot or simulation)      │
+│  read()  → update state interfaces           │
+│  write() ← apply command interfaces         │
+└──────────────────────────────────────────────┘
+```
+
+**Controllers** implement motion logic — PID, trajectory following, gravity compensation. They see joints as a list of StateInterfaces (current position, velocity, effort) and CommandInterfaces (position command, velocity command, effort command).
+
+**Controller Manager** is the scheduler. It runs the update loop at a fixed rate (typically 1 kHz for position control, 500 Hz for most cobots). It activates and deactivates controllers and enforces that only one controller owns any given command interface at a time.
+
+**Hardware Interfaces** are the boundary to the real world. They implement `read()` and `write()` — called by the CM every loop cycle. `read()` copies the robot's current state into the StateInterfaces; `write()` copies the CommandInterfaces into the robot command buffer.
+
+## The control YAML — wiring everything together
+
+The ros2_control configuration lives in a YAML file referenced from the URDF (or launched separately). For a 2-joint simulated arm:
+
+```yaml
+# ros2_control.yaml
+controller_manager:
+  ros__parameters:
+    update_rate: 1000 # Hz — real-time loop rate
+
+    # Declare which controllers to load at startup
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+    command_interfaces:
+      - position # this controller commands position
+    state_interfaces:
+      - position
+      - velocity
+    # Tolerances for trajectory execution
+    constraints:
+      stopped_velocity_tolerance: 0.01 # rad/s
+      goal_time: 5.0 # seconds to reach the goal
+    gains:
+      joint_1:
+        p: 100.0
+        i: 0.5
+        d: 10.0
+        i_clamp: 10.0
+      joint_2:
+        p: 80.0
+        i: 0.5
+        d: 8.0
+        i_clamp: 8.0
+```
+
+The URDF must declare the `<ros2_control>` block that describes the hardware interface and its interfaces:
+
+```xml
+<!-- Inside the URDF, after the kinematic chain -->
+<ros2_control name="simple_arm_hardware" type="system">
+  <hardware>
+    <!-- For simulation: use the mock hardware (always installed) -->
+    <plugin>mock_components/GenericSystem</plugin>
+  </hardware>
+
+  <joint name="joint_1">
+    <command_interface name="position">
+      <param name="min">-3.14159</param>
+      <param name="max"> 3.14159</param>
+    </command_interface>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+    <state_interface name="effort"/>
+  </joint>
+
+  <joint name="joint_2">
+    <command_interface name="position">
+      <param name="min">-1.5708</param>
+      <param name="max"> 1.5708</param>
+    </command_interface>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+    <state_interface name="effort"/>
+  </joint>
+</ros2_control>
+```
+
+`mock_components/GenericSystem` is the built-in hardware interface for testing: it mirrors command interfaces directly to state interfaces, simulating a perfect robot.
+
+## Writing a hardware interface plugin
+
+For a real robot, you write a hardware interface that inherits from `hardware_interface::SystemInterface`:
+
+```cpp
+// my_robot_hardware/my_robot_hardware.hpp
+#pragma once
+
+#include <string>
+#include <vector>
+#include "hardware_interface/system_interface.hpp"
+#include "hardware_interface/types/hardware_interface_return_values.hpp"
+#include "rclcpp/rclcpp.hpp"
+
+namespace my_robot_hardware {
+
+class MyRobotHardware : public hardware_interface::SystemInterface {
+public:
+  // Called once at startup — parse parameters, open communications
+  hardware_interface::CallbackReturn on_init(
+    const hardware_interface::HardwareInfo & info) override;
+
+  // Return the list of StateInterface objects this hardware exports.
+  // Called once after on_init; the CM registers these with controllers.
+  std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
+
+  // Return the list of CommandInterface objects this hardware exports.
+  std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
+
+  // Called when a controller that needs this hardware is activated.
+  // Establish communication, enable servos, verify connection.
+  hardware_interface::CallbackReturn on_activate(
+    const rclcpp_lifecycle::State & previous_state) override;
+
+  // Called when all controllers that need this hardware are deactivated.
+  // Disable servos, close communications gracefully.
+  hardware_interface::CallbackReturn on_deactivate(
+    const rclcpp_lifecycle::State & previous_state) override;
+
+  // THE REAL-TIME LOOP — called every control cycle.
+  // MUST be deterministic. MUST NOT allocate memory. MUST NOT block.
+  hardware_interface::return_type read(
+    const rclcpp::Time & time, const rclcpp::Duration & period) override;
+
+  hardware_interface::return_type write(
+    const rclcpp::Time & time, const rclcpp::Duration & period) override;
+
+private:
+  // Position state (populated by read(), exposed to controllers)
+  std::vector<double> position_state_;
+  // Position command (written by controllers, consumed by write())
+  std::vector<double> position_command_;
+};
+
+}  // namespace my_robot_hardware
+```
+
+The `read()` / `write()` contract is strict:
+
+```cpp
+hardware_interface::return_type MyRobotHardware::read(
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+{
+  // This runs at 1 kHz. Rules:
+  // 1. Do NOT call ROS logging here (allocates memory → priority inversion)
+  // 2. Do NOT sleep or block
+  // 3. Do NOT call non-realtime code
+  //
+  // Correct pattern: read from a double buffer populated by a separate
+  // communication thread; copy to position_state_ atomically.
+  for (std::size_t i = 0; i < position_state_.size(); ++i) {
+    // Assuming comm_buffer_ is updated by a separate real-time-safe thread
+    position_state_[i] = comm_buffer_.joint_positions[i];
+  }
+  return hardware_interface::return_type::OK;
+}
+
+hardware_interface::return_type MyRobotHardware::write(
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+{
+  for (std::size_t i = 0; i < position_command_.size(); ++i) {
+    comm_buffer_.joint_commands[i] = position_command_[i];
+  }
+  // Trigger the communication thread to send the commands to hardware
+  comm_buffer_.command_ready.store(true, std::memory_order_release);
+  return hardware_interface::return_type::OK;
+}
+```
+
+## Activating controllers at runtime
+
+The controller manager exposes lifecycle-management services. From the command line:
+
+```bash
+# List available controllers
+ros2 control list_controllers
+
+# List available hardware interfaces
+ros2 control list_hardware_interfaces
+
+# Activate a controller
+ros2 control set_controller_state joint_trajectory_controller active
+
+# Activate/deactivate via the spawner (use in launch files)
+ros2 run controller_manager spawner joint_trajectory_controller
+ros2 run controller_manager unspawner joint_trajectory_controller
+```
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A ros2_control hardware interface `read()` function calls `RCLCPP_INFO(get_logger(), 'read called')` every cycle at 1 kHz. What is the specific problem with this?",
+      options: [
+        "get_logger() is not available inside read() — it requires a different logging mechanism",
+        "RCLCPP_INFO allocates memory for the log string on the heap every call; at 1 kHz this triggers the memory allocator in the real-time context, causing non-deterministic latency that can miss control deadlines and destabilize the control loop",
+        "Logging at 1 kHz will overflow the ROS 2 log buffer and crash the controller manager",
+        "read() runs in a different thread from the logger; thread-safety is the issue",
+      ],
+      correct: 1,
+      explanation:
+        "The real-time update loop must be deterministic — every iteration must complete in a bounded time. Dynamic memory allocation (heap alloc/free) is non-deterministic because the allocator may block on locks or system calls. RCLCPP_INFO formats a string (which allocates memory) and writes to a log backend (which may also allocate). In a 1 kHz loop, this can cause missed deadlines and unstable control. The correct pattern: log only in non-realtime callbacks (on_activate, on_deactivate) or use a lock-free ring buffer to pass log messages out of the realtime context.",
+    },
+    {
+      question:
+        "In the ros2_control architecture, what enforces the constraint that only one controller can write to a specific command interface (e.g., joint_1/position) at a time?",
+      options: [
+        "The hardware interface plugin — it rejects duplicate writes in its write() function",
+        "The URDF — declaring a command_interface in only one joint ensures only one controller uses it",
+        "The controller manager — it manages command interface ownership and refuses to activate a second controller that claims an interface already owned by an active controller",
+        "The joint trajectory controller itself — it checks for conflicts before publishing commands",
+      ],
+      correct: 2,
+      explanation:
+        "The controller manager enforces exclusive ownership of command interfaces. When you try to activate a controller that requests a command interface already owned by an active controller, the CM returns an error and does not activate the new controller. This prevents two controllers from fighting over the same joint. StateInterfaces (reads) can be shared by multiple controllers simultaneously — both a trajectory controller and a state broadcaster can read joint position at the same time.",
+    },
+    {
+      question:
+        "You're writing a ros2_control hardware interface for a robot that communicates over EtherCAT at 1 ms cycle time, matching the 1 kHz controller manager update rate. Where should the EtherCAT communication happen?",
+      options: [
+        "Inside read() and write() directly — they are called at 1 kHz and can handle EtherCAT synchronously",
+        "In a separate real-time thread that runs at 1 kHz, sharing data with read() and write() via lock-free double buffers; read() and write() copy to/from the buffers without blocking",
+        "In a ROS 2 timer callback at 1 kHz, which ros2_control will synchronize with automatically",
+        "In on_activate(), which establishes a persistent connection that read() and write() then use",
+      ],
+      correct: 1,
+      explanation:
+        "EtherCAT communication must be synchronized precisely with the hardware cycle, and the blocking calls (send frame, receive frame) add latency that would violate the read()/write() determinism contract if called directly. The standard pattern: a separate PREEMPT_RT real-time thread handles EtherCAT communication at its own precise timing; read() and write() copy atomic data to/from lock-free double buffers that the EtherCAT thread populates. This keeps read() and write() bounded (just a memcpy), while EtherCAT stays synchronized to its own master cycle.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson R6-5 introduces MoveIt 2 — the motion planning framework that sits above ros2_control. MoveIt consumes the URDF for collision geometry and joint limits, uses ros2_control's JointTrajectoryController as its execution back-end, and adds planning algorithms (OMPL, CHOMP, PILZ Industrial Motion Planner) that compute obstacle-free trajectories from current joint state to target pose.

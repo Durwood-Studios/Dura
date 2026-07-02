@@ -1,0 +1,278 @@
+---
+title: "NVIC Priority Levels and Nested Interrupts"
+description: "Priority groups, sub-priorities, preemption in practice. Why getting interrupt priorities wrong produces bugs that only manifest under load — and how to design a priority assignment that's provably correct."
+phase: 10
+module: "e-3-interrupts-and-dma"
+order: 2
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-3-interrupts-and-dma/01"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - nvic
+  - preempt-priority
+  - sub-priority
+  - priority-group
+  - priority-grouping
+  - tail-chaining
+  - late-arrival
+  - basepri
+  - prigroup
+  - interrupt-nesting
+learningOutcomes:
+  - "Configure interrupt priorities using NVIC_SetPriority and explain the priority-grouping split"
+  - "Predict which interrupt preempts which given a set of priority assignments"
+  - "Identify the priority-ceiling constraint for FreeRTOS/CMSIS interrupt calls from ISRs"
+  - "Design a three-tier priority assignment for a real-time system (safety, application, housekeeping)"
+  - "Explain tail-chaining and late-arrival and when each is beneficial"
+professionalContext: "An embedded system with incorrectly prioritized interrupts passes unit tests and fails under production load. The engineer who assigned priority 3 to both the motor-overcurrent shutoff and the Bluetooth data handler created a system where Bluetooth traffic can delay an emergency stop. Priority design is a safety-critical engineering decision, not a configuration detail. This lesson teaches you to reason about it correctly."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Interrupt priorities determine which code runs when multiple interrupts fire simultaneously and which ISR can preempt which. An engineer who assigns priorities arbitrarily produces a system that:
+
+- Fails to meet real-time deadlines under load because a low-priority "important" ISR gets preempted by a high-priority "convenience" ISR.
+- Silently deadlocks if FreeRTOS ISR variants are called from ISRs above `configMAX_SYSCALL_INTERRUPT_PRIORITY`.
+- Delays safety-critical shutoff ISRs with application-level ISRs during error recovery.
+
+Priority assignment is a design decision that must be documented, reasoned about, and correct by construction — not guessed.
+
+## Cortex-M priority mechanics
+
+Cortex-M supports up to 256 priority levels, encoded in 8 bits per interrupt. In practice, chip vendors implement only the top N bits:
+
+- STM32F4: 4 bits → 16 levels (0 = highest, 15 = lowest)
+- nRF52: 3 bits → 8 levels (0 = highest, 7 = lowest)
+
+A lower number means higher priority (runs first, can preempt higher-number priorities).
+
+The CMSIS API:
+
+```c
+#include "core_cm4.h"   /* Or <stdint.h> with direct register access */
+
+/* Set USART2 interrupt to priority 5 */
+NVIC_SetPriority(USART2_IRQn, 5U);
+NVIC_EnableIRQ(USART2_IRQn);
+
+/* Read the assigned priority */
+uint32_t pri = NVIC_GetPriority(USART2_IRQn);
+```
+
+## Priority grouping — preempt vs sub-priority
+
+The 4 implemented priority bits can be split into a **preemption priority** field and a **sub-priority** field via the `PRIGROUP` register in the System Control Block:
+
+```c
+/* PRIGROUP values for 4-bit priority implementation:
+   PRIGROUP 3 (0xXXXX & 0b0111): [PP.PP | SP.SP] — 4 preempt bits, 0 sub-priority
+   PRIGROUP 4 (0xXXXX & 0b0011): [PP.PP | SP.SP] — 3 preempt bits, 1 sub-priority bit
+   PRIGROUP 5:                    [PP | PP.SP] — 2 preempt bits, 2 sub-priority bits
+   ...and so on */
+
+/* FreeRTOS strongly recommends PRIGROUP 3 (all preempt, no sub-priority) */
+NVIC_SetPriorityGrouping(3U);
+```
+
+**Preemption priority** determines whether one ISR can interrupt another. **Sub-priority** is only used to break ties when two ISRs of the same preemption priority are both pending simultaneously.
+
+FreeRTOS documentation is explicit: set PRIGROUP to use all bits as preemption priority (`__NVIC_PRIO_BITS` preempt bits, 0 sub-priority bits). This avoids surprising behavior where two ISRs at different sub-priorities can't preempt each other.
+
+## The three-tier priority model
+
+A useful design for most embedded applications:
+
+```
+Priority 0–1:   Safety tier    — emergency stop, overcurrent shutoff, watchdog
+Priority 2–5:   Application    — sensor ISRs, DMA completion, UART RX, timers
+Priority 6–12:  Communication  — BLE, WiFi, USB data handlers
+Priority 13–15: Housekeeping   — statistics, logging (never preempts anything critical)
+```
+
+```c
+/* Example assignment for a motor controller */
+NVIC_SetPriority(EXTI0_IRQn,       1U);   /* Emergency stop button — safety tier */
+NVIC_SetPriority(TIM1_UP_IRQn,     2U);   /* PWM update — must not miss */
+NVIC_SetPriority(ADC_IRQn,         3U);   /* Current sense ADC — must not miss */
+NVIC_SetPriority(USART2_IRQn,      7U);   /* Debug UART — application */
+NVIC_SetPriority(DMA1_Stream0_IRQn, 5U);  /* Bulk data DMA */
+```
+
+The emergency stop at priority 1 can preempt everything except priority 0 (reserved for truly catastrophic faults like NMI). The PWM update at priority 2 can't preempt the emergency stop. The debug UART at priority 7 can't preempt any of the above.
+
+## FreeRTOS constraint: configMAX_SYSCALL_INTERRUPT_PRIORITY
+
+FreeRTOS uses BASEPRI to implement critical sections — it masks interrupts at or below a configurable priority ceiling. ISRs that call FreeRTOS `FromISR` APIs (like `xQueueSendFromISR`) must have a priority NUMERICALLY HIGHER than (equal to or worse than) `configMAX_SYSCALL_INTERRUPT_PRIORITY`.
+
+```c
+/* In FreeRTOSConfig.h: */
+#define configMAX_SYSCALL_INTERRUPT_PRIORITY  5U   /* On STM32 with 4-bit impl */
+```
+
+This means:
+
+- ISRs at priority 5, 6, 7, ..., 15 MAY call `FromISR` variants.
+- ISRs at priority 0, 1, 2, 3, 4 MUST NOT call any FreeRTOS API — they can't be masked by the kernel's critical sections.
+
+An ISR at priority 2 that calls `xQueueSendFromISR` will crash or corrupt the kernel because it runs while the kernel's critical section is active.
+
+```c
+/* CORRECT: USART2 ISR at priority 7 (above configMAX_SYSCALL_INTERRUPT_PRIORITY = 5) */
+/* Can safely call xQueueSendFromISR, xSemaphoreGiveFromISR, etc. */
+void USART2_IRQHandler(void) {
+    uint8_t byte = USART2_DR;
+    xQueueSendFromISR(uart_queue, &byte, &higher_prio_woken);
+}
+
+/* WRONG: TIM1 ISR at priority 2 calls FreeRTOS API — undefined behavior */
+void TIM1_UP_TIM10_IRQHandler(void) {
+    /* DO NOT call xQueueSendFromISR here — priority 2 < configMAX_SYSCALL = 5 */
+    /* Instead: set a volatile flag that main code or a lower-priority ISR checks */
+    pwm_update_flag = 1;
+}
+```
+
+The safety-tier and application-real-time ISRs don't use FreeRTOS APIs at all — they set flags or write to shared variables with explicit critical sections.
+
+## Tail-chaining and late-arrival
+
+Cortex-M has two hardware optimizations for back-to-back interrupts:
+
+**Tail-chaining**: when an ISR completes and another interrupt is pending, the CPU skips the full exception exit/re-entry sequence (which would require saving and restoring registers) and directly vectors to the next ISR. The overhead is 6 cycles instead of 12 + 12. At 168 MHz, you save ~71 ns — meaningful for high-frequency ISRs.
+
+**Late-arrival**: if a higher-priority interrupt arrives while the CPU is in the exception-entry sequence (pushing registers), the CPU switches to the higher-priority ISR immediately when register saving completes. The lower-priority ISR's entry is cancelled; it will re-enter after the higher one completes. This provides near-optimal response to high-priority interrupts even when another ISR was about to start.
+
+Both are automatic. You don't configure them; you just benefit from them. The practical implication: back-to-back interrupts at the same or different priorities have lower overhead than separate interruptions.
+
+## Competency check
+
+<SandboxExercise
+  language="c"
+  instructions="Given this system: STM32F4 at 168 MHz with FreeRTOS, 4-bit priority implementation, configMAX_SYSCALL_INTERRUPT_PRIORITY = 5 (numerical). Four interrupts are in use: (1) Emergency stop EXTI at priority 1, (2) Motor current sense ADC at priority 3, (3) UART RX at priority 7, (4) BLE data handler at priority 9. Answer: (a) Which ISRs can preempt which? (b) Which ISRs may safely call xQueueSendFromISR? (c) An engineer adds a 'safe mode' timer ISR at priority 4 that calls xSemaphoreGiveFromISR. Is this safe? Annotate the code below with your answers."
+  initialCode={`/* Priority assignments — document who preempts whom */
+void configure_interrupts(void) {
+    NVIC_SetPriorityGrouping(3U);   /* All bits as preempt, no sub-priority */
+
+    NVIC_SetPriority(EXTI0_IRQn,        1U);  /* Emergency stop */
+    NVIC_SetPriority(ADC_IRQn,          3U);  /* Current sense */
+    NVIC_SetPriority(USART2_IRQn,       7U);  /* UART RX */
+    NVIC_SetPriority(EXTI9_5_IRQn,      9U);  /* BLE handler */
+
+    /* configMAX_SYSCALL_INTERRUPT_PRIORITY = 5 */
+
+    /* TODO: Add TIM6 ISR at priority 4 for "safe mode" signaling via
+       xSemaphoreGiveFromISR — is this legal? Comment your analysis. */
+
+}
+
+/_ TODO: Annotate each ISR with:
+(a) which others can preempt it
+(b) whether it may call FreeRTOS FromISR APIs _/
+void EXTI0*IRQHandler(void) {
+/* Emergency stop — priority 1 _/
+/_ Preempted by: ? _/
+/_ May call FreeRTOS API: ? \_/
+motor_emergency_stop();
+}
+
+void ADC*IRQHandler(void) {
+/* Current sense — priority 3 _/
+/_ Preempted by: ? _/
+/_ May call FreeRTOS API: ? \_/
+}
+
+void USART2*IRQHandler(void) {
+/* UART RX — priority 7 _/
+/_ Preempted by: ? _/
+/_ May call FreeRTOS API: ? _/
+uint8_t byte = USART2_DR;
+/_ xQueueSendFromISR(uart*q, &byte, NULL); — safe? */
+}
+
+void EXTI9*5_IRQHandler(void) {
+/* BLE handler — priority 9 _/
+/_ Preempted by: ? _/
+/_ May call FreeRTOS API: ? \_/
+}
+`}
+  solution={`void configure_interrupts(void) {
+NVIC_SetPriorityGrouping(3U);
+
+    NVIC_SetPriority(EXTI0_IRQn,    1U);
+    NVIC_SetPriority(ADC_IRQn,      3U);
+    NVIC_SetPriority(USART2_IRQn,   7U);
+    NVIC_SetPriority(EXTI9_5_IRQn,  9U);
+
+    /* TIM6 at priority 4 — UNSAFE. Priority 4 < configMAX_SYSCALL = 5.
+       FreeRTOS masks ISRs at priority >= 5 during critical sections.
+       Priority 4 ISRs run EVEN DURING kernel critical sections.
+       Calling xSemaphoreGiveFromISR from a priority-4 ISR corrupts kernel state.
+       Fix: move TIM6 to priority 6 or higher (numerically). */
+    NVIC_SetPriority(TIM6_DAC_IRQn, 6U);  /* CORRECT: 6 >= configMAX_SYSCALL=5 */
+
+}
+
+/\* Preemption rules:
+Lower number = higher priority = preempts all higher numbers.
+Priority 1 preempts 3, 7, 9.
+Priority 3 preempts 7, 9.
+Priority 7 preempts 9 only.
+Priority 9 preempts nothing (lowest priority in this set).
+
+FreeRTOS API rule: may call FromISR if priority >= configMAX_SYSCALL (numerically).
+configMAX_SYSCALL = 5 → ISRs at 5, 6, 7, 8, 9, ... may call FromISR.
+ISRs at 1, 2, 3, 4 MUST NOT call any FreeRTOS API. \*/
+
+void EXTI0*IRQHandler(void) {
+/* Emergency stop — priority 1 _/
+/_ Preempted by: NOTHING (only NMI/HardFault at priority -1/-2) _/
+/_ May call FreeRTOS API: NO (priority 1 < configMAX*SYSCALL = 5) */
+motor*emergency_stop();
+/* Communicate via a simple volatile flag, not a FreeRTOS object \_/
+emergency_stop_flag = 1U;
+}
+
+void ADC*IRQHandler(void) {
+/* Current sense — priority 3 _/
+/_ Preempted by: EXTI0 (priority 1) _/
+/_ May call FreeRTOS API: NO (priority 3 < configMAX*SYSCALL = 5) */
+current*sample = ADC1_DR;
+current_sample_ready = 1U; /* Volatile flag — no RTOS API \_/
+}
+
+void USART2*IRQHandler(void) {
+/* UART RX — priority 7 _/
+/_ Preempted by: EXTI0 (1), ADC (3), anything at 2-6 _/
+/_ May call FreeRTOS API: YES (priority 7 >= configMAX*SYSCALL = 5) */
+uint8*t byte = USART2_DR;
+BaseType_t woken = pdFALSE;
+xQueueSendFromISR(uart_q, &byte, &woken); /* SAFE \_/
+portYIELD_FROM_ISR(woken);
+}
+
+void EXTI9*5_IRQHandler(void) {
+/* BLE handler — priority 9 _/
+/_ Preempted by: EXTI0 (1), ADC (3), UART (7), anything at 2-8 _/
+/_ May call FreeRTOS API: YES (priority 9 >= configMAX*SYSCALL = 5) */
+}
+`}
+testCases={[
+"TIM6 priority changed from 4 to 6 (or higher) to be above configMAX_SYSCALL",
+"EXTI0 ISR annotated as not preempted by lower-priority interrupts",
+"ADC ISR annotated as not calling FreeRTOS APIs",
+"UART ISR noted as safe to call FromISR variants"
+]}
+/>
+
+## What's next
+
+Lesson 03 focuses on DMA double-buffering — the pattern that achieves zero data loss for streaming peripherals like ADC sweeps and audio capture. The circular DMA + half-transfer interrupt combination is the standard approach for any high-rate data acquisition, and it uses the ISR patterns from Lessons 01 and 02 of this module.

@@ -1,0 +1,227 @@
+---
+title: "Measuring Cache Performance — perf stat, cachegrind, and PMU Events"
+description: "Use Linux perf and Valgrind cachegrind to count L1/L2/L3 cache misses, TLB misses, and branch mispredictions on real code, then map the numbers back to layout decisions."
+phase: 12
+module: "q-3-cache-aware-programming"
+order: 7
+estimatedMinutes: 55
+difficulty: 4
+prerequisites:
+  - "q-3-cache-aware-programming/06-tlb-huge-pages"
+standards:
+  primaryAnchor: "perf_event_open(2) Linux kernel interface"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - performance-monitoring-unit
+  - hardware-performance-counter
+  - perf-stat
+  - perf-record
+  - perf-report
+  - cachegrind
+  - valgrind
+  - llc-miss
+  - instructions-per-cycle
+  - branch-misprediction
+  - cycles-per-instruction
+  - annotate
+learningOutcomes:
+  - "After this lesson you can run perf stat on a binary and read the LLC miss rate, IPC, and branch misprediction rate from the output"
+  - "After this lesson you can run cachegrind and identify which function accounts for the most L1 and LL cache misses"
+  - "After this lesson you can use perf record + perf annotate to find the specific source line generating the most cache misses"
+  - "After this lesson you can interpret a cycles-per-instruction value and state what ratio indicates a memory-bound vs compute-bound loop"
+professionalContext: "Every claim in this module — 'AoS generates more cache misses,' 'false sharing costs 5×,' 'huge pages reduce TLB pressure' — is verifiable with perf and cachegrind. HFT engineers who reach for a profiler before making layout decisions avoid the trap of optimizing a bottleneck that doesn't exist. The discipline is: measure first, change second, measure again. perf stat is the three-second sanity check that tells you whether you are memory-bound or compute-bound before you spend an hour restructuring a struct."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You restructured a struct from AoS to SoA based on everything in this module. You re-run the benchmark and the latency improved by... nothing measurable. The lesson said SoA should help, the cache analysis says fewer lines should be touched, but the numbers are the same.
+
+What went wrong? Almost certainly: the loop you optimized was not cache-bound in the first place. It was compute-bound — the CPU was stalling on divisions or floating-point operations, not on memory. A five-second `perf stat` run would have told you this before you touched the struct.
+
+The measurement comes first.
+
+## perf stat: the five-second assessment
+
+`perf stat` attaches to a process, counts hardware events using the CPU's <VocabTooltip slug="performance-monitoring-unit">Performance Monitoring Unit</VocabTooltip> (PMU), and prints a summary. You do not need to recompile your binary or add instrumentation.
+
+```bash
+# Basic run: default counters (cycles, instructions, cache-misses)
+perf stat ./order_book_bench
+
+# Example output:
+# Performance counter stats for './order_book_bench':
+#
+#          3,245.21 msec task-clock     #  0.998 CPUs utilized
+#                 5      context-switches
+#                 0      cpu-migrations
+#             1,024      page-faults
+#    9,876,543,210      cycles                    # 3.04 GHz
+#    3,211,567,890      instructions              # 0.32  insn per cycle
+#       12,456,789      branches
+#          567,890      branch-misses             # 4.56% of all branches
+#       89,234,567      cache-references
+#       45,678,901      cache-misses              # 51.18% of cache refs
+#
+#        3.252 seconds time elapsed
+```
+
+The critical numbers:
+
+| Metric                       | Good   | Investigate if                     |
+| ---------------------------- | ------ | ---------------------------------- |
+| Instructions per cycle (IPC) | 2–4    | < 1.0 (memory-bound or serialized) |
+| LLC (L3) miss rate           | < 0.5% | > 2%                               |
+| Branch miss rate             | < 1%   | > 5% on the hot path               |
+| `cycles` / `instructions`    | < 1    | > 4 (severe stall)                 |
+
+In the example above, IPC is 0.32 — the CPU issues fewer than one instruction per clock. It is memory-bound: for every 3 cycles spent doing work, 9 cycles are spent waiting for cache lines. This is the profile of an AoS loop with high LLC miss rate. No amount of algorithmic optimization will help until the data layout changes.
+
+## Targeting specific events
+
+```bash
+# Count L1, L2, L3 data cache misses separately
+perf stat -e L1-dcache-misses,L2-load-misses,LLC-load-misses \
+          -e dTLB-load-misses,iTLB-load-misses \
+          ./order_book_bench
+
+# Output (hypothetical):
+#     12,300,456  L1-dcache-misses
+#      4,567,890  L2-load-misses
+#      2,345,678  LLC-load-misses    ← these go to DRAM: ~70ns each
+#         89,012  dTLB-load-misses   ← TLB misses → page walks
+#          1,234  iTLB-load-misses
+
+# A high LLC-load-misses count with a high dTLB-load-misses count
+# suggests you need huge pages (TLB) AND better data layout (LLC).
+
+# Count false-sharing specifically:
+# mem_load_retired.l3_miss + look for high cycle counts on specific cachelines
+perf c2c record -g ./order_book_bench
+perf c2c report
+# c2c ("cache-to-cache") shows lines contested between CPUs — the
+# exact signature of false sharing.
+```
+
+## perf record + perf annotate: finding the line
+
+`perf stat` tells you the program is cache-bound. `perf record` tells you _where_.
+
+```bash
+# Sample cache misses at the instruction level
+perf record -e LLC-load-misses -g ./order_book_bench
+
+# Display hottest functions
+perf report --sort comm,dso,sym
+
+# Annotate a specific function with per-instruction miss counts
+perf annotate --symbol=update_book_level
+```
+
+A typical annotated output:
+
+```asm
+       ↓ 0.12%   │  48:  movq   (%rbx,%rax,8), %rcx   ← 0.12% of samples
+       ↑ 83.4%   │  4c:  movq   (%rdx,%rcx,8), %rsi   ← THIS IS THE MISS
+                 │  50:  addq   %rdi, %rsi
+       ↓ 0.07%   │  54:  movq   %rsi, (%rdx,%rcx,8)
+```
+
+Line `4c` — a load through an order-ID-to-level pointer — accounts for 83% of LLC misses. This is the order-to-level lookup in the book update path. The order ID is sequential, but the level pointer it maps to is scattered in memory. The fix: use an intrusive data structure where the order carries its own level reference, eliminating the indirection.
+
+## Valgrind cachegrind: deterministic simulation
+
+`perf` measures real hardware events; it requires root or `perf_event_paranoid` = -1 and is nondeterministic (samples, not counts). `cachegrind` simulates a cache hierarchy deterministically — it counts every miss exactly — at the cost of 20–50× slowdown.
+
+```bash
+# Run cachegrind with custom cache parameters matching your CPU
+valgrind --tool=cachegrind \
+         --I1=32768,8,64 \   # L1 instruction: 32K, 8-way, 64B lines
+         --D1=32768,8,64 \   # L1 data: 32K, 8-way, 64B lines
+         --LL=33554432,16,64 \ # L3: 32M, 16-way, 64B lines
+         ./order_book_bench
+
+# Produces: cachegrind.out.<pid>
+
+# Annotate source with per-line miss counts
+cg_annotate cachegrind.out.<pid> --auto=yes
+
+# Example output:
+# Ir       I1mr   ILmr   Dr       D1mr    DLmr    Dw       D1mw    DLmw
+# 1.23B    4.5K   4.5K   512M     45.6M   23.4M   128M     2.3M    1.2M
+#                                  ^ D1 read misses: 45.6M on 512M reads = 8.9%
+```
+
+The `DLmr` column (Last-Level cache read misses) is the most important: these are accesses that go to DRAM. A DLmr rate above 5% on a hot loop is a red flag.
+
+## Practical workflow: measure-change-measure
+
+```bash
+# Step 1: Establish baseline
+perf stat -e cycles,instructions,LLC-load-misses ./bench > baseline.txt
+
+# Step 2: Make layout change (e.g. AoS → SoA)
+
+# Step 3: Measure again
+perf stat -e cycles,instructions,LLC-load-misses ./bench > after.txt
+
+# Step 4: Diff
+diff baseline.txt after.txt
+# If LLC-load-misses dropped 50% and IPC improved from 0.32 to 1.8, the change worked.
+# If metrics are the same, the loop was not cache-bound — find the actual bottleneck.
+```
+
+<SandboxExercise
+  title="Interpret a perf stat output"
+  description="Below is a perf stat output from a market-data handler that iterates over 8,192 order records. Identify whether the loop is memory-bound or compute-bound, estimate the cycles wasted per LLC miss, and write the one-sentence diagnosis you would put in a design review comment."
+  language="text"
+  starterCode={`Performance counter stats for './md_handler':
+
+          1,024.33 msec task-clock          #  0.998 CPUs utilized
+    3,122,456,789  cycles                   #  3.05 GHz
+      498,301,234  instructions             #  0.16  insn per cycle
+       84,512,003  cache-references
+       41,203,456  cache-misses             # 48.75% of cache refs
+       62,100,890  LLC-load-misses
+            4,512  dTLB-load-misses
+
+# Questions:
+
+# 1. Is this loop memory-bound or compute-bound? How do you know?
+
+# 2. At 70 ns per LLC miss and 3.05 GHz clock, how many cycles does one LLC miss cost?
+
+# 3. Total LLC misses × cycles per miss = how many cycles are spent waiting for DRAM?
+
+# What percentage of total cycles is that?
+
+# 4. What is your one-sentence diagnosis for the design review?
+
+`}
+/>
+
+<Quiz
+  questions={[
+    {
+      question:
+        "perf stat reports IPC (instructions per cycle) of 0.18 for a market-data update loop. A compute-bound loop on the same machine typically achieves IPC of 3.5. What is the primary interpretation?",
+      options: [
+        "The loop has too many branches — use branchless patterns from q-1 lesson 3",
+        "The CPU is stalled waiting for memory most of the time — the loop is memory-bound",
+        "The loop is executing too many instructions — simplify the algorithm",
+        "The CPU is context-switching too frequently — pin the thread to a core",
+      ],
+      correct: 1,
+      explanation:
+        "IPC of 0.18 means the CPU completes fewer than 1 instruction every 5 cycles. A fully compute-bound loop on a modern out-of-order CPU achieves 3–5 IPC because the CPU finds independent instructions and executes them in parallel. An IPC of 0.18 means the pipeline is almost always stalled — the dominant reason is waiting for memory (LLC misses going to DRAM stall the pipeline for 30–100+ cycles). Branch mispredictions would show up as a high branch-miss rate but would not reduce IPC this far. More instructions would increase cycle count but leave IPC stable. Context switches show in the task-clock ratio, not IPC.",
+    },
+  ]}
+/>
+
+## What's next
+
+You have measured, diagnosed, and fixed cache behavior. The final lesson in this module ties everything together with pool allocators and arena allocation — the technique HFT systems use to guarantee both cache-friendly layout AND zero runtime allocation overhead on the hot path.

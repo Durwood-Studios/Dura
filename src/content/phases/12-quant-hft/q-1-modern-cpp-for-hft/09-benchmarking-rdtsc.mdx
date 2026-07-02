@@ -1,0 +1,266 @@
+---
+title: "Benchmarking with rdtsc and Google Benchmark"
+description: "Nanosecond-accurate latency measurement in C++ using the rdtsc instruction, percentile histograms, and Google Benchmark idioms that prevent the compiler from optimizing your benchmark to nothing."
+phase: 12
+module: "q-1-modern-cpp-for-hft"
+order: 9
+estimatedMinutes: 35
+difficulty: 4
+prerequisites:
+  - "q-1-modern-cpp-for-hft/03-branch-prediction-and-branchless-patterns"
+standards:
+  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
+  cs2023: []
+  swebok: []
+  bloom: "evaluate"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - rdtsc
+  - tsc
+  - invariant-tsc
+  - cpuid-serializing
+  - lfence
+  - benchmark-dead-code-elimination
+  - benchmark-clobber
+  - benchmark-escape
+  - percentile-latency
+  - p99-latency
+  - warm-up-phase
+  - outlier-trimming
+learningOutcomes:
+  - "After this lesson you can write a correct rdtsc-based latency measurement that prevents CPU reordering from contaminating the sample"
+  - "After this lesson you can use benchmark::DoNotOptimize and benchmark::ClobberMemory in Google Benchmark to prevent dead-code elimination"
+  - "After this lesson you can record a latency histogram and report p50, p99, and p99.9 percentiles instead of mean latency"
+  - "After this lesson you can explain why microbenchmarks run in isolation can differ from production measurements by 3–10x"
+professionalContext: "The hardest part of HFT optimization is measurement. A microbenchmark that says 50 ns often means the compiler compiled the measured code away entirely — you are timing an empty loop. A benchmark that says 200 ns on your laptop and 80 ns in the colo box is not wrong; it is measuring different inputs. And a benchmark that reports a mean latency of 120 ns while the real system's p99 tail is 800 ns is correct and useless. At every HFT firm the interview question is not 'is your code fast' — it is 'how do you prove your code is fast, and fast on which percentile.' This lesson answers that question with tools you can use immediately."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You optimize an order-book update function and your benchmark says it dropped from 200 ns to 60 ns. You ship it. Production latency does not change. What happened?
+
+One of three things: (a) the compiler noticed the function's output was unused and eliminated the loop body — you measured `nop`; (b) the benchmark ran on a hot cache that production never has, so the 60 ns is the L1-cached case and production hits L3 or DRAM half the time; or (c) the mean went down but the p99 went up — the optimization moved fast cases faster and slow cases slower, and the strategy cares about the slow cases. All three are real bugs. This lesson is how you catch them before they waste a trading day.
+
+## The right way to time in C++
+
+The system clock (`std::chrono::high_resolution_clock`) is fine for millisecond measurements. For nanoseconds on a hot path, you need the CPU's **Time Stamp Counter** — the <VocabTooltip slug="rdtsc">rdtsc</VocabTooltip> instruction on x86. It returns a monotonically increasing 64-bit tick count that increments at a fixed frequency on modern CPUs (the <VocabTooltip slug="invariant-tsc">invariant TSC</VocabTooltip>, exposed since Intel Nehalem). The tick frequency is the CPU's base clock — ~3 GHz on typical HFT hardware — so one tick ≈ 0.33 ns.
+
+The tricky part: the CPU is allowed to reorder instructions, including your `rdtsc` calls, relative to the code under test. A bare `rdtsc` can be measured before the preceding code finishes, producing a spuriously short sample. The fix is a <VocabTooltip slug="lfence">lfence</VocabTooltip> memory fence before each `rdtsc`, which serializes all prior instructions before the counter is read.
+
+```cpp
+#include <cstdint>
+
+// Read the TSC with serialization so prior instructions complete first.
+// lfence: all preceding memory loads are globally visible before continuing.
+// Combined with rdtsc this is the standard idiom for start-of-interval timing.
+inline uint64_t rdtsc_start() noexcept {
+    uint32_t lo, hi;
+    __asm__ volatile (
+        "lfence\n\t"        // serialize: finish all prior loads
+        "rdtsc\n\t"         // read TSC into edx:eax
+        : "=a"(lo), "=d"(hi)
+        :
+        : "memory"          // clobber: prevents compiler from reordering across
+    );
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+// Read the TSC at the end of an interval. rdtscp writes the CPU id to
+// ecx and is itself serializing — no lfence needed after it.
+inline uint64_t rdtsc_end() noexcept {
+    uint32_t lo, hi;
+    __asm__ volatile (
+        "rdtscp\n\t"        // serializing read (waits for prior instructions)
+        : "=a"(lo), "=d"(hi)
+        :
+        : "ecx", "memory"
+    );
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+// Convert ticks to nanoseconds. Call once at startup with a calibration
+// against std::chrono to find ticks_per_ns.
+inline double ticks_to_ns(uint64_t ticks, double ticks_per_ns) {
+    return static_cast<double>(ticks) / ticks_per_ns;
+}
+```
+
+`rdtscp` (with trailing `p`) is a serializing variant of `rdtsc` that waits for all preceding instructions to retire before reading the counter. Used at the end of a timed region, it measures everything up to the point you call it. The pair `lfence + rdtsc` at the start and `rdtscp` at the end is the canonical HFT latency measurement idiom.
+
+## Preventing dead-code elimination
+
+The compiler is allowed to delete code whose output is never observed. A benchmark loop that calls `update_book(price)` but never reads the book's state can be compiled to `nop` — and `rdtsc_end - rdtsc_start` then measures an empty loop body.
+
+Google Benchmark provides two tools to prevent this:
+
+```cpp
+// benchmark/benchmark.h (Google Benchmark)
+#include <benchmark/benchmark.h>
+
+// DoNotOptimize(x): forces x to be "used" by the compiled code.
+// Concretely, it tells the compiler that x is read and written by an
+// unknown external entity — preventing elimination of the computation
+// that produced x.
+benchmark::DoNotOptimize(result);
+
+// ClobberMemory(): tells the compiler all memory may have been changed.
+// Use after a function that writes to a buffer you have not read yet —
+// prevents the compiler from assuming the writes are dead.
+benchmark::ClobberMemory();
+```
+
+In a hand-written rdtsc benchmark, the equivalent is an `asm volatile("" :: "m"(result) : "memory")` fence — it forces the compiler to assume `result`'s memory is observable:
+
+```cpp
+// Prevent the compiler from eliminating `val`. Use this when not using
+// Google Benchmark's DoNotOptimize.
+template <typename T>
+inline void escape(T& val) {
+    asm volatile("" :: "m"(val) : "memory");
+}
+```
+
+## A complete Google Benchmark example
+
+```cpp
+#include <benchmark/benchmark.h>
+#include <cstdint>
+#include <cstring>
+
+// The function under test: update best bid if the new price is higher.
+// This is a realistic HFT inner-loop operation.
+int64_t g_best_bid = 10000;   // in ticks
+
+static void BM_UpdateBestBid(benchmark::State& state) {
+    // Warm-up: Google Benchmark runs the loop until timing stabilizes,
+    // then switches to the measurement phase. The framework handles warm-up.
+
+    int64_t new_price = static_cast<int64_t>(state.range(0));
+    for (auto _ : state) {
+        // DoNotOptimize: the new_price input must remain "alive" — the compiler
+        // cannot assume it is constant and fold the branch away.
+        benchmark::DoNotOptimize(new_price);
+
+        // The operation under test.
+        if (new_price > g_best_bid) g_best_bid = new_price;
+
+        // ClobberMemory: forces the compiler to assume g_best_bid was
+        // read externally, so the store is not dead-code-eliminated.
+        benchmark::ClobberMemory();
+    }
+}
+BENCHMARK(BM_UpdateBestBid)->Arg(10001)->Arg(9999)->Arg(10000);
+// Pass 10001 (update path), 9999 (no-update path), 10000 (equal, no-update).
+
+BENCHMARK_MAIN();
+```
+
+Run with `--benchmark_format=json` and `--benchmark_time_unit=ns` to get machine-readable results. Google Benchmark reports mean and standard deviation — which is a start — but the missing metric is the tail.
+
+## Recording and reporting percentile latency
+
+Mean latency hides the distribution. An HFT strategy that misses one in a thousand fills because of a 10-microsecond tail spike loses more in expected value than a strategy that is 20% slower on average. Always measure and report percentiles.
+
+```cpp
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+
+// Collect N latency samples into a sorted array and report percentiles.
+// In production: use a fixed-size circular buffer or a HDR histogram.
+template <std::size_t N>
+struct LatencyHistogram {
+    std::array<uint64_t, N> samples{};
+    std::size_t count = 0;
+
+    void record(uint64_t ticks) {
+        if (count < N) samples[count++] = ticks;
+    }
+
+    void report(double ticks_per_ns) {
+        if (count == 0) return;
+        std::sort(samples.begin(), samples.begin() + count);
+
+        auto pct = [&](double p) -> double {
+            std::size_t idx = static_cast<std::size_t>(p / 100.0 * count);
+            if (idx >= count) idx = count - 1;
+            return ticks_to_ns_approx(samples[idx], ticks_per_ns);
+        };
+
+        std::printf("samples=%zu  p50=%.1f ns  p99=%.1f ns  p99.9=%.1f ns  max=%.1f ns\n",
+                    count, pct(50.0), pct(99.0), pct(99.9),
+                    ticks_to_ns_approx(samples[count - 1], ticks_per_ns));
+    }
+
+    static double ticks_to_ns_approx(uint64_t ticks, double ticks_per_ns) {
+        return static_cast<double>(ticks) / ticks_per_ns;
+    }
+};
+```
+
+Key reporting discipline: **p50 is the fast path; p99 is where money leaks; p99.9 is where disaster happens.** Report all three. An optimization that improves p50 but widens p99 is generally a regression in an HFT context.
+
+## Why microbenchmarks lie
+
+Four common reasons a microbenchmark does not predict production performance:
+
+1. **Cache state.** A benchmark that fits in L1/L2 measures the cache-warm case. Production may encounter the function with a cold cache. Add a `_mm_clflush` pass before timing to simulate cold-cache conditions.
+2. **NUMA.** On a multi-socket server, memory allocated on the wrong NUMA node adds ~100 ns per access. A benchmark that allocates memory on the same socket as the thread is not measuring the same thing as a production system that crosses sockets.
+3. **Turbo boost.** CPUs run at a boosted frequency when not thermally constrained. A benchmark on a cold CPU may run at 3.8 GHz; production at thermal equilibrium may run at 3.2 GHz — a 19% difference in measured nanoseconds.
+4. **Isolation.** A benchmark that pins the thread to a core and uses `isolcpus` on the kernel command line to prevent interrupts gets very different numbers from one that shares a core with kernel threads. Production colo boxes use `isolcpus`; developer laptops do not.
+
+The discipline: **measure on the machine where you trade, with the cores isolated, with the NUMA topology matched, and after a 30-second warm-up to let the CPU reach thermal equilibrium.** Everything else is a directional guide, not a ground truth.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "You measure a function's latency with rdtsc_start/rdtsc_end and get 8 ticks. The TSC frequency is 3.2 GHz (3.2 × 10^9 ticks/s). What is the latency in nanoseconds?",
+      options: [
+        "8 ns (one tick per nanosecond at 1 GHz)",
+        "2.5 ns (8 ticks ÷ 3.2 ticks/ns = 2.5 ns)",
+        "25.6 ns",
+        "0.8 ns",
+      ],
+      correct: 1,
+      explanation:
+        "The TSC increments at 3.2 GHz = 3.2 ticks per nanosecond. Latency in nanoseconds = ticks / (ticks per nanosecond) = 8 / 3.2 = 2.5 ns. This is the arithmetic you need to convert raw TSC deltas to nanoseconds. Most HFT measurement harnesses calibrate once at startup by comparing a known duration between rdtsc and std::chrono, then apply the ratio to all subsequent rdtsc samples.",
+    },
+    {
+      question:
+        "A Google Benchmark loop contains: `int result = compute(x); benchmark::DoNotOptimize(result);`. A reviewer says the DoNotOptimize is unnecessary because the result is stored in a local variable. Is the reviewer right?",
+      options: [
+        "Yes — the compiler cannot remove a computation whose result is stored in a named local variable",
+        "No — if `result` is never read after the assignment, the compiler may eliminate the entire `compute(x)` call as dead code; DoNotOptimize prevents this by making the compiler treat `result` as observable to an external entity",
+        "Yes, but only when -O0 is used; at -O2 DoNotOptimize is needed",
+        "No — but ClobberMemory() is the correct tool here, not DoNotOptimize",
+      ],
+      correct: 1,
+      explanation:
+        "A local variable that is never read after assignment is dead — the compiler is permitted to eliminate both the assignment and the computation that produced the value. This is exactly the bug in naive benchmarks: you call compute(x), never read the result, and the optimizer deletes the call. DoNotOptimize(result) inserts an inline asm constraint that treats result as if it were read and written by an external entity the optimizer cannot see, forcing the computation to remain. ClobberMemory() is the complementary tool for functions that write to memory rather than returning a value — it tells the compiler all memory may have changed.",
+    },
+    {
+      question:
+        "Your benchmark reports mean latency of 80 ns with a standard deviation of 5 ns. A production incident shows the strategy missed 3 fills in one minute because the order arrived 2 µs late. Is the benchmark evidence that the code path was fast enough?",
+      options: [
+        "Yes — mean 80 ns with 5 ns std dev implies p99 < 100 ns, which is well below 2 µs",
+        "No — mean and standard deviation do not bound the tail; a distribution with mean 80 ns and std dev 5 ns can still have outliers at 2 µs or higher if the distribution is heavy-tailed or bimodal; you need to measure and report p99 and p99.9 to know whether the 2 µs tail exists",
+        "Yes — standard deviation of 5 ns means no sample was more than a few multiples of 5 ns from the mean",
+        "No — but only because the benchmark did not run on the production machine",
+      ],
+      correct: 1,
+      explanation:
+        "Mean and standard deviation fully characterize a normal distribution, but latency distributions are almost never normal — they are typically right-skewed or bimodal (fast path + occasional slow path). A mean of 80 ns with a std dev of 5 ns says nothing about the 99th or 99.9th percentile; those could be 200 ns (fine) or 2000 ns (production breaking). The 3 fills missed at 2 µs is evidence of a high-percentile tail that the mean/std-dev summary hid. The correct tool is a percentile histogram: collect at least 10,000 samples, sort, and report p50/p99/p99.9/max. If p99.9 is 2 µs, you have a 1-in-1000 spike that the mean concealed.",
+    },
+  ]}
+/>
+
+## What's next
+
+Module q-1 is complete. Module q-2 takes the numerics of prices deeper: after understanding IEEE 754 representation, you will apply Kahan summation to accurate P&L accumulation, learn the NaN propagation rules that create silent pricing bugs, and build a safe floating-point comparison toolkit that is both correct and fast.

@@ -1,0 +1,297 @@
+---
+title: "The Coverage-Driven Verification Loop"
+description: "How coverage reports drive constraint refinement, targeted sequences, and the decision to declare closure or mark bins unreachable."
+phase: 11
+module: "h-4-functional-coverage"
+order: 4
+estimatedMinutes: 65
+difficulty: 4
+prerequisites:
+  - "h-4-uvm-subscriber-coverage"
+standards:
+  primaryAnchor: "IEEE 1800-2023 (SystemVerilog)"
+  cs2023: []
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - coverage-driven-verification
+  - coverage-closure
+  - coverage-hole
+  - unreachable-bin
+  - directed-random
+  - bias-refinement
+learningOutcomes:
+  - "Identify structural coverage holes vs statistical holes and apply different fixes"
+  - "Refine constraints to target specific uncovered bins"
+  - "Decide when to mark a bin unreachable with justification"
+  - "Declare coverage closure on a defined coverage model with documented rationale"
+professionalContext: "Coverage closure is the verification engineer's primary deliverable. The loop — run random stimulus, measure coverage, identify holes, fix stimulus, repeat — is the daily workflow for DV engineers on active projects. Engineers who can close coverage efficiently and document their rationale rigorously are the ones who drive sign-off. Engineers who run more random transactions and hope the holes close on their own miss schedule."
+thresholdConcept: true
+---
+
+## Why this matters
+
+A chip project has a tape-out deadline. The verification lead is asked: "Are we done?" The answer is not "we ran a lot of transactions" — it's "our documented coverage plan is closed at the defined goal, and all unreachable bins are documented with rationale."
+
+This lesson teaches the process from initial random run to that answer.
+
+## The four loop stages
+
+```
+Stage 1: SEED → Run random stimulus with diverse seeds
+Stage 2: MEASURE → Read the coverage report, identify holes
+Stage 3: DIAGNOSE → Classify each hole as statistical or structural
+Stage 4: FIX → Refine constraints, write directed sequences, or mark unreachable
+             └── Repeat from Stage 1
+```
+
+The loop terminates when every bin is either:
+
+- COVERED (hit count ≥ at_least), or
+- DOCUMENTED AS UNREACHABLE (ignore_bins with comment)
+
+## Stage 2: Reading the coverage report
+
+A Questa/VCS coverage report for a covergroup looks like:
+
+```
+Coverage Report: cg_axi_write
+  Coverpoint: cp_addr_region
+    COVERED:   zero_page     [hits: 847]
+    COVERED:   low_range     [hits: 6,203]
+    COVERED:   mid_range     [hits: 3,024]
+    NOT_COVERED: high_range  [hits: 2]   ← at_least=10; only 2 hits
+  Coverpoint: cp_strb
+    COVERED:   full (1111)   [hits: 4,519]
+    NOT_COVERED: byte_0 (0001) [hits: 7]
+    NOT_COVERED: byte_1 (0010) [hits: 6]
+    COVERED:   byte_2 (0100) [hits: 15]
+    NOT_COVERED: byte_3 (1000) [hits: 8]
+    COVERED:   lower_half    [hits: 12]
+    COVERED:   upper_half    [hits: 11]
+  Cross: cx_addr_strb
+    NOT_COVERED: high_range × byte_0 [hits: 0]
+    NOT_COVERED: high_range × byte_1 [hits: 0]
+    ...
+  Group total: 71.4%
+```
+
+This report tells you:
+
+- `high_range` addresses are almost never generated (2 hits vs 10 required).
+- Individual byte enables are under-sampled.
+- The cross bins combining high addresses with byte enables are completely uncovered.
+
+## Stage 3: Classify each hole
+
+**Statistical hole**: The constraint is correct, but the probability of hitting the bin is low. More transactions or distribution biasing will fix it.
+
+**Structural hole**: The constraint PREVENTS hitting the bin. No amount of random stimulus fixes it.
+
+Diagnosis method:
+
+```systemverilog
+// Temporarily disable all constraints and randomize with the exact target
+txn.randomize() with {
+    awaddr inside { [32'hFF00_0000 : 32'hFFFF_FFFC] };  // Force high_range
+    wstrb == 4'b0001;                                     // Force byte_0
+};
+// If this FAILS: structural hole — constraints prevent this combination
+// If this SUCCEEDS: statistical hole — the combo is reachable but rarely generated
+```
+
+For the `high_range` hole above: the constraint `c_addr_distribution` only assigns 10% weight to addresses above 0x0001_0000. With default probability, hitting `high_range` in the cross is rare. This is a STATISTICAL hole — the fix is distribution biasing.
+
+## Stage 4a: Fix statistical holes — distribution refinement
+
+```systemverilog
+// Before: 10% weight on high addresses
+constraint c_addr_distribution {
+    awaddr dist {
+        32'h0000_0000               := 10,
+        [32'h0000_0004 : 32'h0000_FFFC] := 70,
+        [32'h0001_0000 : 32'hFFFF_FFFC] := 10,   // Too low for reliable coverage
+        32'h0000_FFFC               := 10
+    };
+}
+
+// After: increase high-range weight for targeted regression
+constraint c_addr_distribution {
+    awaddr dist {
+        32'h0000_0000               := 5,
+        [32'h0000_0004 : 32'h0000_FFFC] := 40,
+        [32'h0001_0000 : 32'hFFFF_FFFC] := 50,   // Raised: target coverage closure
+        32'h0000_FFFC               := 5
+    };
+}
+```
+
+Or write a targeted sequence without touching the base class:
+
+```systemverilog
+class high_addr_byte_seq extends uvm_sequence #(axi4_lite_write_txn);
+    `uvm_object_utils(high_addr_byte_seq)
+    task body();
+        axi4_lite_write_txn t;
+        repeat (50) begin
+            t = axi4_lite_write_txn::type_id::create("t");
+            start_item(t);
+            assert(t.randomize() with {
+                awaddr inside { [32'hFF00_0000 : 32'hFFFF_FFFC] };
+                wstrb inside { 4'b0001, 4'b0010, 4'b0100, 4'b1000 };
+            });
+            finish_item(t);
+        end
+    endtask
+endclass
+```
+
+Run the targeted sequence in the test that's missing the coverage, then re-measure.
+
+## Stage 4b: Fix structural holes — constraint redesign
+
+If your diagnosis shows the hole is structural (randomize fails even when forced), find the conflicting constraint:
+
+```systemverilog
+// Hypothesis: c_addr_word_aligned conflicts with unaligned byte enable
+// Test: is a high address with strb=4'b0001 possible given word alignment?
+// AXI4-Lite requires word alignment for ALL writes
+// → strb=0001 + word-aligned addr is LEGAL in AXI4-Lite
+// → But: our constraint ALSO has c_addr_range: soft addr inside [0..64K]
+// The soft constraint biases but doesn't block — this is statistical, not structural.
+
+// If we have: constraint c_only_high { addr > 32'hFFFF_FFFF; }
+// That IS structural if addr is 32-bit (no value satisfies > max 32-bit value)
+// Fix: remove the buggy constraint
+```
+
+For genuine structural holes (cross combination that the DUT's spec says can never occur), use ignore_bins:
+
+```systemverilog
+cx_addr_strb : cross cp_addr, cp_strb {
+    // AXI4-Lite spec: privileged writes only go to high addresses.
+    // strb-only (byte writes) to high-security addresses are not supported
+    // in our system's memory map.
+    ignore_bins high_byte_write =
+        binsof(cp_addr.high_range) && binsof(cp_strb.byte_enables);
+    // Documentation: "High-range memory is 64-bit aligned only"
+}
+```
+
+## Closure declaration
+
+Coverage closure is a formal document, not just a number:
+
+```
+Coverage Closure Record: AXI4-Lite Write Testbench
+Date: 2026-06-30
+Engineer: [name]
+
+Coverage Model: cg_axi_write (axi_write_cov.sv)
+Goal: cp_addr: 100%, cp_strb: 100%, cx: 100%
+
+Final Coverage: 100% (all bins at_least=10 satisfied)
+
+Excluded bins and rationale:
+- cx_addr_strb.high_range × byte_enables: IGNORE_BINS
+  Rationale: High-range addresses (0xFF00_0000+) in our memory map are
+  write-combined registers that require 32-bit aligned full-word writes.
+  Byte-enable sub-word writes to these addresses are architecturally
+  prohibited and will never be issued by software. Reference: Memory Map
+  Spec rev 3.2 §4.7.
+  Formal proof available: h6_no_byte_write_to_highmem.jdb
+
+Signed: [lead engineer]
+Reviewed: [verification lead]
+```
+
+The sign-off document makes the closure reproducible and auditable. "We ran lots of transactions" does not qualify as closure. "All bins in the documented coverage model were hit at_least 10 times or explicitly excluded with written rationale" does.
+
+## Check your understanding
+
+<SandboxExercise
+  language="text"
+  instructions={`A coverage report shows the following for a FIFO depth covergroup (at_least=5):
+
+cp_depth bins:
+empty (depth=0): 2 hits ← NOT covered
+low (depth 1-4): 15 hits ← COVERED
+mid (depth 5-11): 12 hits ← COVERED  
+ high (depth 12-15): 3 hits ← NOT covered
+full (depth=16): 0 hits ← NOT covered
+
+The FIFO depth is randomized through write/read sequence interleaving.
+The testbench runs 2000 write and 2000 read transactions in random order.
+
+Task:
+
+1. Classify each not-covered bin as STATISTICAL or STRUCTURAL, with reasoning.
+2. For each STATISTICAL hole, propose a specific fix (constraint or sequence).
+3. For each STRUCTURAL hole, propose a diagnostic test to confirm.
+4. Describe what the closure declaration would say if 'full' is genuinely unreachable due to a testbench architectural constraint.`}
+initialCode={`Hole Analysis:
+
+5. empty (depth=0): STATISTICAL or STRUCTURAL?
+   Reasoning:
+   Proposed fix:
+
+6. high (depth 12-15): STATISTICAL or STRUCTURAL?
+   Reasoning:
+   Proposed fix:
+
+7. full (depth=16): STATISTICAL or STRUCTURAL?
+   Diagnostic test:
+
+If full is unreachable — closure declaration:
+`}
+  solution={`Hole Analysis:
+
+1. empty (depth=0): STATISTICAL
+   Reasoning: The FIFO should reach depth=0 when the read count exceeds write count, which
+   is reachable with random interleaving. With 2000 writes and 2000 reads in random order,
+   the FIFO should periodically drain to empty. The low hit count (2) suggests the random
+   ordering rarely produces a fully-drained FIFO — it is probabilistically rare, not impossible.
+   Proposed fix: Add a directed sequence that explicitly reads until empty:
+   "Write N items, then read all N items, observing empty." Run this 10 times.
+   Alternatively, add a drain_to_empty() function and call it periodically in the test.
+
+2. high (depth 12-15): STATISTICAL  
+   Reasoning: With random interleaving, the FIFO depth depends on the running difference
+   between writes and reads. Near-full conditions (12-15) require a burst of writes without
+   reads — statistically infrequent with purely random ordering.
+   Proposed fix: Add a targeted sequence: "drive 15 consecutive writes without reads."
+   Or bias the random ordering: randcase { 80: drive_write(); 20: drive_read(); }
+   for 50 iterations, forcing write-heavy phases. Monitor depth coverage.
+
+3. full (depth=16): could be STRUCTURAL if the testbench prevents backpressure
+   Diagnostic test: Force a scenario: disable reads, drive 20 consecutive writes.
+   If the FIFO cannot reach depth=16 (e.g., the driver stops when full and waits
+   for a read), then the testbench architecture prevents full. If depth reaches 16
+   during the force test, this is STATISTICAL and fix is a targeted burst.
+
+If full is unreachable (testbench drives writes only when FIFO has space):
+CLOSURE DECLARATION:
+Bin: cp_depth.full (depth=16)
+Status: IGNORE_BINS
+Rationale: The testbench driver checks FIFO not-full before issuing each write
+(standard handshake protocol). The FIFO-full condition causes the master to hold
+writes — the driver never issues a write when FIFO is full. The "full" depth is
+briefly observable only during the handshake cycle, which is too short to be
+captured by our sample-per-transaction sampling strategy. Hardware behavior at
+full depth is covered by SVA property p_fifo_full_no_write.
+Reference: h6_fifo_full_assertion.jdb (formal proof).
+`}
+testCases={[
+"Both 'empty' and 'high' classified as STATISTICAL with valid reasoning",
+"Directed sequence fix proposed for 'empty' (drain to empty)",
+"Write-burst fix proposed for 'high' (consecutive writes)",
+"Diagnostic test for 'full' involves forcing backpressure scenario",
+"Closure declaration includes rationale and references an assertion or formal proof"
+]}
+/>
+
+## What's next
+
+Lesson H4-5 covers writing a verification plan (VPlan) — the structured document that maps coverage goals to specification requirements and drives the coverage-driven verification loop from the beginning of a project.

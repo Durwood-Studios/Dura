@@ -1,0 +1,195 @@
+---
+title: "TLB, Huge Pages, and Virtual-to-Physical Translation"
+description: "How the TLB limits throughput when your working set spans thousands of 4K pages, and why HFT systems map their critical data with 2MB huge pages to eliminate translation overhead."
+phase: 12
+module: "q-3-cache-aware-programming"
+order: 6
+estimatedMinutes: 40
+difficulty: 4
+prerequisites:
+  - "q-3-cache-aware-programming/05-numa-topology-and-remote-memory"
+standards:
+  primaryAnchor: "Intel 64 and IA-32 Architectures Optimization Reference Manual"
+  cs2023: []
+  swebok: []
+  bloom: "understand"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - virtual-memory
+  - page-table
+  - tlb
+  - tlb-miss
+  - page-walk
+  - huge-pages
+  - transparent-huge-pages
+  - mmap
+  - madvise
+  - hugepages-sysfs
+  - page-fault
+  - working-set
+learningOutcomes:
+  - "After this lesson you can explain why a TLB miss triggers a multi-level page walk and estimate its latency cost on modern x86-64"
+  - "After this lesson you can state why reducing the number of distinct pages in the working set reduces TLB pressure"
+  - "After this lesson you can allocate a 2MB huge-page-backed buffer with mmap and confirm huge-page backing with /proc/smaps"
+  - "After this lesson you can explain the trade-off between Transparent Huge Pages and explicit huge-page allocation for a latency-critical process"
+professionalContext: "An HFT system that added huge pages to its order book reported a 15% latency improvement on the p99.9 tail with no code change — purely from eliminating TLB misses on the price-level array. Virtual memory translation is invisible in profilers that count cache events and invisible in code review, but it is a consistent contributor to tail latency any time the hot-path working set grows beyond the TLB's capacity."
+thresholdConcept: false
+---
+
+## Why this matters
+
+You have applied every cache lesson so far: the order book's price-level array is SoA, aligned to 64-byte lines, NUMA-local, prefetched. The p50 latency is excellent. But the p99.9 tail is still spiking — the worst 1 in 1,000 messages takes 3× longer than the median, with no obvious cause. The CPU isn't waiting for cache lines; it is waiting for something that happens _before_ cache lines are fetched: translating the virtual address into a physical address.
+
+This is the <VocabTooltip slug="tlb">TLB miss</VocabTooltip> — the overlooked twin of the cache miss.
+
+## Virtual memory and translation
+
+Every address your program uses is a _virtual_ address. The CPU maps virtual addresses to physical RAM addresses through a <VocabTooltip slug="page-table">page table</VocabTooltip>, a multi-level data structure managed by the OS. On x86-64 with 4K pages, the translation traverses four page-table levels:
+
+```
+Virtual address (48 bits):
+ [PML4 index 9b] [PDPT index 9b] [PD index 9b] [PT index 9b] [offset 12b]
+       │                │               │              │
+       ▼                ▼               ▼              ▼
+  PML4 table      PDPT table       PD table       PT table → physical page
+```
+
+Four memory reads — each of them a cache-miss candidate — to translate one virtual address. The <VocabTooltip slug="tlb">Translation Lookaside Buffer</VocabTooltip> (TLB) caches recently-used translations so most accesses skip this walk. But the TLB has limited capacity:
+
+| TLB level     | Entries (typical Skylake) | Coverage at 4K pages |
+| ------------- | ------------------------- | -------------------- |
+| L1 DTLB       | 64 entries                | 256 KB               |
+| L2 TLB        | 1,536 entries             | 6 MB                 |
+| STLB (shared) | 1,536 entries             | 6 MB                 |
+
+An order book that tracks 2,000 price levels with each level's data touching a separate 4K page can overflow the L2 TLB. Every TLB miss triggers a <VocabTooltip slug="page-walk">page walk</VocabTooltip> — four sequential memory accesses, potentially to cold DRAM — costing 50–200 ns. On a machine processing 1 million messages per second, a 1% TLB miss rate adds hundreds of nanoseconds to the average latency.
+
+## Huge pages: the fix
+
+Instead of 4K pages, the OS can back memory with 2MB pages (or 1GB pages). With 2MB pages:
+
+| TLB level | Entries          | Coverage at 2MB pages |
+| --------- | ---------------- | --------------------- |
+| L1 DTLB   | 32 entries (2MB) | **64 MB**             |
+| L2 TLB    | 1,024 entries    | **2 GB**              |
+
+A 64-entry 2MB TLB covers 64 MB — enough for an entire order book, a ring buffer, and a strategy's working set in fewer TLB entries than 4K pages needed for 256 KB. TLB coverage scales by 512× for the same number of entries.
+
+## Allocating huge pages explicitly
+
+```cpp
+#include <sys/mman.h>
+#include <cstddef>
+#include <stdexcept>
+#include <cstdio>
+
+// Allocate size bytes backed by 2MB huge pages
+// size must be a multiple of 2MB = 2 * 1024 * 1024
+void* alloc_huge(size_t size) {
+    // MAP_HUGETLB requests 2MB pages; MAP_HUGE_2MB is explicit
+    void* p = mmap(nullptr, size,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB,
+                   -1, 0);
+    if (p == MAP_FAILED) {
+        // Fallback: system may have no huge pages reserved.
+        // Reserve with: echo 512 > /proc/sys/vm/nr_hugepages
+        throw std::runtime_error{"mmap MAP_HUGETLB failed — check nr_hugepages"};
+    }
+    return p;
+}
+
+void free_huge(void* p, size_t size) {
+    munmap(p, size);
+}
+
+// Usage: back the order book's price arrays with huge pages
+static constexpr size_t HUGE = 2 * 1024 * 1024;
+static constexpr size_t BOOK_SIZE = 4 * HUGE;  // 8 MB, 4 huge pages
+
+struct alignas(64) OrderBook {
+    void init() {
+        // Allocate all price-level arrays in one huge-page mapping
+        _backing = alloc_huge(BOOK_SIZE);
+        // Place arrays within the backing store
+        bid_prices = reinterpret_cast<int64_t*>(_backing);
+        ask_prices = bid_prices + MAX_LEVELS;
+        bid_sizes  = reinterpret_cast<int32_t*>(ask_prices + MAX_LEVELS);
+        ask_sizes  = bid_sizes + MAX_LEVELS;
+    }
+
+    static constexpr int MAX_LEVELS = 65536;
+    int64_t* bid_prices{};
+    int64_t* ask_prices{};
+    int32_t* bid_sizes{};
+    int32_t* ask_sizes{};
+private:
+    void* _backing{};
+};
+```
+
+Verify huge-page backing after allocation:
+
+```bash
+# Find the virtual address range of your process's huge-page mapping
+grep -A4 'AnonHugePages' /proc/<pid>/smaps | grep -B4 'AnonHugePages: [^0]'
+# AnonHugePages: 8192 kB means 4 × 2MB huge pages are in use.
+
+# Check how many huge pages are available system-wide
+cat /proc/sys/vm/nr_hugepages          # pre-allocated huge pages
+cat /proc/sys/vm/nr_free_hugepages     # available right now
+
+# Reserve 256 × 2MB = 512 MB of huge pages (run as root or with CAP_SYS_ADMIN)
+echo 256 > /proc/sys/vm/nr_hugepages
+
+# Pin them permanently across reboots (add to /etc/sysctl.conf):
+# vm.nr_hugepages = 256
+```
+
+## Transparent Huge Pages: the trade-off
+
+Linux Transparent Huge Pages (THP) automatically promotes contiguous 4K page groups to 2MB pages without explicit `MAP_HUGETLB`. This sounds like a free win, but THP has a fatal flaw for latency-critical processes:
+
+**THP promotion happens asynchronously, in the background, and causes page-table rescans during promotion that introduce latency spikes of tens of microseconds.** The khugepaged kernel daemon wakes periodically, finds candidate regions, locks the page table, and promotes them — during which your strategy thread can be briefly stalled.
+
+For HFT:
+
+| Method                   | Latency impact                                  | When to use                                    |
+| ------------------------ | ----------------------------------------------- | ---------------------------------------------- |
+| `MAP_HUGETLB` (explicit) | None at runtime — pages are pre-allocated       | Order book, ring buffers, hot-path allocations |
+| THP (transparent)        | Rare multi-microsecond spikes during promotion  | Background allocations, off-path data          |
+| THP disabled             | No promotion spikes; high TLB pressure possible | When explicit huge pages cover all hot data    |
+
+Production HFT processes typically disable THP (`echo never > /sys/kernel/mm/transparent_hugepage/enabled`) and manually back every hot-path allocation with explicit `MAP_HUGETLB`.
+
+## When huge pages don't help
+
+Huge pages reduce TLB pressure only when the working set is large enough that TLB entries are the constraint. If your entire order book fits in the L1 TLB's 256 KB coverage at 4K pages (64 entries × 4K), adding huge pages offers no benefit and consumes physically contiguous memory unnecessarily. Profile first:
+
+```bash
+perf stat -e dTLB-load-misses,dTLB-loads ./strategy
+# If dTLB-load-misses / dTLB-loads > 0.001 (0.1%), TLB pressure is real.
+```
+
+<Quiz
+  questions={[
+    {
+      question:
+        "Your order book's hot-path working set is 32 MB — the bid and ask price arrays, size arrays, and order-ID hash table. The L2 TLB covers 6 MB at 4K pages and 2 GB at 2MB pages. What is the expected TLB behavior with 4K pages?",
+      options: [
+        "All 32 MB fits in L2 TLB because TLB entries cache any page regardless of size",
+        "32 MB / 6 MB = 5.3x TLB overflow — most accesses miss the TLB and trigger page walks",
+        "TLB misses are irrelevant because page walks use the L3 cache, which covers 32 MB",
+        "4K pages are fine because the hardware prefetcher handles page-walk latency transparently",
+      ],
+      correct: 1,
+      explanation:
+        "At 4K pages, the L2 TLB covers 1,536 entries × 4K = 6 MB. A 32 MB working set requires 32 MB / 4 KB = 8,192 page table entries. With only 1,536 slots, the TLB overflows 5× — most hot accesses miss the TLB and require a 4-level page walk. With 2MB pages, the same 32 MB needs only 16 entries, comfortably fitting in the L1 DTLB's 32 huge-page slots. Page walks do hit the L3 cache for cached page-table entries, but this is still 30–50 cycles versus a TLB hit at 1–4 cycles. The hardware prefetcher does not help with TLB walks.",
+    },
+  ]}
+/>
+
+## What's next
+
+You have controlled cache-line layout, NUMA placement, and TLB pressure. The next lesson closes the measurement loop: how to use `perf stat` and `cachegrind` to verify that your layout improvements actually show up in the hardware event counters.

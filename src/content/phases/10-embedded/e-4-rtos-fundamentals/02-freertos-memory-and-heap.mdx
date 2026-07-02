@@ -1,0 +1,258 @@
+---
+title: "FreeRTOS Memory Schemes and Stack High-Water Marks"
+description: "Five heap implementations, zero-copy queue techniques, and the uxTaskGetStackHighWaterMark API — know exactly how much RAM your RTOS is using before a field deployment."
+phase: 10
+module: "e-4-rtos-fundamentals"
+order: 2
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-4-rtos-fundamentals/01"
+standards:
+  primaryAnchor: "FreeRTOS"
+  cs2023: ["SF-Foundations", "OS-Scheduling"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - heap-1
+  - heap-4
+  - heap-5
+  - stack-high-water-mark
+  - static-allocation
+  - heap-fragmentation
+  - pvPortMalloc
+  - task-control-block
+learningOutcomes:
+  - "Choose among FreeRTOS heap_1 through heap_5 based on allocation pattern and device constraints"
+  - "Use uxTaskGetStackHighWaterMark to right-size task stacks before shipping"
+  - "Statically allocate all RTOS objects to eliminate heap dependency"
+  - "Predict RAM consumption for a given task set at compile time"
+professionalContext: "Embedded systems have no MMU and no swap space. Every byte of RAM is accounted for at design time. Engineers who can audit an RTOS application's memory before deployment ship products that don't fail on day 180 in the field; engineers who guess at stack sizes spend late nights debugging stack-corruption crashes that only manifest under specific load conditions."
+thresholdConcept: false
+---
+
+## Why this matters
+
+An RTOS product at a customer site crashes every two weeks with no reproducible trigger. Post-mortem analysis (via a coredump register read over JTAG) shows the stack pointer inside a corruption band — a task overflowed its stack into an adjacent task's memory. The crash is intermittent because it only occurs when the deepest call path is executed simultaneously with the highest interrupt nesting depth.
+
+The fix is two minutes of measurement in development. The reason it wasn't caught: the team guessed stack sizes and never measured. FreeRTOS provides a one-call API to prevent this. Using it is the difference between a robust product and a maintenance nightmare.
+
+## FreeRTOS heap schemes
+
+FreeRTOS ships five heap implementations, selectable by including exactly one of them in your build.
+
+| Scheme | Strategy                                  | Fragmentation                | Free? | Use case                                   |
+| ------ | ----------------------------------------- | ---------------------------- | ----- | ------------------------------------------ |
+| heap_1 | Never free; first-fit allocate            | None                         | No    | Simplest: allocate at start, never release |
+| heap_2 | First-fit, free allowed                   | Yes (worst-fit accumulation) | Yes   | Legacy; do not use in new code             |
+| heap_3 | Wraps `malloc`/`free`                     | OS-dependent                 | Yes   | When the C library allocator must be used  |
+| heap_4 | First-fit, coalescing                     | Low                          | Yes   | General RTOS with mixed-lifetime objects   |
+| heap_5 | Spans multiple non-contiguous RAM regions | Low                          | Yes   | Multi-bank RAM (e.g., CCM + SRAM on STM32) |
+
+### heap_1: the safe default for most embedded products
+
+```c
+/* All RTOS objects are allocated at startup and never freed.
+   heap_1 is literally an advancing pointer. */
+
+void *pvPortMalloc(size_t xWantedSize) {
+    /* advance ucHeap pointer by xWantedSize, aligned */
+    /* never call free() — it asserts */
+}
+```
+
+If your product allocates all tasks, queues, and mutexes at boot and never creates or destroys them at runtime, <VocabTooltip slug="heap-1">heap_1</VocabTooltip> is correct. It's deterministic, has zero fragmentation, and its memory use is fully knowable at compile time.
+
+### heap_4 for dynamic patterns
+
+<VocabTooltip slug="heap-4">heap_4</VocabTooltip> coalesces adjacent freed blocks, preventing the
+long-term fragmentation that destroys heap_2. Use it when tasks or queues are created and destroyed
+at runtime (e.g., a communication stack that creates a task per connection).
+
+```c
+/* FreeRTOSConfig.h — tune the heap size */
+#define configTOTAL_HEAP_SIZE    ((size_t)(32 * 1024))  /* 32 KB for RTOS objects */
+```
+
+Monitor heap headroom at runtime:
+
+```c
+void heap_monitor_task(void *params) {
+    (void)params;
+    for (;;) {
+        size_t free_heap = xPortGetFreeHeapSize();
+        size_t min_free  = xPortGetMinimumEverFreeHeapSize();
+        /* Log both: free_heap for current; min_free for worst-case observed */
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+```
+
+`xPortGetMinimumEverFreeHeapSize()` is the number to care about. It's the low-water mark — the smallest the heap has ever been. If it approaches zero, you have a near-OOM event that the product just survived by luck.
+
+## Static allocation: eliminating the heap entirely
+
+FreeRTOS 9+ supports 100% static allocation: no heap required. Each RTOS object is backed by a statically-declared buffer.
+
+```c
+/* Statically allocated task */
+static StaticTask_t sensor_task_tcb;
+static StackType_t  sensor_task_stack[512];  /* 512 32-bit words = 2 KB */
+
+void app_init(void) {
+    xTaskCreateStatic(
+        sensor_task,           /* task function */
+        "sensor",              /* debug name */
+        512,                   /* stack depth in words */
+        NULL,                  /* params */
+        5,                     /* priority */
+        sensor_task_stack,     /* stack buffer */
+        &sensor_task_tcb       /* task control block buffer */
+    );
+}
+
+/* Statically allocated queue */
+static StaticQueue_t  uart_queue_struct;
+static uint8_t        uart_queue_storage[64 * sizeof(uint8_t)];
+
+void queue_init(void) {
+    uart_rx_queue = xQueueCreateStatic(
+        64,                    /* items */
+        sizeof(uint8_t),       /* item size */
+        uart_queue_storage,
+        &uart_queue_struct
+    );
+}
+```
+
+With static allocation:
+
+- No heap scheme needed at all (`heap_1` through `heap_5` can be omitted)
+- RAM use is fully visible in the map file
+- `configSUPPORT_STATIC_ALLOCATION = 1` must be set in `FreeRTOSConfig.h`
+- The application must implement `vApplicationGetIdleTaskMemory()` and `vApplicationGetTimerTaskMemory()` to supply static buffers for the FreeRTOS internal tasks
+
+The <VocabTooltip slug="task-control-block">task control block</VocabTooltip> (`StaticTask_t`) holds all the scheduler metadata for a task. In heap-based allocation, FreeRTOS allocates this internally; with static allocation, you own the buffer.
+
+## Stack high-water marks
+
+Every FreeRTOS task stack is written with a known sentinel byte pattern (`0xA5A5A5A5`) at creation. `uxTaskGetStackHighWaterMark(task_handle)` walks from the bottom of the stack looking for the first non-sentinel word, computing how many words remain untouched.
+
+```c
+void stack_audit_task(void *params) {
+    (void)params;
+    /* Run this once at startup after the system has had a chance to exercise all paths */
+    vTaskDelay(pdMS_TO_TICKS(5000));   /* Wait 5 s for system to stabilize */
+
+    TaskStatus_t task_info[8];
+    uint32_t run_time;
+    UBaseType_t n = uxTaskGetSystemState(task_info, 8, &run_time);
+
+    for (UBaseType_t i = 0; i < n; i++) {
+        /* High-water mark in words (4 bytes each) */
+        UBaseType_t hwm = uxTaskGetStackHighWaterMark(task_info[i].xHandle);
+        /* Log: task name, allocated stack words, hwm (free words remaining) */
+    }
+    vTaskDelete(NULL);  /* Audit complete — delete this task */
+}
+```
+
+Decision rule:
+
+- HWM > 50% of allocated: stack is fine
+- HWM 20–50%: acceptable, review the deepest call paths manually
+- HWM < 20%: shrink the stack OR this is a warning — the next deep call causes overflow
+- HWM = 0: overflow has already occurred; behavior is undefined from this point forward
+
+Enable stack overflow detection in development builds:
+
+```c
+/* FreeRTOSConfig.h */
+#define configCHECK_FOR_STACK_OVERFLOW  2  /* Method 2: both sentinel + runtime SP check */
+
+/* Application must implement the hook: */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
+    /* Log pcTaskName if possible, then fail safe */
+    __disable_irq();
+    while (1) { }  /* Or trigger a controlled fault/reset */
+}
+```
+
+`configCHECK_FOR_STACK_OVERFLOW 2` does both the sentinel walk (catches gradual overflow) and a runtime stack-pointer check on each context switch (catches sudden overflow). The cost is a few cycles per context switch — worth it in development, can be disabled for production if RAM or time budget is tight.
+
+## RAM budget worksheet
+
+Before shipping, produce a RAM budget:
+
+```
+Component                      RAM (bytes)   Notes
+─────────────────────────────────────────────────────
+RTOS kernel overhead             ~400         TCBs for idle/timer tasks + heap metadata
+sensor_task TCB                   ~100        StaticTask_t
+sensor_task stack               2048         512 words allocated; 1200 bytes measured HWM
+processor_task TCB               ~100
+processor_task stack            1024
+display_task TCB                 ~100
+display_task stack               384
+sensor_queue (32 × uint16_t)     ~80
+telemetry_queue (8 × 16 bytes)  ~180
+.data + .bss (globals)          1200
+Total                           ~5616 bytes
+Available (STM32F407 = 192KB)   192000 bytes
+Margin                          186384 bytes (97%)
+─────────────────────────────────────────────────────
+```
+
+This worksheet belongs in the project's memory documentation. The map file (`arm-none-eabi-objdump -h firmware.elf`) gives the static (.data, .bss) numbers; the RTOS object sizes come from `sizeof()` on the static buffers.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An embedded product allocates all tasks, queues, and mutexes at boot and never destroys them. Which FreeRTOS heap scheme should it use, and why?",
+      options: [
+        "heap_4 — it has the best general-purpose performance",
+        "heap_1 — no fragmentation is possible when nothing is ever freed; heap_1's advancing-pointer allocator is deterministic, has zero overhead for bookkeeping, and eliminates the entire class of heap-fragmentation failures. heap_4 is correct for dynamic allocation patterns; heap_1 is correct when all allocation happens once at startup.",
+        "heap_3 — wrapping malloc gives the most compatibility",
+        "heap_5 — multi-bank support is always safer",
+      ],
+      correct: 1,
+      explanation:
+        "heap_1 is the safe choice when all RTOS objects are created at startup and never freed. It cannot fragment because free() asserts. heap_4 is the right choice if objects are dynamically created/destroyed at runtime. heap_3 ties you to the C library allocator, which may not be deterministic. heap_5 is for multi-region RAM; it adds complexity for no benefit on single-SRAM devices.",
+    },
+    {
+      question:
+        "uxTaskGetStackHighWaterMark returns 2 for a task with 256 words allocated. What does this mean and what should be done?",
+      options: [
+        "The task has 2 KB of free stack — no action needed",
+        "Only 2 words (8 bytes) of stack sentinel remain untouched — overflow is imminent. The observed peak usage is 254 words, leaving an 8-byte margin before the next call into that task corrupts memory below the stack. The task's stack allocation must be increased immediately. 256 words is also too small for any but the most trivial tasks; investigate the call chain to understand actual usage, then allocate at least 2× the measured high-water mark as safety margin.",
+        "The task ran 2 times — no stack issues",
+        "The function has 2 active parameters",
+      ],
+      correct: 1,
+      explanation:
+        "uxTaskGetStackHighWaterMark returns the number of remaining sentinel words, not bytes used. A value of 2 means 8 bytes remain between the deepest observed stack use and the bottom of the allocated region. Any additional function call or local variable that pushes to the stack will overflow into adjacent memory, producing silent corruption. The rule of thumb: high-water mark should stay above 20% of total allocation. Here it's under 1% — increase the stack immediately.",
+    },
+    {
+      question:
+        "An engineer uses xTaskCreateStatic with a 256-word stack buffer declared as a local variable inside main(). The system works in testing but crashes after 30 seconds. What's the structural error?",
+      options: [
+        "Static allocation is incompatible with xTaskCreateStatic",
+        "The stack buffer is a local variable in main(). When vTaskStartScheduler() returns control to the OS (which it doesn't on Cortex-M — the scheduler takes over main's stack), main's stack frame may be reused. But the deeper issue: main's local variables live on the startup stack, which FreeRTOS can also reclaim for the idle task in some configurations. The task stack buffer MUST have static storage duration — declared at file scope or with the 'static' keyword — so it lives for the program's entire lifetime.",
+        "256 words is always too small",
+        "xTaskCreateStatic doesn't accept stack buffers",
+      ],
+      correct: 1,
+      explanation:
+        "The stack buffer passed to xTaskCreateStatic must outlive the task — which means it must have static storage duration (file scope or 'static' keyword). A local variable in main() lives on main's stack frame, which FreeRTOS may reclaim or reuse after the scheduler starts. The resulting aliasing between the task's stack region and FreeRTOS internals produces exactly the kind of intermittent corruption observed. Always declare RTOS buffers with static storage duration.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 3 covers event groups, task notifications, and software timers — the remaining FreeRTOS synchronization primitives. Task notifications in particular are a faster, lower-RAM alternative to binary semaphores for the common case where one task signals one other task.

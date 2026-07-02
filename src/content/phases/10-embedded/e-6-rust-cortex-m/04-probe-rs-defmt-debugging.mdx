@@ -1,0 +1,199 @@
+---
+title: "Debugging Rust Embedded — probe-rs, defmt, and RTT"
+description: "probe-rs replaces OpenOCD for flashing and debugging. defmt encodes log messages as integers for near-zero-overhead logging. Together they give you printf-quality insight into firmware with minimal CPU cost."
+phase: 10
+module: "e-6-rust-cortex-m"
+order: 4
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "e-6-rust-cortex-m/03"
+standards:
+  primaryAnchor: "probe-rs (probe.rs)"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - probe-rs
+  - defmt
+  - rtt
+  - segger-rtt
+  - deferred-formatting
+  - elf-file
+  - gdb-server
+  - swd
+  - jtag
+  - backtrace
+learningOutcomes:
+  - "Flash and debug a Rust embedded binary using probe-rs from the command line and Cargo"
+  - "Instrument firmware with defmt log calls and interpret the decoded output"
+  - "Capture a panic backtrace and identify the faulting source location"
+  - "Explain why defmt is lower overhead than UART printf for embedded logging"
+professionalContext: "The transition from OpenOCD + GDB + semihosting to probe-rs + defmt + RTT is the productivity change embedded Rust engineers describe as most impactful. Iteration speed — from code change to observing behavior on hardware — drops from 60 seconds to under 10. defmt log output is available within milliseconds of the relevant code executing. Engineers who set this up once on a project never go back to printf-over-UART for development."
+thresholdConcept: false
+---
+
+## Why this matters
+
+Embedded debugging with `printf` to UART has two problems: (1) it's slow — each byte takes microseconds to transmit at 115200 baud, which disturbs timing in interrupt-heavy code; (2) it adds string-formatting code at the point of the log call, bloating the binary.
+
+<VocabTooltip slug="defmt">defmt</VocabTooltip> solves both. At the log call site, it encodes the
+format string as a single integer index (not the string). The integer is sent via
+<VocabTooltip slug="rtt">SEGGER RTT</VocabTooltip> (a ring-buffer-in-RAM mechanism the debugger
+reads without halting the CPU). The host tool (probe-rs) looks up the index in the ELF symbol table
+and reconstructs the full formatted string. The target spends ~100 ns per log call; the host does
+the work.
+
+## Tool setup
+
+```bash
+# Install probe-rs
+cargo install probe-rs-tools --locked
+
+# Verify your debug probe is found
+probe-rs list
+# Expected: CMSIS-DAP or J-Link or ST-Link listed with serial number
+```
+
+```toml
+# .cargo/config.toml — run 'cargo run' to flash and log
+[target.thumbv7em-none-eabihf]
+runner = "probe-rs run --chip STM32F407VGTx"
+
+[build]
+target = "thumbv7em-none-eabihf"
+```
+
+With this config, `cargo run` builds the binary, flashes it via the connected debug probe, resets the target, and streams defmt log output to the terminal. Round-trip: about 3-8 seconds.
+
+## Adding defmt to a project
+
+```toml
+# Cargo.toml
+[dependencies]
+defmt          = "0.3"
+defmt-rtt      = "0.4"    # RTT transport — send logs via the debug probe
+panic-probe    = { version = "0.3", features = ["print-defmt"] }
+```
+
+```rust
+// main.rs
+use defmt_rtt as _;       // Linker symbol to enable RTT
+use panic_probe as _;     // Panic handler that prints a backtrace via defmt
+
+defmt::info!("System started, clocks: {} MHz", 168);
+defmt::warn!("Sensor read timeout, retry {}", retry_count);
+defmt::error!("Fatal: {} failed: {:?}", "I2C init", err);
+```
+
+Log levels: `trace!`, `debug!`, `info!`, `warn!`, `error!`. Level filtering happens at compile time (via Cargo features) — `DEFMT_LOG=warn cargo build` emits only warn and above, shrinking the binary.
+
+## What defmt actually transmits
+
+When the target executes `defmt::info!("Sensor read timeout, retry {}", retry_count)`:
+
+1. At compile time: the format string is assigned an index (e.g., 42). The index is stored in the ELF symbol table, not in flash.
+2. At runtime: the target sends `[42, retry_count_bytes]` via RTT — a few bytes, not the full string.
+3. The host: probe-rs reads the RTT buffer, looks up index 42 in the ELF to get the format string, substitutes `retry_count`, and prints the full line.
+
+Compare to UART printf at 115200 baud:
+
+- `"Sensor read timeout, retry 5"` is 29 bytes → ~2.5 ms to transmit
+- defmt RTT: 5 bytes → ~1 µs to transmit (RTT writes to RAM, read out-of-band)
+
+For a firmware loop running at 10 kHz with logging, the UART approach would consume 25% of the loop budget. defmt consumes under 0.01%.
+
+## Interpreting a panic backtrace
+
+When a panic occurs (array out of bounds, unwrap on None, explicit `panic!()`), panic-probe prints a backtrace via defmt:
+
+```
+WARN panicked at 'attempt to subtract with overflow', src/sensor.rs:42:12
+WARN  0: 0x0800_1234 - sensor::compensate_temperature
+WARN     at src/sensor.rs:42:12
+WARN  1: 0x0800_15A0 - sensor_task
+WARN     at src/main.rs:78:5
+WARN  2: embassy_executor::executor::run
+WARN     at ...
+```
+
+The backtrace shows the exact source file, line, and function for each frame. On a Cortex-M without OS, this is only possible because the ELF file (built with `debug` profile) retains symbol information and probe-rs can unwind the stack using DWARF debug info.
+
+Production builds use the `release` profile (`cargo build --release`), which enables optimizations but strips debug info. Ship the ELF with debug info separately (for post-mortem analysis) even when the stripped binary goes to flash. The stripping is done by `arm-none-eabi-strip` or `cargo objcopy`.
+
+## GDB server mode for interactive debugging
+
+For step-through debugging:
+
+```bash
+# Terminal 1: start probe-rs as a GDB server
+probe-rs gdb --chip STM32F407VGTx
+
+# Terminal 2: connect GDB
+arm-none-eabi-gdb target/thumbv7em-none-eabihf/debug/firmware
+(gdb) target remote :1337
+(gdb) break main
+(gdb) continue
+(gdb) next
+(gdb) print sensor_data
+```
+
+Or use VS Code with the `probe-rs` extension — it provides a full graphical debug UI (breakpoints, variable inspection, call stack) with one-click attach.
+
+The probe-rs GDB server is typically faster than OpenOCD for Cortex-M targets and requires no OpenOCD config file — the chip name (`STM32F407VGTx`) is all the configuration needed.
+
+## Measuring timing with defmt timestamps
+
+```toml
+# Cargo.toml — add Embassy time feature for defmt timestamps
+[dependencies]
+embassy-time = { version = "0.3", features = ["defmt-timestamp-uptime"] }
+```
+
+With this feature, every defmt log line is prefixed with the uptime in milliseconds:
+
+```
+0.000012 INFO  System started, clocks: 168 MHz
+0.001045 INFO  Sensor initialized
+1.001203 WARN  Sensor read timeout, retry 1
+1.002156 INFO  Sensor read OK
+```
+
+This is essential for timing analysis: how long did init take? When exactly did the timeout occur? How long between reads? The microsecond-resolution timestamps answer all of these without a logic analyzer.
+
+## Check your understanding
+
+<FillBlank
+  prompt="defmt sends log messages as ___ indices rather than full strings, reducing per-call overhead to roughly ___. The full formatted string is reconstructed by the host by looking up the index in the ___ file. The transport mechanism is ___, which reads from a ring buffer in RAM without halting the CPU."
+  answers={["integer", "100 ns", "ELF", "RTT"]}
+  hints={[
+    "A compact numeric representation",
+    "Much less than 1 microsecond",
+    "The binary format that includes symbol tables and debug information",
+    "SEGGER's Real-Time Transfer protocol",
+  ]}
+/>
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer adds defmt::debug! calls to a timing-critical ISR. The ISR must complete in under 10 µs. The debug calls each transmit ~5 bytes via RTT. Will the ISR meet its deadline?",
+      options: [
+        "No — defmt adds at least 1 ms per call in ISRs",
+        "Likely yes — defmt writes to a RAM ring buffer (RTT) at memory-write speed, typically under 1 µs for a 5-byte write. The format encoding is done at compile time; the runtime cost is an integer write plus the argument bytes. The host reads the ring buffer asynchronously. However: if the RTT buffer is full (host not reading fast enough), defmt may block or drop messages depending on the blocking mode. For a 10 µs ISR, use DEFMT_LOG=warn in production and debug level only during development runs where the host is actively connected.",
+        "RTT halts the CPU to send data — never use in ISRs",
+        "defmt is not allowed in ISRs",
+      ],
+      correct: 1,
+      explanation:
+        "RTT's key property: it writes to a RAM ring buffer, not to a UART. The target-side cost is a memory write plus a few instructions — typically 100-500 ns for a typical log call with one argument. This is safe in a 10 µs ISR in development. The caveat: in blocking mode, if the ring buffer is full (host not consuming fast enough), defmt blocks until space is available, which breaks the timing guarantee. Solution: use non-blocking mode in ISRs (defmt-rtt can be configured), or simply filter out debug-level calls in production via DEFMT_LOG.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 5 covers FFI — calling existing C libraries from Rust embedded code and calling Rust from C. In practice, most Rust-on-embedded projects start by wrapping a C HAL or vendor library before replacing it incrementally. Understanding FFI bridges is the entry point for mixing Rust into an existing C firmware base.

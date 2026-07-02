@@ -1,0 +1,247 @@
+---
+title: "Clock Gating and Voltage Scaling — Peripheral-Level Power Management"
+description: "Stop paying the power cost of peripherals you're not using. Clock gating removes the switching power; voltage scaling removes the static power. Together they define the current envelope of an active MCU."
+phase: 10
+module: "10-9-power-management"
+order: 2
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "10-9-power-management/01"
+standards:
+  primaryAnchor: "ARMv7-M Architecture Reference Manual"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - clock-gating
+  - peripheral-clock
+  - ahb-enable
+  - apb-enable
+  - voltage-scaling
+  - dynamic-voltage-scaling
+  - power-mode-1
+  - power-mode-3
+  - vos
+  - flash-latency
+  - switcher-regulator
+learningOutcomes:
+  - "Disable peripheral clocks for unused peripherals via RCC AHB/APB enable registers"
+  - "Configure the STM32F4 voltage scaling register to reduce active current at lower clock speeds"
+  - "Explain the relationship between flash latency, voltage, and maximum clock frequency"
+  - "Measure the current reduction achieved by clock gating an unused peripheral"
+professionalContext: "Embedded products in production often run at full clock speed with all peripheral clocks enabled, even when 70% of the peripherals are idle. This is the lowest-effort firmware configuration — it's also the highest-power one. Engineers who understand clock gating and voltage scaling deliver products with longer battery life using the same hardware."
+thresholdConcept: false
+---
+
+## Why this matters
+
+An IoT gateway runs at 168 MHz with clocks enabled for two UARTs, SPI, I2C, two timers, and the ADC — all on by default from the vendor startup code. Only one UART and the ADC are actually used. The unused peripherals consume switching power on every clock edge. Gating their clocks reduces power consumption by 15–25% during active operation without any impact on functionality.
+
+Clock gating is the first and lowest-risk power optimization. It requires reading the reference manual to identify which RCC bits control which peripherals, then clearing the bits for unused peripherals. Zero functional change; meaningful power reduction.
+
+## How peripheral clocks work on STM32
+
+STM32F4 peripherals are connected to two internal buses:
+
+- **AHB1/AHB2** — high-speed: GPIO, DMA, Ethernet, USB HS. Clocked from HCLK (typically = SYSCLK).
+- **APB1/APB2** — lower-speed: USART2-5, SPI2-3, I2C, TIM2-14. Clocked from PCLK1/PCLK2 (SYSCLK divided by prescaler).
+
+Each peripheral has an enable bit in the corresponding RCC EN register:
+
+```c
+/* From stm32f4xx.h — a few examples */
+/* AHB1 */
+#define RCC_AHB1ENR_GPIOAEN     (1U << 0)
+#define RCC_AHB1ENR_DMA1EN      (1U << 21)
+#define RCC_AHB1ENR_DMA2EN      (1U << 22)
+
+/* APB1 */
+#define RCC_APB1ENR_TIM2EN      (1U << 0)
+#define RCC_APB1ENR_SPI2EN      (1U << 14)
+#define RCC_APB1ENR_USART2EN    (1U << 17)
+#define RCC_APB1ENR_I2C1EN      (1U << 21)
+
+/* APB2 */
+#define RCC_APB2ENR_TIM1EN      (1U << 0)
+#define RCC_APB2ENR_USART1EN    (1U << 4)
+#define RCC_APB2ENR_SPI1EN      (1U << 12)
+#define RCC_APB2ENR_ADC1EN      (1U << 8)
+```
+
+When an enable bit is cleared, the peripheral receives no clock. Its registers retain their values, but no switching activity occurs — zero dynamic power consumed by that peripheral.
+
+## Clock gating unused peripherals
+
+The startup code (often `SystemInit()` from vendor CMSIS) enables clocks broadly. Audit which peripherals your application actually uses:
+
+```c
+void power_optimize_clocks(void) {
+    /* Audit: We use DMA1, DMA2, GPIOD (LEDs), USART2 (console), ADC1, TIM2.
+       Everything else: gate it off. */
+
+    /* Gate unused APB1 peripherals */
+    RCC->APB1ENR &= ~(
+        RCC_APB1ENR_TIM3EN  |
+        RCC_APB1ENR_TIM4EN  |
+        RCC_APB1ENR_TIM5EN  |
+        RCC_APB1ENR_SPI2EN  |
+        RCC_APB1ENR_SPI3EN  |
+        RCC_APB1ENR_USART3EN|
+        RCC_APB1ENR_I2C1EN  |
+        RCC_APB1ENR_I2C2EN  |
+        RCC_APB1ENR_I2C3EN  |
+        RCC_APB1ENR_CAN1EN
+    );
+
+    /* Gate unused APB2 peripherals */
+    RCC->APB2ENR &= ~(
+        RCC_APB2ENR_TIM1EN  |
+        RCC_APB2ENR_USART1EN|
+        RCC_APB2ENR_SPI1EN  |
+        RCC_APB2ENR_TIM8EN  |
+        RCC_APB2ENR_SDMMC1EN
+    );
+
+    /* Gate unused AHB1 peripherals */
+    RCC->AHB1ENR &= ~(
+        RCC_AHB1ENR_GPIOAEN |   /* Not used */
+        RCC_AHB1ENR_GPIOBEN |
+        RCC_AHB1ENR_GPIOCEN |
+        RCC_AHB1ENR_ETHMACEN|
+        RCC_AHB1ENR_OTGHSEN
+    );
+}
+```
+
+Call this immediately after system clock initialization, before enabling any application peripherals. Then enable only what you actually need:
+
+```c
+void enable_required_peripherals(void) {
+    /* Enable exactly the peripherals we use */
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN | RCC_AHB1ENR_DMA1EN | RCC_AHB1ENR_DMA2EN;
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN | RCC_APB1ENR_TIM2EN;
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+}
+```
+
+## Dynamic clock gating during operation
+
+For peripherals used intermittently (e.g., a SPI display that's updated every 100 ms), gate the clock between uses:
+
+```c
+void display_update(void) {
+    /* Enable SPI clock only for the duration of the frame transfer */
+    RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
+    __DSB();   /* Ensure clock enable is visible before first SPI access */
+
+    spi_send_frame(display_buffer, FRAME_SIZE);
+    spi_wait_complete();
+
+    /* Gate clock immediately after — saves power during the 90 ms between frames */
+    RCC->APB2ENR &= ~RCC_APB2ENR_SPI1EN;
+}
+```
+
+The `__DSB()` barrier is required: the clock-enable write must propagate before the first peripheral access. Without it, on a deeply pipelined core, the peripheral might be accessed before the clock actually starts.
+
+## Voltage scaling
+
+<VocabTooltip slug="voltage-scaling">Voltage scaling</VocabTooltip> reduces the core voltage when
+the MCU operates at a lower clock frequency. Lower voltage → lower static (leakage) and dynamic
+power. The trade-off: lower voltage limits the maximum clock frequency.
+
+STM32F4 supports three voltage scaling modes via the `PWR->CR` VOS bits:
+
+| VOS Mode | Core Voltage | Max SYSCLK | Active Current (typical) |
+| -------- | ------------ | ---------- | ------------------------ |
+| Scale 1  | 1.2 V        | 168 MHz    | ~50 mA at 168 MHz        |
+| Scale 2  | 1.05 V       | 144 MHz    | ~35 mA at 120 MHz        |
+| Scale 3  | 0.95 V       | 120 MHz    | ~25 mA at 100 MHz        |
+
+Application: if the sensor pipeline only needs 84 MHz (processes 1 kHz ADC samples with time to spare), run at Scale 2 and reduce active current by ~30%.
+
+```c
+void set_voltage_scale(uint32_t vos_mode) {
+    /* VOS bits are in PWR->CR[14:15] */
+    /* VOS=1 → Scale 1 (1.2V, max 168 MHz) */
+    /* VOS=2 → Scale 2 (1.05V, max 144 MHz) */
+    /* VOS=3 → Scale 3 (0.95V, max 120 MHz) */
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;   /* Enable PWR peripheral */
+    PWR->CR = (PWR->CR & ~(3U << 14)) | (vos_mode << 14);
+    /* Voltage change takes effect after the VOS bits are set.
+       No status bit to poll — allow 1 µs settling time. */
+    delay_us(1);
+}
+```
+
+## Flash latency coordination
+
+When voltage and clock change, flash latency must also change. Flash has a maximum read speed that depends on both HCLK and VDD:
+
+| VOS | Flash latency at 84 MHz  | Flash latency at 168 MHz |
+| --- | ------------------------ | ------------------------ |
+| 1   | 2 wait states            | 5 wait states            |
+| 2   | 3 wait states            | 4 wait states (max 144M) |
+| 3   | 4 wait states (max 100M) | N/A                      |
+
+```c
+void set_flash_latency(uint32_t wait_states) {
+    FLASH->ACR = (FLASH->ACR & ~FLASH_ACR_LATENCY_Msk) | wait_states;
+    /* Verify it took effect */
+    while ((FLASH->ACR & FLASH_ACR_LATENCY_Msk) != wait_states) { }
+}
+```
+
+The sequence when DECREASING frequency (e.g., 168 → 84 MHz):
+
+1. Reduce clock first (switch to lower frequency)
+2. Then reduce flash wait states
+3. Then change VOS
+
+The sequence when INCREASING frequency (e.g., 84 → 168 MHz):
+
+1. Increase VOS first
+2. Increase flash wait states
+3. Then increase clock
+
+Wrong order causes flash read failures (corrupt instruction fetches) or timing violations.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A sensor node with SPI flash runs at 168 MHz (VOS Scale 1). The main application logic runs in 15 ms per 50 ms cycle — 30% CPU utilization. An engineer wants to reduce active power by switching to 84 MHz. What must happen in what order to safely reduce the frequency?",
+      options: [
+        "Change VOS, then clock, then flash latency",
+        "Change the clock first (PLL configuration), then change flash wait states to match the new lower frequency, then optionally change VOS to Scale 2 for the lower-voltage benefit. When decreasing frequency, the existing flash latency (set for 168 MHz) is safe at 84 MHz — more wait states than necessary, but safe. You can then reduce latency once at the lower frequency. VOS reduction last is safe because the core is already at a lower frequency that VOS Scale 2 supports.",
+        "Change flash latency first, then clock, then VOS",
+        "Change VOS and clock simultaneously — order doesn't matter",
+      ],
+      correct: 1,
+      explanation:
+        "The order for frequency decrease: clock first, then flash latency, then VOS. When running at 168 MHz with 5 wait states, reducing to 84 MHz with the latency still at 5 wait states is safe (extra wait states slow reads but don't corrupt them). Then reduce wait states to 2 (correct for 84 MHz + VOS 1). Then optionally reduce VOS to Scale 2. The unsafe order is: reduce flash latency first while still at 168 MHz — this runs flash with insufficient wait states, causing corrupt instruction fetches. VOS reduction last is safe because 84 MHz is within Scale 2's capabilities.",
+    },
+    {
+      question:
+        "After gating the I2C1 peripheral clock, an engineer's sensor read returns garbage. The engineer confirmed the sensor is connected and the I2C bus was working before gating. What's the most likely cause?",
+      options: [
+        "I2C sensors don't work without a clock",
+        "The RCC_APB1ENR_I2C1EN bit was cleared while the I2C peripheral had an in-progress or partially-initialized state. Without its clock, the I2C peripheral cannot complete or reset pending transactions. The sensor may now be in a mid-transaction state (SDA held low by the slave). The fix: before gating the I2C clock, ensure the bus is idle (SR2.BUSY=0), complete any pending transaction, then gate. To recover from the stuck state: run the 9-SCL-toggle bus recovery procedure before re-enabling the clock.",
+        "Clock gating irreversibly disables I2C peripherals",
+        "The I2C address changed when the clock was gated",
+      ],
+      correct: 1,
+      explanation:
+        "Dynamic clock gating must happen at transaction boundaries, not mid-transaction. Gating a peripheral clock while a transaction is pending leaves the peripheral (and the connected slave) in a partial state. I2C slaves that are mid-byte hold SDA low, producing the 'bus stuck' failure. Safe clock gating: wait for the peripheral to reach an idle state (busy flag clear, last transaction confirmed complete), then gate. Re-enabling after incorrect gating: re-enable the clock, check SR2.BUSY, if still set run bus recovery.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 3 covers power profiling — measuring actual current consumption with a Nordic PPK2 or bench multimeter, identifying the dominant power consumers, and quantifying the improvement from sleep modes and clock gating. Numbers on a datasheet are typical; measured numbers are what your product actually draws.

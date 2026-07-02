@@ -1,0 +1,183 @@
+---
+title: "System-Level Low-Power Design — Architecture Before Optimization"
+description: "The biggest power savings come from architecture decisions made before a line of code is written: duty cycle, communication protocol, MCU selection, and sensor configuration. This lesson is about designing the energy budget rather than optimizing away from a bad baseline."
+phase: 10
+module: "10-9-power-management"
+order: 5
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "10-9-power-management/04"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture Reference Manual"
+  cs2023: ["SF-Foundations", "SE-Design"]
+  swebok: []
+  bloom: "evaluate"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - duty-cycle
+  - energy-budget
+  - lpwan
+  - lora
+  - nb-iot
+  - psm-mode
+  - drx-mode
+  - ble-advertising
+  - antenna-efficiency
+  - power-architecture
+learningOutcomes:
+  - "Calculate energy per cycle for a duty-cycled sensor node and project battery life"
+  - "Evaluate the dominant power consumers in a sensor-node architecture and identify the highest-leverage optimization"
+  - "Compare the power implications of BLE advertising, LoRaWAN, and NB-IoT for a given transmission pattern"
+  - "Explain why MCU sleep power is often not the limiting factor in real IoT products"
+professionalContext: "Senior embedded engineers frame power design as an energy budget, not a list of optimization tricks. They know that reducing MCU sleep current from 80 µA to 30 µA saves 50 µA — but adding a 10-minute transmission interval instead of 1-minute saves 9× more, because radio transmission dominates the budget. Understanding which factors dominate is what makes power optimization effective."
+thresholdConcept: false
+---
+
+## Why this matters
+
+An IoT soil-moisture sensor is designed with a 32-bit Cortex-M4 running at 168 MHz. After six months of optimization, the MCU enters Stop mode with 8 µA sleep current. But the battery life is only 3 months. Why? The soil sensor itself consumes 400 µA continuously (it has a capacitance-sensing circuit that requires constant current). The MCU optimization was irrelevant — the sensor dominated the budget and no one measured it.
+
+System-level power design identifies which component dominates before spending time on MCU optimization.
+
+## The energy budget model
+
+For a duty-cycled device:
+
+```
+Energy per cycle = Σ (component_current × component_active_time)
+
+Battery life = Battery_capacity_mAh / Average_current_mA
+```
+
+For a soil-moisture sensor node:
+
+```
+Cycle: 10-minute interval, active 200 ms for sense + transmit
+
+Component         | Current  | Duration | Contribution
+──────────────────|──────────|──────────|─────────────
+MCU (active)      | 30 mA    | 50 ms    | 1.5 mAs
+MCU (sleep)       | 0.050 mA | 550 s    | 27.5 mAs
+Soil sensor       | 0.400 mA | 600 s    | 240 mAs   ← DOMINANT
+LoRa TX           | 85 mA    | 150 ms   | 12.75 mAs
+──────────────────|──────────|──────────|─────────────
+Total             |          | 600 s    | 281.75 mAs
+
+Average current = 281.75 mAs / 600 s = 0.470 mA = 470 µA
+Battery life (2000 mAh) = 2000 / 0.470 ≈ 4,255 hours ≈ 177 days
+```
+
+The soil sensor's 400 µA continuous draw (50× the MCU sleep current) dominates. Reducing MCU sleep from 50 µA to 10 µA saves 0.04 mAs per cycle — 0.01% of the budget. The real optimization: use a soil sensor that can be powered down between readings. Replace 240 mAs with 0 mAs → new total ~41.75 mAs → average 70 µA → battery life 1,190 days (3.3 years).
+
+**The lesson**: measure and model before optimizing. The highest-leverage optimization is rarely the one that looks obvious.
+
+## Communication protocol power comparison
+
+For a device that transmits 50 bytes once per 10 minutes:
+
+| Protocol     | TX Power  | TX Duration | Energy/TX  | Sleep current | Notes                                |
+| ------------ | --------- | ----------- | ---------- | ------------- | ------------------------------------ |
+| BLE 5.0      | 0-20 dBm  | ~10 ms      | ~0.5 mAs   | 1-5 µA        | Short range; mesh via gateways       |
+| LoRaWAN      | 17-20 dBm | 50-2000 ms  | 2-30 mAs   | 1-3 µA        | Long range; sub-GHz; varies by SF    |
+| NB-IoT       | 20-23 dBm | 200-5000 ms | 15-100 mAs | 3-15 µA (PSM) | Licensed spectrum; cellular coverage |
+| WiFi 802.11n | 20 dBm    | 5-50 ms     | 10-50 mAs  | 150-200 µA    | High bandwidth; difficult sleep      |
+| Zigbee       | 5 dBm     | 10-50 ms    | 0.5-5 mAs  | 1-5 µA        | Mesh; 2.4 GHz; coordinator needed    |
+
+For a 10-minute interval, 50-byte payload, outdoors:
+
+- BLE: ~0.5 mAs + ~6 µA sleep = ~6.5 µA average → 3.5 years on 2000 mAh
+- LoRaWAN SF9: ~10 mAs + ~2 µA sleep = ~4.0 µA average → ~4.7 years
+- NB-IoT: ~50 mAs + ~3 µA (PSM) = ~9.0 µA average → ~2.5 years (but cellular coverage!)
+
+The "right" choice depends on range requirements, infrastructure availability, and regulatory constraints — not just power. But understanding the power implications is how you evaluate trade-offs.
+
+## MCU selection for power-constrained applications
+
+If the application runs most of the time in sleep and wakes briefly to sample, the MCU's sleep current dominates (not its active performance). Cortex-M4 at 168 MHz → 30–50 mA active, ~80 µA Stop. A Cortex-M0+ at 48 MHz → 3-10 mA active, ~2 µA Stop. If active time is 0.1% of the cycle, the M0+ adds 4.5× less active contribution despite running 3.5× slower.
+
+Common mistake: specifying a high-performance MCU because "we might need the compute" and then discovering the sleep power dominates. Start with the minimum adequate MCU; the interrupt latency and compute usually have more margin than expected.
+
+## Sensor power modes
+
+Most sensors (BME280, ICM-42688, MAX30102) have power modes:
+
+- **One-shot / forced mode**: wake the sensor, take a reading, the sensor returns to sleep. Power ~20-50 µA during measurement only.
+- **Normal / continuous mode**: sensor converts continuously. Power is always active current.
+
+Always use one-shot mode for low-duty-cycle applications. The soil sensor example's 400 µA was continuous mode where forced mode would give ~400 µA for 5 ms per reading = 2 µAs vs 240 mAs per 10-minute cycle.
+
+```c
+/* BME280 forced mode for duty-cycled measurement */
+void bme280_trigger_one_shot(bme280_t *dev) {
+    /* Mode = 01 (forced) — sensor takes one measurement, returns to sleep */
+    uint8_t ctrl = (0x02U << 5) | (0x05U << 2) | 0x01U;  /* Last 2 bits = forced */
+    i2c_write_register(dev->bus, dev->addr, REG_CTRL_MEAS, ctrl);
+    /* Wait for measurement complete (status.measuring = 0) */
+    uint8_t status;
+    do {
+        delay_ms(5);
+        i2c_read_register(dev->bus, dev->addr, REG_STATUS, &status);
+    } while (status & 0x08U);   /* measuring bit */
+    /* Now read the data registers — sensor is back in sleep mode */
+}
+```
+
+## The power architecture checklist
+
+Before finalizing a low-power product design:
+
+1. **Energy budget model** — calculate mAs per cycle for every component; identify the top 3 consumers.
+2. **Sensor power modes** — use one-shot / forced mode for all sensors; confirm with datasheet.
+3. **Communication interval** — can you transmit less often? Each 10× reduction in frequency reduces radio contribution by ~9×.
+4. **MCU sleep current** — verify with measurement (not datasheet typical); check for current leaks (pull resistors, output GPIOs floating).
+5. **Clock gating** — gate all unused peripheral clocks before Stop entry.
+6. **External components** — measure current draw of pull resistors, decoupling caps, and external ICs during sleep.
+7. **SysTick in Stop mode** — verify SysTick is disabled before WFI (it wakes the CPU every ms).
+
+Item 7 is the most commonly missed. SysTick is often enabled by HAL initialization and never disabled. One `SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;` before the WFI can eliminate 1000 unnecessary wakes per second.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A product team has spent 3 weeks reducing the MCU Stop mode current from 80 µA to 22 µA. The device uses LoRaWAN SF10 and transmits once per 15 minutes (TX duration: 1,000 ms at 85 mA). Calculate whether the MCU sleep optimization was worth the effort.",
+      options: [
+        "Yes — any reduction in sleep current is valuable",
+        "With 15-minute intervals (900 s) and 1 s TX: sleep fraction = 899/900 ≈ 99.9%. MCU sleep contribution: old = 80 µA × 899/900 ≈ 79.9 µA. New = 22 µA × 899/900 ≈ 21.9 µA. Savings: ~58 µA. LoRa TX contribution: 85,000 µA × 1s / 900s ≈ 94 µA. So LoRa dominates (94 µA) over even the old MCU sleep (80 µA). The 3-week optimization saved 58 µA but left 94 µA unaddressed. Higher leverage: reduce LoRa SF (SF10 → SF7 → 4× faster TX → 25 µA LoRa contribution) or transmit less often.",
+        "The optimization halved sleep power — always worth it",
+        "MCU power never matters if you use LoRaWAN",
+      ],
+      correct: 1,
+      explanation:
+        "Power optimization ROI depends on which component dominates. Here: LoRa TX at 94 µA average > MCU sleep at 80 µA (old). Reducing MCU sleep to 22 µA saves 58 µA — significant — but LoRa is still bigger and untouched. The higher-leverage optimization was addressing the LoRa contribution first: lower spreading factor (SF7 instead of SF10) reduces TX duration 4-8×, cutting the LoRa contribution from 94 µA to ~15-25 µA. The calculation shows why engineers model the energy budget before coding — it reveals which optimizations are worth 3 weeks and which are worth 3 hours.",
+    },
+    {
+      question:
+        "A GPS tracker uses NB-IoT to transmit location every 5 minutes. The GPS module has no sleep mode and draws 50 mA continuously. The MCU enters PSM (Power Saving Mode) and draws 3 µA between transmissions. What's the dominant power consumer, and what's the most impactful architectural change?",
+      options: [
+        "The MCU in PSM — optimize sleep further",
+        "The GPS module at 50 mA continuous completely dominates the budget. GPS contribution: 50 mA × always = 50 mA average. MCU PSM: 3 µA × ~298s/300s ≈ 3 µA. NB-IoT TX (300 ms at 100 mA, once per 5 min): 100 mA × 0.3/300 ≈ 100 µA. Total: ~50.1 mA — GPS is 99.8% of it. The impactful change: power the GPS module only when a fix is needed (enable > acquire fix > disable: typically 30-60 seconds of GPS on-time per cycle). This reduces GPS contribution from 50 mA × 300 s = 15,000 mAs to ~50 mA × 45 s = 2,250 mAs per 5-minute cycle. Average drops from ~50 mA to ~7.5 mA — a 6.7× improvement from one architectural decision.",
+        "NB-IoT transmission — upgrade to LoRaWAN",
+        "MCU active time during GPS processing — optimize the GNSS library",
+      ],
+      correct: 1,
+      explanation:
+        "Always-on peripherals with significant current draws are the most common cause of poor battery life in GPS and cellular IoT products. A 50 mA GPS module consumes 300,000 times more than the MCU in PSM. No amount of MCU optimization makes a dent. The architectural fix: duty-cycle the GPS module. Power it on, wait for a fix (use assisted GPS to shorten this to 5-15 seconds in good conditions), power it off. This one change dominates all other optimizations combined. The analysis requires an energy budget model — without it, engineers waste time optimizing MCU sleep while missing the obvious.",
+    },
+  ]}
+/>
+
+## What you've learned in module 10-9
+
+- Sleep, Stop, and Standby modes eliminate MCU dynamic power during idle; Stop mode (RAM retained, µA range) fits most sensor-node applications.
+- Clock gating unused peripherals removes switching power from all logic clocked by those buses.
+- Voltage scaling reduces static and dynamic power when operating at lower frequencies.
+- Power profiling — measuring actual current with GPIO correlation — reveals what the firmware actually does, not what the datasheet says it should.
+- FreeRTOS tickless idle eliminates wasted tick-rate wake-ups during long idle periods.
+- System-level energy budget analysis identifies the dominant consumer before optimization begins — the biggest wins usually come from sensor duty-cycling or communication frequency, not MCU optimization.
+
+The next module (10-10) covers bootloaders and OTA firmware updates — the mechanism that lets you deploy power-management improvements and bug fixes to devices already in the field.

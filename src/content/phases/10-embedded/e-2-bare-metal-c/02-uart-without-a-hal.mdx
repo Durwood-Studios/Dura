@@ -1,0 +1,277 @@
+---
+title: "UART Without a HAL — Polled and Interrupt-Driven"
+description: "Configure and use USART2 on STM32F4 from the reference manual. Polled transmit for debug output, interrupt-driven receive with a ring buffer, and the framing errors you must handle in production."
+phase: 10
+module: "e-2-bare-metal-c"
+order: 2
+estimatedMinutes: 25
+difficulty: 3
+prerequisites:
+  - "e-2-bare-metal-c/01"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - uart
+  - usart
+  - baud-rate
+  - start-bit
+  - stop-bit
+  - overrun-error
+  - framing-error
+  - ring-buffer
+  - tx-empty
+  - rx-not-empty
+  - brr-register
+learningOutcomes:
+  - "Compute the USART baud-rate register value for a given clock and target baud rate"
+  - "Initialize USART2 on STM32F4 in 8N1 mode at 115200 baud from register definitions"
+  - "Implement polled transmit using the TXE (TX Empty) status flag"
+  - "Implement interrupt-driven receive using a ring buffer and the RXNE (RX Not Empty) flag"
+  - "Detect and handle framing and overrun errors in the status register"
+professionalContext: "UART is the most common debug and inter-device communication bus in embedded systems. Every embedded engineer writes a UART driver. Engineers who write it from the reference manual can port it to any chip; engineers who only use HAL functions can't. This lesson teaches the pattern that transfers across STM32, NXP Kinetis, Nordic nRF, and any other Cortex-M vendor."
+thresholdConcept: false
+---
+
+## Why this matters
+
+In Lesson E1, the toolchain exercises used infinite loops. Real firmware communicates. UART is the most universal communication channel — it requires only two wires, needs no clock synchronization, and is universally available as a debug port, GPS interface, Bluetooth UART module, or host communication channel.
+
+Understanding UART at register level means you can configure it for any baud rate, data format, or parity scheme the application demands, and handle the error conditions that HAL functions quietly discard.
+
+## UART fundamentals
+
+UART (Universal Asynchronous Receiver/Transmitter) serializes bytes over two wires: TX (transmit) and RX (receive). There is no clock wire — both ends agree in advance on timing parameters:
+
+- **Baud rate** — bits per second (9600, 115200, 921600, etc.)
+- **Data bits** — almost always 8
+- **Parity** — None / Even / Odd (almost always None in modern systems)
+- **Stop bits** — 1 (sometimes 2 for slow UARTs)
+
+"8N1" means 8 data bits, No parity, 1 stop bit — the universal default.
+
+Each byte is transmitted as: 1 start bit (LOW) + 8 data bits (LSB first) + 1 stop bit (HIGH). At 115200 baud, each bit is 8.68 µs; one byte takes 10 bits = 86.8 µs.
+
+## USART2 on STM32F4 — registers from RM0090
+
+STM32F4 has 3 USARTs and 3 UARTs. USART2 is convenient because it's on the APB1 bus (lower speed peripheral bus) and its TX/RX pins (PA2/PA3) are easy to route.
+
+Key registers (base address 0x40004400):
+
+| Register | Offset | Purpose                                        |
+| -------- | ------ | ---------------------------------------------- |
+| SR       | 0x00   | Status: TXE, RXNE, ORE, FE flags               |
+| DR       | 0x04   | Data: write to send, read to receive           |
+| BRR      | 0x08   | Baud rate divisor                              |
+| CR1      | 0x0C   | Enable, word length, parity, interrupt enables |
+| CR2      | 0x10   | Stop bits                                      |
+| CR3      | 0x14   | Flow control, DMA enables                      |
+
+Define them in C:
+
+```c
+#include <stdint.h>
+
+#define USART2_BASE  0x40004400UL
+#define USART2_SR    (*(volatile uint32_t *)(USART2_BASE + 0x00))
+#define USART2_DR    (*(volatile uint32_t *)(USART2_BASE + 0x04))
+#define USART2_BRR   (*(volatile uint32_t *)(USART2_BASE + 0x08))
+#define USART2_CR1   (*(volatile uint32_t *)(USART2_BASE + 0x0C))
+
+/* SR flag bits */
+#define SR_TXE   (1U << 7)   /* TX register empty — safe to write next byte */
+#define SR_RXNE  (1U << 5)   /* RX not empty — a byte has arrived */
+#define SR_ORE   (1U << 3)   /* Overrun — a byte was lost */
+#define SR_FE    (1U << 1)   /* Framing error — bad stop bit */
+
+/* CR1 bits */
+#define CR1_UE   (1U << 13)  /* USART enable */
+#define CR1_TE   (1U << 3)   /* Transmitter enable */
+#define CR1_RE   (1U << 2)   /* Receiver enable */
+#define CR1_RXNEIE (1U << 5) /* RX-not-empty interrupt enable */
+```
+
+## Baud rate calculation
+
+The BRR register holds a fixed-point divisor: USARTDIV = f_CK / (16 × baud_rate), where f_CK is the peripheral clock.
+
+For STM32F4 with USART2 on APB1 at 42 MHz, targeting 115200 baud:
+
+```
+USARTDIV = 42,000,000 / (16 × 115200) = 22.786...
+Integer part: 22 (0x16)
+Fractional part: 0.786 × 16 = 12.57 → 13 (0xD)
+BRR value = (22 << 4) | 13 = 0x16D
+```
+
+The GCC ARM toolchain's math is exact enough to compute this at compile time:
+
+```c
+#define PCLK1_HZ    42000000UL
+#define BAUD        115200UL
+#define USARTDIV    ((PCLK1_HZ + (BAUD / 2U)) / BAUD)
+/* Rounding in BRR: mantissa in bits[15:4], fraction in bits[3:0] */
+```
+
+## Initialization — clocks, pins, USART
+
+Three steps in order: clock enable, pin alternate-function setup, USART configuration.
+
+```c
+/* RCC base for clock enables */
+#define RCC_BASE    0x40023800UL
+#define RCC_AHB1ENR (*(volatile uint32_t *)(RCC_BASE + 0x30))
+#define RCC_APB1ENR (*(volatile uint32_t *)(RCC_BASE + 0x40))
+#define RCC_AHB1ENR_GPIOAEN (1U << 0)
+#define RCC_APB1ENR_USART2EN (1U << 17)
+
+/* GPIOA for PA2 (TX) and PA3 (RX) */
+#define GPIOA_BASE    0x40020000UL
+#define GPIOA_MODER   (*(volatile uint32_t *)(GPIOA_BASE + 0x00))
+#define GPIOA_AFRL    (*(volatile uint32_t *)(GPIOA_BASE + 0x20))
+
+void usart2_init(void) {
+    /* 1. Enable clocks */
+    RCC_AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC_APB1ENR |= RCC_APB1ENR_USART2EN;
+
+    /* 2. Configure PA2 (TX) and PA3 (RX) as Alternate Function 7 (USART2) */
+    /* MODER bits: 10 = AF mode */
+    GPIOA_MODER &= ~((0b11U << (2 * 2)) | (0b11U << (3 * 2)));
+    GPIOA_MODER |=  ((0b10U << (2 * 2)) | (0b10U << (3 * 2)));
+    /* AFRL: 4 bits per pin; PA2=bits[11:8], PA3=bits[15:12]; AF7=0b0111 */
+    GPIOA_AFRL &= ~(0xFFU << 8);
+    GPIOA_AFRL |=  (0x77U << 8);   /* AF7 for both PA2 and PA3 */
+
+    /* 3. Configure USART2 — 115200 baud, 8N1 */
+    USART2_BRR = ((PCLK1_HZ + (BAUD / 2U)) / BAUD);
+    USART2_CR1 = CR1_UE | CR1_TE | CR1_RE;  /* Enable USART, TX, RX */
+    /* CR2 and CR3 default to 1 stop bit, no flow control — correct for 8N1 */
+}
+```
+
+## Polled transmit
+
+Wait for TXE, write the byte, done:
+
+```c
+void uart_putc(char c) {
+    while (!(USART2_SR & SR_TXE)) { }
+    USART2_DR = (uint8_t)c;
+}
+
+void uart_puts(const char *s) {
+    while (*s) uart_putc(*s++);
+}
+```
+
+Polled is acceptable for low-bandwidth debug output where timing doesn't matter. At 115200 baud, transmitting a single byte takes ~86 µs in the wait loop. For an application that needs to do useful work while transmitting, use interrupt-driven TX (Module E5 covers the full TX ring buffer).
+
+## Interrupt-driven receive with a ring buffer
+
+For receiving, polling doesn't scale — you'd have to poll faster than bytes arrive. At 115200 baud, a byte arrives every 86 µs. The interrupt-driven pattern:
+
+```c
+#define RX_BUF_SIZE 64
+
+static volatile uint8_t rx_buf[RX_BUF_SIZE];
+static volatile uint8_t rx_head = 0;   /* Written by ISR */
+static volatile uint8_t rx_tail = 0;   /* Read by main */
+
+void usart2_rx_interrupt_enable(void) {
+    USART2_CR1 |= CR1_RXNEIE;          /* Enable RXNE interrupt */
+    /* Enable USART2 IRQ in NVIC — IRQn = 38, ISER1 bit 6 */
+    *(volatile uint32_t *)0xE000E104 |= (1U << (38 - 32));
+}
+
+/* ISR — fires when a byte arrives */
+void USART2_IRQHandler(void) {
+    if (USART2_SR & SR_RXNE) {
+        uint8_t byte = (uint8_t)USART2_DR;   /* Read clears RXNE */
+        uint8_t next = (uint8_t)((rx_head + 1U) % RX_BUF_SIZE);
+        if (next != rx_tail) {              /* Buffer not full */
+            rx_buf[rx_head] = byte;
+            rx_head = next;
+        }
+        /* If buffer is full, the byte is dropped — better than overrun */
+    }
+    if (USART2_SR & SR_ORE) {
+        /* Overrun: clear by reading DR */
+        (void)USART2_DR;
+    }
+}
+
+/* Main context: drain the ring buffer */
+int uart_getc(uint8_t *out) {
+    if (rx_head == rx_tail) return 0;   /* Empty */
+    *out = rx_buf[rx_tail];
+    rx_tail = (uint8_t)((rx_tail + 1U) % RX_BUF_SIZE);
+    return 1;
+}
+```
+
+The `volatile` on `rx_buf`, `rx_head`, and `rx_tail` is mandatory — the ISR modifies them between main-code instructions (Lesson E1/E3 covered this in detail).
+
+## Error handling
+
+The status register contains two error flags every production driver must check:
+
+**ORE (Overrun Error)** — a new byte arrived before the last one was read. The byte is lost. ORE is set even if RXNE is set. Must be cleared by reading DR (a read to DR clears both RXNE and ORE in most STM32 devices). In the ISR above, we explicitly check and clear ORE.
+
+**FE (Framing Error)** — the received stop bit was not HIGH. Usually means wrong baud rate or line noise. If your UART is receiving garbage, check FE first — it often points to a baud rate mismatch rather than a bug in the driver.
+
+Production drivers count error occurrences (per second or since last reset) and expose them via diagnostics. An error rate above 0.1% usually indicates a hardware problem.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "USART2 is initialized at 115200 baud and the application sends a byte. A logic analyzer shows the line is idle (HIGH), then goes LOW for 8.68 µs (one bit time), then 8 more pulses, then HIGH. What byte was sent?",
+      options: [
+        "Cannot determine without parity information",
+        "Read the 8 data bits after the start bit in LSB-first order — the bit pattern of those 8 pulses (LOW=0, HIGH=1) gives the byte value in LSB-first binary. At 115200 baud, one bit = 8.68 µs. The start bit is always LOW; the stop bit is always HIGH. Count the data bits in sequence: bit 0 (LSB) through bit 7 (MSB).",
+        "0xFF — all HIGH bits after the start",
+        "The byte cannot be read without reading the DR register",
+      ],
+      correct: 1,
+      explanation:
+        "UART sends bits LSB-first. After the start bit (1 LOW period = one bit time), the 8 data bits follow, then the stop bit. On a logic analyzer, reading the data bits in order from bit0 (first after start) to bit7 gives the byte value in binary. At 115200 baud, each bit is 1/115200 ≈ 8.68 µs. The logic analyzer shows you exactly the physical encoding that the UART specification defines — which is why knowing the wire protocol matters even when you're writing software.",
+    },
+    {
+      question:
+        "A receive ISR reads USART2_DR to get the received byte. No ORE check is present. Under high traffic, bytes are occasionally lost and the subsequent received values appear shifted. What's the structural cause?",
+      options: [
+        "The ring buffer is too small",
+        "When ORE (Overrun Error) is set, the new byte that caused the overrun sits in a shadow register and RXNE may stay set. Reading DR clears RXNE but may not correctly advance the internal shift register state, causing the next byte to be misread or missed. The fix: check ORE on every RXNE interrupt, read DR to clear ORE, and count the dropped bytes for diagnostics. In some STM32 variants, ORE must be cleared explicitly by reading SR then DR in sequence.",
+        "Interrupt priority is wrong",
+        "The baud rate calculation is slightly off",
+      ],
+      correct: 1,
+      explanation:
+        "Overrun is the most common receive error in production UART code. When the CPU doesn't read RXNE fast enough, the next byte overrides the previous one. The UART peripheral sets ORE to signal that a byte was lost. Ignoring ORE leaves the peripheral in an error state where subsequent reception may behave unexpectedly depending on the chip's specific ORE-clearing behavior. The correct pattern: check and clear all error flags on every ISR entry, and count them for diagnostics. An ORE rate above 0.01% indicates the ISR isn't keeping up with traffic.",
+    },
+    {
+      question:
+        "What's the BRR register value for 9600 baud on a USART whose peripheral clock is 84 MHz?",
+      options: [
+        "875",
+        "84,000,000 / (16 × 9600) = 546.875. Integer mantissa = 546 (0x222); fractional = 0.875 × 16 = 14 (0xE). BRR = (546 << 4) | 14 = 0x222E = 8750.",
+        "9600",
+        "84000",
+      ],
+      correct: 1,
+      explanation:
+        "The BRR calculation is USARTDIV = f_CK / (16 × baud). The BRR register encodes the mantissa in bits[15:4] and the fractional part (rounded to nearest 1/16) in bits[3:0]. For 84 MHz / (16 × 9600) = 546.875: mantissa = 546, fraction = round(0.875 × 16) = 14. BRR = (546 << 4) | 14. Getting this wrong by even 1 LSB introduces a fractional baud rate error that accumulates over a byte's 10 bits. An error > 2-3% causes framing errors. Always verify with a logic analyzer when first bringing up a UART on a new chip.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 03 adds the timing dimension: SysTick and general-purpose timers give you precise delays and periodic events without the busy-wait loops that have appeared throughout E1-E2. The LED blink from Lesson 01 gets a 500 ms toggle that's accurate to within 1 µs, without burning CPU time in delay loops.

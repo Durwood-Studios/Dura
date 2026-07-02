@@ -1,0 +1,244 @@
+---
+title: "Timers, SysTick, and Precise Delays"
+description: "Replace the busy-wait loop with hardware timers. SysTick for millisecond ticks, TIM2 for microsecond-accurate delays and periodic events — and why the busy-wait you wrote in Lesson 01 is unacceptable in production."
+phase: 10
+module: "e-2-bare-metal-c"
+order: 3
+estimatedMinutes: 20
+difficulty: 3
+prerequisites:
+  - "e-2-bare-metal-c/02"
+standards:
+  primaryAnchor: "ARM Cortex-M Architecture"
+  cs2023: ["SF-Foundations"]
+  swebok: []
+  bloom: "apply"
+  sfia: 3
+  dreyfus: "advanced-beginner"
+vocabulary:
+  - systick
+  - timer
+  - prescaler
+  - auto-reload
+  - tim2
+  - pwm
+  - tick-count
+  - periodic-interrupt
+  - busy-wait
+  - cpu-utilization
+learningOutcomes:
+  - "Configure SysTick to generate a 1 ms interrupt and maintain a tick counter"
+  - "Implement a delay_ms() function using the SysTick tick counter that doesn't busy-wait on a peripheral register"
+  - "Set up TIM2 to generate a 1 µs timer base and measure elapsed time"
+  - "Explain why a busy-wait delay loop consumes 100% CPU and what that costs a real system"
+  - "Configure a general-purpose timer for periodic interrupt generation"
+professionalContext: "Every real embedded system needs time references: delays between sensor reads, periodic tasks, timeouts for communication protocols, PWM generation. Engineers who know only busy-wait loops write firmware that can never sleep to save power, never use the CPU for useful work during delays, and can't measure timing accurately. This lesson replaces the crude for-loop delay from Lesson 01 with hardware timers — the pattern you'll use in every production system."
+thresholdConcept: false
+---
+
+## Why this matters
+
+The Lesson 01 LED blink used:
+
+```c
+for (volatile int i = 0; i < 500000; i++) { }
+```
+
+This is a defect wearing the costume of a feature. While the loop spins:
+
+- The CPU burns 100% power executing empty operations.
+- No other code can run — no sensor reads, no UART, no button checks.
+- The delay changes if you change the clock speed, the compiler, or the optimization flags.
+- You can never put the CPU to sleep to save power.
+
+Production firmware uses hardware timers. The CPU configures a timer, starts it, and then does something useful (or sleeps). The timer fires an interrupt when time is up.
+
+## SysTick — the Cortex-M system timer
+
+Every Cortex-M chip has SysTick: a 24-bit down-counter built into the processor core (not a vendor peripheral). It counts down from a reload value to zero, fires an exception, reloads, and repeats. SysTick is universally available regardless of chip vendor.
+
+The standard use: count down once per millisecond and maintain a global tick counter.
+
+```c
+#include <stdint.h>
+
+volatile uint32_t tick_count = 0;
+
+void SysTick_Handler(void) {
+    tick_count++;
+}
+
+void systick_init(uint32_t cpu_hz) {
+    /* SysTick registers in the Cortex-M private peripheral space */
+    SysTick->LOAD = (cpu_hz / 1000U) - 1U;  /* Reload for 1 ms at given clock */
+    SysTick->VAL  = 0U;                      /* Clear current value */
+    /* CLKSOURCE = processor clock (bit 2), TICKINT = exception enable (bit 1),
+       ENABLE = counter on (bit 0) */
+    SysTick->CTRL = 0x7U;
+}
+
+uint32_t get_tick_ms(void) {
+    return tick_count;
+}
+
+void delay_ms(uint32_t ms) {
+    uint32_t start = tick_count;
+    while ((tick_count - start) < ms) { }
+    /* tick_count is volatile — GCC won't cache it in a register */
+}
+```
+
+The subtraction `(tick_count - start)` handles the 32-bit roll-over correctly without special casing: if `tick_count` wraps around, the unsigned subtraction still gives the correct elapsed time.
+
+For STM32F4 at 168 MHz:
+
+```c
+systick_init(168000000U);  /* 168 MHz → LOAD = 167999 */
+```
+
+The LED blink from Lesson 01, corrected:
+
+```c
+int main(void) {
+    systick_init(168000000U);
+    /* ... GPIO init ... */
+    while (1) {
+        GPIOD_ODR ^= (1U << LED_PIN);
+        delay_ms(500);
+        /* CPU could do other work here — delay_ms burns CPU in a wait loop,
+           but at least the timing is accurate and clock-independent */
+    }
+}
+```
+
+The timing is now accurate to within the SysTick interrupt latency (~1–3 µs). Change the clock speed? Update the argument to `systick_init` and everything recalibrates.
+
+## General-purpose timers — sub-millisecond resolution
+
+SysTick gives you millisecond resolution. For microsecond timing (SPI bit-banging, sensor protocols, latency measurement), use a general-purpose timer like TIM2.
+
+TIM2 on STM32F4 is a 32-bit up-counter on APB1 (84 MHz max when the APB1 prescaler is 2). The prescaler divides the input clock to produce the timer clock; the auto-reload register (ARR) determines the period.
+
+Setting TIM2 up as a 1 µs tick:
+
+```c
+#define RCC_APB1ENR    (*(volatile uint32_t *)(0x40023800UL + 0x40))
+#define TIM2_BASE      0x40000000UL
+#define TIM2_CR1       (*(volatile uint32_t *)(TIM2_BASE + 0x00))
+#define TIM2_PSC       (*(volatile uint32_t *)(TIM2_BASE + 0x28))
+#define TIM2_ARR       (*(volatile uint32_t *)(TIM2_BASE + 0x2C))
+#define TIM2_CNT       (*(volatile uint32_t *)(TIM2_BASE + 0x24))
+#define TIM2_EGR       (*(volatile uint32_t *)(TIM2_BASE + 0x14))
+
+void tim2_us_init(void) {
+    RCC_APB1ENR |= (1U << 0);         /* Enable TIM2 clock */
+
+    /* Prescaler: divide 84 MHz APB1 clock by 84 to get 1 MHz (1 µs per tick) */
+    TIM2_PSC = 84U - 1U;              /* PSC+1 is the divisor */
+    TIM2_ARR = 0xFFFFFFFFU;           /* Max period — let it count freely */
+
+    TIM2_EGR = (1U << 0);             /* UG: update event to load PSC/ARR */
+    TIM2_CR1 = (1U << 0);             /* CEN: enable counter */
+}
+
+uint32_t get_us(void) {
+    return TIM2_CNT;
+}
+
+void delay_us(uint32_t us) {
+    uint32_t start = TIM2_CNT;
+    while ((TIM2_CNT - start) < us) { }
+}
+```
+
+With TIM2 running at 1 MHz, each count is 1 µs. The 32-bit counter rolls over at ~4295 seconds (1.19 hours), which is fine for most use cases.
+
+## Periodic interrupts
+
+Timers aren't just for delays — they're for periodic work. Replace SysTick for periodic work if you need a different rate or want to leave SysTick for the RTOS tick (Lesson E4 uses it).
+
+Configure TIM3 to fire at 100 Hz:
+
+```c
+#define TIM3_BASE      0x40000400UL
+#define TIM3_CR1       (*(volatile uint32_t *)(TIM3_BASE + 0x00))
+#define TIM3_PSC       (*(volatile uint32_t *)(TIM3_BASE + 0x28))
+#define TIM3_ARR       (*(volatile uint32_t *)(TIM3_BASE + 0x2C))
+#define TIM3_DIER      (*(volatile uint32_t *)(TIM3_BASE + 0x0C))
+#define TIM3_SR        (*(volatile uint32_t *)(TIM3_BASE + 0x10))
+#define TIM3_EGR       (*(volatile uint32_t *)(TIM3_BASE + 0x14))
+
+void tim3_100hz_init(void) {
+    RCC_APB1ENR |= (1U << 1);         /* Enable TIM3 clock */
+
+    /* 84 MHz / 8400 / 100 = 100 Hz */
+    TIM3_PSC  = 8400U - 1U;           /* 84 MHz / 8400 = 10 kHz */
+    TIM3_ARR  = 100U - 1U;            /* 10 kHz / 100 = 100 Hz */
+    TIM3_EGR  = (1U << 0);
+    TIM3_DIER = (1U << 0);            /* UIE: update interrupt enable */
+    TIM3_CR1  = (1U << 0);            /* CEN: start */
+
+    /* Enable TIM3 IRQ in NVIC (IRQn = 29, ISER0 bit 29) */
+    *(volatile uint32_t *)(0xE000E100) |= (1U << 29);
+}
+
+void TIM3_IRQHandler(void) {
+    if (TIM3_SR & (1U << 0)) {        /* UIF: update interrupt flag */
+        TIM3_SR &= ~(1U << 0);        /* Clear by writing 0 */
+        /* 100 Hz periodic work goes here */
+        sample_sensors_and_update_state();
+    }
+}
+```
+
+The TIM3 ISR fires exactly 100 times per second. If the ISR is short (it should be — see E3), you get precise periodic events with essentially no CPU overhead between events.
+
+## Competency check
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An engineer changes the CPU clock from 84 MHz to 168 MHz but forgets to update the SysTick LOAD value. What happens to delay_ms(500)?",
+      options: [
+        "Nothing changes — SysTick is independent of the CPU clock",
+        "The 1 ms tick period becomes 0.5 ms because SysTick now counts down twice as fast. Every 'millisecond' tick is actually 0.5 ms. delay_ms(500) returns after 250 real milliseconds instead of 500. The fix: always pass the actual CPU frequency to systick_init() — compute it at runtime from the RCC registers or use a clock-init function that updates a global SystemCoreClock variable.",
+        "The system crashes — SysTick doesn't work above 84 MHz",
+        "delay_ms becomes more accurate because faster counts reduce quantization error",
+      ],
+      correct: 1,
+      explanation:
+        "SysTick counts at the processor clock rate. If you double the clock without halving the LOAD value, each count is half as long, so the 'millisecond' interrupt fires at 2 kHz instead of 1 kHz. delay_ms(500) waits for 500 tick increments, which now happen in 250 ms. This is the exact class of bug that the for-loop delay in Lesson 01 also suffers from — the fix in both cases is to derive timing from a known frequency, not a hard-coded iteration count.",
+    },
+    {
+      question:
+        "Why is `(tick_count - start) < ms` the correct expression for detecting elapsed time rather than `tick_count < (start + ms)`?",
+      options: [
+        "They are equivalent — use whichever you prefer",
+        "tick_count is a uint32_t. When it overflows (at ~49 days at 1 kHz), (start + ms) would also overflow but in the wrong direction: if start = 0xFFFFF000 and ms = 1000, then start + ms = 0x000003E8 (wrapped), and tick_count (still near 0xFFFFF000) would appear greater than (start+ms), terminating the wait immediately. The subtraction form (tick_count - start) computes the correct unsigned elapsed time even across the rollover boundary, because unsigned subtraction in C wraps correctly.",
+        "The subtraction form is only correct for 64-bit counters",
+        "start + ms may overflow the volatile qualifier",
+      ],
+      correct: 1,
+      explanation:
+        "This is a subtle but important C idiom. Unsigned integer overflow in C is well-defined (wraps modulo 2^32). The subtraction (tick_count - start) always gives the correct elapsed count even when tick_count has wrapped past zero, because unsigned wraparound math is defined. The comparison (tick_count < start + ms) fails when start + ms itself wraps, because then the threshold value is less than start, and the condition may immediately be false. Always use the subtraction form for elapsed-time comparisons with wrapping counters.",
+    },
+    {
+      question:
+        "An engineer needs a 1 µs delay in an ISR. Using delay_us() from the lesson, which calls `while ((TIM2_CNT - start) < us)`. Is this appropriate in an ISR?",
+      options: [
+        "Yes — the while loop is short enough that it doesn't matter",
+        "A 1 µs busy-wait in an ISR means the ISR holds the CPU for 168 clock cycles (at 168 MHz). For a single occurrence that's borderline acceptable. But the rule from E3 is: ISRs must be short and bounded. A delay_us inside an ISR violates that principle because: (1) the delay scales with the parameter — someone could call delay_us(1000) and block for a millisecond; (2) if a higher-priority interrupt is needed during the delay, it CAN preempt (because busy-wait doesn't disable interrupts), but if BASEPRI is set, it can't. Use hardware timer delays in main code; design ISRs to not need delays.",
+        "No — TIM2 is not accessible from an ISR",
+        "Yes — ISRs run with interrupts disabled so the delay is harmless",
+      ],
+      correct: 1,
+      explanation:
+        "ISRs should be bounded and minimal. A busy-wait in an ISR is a code smell: it makes ISR duration a function of a runtime parameter, violates the 'ISR must complete quickly' rule, and sets a dangerous precedent. The correct design when an ISR needs to generate a timed event is to use a hardware timer in output-compare mode to fire a second interrupt at the right time. busy-wait delays belong in main code where they can be reasoned about in the context of the superloop or task structure.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson 04 adds SPI — the fast full-duplex bus used for displays, flash memory, and IMUs. The GPIO patterns from Lesson 01 (bit manipulation, BSRR) and the timer patterns from this lesson (delays for bit-banging, SPI clock frequency) both appear directly in the SPI driver.

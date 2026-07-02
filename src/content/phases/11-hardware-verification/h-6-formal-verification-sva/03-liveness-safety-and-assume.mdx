@@ -1,0 +1,266 @@
+---
+title: "Liveness, Safety, and Assume — The Three Pillars of Formal"
+description: "Safety says bad things never happen. Liveness says good things eventually happen. Assume constrains the environment. Together they form a complete formal specification."
+phase: 11
+module: "h-6-formal-verification-sva"
+order: 3
+estimatedMinutes: 65
+difficulty: 4
+prerequisites:
+  - "h-6-sva-sequence-operators"
+standards:
+  primaryAnchor: "IEEE 1800-2023 §16 (SystemVerilog Assertions)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "analyze"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - safety-property
+  - liveness-property
+  - vacuity
+  - assume-property
+  - environment-constraint
+  - antecedent-coverage
+  - deadlock-freedom
+learningOutcomes:
+  - "Classify a property as safety or liveness and explain the structural difference"
+  - "Write assume property statements that constrain an unrealistic formal environment"
+  - "Identify vacuous passes and add antecedent coverage to detect them"
+  - "Use $eventually to express liveness requirements in SVA"
+professionalContext: "A formal proof that passes but is vacuous — because the antecedent never fires — gives a false sense of security. A safety property that misses the liveness dimension lets the design deadlock. Engineers who understand the safety/liveness split and can write correct assumptions are the ones trusted to sign off on formal closure. This lesson is where formal gets rigorous."
+thresholdConcept: true
+---
+
+## Why this matters
+
+Consider the assertion: "if a request is made, an acknowledge will eventually arrive." A simulator can run forever without ever seeing a request — and the assertion passes. Is the design correct? Unknown. The assertion was never actually exercised. This is called a **vacuous pass** — and it's one of the most dangerous failure modes in formal verification.
+
+The three concepts in this lesson — safety, liveness, and assume — are what turn formal from "I ran some assertions" into "I have a mathematical claim about this design's correctness."
+
+## Safety vs liveness — the structural split
+
+Every formal property belongs to one of two categories.
+
+### Safety — bad things never happen
+
+A safety property says: "In every reachable state, this condition holds." If it's violated, there's a finite prefix (a specific input sequence) that produces the failure.
+
+```systemverilog
+// Safety: the FIFO never overflows
+property p_fifo_no_overflow;
+    @(posedge clk) disable iff (!rst_n)
+        !(fifo_full && wr_en && !rd_en);
+endproperty
+assert property (p_fifo_no_overflow);
+
+// Safety: FSM never reaches an illegal state
+property p_no_illegal_state;
+    @(posedge clk) disable iff (!rst_n)
+        state inside {IDLE, FETCH, EXECUTE, WRITEBACK};
+endproperty
+assert property (p_no_illegal_state);
+
+// Safety: AXI address must be aligned to transfer size
+property p_addr_aligned;
+    @(posedge clk) disable iff (!rst_n)
+        awvalid |-> (awaddr[1:0] == 2'b00);    // word-aligned
+endproperty
+assert property (p_addr_aligned);
+```
+
+Safety is what most DV engineers start with. The formal tool explores all reachable states (bounded) and finds any that violate the safety condition.
+
+### Liveness — good things eventually happen
+
+A liveness property says: "From any reachable state, this condition will eventually become true." Violations require an infinite trace — the condition was never reached. In bounded model checking, liveness is approximated as "within N cycles."
+
+```systemverilog
+// Liveness: every request eventually gets acknowledged
+property p_req_eventually_ack;
+    @(posedge clk) disable iff (!rst_n)
+        req |-> ##[1:100] ack;     // ack within 100 cycles — bounded liveness
+endproperty
+assert property (p_req_eventually_ack);
+
+// Liveness: interrupt eventually cleared
+property p_irq_eventually_cleared;
+    @(posedge clk) disable iff (!rst_n)
+        irq |-> ##[1:1000] !irq;
+endproperty
+assert property (p_irq_eventually_cleared);
+```
+
+The `[1:N]` bound makes these bounded liveness properties — they're technically safety properties over N cycles, but they capture the spirit of "this eventually happens." True unbounded liveness requires tools that support `$eventually` or equivalent LTL operators.
+
+### $eventually — SVA's liveness operator
+
+For tools that support it (Jasper, VC Formal with LTL mode):
+
+```systemverilog
+// True unbounded liveness: req implies ack eventually (no cycle bound)
+property p_req_unbounded_ack;
+    @(posedge clk) disable iff (!rst_n)
+        req |-> s_eventually ack;
+endproperty
+assert property (p_req_unbounded_ack);
+```
+
+`s_eventually` (strong eventually) is checked over all infinite traces. This requires the tool to prove that no infinite trace exists where req is set but ack never arrives. Bounded model checking tools can't prove this directly; unbounded formal (IC3/PDR algorithm) can.
+
+## Vacuity — assertions that always pass but prove nothing
+
+A **vacuous pass** occurs when an assertion's antecedent is never activated. The assertion reports "pass" because it's never tested:
+
+```systemverilog
+// If req is never asserted in the formal environment, this always passes.
+property p_never_tested;
+    @(posedge clk)
+        req |-> ##[1:5] ack;   // antecedent: req; consequent: ack within 5 cycles
+endproperty
+assert property (p_never_tested);
+```
+
+If the formal environment never generates a `req` signal, the implication is vacuously true — "for all cases where req is true (there are none), ack follows." This is a mathematical truth that proves nothing about the DUT.
+
+### Detecting vacuity with cover property
+
+The fix: add a `cover property` that explicitly checks the antecedent fires:
+
+```systemverilog
+// Antecedent coverage — this MUST succeed for the assertion to be non-vacuous
+cover property (
+    @(posedge clk) disable iff (!rst_n)
+        req
+);
+
+// Or more directly: cover the full antecedent activation
+cover property (
+    @(posedge clk) disable iff (!rst_n)
+        $rose(req)
+);
+```
+
+If the cover property fails (0 hits), the assertion above is vacuous. Always check antecedent coverage before declaring formal closure.
+
+## assume property — constraining the environment
+
+Formal tools generate ALL possible input sequences. Most are physically impossible — no real system would drive awvalid in burst mode while simultaneously resetting. Without constraints, the formal tool explores these unrealistic states and produces counterexamples that don't correspond to real bugs.
+
+`assume property` constrains what the environment (inputs) is allowed to do:
+
+```systemverilog
+// Assume: reset is only de-asserted after a minimum hold
+// (prevents unrealistic "reset for 0 cycles" scenarios)
+assume property (
+    @(posedge clk)
+        $rose(rst_n) |-> ##[4:$] rst_n   // hold for at least 4 cycles
+);
+
+// Assume: valid is only asserted when data is known (no X driving)
+assume property (
+    @(posedge clk)
+        awvalid |-> !$isunknown(awaddr)
+);
+
+// Assume: interrupts are not asserted during reset
+assume property (
+    @(posedge clk)
+        !rst_n |-> !irq
+);
+```
+
+Assumptions narrow the formal search space to realistic scenarios. **Too many assumptions** makes formal too easy — it may never find real bugs. **Too few assumptions** produces false counterexamples from unrealistic inputs.
+
+The discipline: every assumption needs a justification comment explaining what physical constraint it models.
+
+### The assume/assert danger
+
+An assumption that is incorrect (tighter than reality) makes formal unsound — it proves properties that only hold under the unrealistic assumption, not in the real system.
+
+```systemverilog
+// DANGEROUS: this assumption prevents the formal tool from
+// ever exploring concurrent writes — but concurrent writes DO happen in silicon.
+assume property (
+    @(posedge clk)
+        wr_en_a |-> !wr_en_b   // "only one write at a time"
+);
+// If this is wrong, the assertion that passes under this assumption
+// may fail in silicon under concurrent writes.
+```
+
+Before adding an assumption, verify it describes a genuine hardware constraint, not just "the testbench never does this."
+
+## Deadlock freedom — a key formal target
+
+Deadlock: the FSM enters a state from which no transition can occur, or two agents wait for each other forever.
+
+```systemverilog
+// Deadlock freedom: from any non-idle state, the FSM eventually returns to IDLE
+property p_no_deadlock;
+    @(posedge clk) disable iff (!rst_n)
+        (state != IDLE) |-> ##[1:200] (state == IDLE || state == DONE);
+endproperty
+assert property (p_no_deadlock);
+
+// Or more specifically: state machine always makes progress
+// (no cycle where state stays the same for more than 5 cycles)
+property p_fsm_progress;
+    @(posedge clk) disable iff (!rst_n)
+        !(state [*6]);      // state cannot hold the same value for 6 consecutive cycles
+                            // NOTE: requires that state is more than 1 bit wide for
+                            //       this to be meaningful
+endproperty
+```
+
+Deadlock is a liveness violation: the system gets stuck (bad state) and never escapes. Formal is excellent at proving deadlock freedom because it explores all reachable states.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A formal run reports all assertions passing with 0 counterexamples. A reviewer asks for antecedent coverage results and finds that every cover property for assertion antecedents shows 0 hits. What does this mean?",
+      options: [
+        "The design is formally verified — 0 counterexamples is a pass.",
+        "All assertions are vacuously passing — the formal environment never generates inputs that activate the antecedents. The design's correctness is unproven. Fixes: (1) check that input assumptions aren't over-constraining inputs to never match; (2) add cover properties for each antecedent and verify they achieve > 0 hits before declaring closure. Passing assertions without antecedent activation are formally meaningless.",
+        "The DUT has no bugs",
+        "Increase the bound and re-run",
+      ],
+      correct: 1,
+      explanation:
+        "Vacuous passes are the silent killer of formal verification. All assertions pass because the antecedents never fire — not because the design is correct. The mandatory check is antecedent coverage: every assertion's antecedent must be witnessed (hit) at least once in the formal run. If cover property on the antecedent shows 0 hits, the assertion is vacuous. This is why formal sign-off includes both assertion results AND antecedent coverage.",
+    },
+    {
+      question:
+        "An engineer adds `assume property (@(posedge clk) valid |-> !error);` to a formal run. The formal tool finds no counterexamples. Later in silicon, bugs appear when valid and error are simultaneously true. What went wrong?",
+      options: [
+        "The assumption was correctly modeled",
+        "The assumption prevented the formal tool from exploring the scenario where valid and error are simultaneously asserted. If this combination CAN happen in the real system (it does, since silicon shows it), the assumption is too strong — it excludes a valid physical input sequence. The formal proof holds only under the (false) constraint. Fix: remove the assumption unless there's a genuine hardware guarantee that valid and error can never be simultaneously asserted, and document why.",
+        "The assertion was wrong",
+        "Increase the bound",
+      ],
+      correct: 1,
+      explanation:
+        "Incorrect assumptions make formal unsound. An assumption that excludes a physically reachable scenario means the formal proof is only valid under that assumption. If the assumption doesn't correspond to a real hardware constraint, the proof is meaningless. This is why every assumption needs a documented justification — it's an assertion about the environment's behavior, and getting it wrong invalidates the proof. The discipline: when in doubt, remove the assumption and see whether the tool produces a counterexample. If the counterexample is unrealistic, then add the assumption and justify it precisely.",
+    },
+    {
+      question:
+        "Which of these best describes the difference between a safety property and a liveness property?",
+      options: [
+        "Safety uses assert; liveness uses cover",
+        "Safety properties can be refuted by a finite counterexample (a finite trace that reaches a bad state). Liveness properties can only be refuted by an infinite trace (the good thing never happens). In bounded model checking, liveness is approximated with a cycle bound like ##[1:N]. True liveness proofs require algorithms that reason about infinite behaviors (IC3/PDR). Safety is the more commonly proved class in production DV; liveness is increasingly important in safety-critical and protocol-correctness work.",
+        "Safety is for simulation; liveness is for formal",
+        "Safety checks state; liveness checks timing",
+      ],
+      correct: 1,
+      explanation:
+        "The safety/liveness distinction is fundamental in formal methods. Safety: 'nothing bad ever happens' — falsified by a finite bad trace. Liveness: 'something good eventually happens' — falsified only by an infinite trace where the good thing is perpetually deferred. BMC handles safety naturally; liveness requires either a cycle bound (making it effectively safety over N cycles) or algorithms like IC3 that reason about fairness and infinite behaviors. Most production formal is safety-focused; liveness is the harder problem.",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H6-4 introduces formal tools in practice — Jasper GoldMD, VC Formal, Questa PropCheck — and the mechanics of running a formal flow: elaboration, constraint files, setting the bound, interpreting the output, and filing waivers for false counterexamples.

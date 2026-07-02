@@ -1,0 +1,257 @@
+---
+title: "Formal Property Verification — Tools, Flows, and Counterexamples"
+description: "Running a real FPV flow: elaboration, constraint TCL, bound selection, reading tool output, debugging counterexamples, and filing waivers."
+phase: 11
+module: "h-6-formal-verification-sva"
+order: 4
+estimatedMinutes: 75
+difficulty: 4
+prerequisites:
+  - "h-6-liveness-safety-and-assume"
+standards:
+  primaryAnchor: "IEEE 1800-2023 §16 (SystemVerilog Assertions)"
+  cs2023: ["AR-DigitalLogic"]
+  swebok: []
+  bloom: "apply"
+  sfia: 4
+  dreyfus: "competent"
+vocabulary:
+  - fpv-flow
+  - bounded-model-checking
+  - cone-of-influence
+  - witness-trace
+  - counterexample-trace
+  - waiver
+  - unreachable-state
+  - proof-depth
+learningOutcomes:
+  - "Run a formal property verification flow end-to-end: elaborate, constrain, solve, analyze"
+  - "Interpret a formal tool's result categories: proved, failed, bounded, vacuous"
+  - "Debug a counterexample trace and distinguish a real bug from a false counterexample"
+  - "Write a TCL constraint script for a formal run"
+professionalContext: "Knowing SVA syntax is necessary but not sufficient. DV engineers who drive formal sign-off know how to run the tools, interpret their output, and turn counterexamples into bug reports or waivers. The TCL scripts that configure formal runs, the bound-setting logic, and the waiver database are artifacts that outlive any individual engineer on the project. This lesson covers the mechanics."
+thresholdConcept: false
+---
+
+## Why this matters
+
+An SVA file sitting in a text editor proves nothing. Properties become proofs only when a formal tool runs against them. Understanding what that tool does — how it elaborates the design, how it sets up the search, what its result categories mean — is what makes formal a discipline rather than a checkbox.
+
+## The formal tool landscape
+
+Three major commercial tools dominate FPV:
+
+| Tool                    | Vendor      | Notable Strengths                                     |
+| ----------------------- | ----------- | ----------------------------------------------------- |
+| JasperGold / Jasper App | Cadence     | Widest use, apps for specific domains (CDC, RDC, UNR) |
+| VC Formal               | Synopsys    | Tight integration with VCS; Questa-to-Formal flow     |
+| Questa PropCheck        | Siemens EDA | Unified sim+formal flow; assertion reuse from UVM TB  |
+| OneSpin 360             | Siemens EDA | Formal-only; strong unbounded proof                   |
+
+All support IEEE 1800-2023 SVA. The underlying algorithms differ (SAT, BDD, IC3/PDR) but the user-facing flow is similar. This lesson uses Jasper-like TCL syntax — the concepts transfer directly.
+
+## The FPV flow — end to end
+
+```
+RTL files (.sv, .v)  +  Constraint files (.tcl)  +  Property files (.sv)
+                         │
+                         ▼
+            [Elaboration] — resolves hierarchy, interfaces, parameters
+                         │
+                         ▼
+            [Cone of Influence analysis] — identifies which logic
+                         affects each property
+                         │
+                         ▼
+            [BMC / IC3 engine] — explores reachable states
+                         │
+                         ▼
+            Results: PROVED / FAILED / BOUNDED / VACUOUS
+                         │
+                    ┌────┴────┐
+                FAILED     PROVED
+                    │          │
+              Counterexample   Proof certificate
+              (debug trace)    (add to waiver DB if false)
+```
+
+## A minimal Jasper constraint script
+
+```tcl
+# jasper_run.tcl — basic formal setup
+
+# Step 1: Read the design
+analyze -sv09 {
+    rtl/uart_rx.sv
+    rtl/uart_tx.sv
+    rtl/uart_ctrl.sv
+    tb/uart_assertions.sv    ;# SVA properties
+}
+
+# Step 2: Elaborate with the top module
+elaborate -top uart_ctrl
+
+# Step 3: Set the primary clock and reset
+clock clk
+reset -expression {!rst_n}
+
+# Step 4: Prove all assert properties; check all cover properties
+prove -all
+
+# Optional: set the proof bound (default is often 20-50 cycles)
+# Increase for protocols with long sequences
+prove -init {init_all_ones} -bound 100 -all
+```
+
+Running this produces results for every `assert property` in the design and bound files.
+
+## Result categories
+
+| Category              | Meaning                                                               | Action                                                 |
+| --------------------- | --------------------------------------------------------------------- | ------------------------------------------------------ |
+| **PROVED**            | Property holds for all reachable states within the proof depth        | Declare as verified at this bound                      |
+| **FAILED**            | Counterexample found — property violated by a specific input sequence | Debug the trace; fix DUT or assertion                  |
+| **BOUNDED** (UNKNOWN) | Neither proved nor failed within the bound                            | Increase bound, or use unbounded proof                 |
+| **VACUOUS**           | Antecedent never activated in any explored trace                      | Add environment stimulus or check assumptions          |
+| **UNREACHABLE**       | The assertion's context (the module state) is unreachable             | May indicate over-constrained assume or design pruning |
+
+## Reading a counterexample
+
+When a property fails, the tool generates a counterexample trace — the minimal input sequence that violates the property:
+
+```
+Property: p_awvalid_stable_until_ready
+Status:   FAILED at cycle 7
+
+Counterexample trace:
+Cycle | rst_n | awvalid | awready | awaddr    | wdata
+  0   |   0   |    0    |    0    |  -------  |  ---
+  1   |   1   |    0    |    0    |  -------  |  ---
+  2   |   1   |    1    |    0    |  0xA000   |  ---
+  3   |   1   |    1    |    0    |  0xA000   |  ---
+  4   |   1   |    1    |    0    |  0xB000   |  ---  ← awaddr changed! VIOLATION
+  5   |   1   |    1    |    0    |  0xB000   |  ---
+  6   |   1   |    1    |    1    |  0xB000   |  ---
+  7   |   1   |    0    |    0    |  -------  |  ---
+```
+
+Reading the trace:
+
+1. Reset releases at cycle 1.
+2. awvalid asserts at cycle 2 with awaddr=0xA000.
+3. At cycle 4, awaddr changes to 0xB000 while awvalid is still high and awready is still low. This violates the AXI4 spec that says awaddr must be stable while awvalid is high and awready is not.
+
+Is this a real bug or a false counterexample?
+
+- **Real bug**: the DUT's control logic allows address change while awaiting ready. Fix the RTL.
+- **False counterexample**: the environment (formal stimulus) changed awaddr in a way that's physically impossible. Fix: add `assume property (@(posedge clk) awvalid && !awready |-> $stable(awaddr));`
+
+## Distinguishing real bugs from false counterexamples
+
+The key question: "Can this trace actually occur in the real system?"
+
+Checklist for evaluating a counterexample:
+
+1. Is the input sequence physically achievable by the upstream system?
+2. Does the trace violate any known protocol invariant on the inputs?
+3. Can a simulation testbench reproduce it?
+
+If yes to (1) and (2) but no to (3), the issue may be a simulation gap (simulation never generated this case). If no to (1), add an assumption and document it.
+
+```tcl
+# After identifying a false counterexample, add the missing constraint:
+# (in jasper_constraints.tcl)
+assume -name awaddr_stable {
+    @(posedge clk)
+    (awvalid && !awready) |-> $stable(awaddr)
+}
+# Document why this is a valid assumption:
+# AXI4 spec section 2.2.1: master must hold awaddr stable while
+# awvalid is asserted and awready is deasserted.
+```
+
+## The waiver database
+
+Not every failure is a real bug. Formal projects maintain a waiver database — a record of "this failure was investigated and determined to be [X]":
+
+```tcl
+# waiver_db.tcl — formal waivers
+waive -name "p_awaddr_stable_cex_001" \
+      -reason "False counterexample: AXI master protocol guarantees addr stable; assume added." \
+      -date   "2026-06-01" \
+      -owner  "dustin.snellings@durwoodstudios.com"
+
+waive -name "p_fifo_depth_unreachable" \
+      -reason "Formal proves depth 17 unreachable from reset; FIFO is 16 deep by design." \
+      -date   "2026-06-01" \
+      -owner  "dustin.snellings@durwoodstudios.com"
+```
+
+The waiver database is an audit artifact. At tape-out, reviewers scan waivers to confirm each was properly investigated. A waiver with no reason or owner is a red flag.
+
+## Proof depth — choosing the bound
+
+Bounded model checking proves properties up to N cycles from reset. The right bound depends on what the property tests:
+
+- **Simple handshakes** (e.g., req → ack within 5 cycles): bound 20-50 is usually sufficient.
+- **FIFO fill/drain** (depth 16, must test full + empty + overflow): bound must cover at least `depth × 2 + 10` cycles.
+- **FSM deadlock freedom** (FSM has N states, average latency M): bound must cover the worst-case path through every state.
+
+```tcl
+# Adaptive bound selection
+prove -bound 50  -all   ;# quick first pass
+prove -bound 200 -all   ;# deeper pass for protocol properties
+prove -bound 500 -all   ;# full regression bound
+```
+
+Properties that remain BOUNDED after 500 cycles either need a deeper proof technique or have a fundamental liveness issue.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "A formal run produces status BOUNDED (UNKNOWN) for a property about a FIFO not overflowing. The FIFO depth is 64. The proof bound is 30 cycles. What's the most likely fix?",
+      options: [
+        "The property is wrong — a FIFO overflow is never proveable",
+        "The proof bound (30 cycles) is too short to allow the FIFO to fill. A depth-64 FIFO needs at least 64 write cycles to fill; to prove it can never overflow requires exploring scenarios where 64 writes happen and no reads occur — which needs at least 65 cycles. Increase the bound to at least 150 (to include fill, attempted overflow, and drain) and rerun. BOUNDED means the tool hasn't explored enough cycles yet, not that the property is unproveable.",
+        "Increase the FIFO depth",
+        "Add more assume constraints",
+      ],
+      correct: 1,
+      explanation:
+        "BOUNDED means the BMC engine exhausted its cycle budget before either proving or refuting the property. For a depth-64 FIFO overflow check, 30 cycles is too short — you can't fill a 64-entry FIFO in 30 cycles. The fix is to increase the bound to cover the worst-case scenario: fill the FIFO completely, then attempt more writes. The rule of thumb: bound ≥ (worst-case latency) × 3 for confidence. For safety properties with known worst-case depths, calculate the bound analytically.",
+    },
+    {
+      question:
+        "A formal counterexample shows rst_n deasserting and reasserting within 2 cycles — a sequence that never occurs in the real system (reset requires a 100ns hold minimum). The DUT fails the assertion under this scenario. What is the correct response?",
+      options: [
+        "Fix the DUT to handle rapid reset toggling",
+        "Add `assume property (@(posedge clk) $rose(rst_n) |-> ##[4:$] rst_n);` to prevent the formal engine from generating rapid-toggle reset sequences. Document the assumption: 'PCB reset controller guarantees minimum 100 ns (4+ cycles at 40 MHz) reset hold per board spec REV-B p.12.' The counterexample is valid formal mathematics but corresponds to an impossible physical scenario. Fix the environment model, not the DUT.",
+        "Waive the property with no investigation",
+        "Remove the assertion entirely",
+      ],
+      correct: 1,
+      explanation:
+        "When a counterexample corresponds to a physically impossible scenario, the correct fix is an environment assumption that excludes it — with documentation of the physical reason. Fixing the DUT to handle impossible inputs wastes area and power and may introduce new bugs. Waiving without investigation leaves the property meaningless. The assumption must be precise: it should exclude exactly the impossible scenario, not over-constrain the environment more broadly.",
+    },
+    {
+      question:
+        "Why does a formal run on a design without any `reset` TCL directive often produce unreliable results?",
+      options: [
+        "The tool runs faster without reset",
+        "Without a reset specification, the formal tool starts from an arbitrary initial state. The DUT may have initialization code that only executes correctly from the reset state — e.g., FSM starts in IDLE, counters start at 0. Starting from an arbitrary state means the tool explores scenarios where the FSM begins in an invalid mid-protocol state, producing false counterexamples for every property that assumes a clean starting point. The reset directive tells the tool the valid initial conditions. Without it, the 'proved' results are stronger than the claimed bound (they include all starting states, including impossible ones) and the failures may be false.",
+        "Reset is optional in modern SystemVerilog",
+        "It produces more counterexamples, which is better",
+      ],
+      correct: 1,
+      explanation:
+        "The reset specification defines the initial state for the formal proof. Without it, the tool explores ALL possible initial states, including ones that the real hardware never reaches (e.g., FSM in an illegal mid-transfer state, counters at non-zero values at time 0). Properties that assume the design was reset will generate false counterexamples from these impossible initial states. The reset directive is mandatory for sound formal results. In Jasper: `reset -expression {!rst_n}` or `reset -none` if the design has no reset (rare).",
+    },
+  ]}
+/>
+
+## What's next
+
+Lesson H6-5 covers `bind` statements — the mechanism that attaches assertion modules to RTL without modifying the RTL source. This is how production DV teams maintain assertion libraries that apply across multiple projects without creating maintenance forks.

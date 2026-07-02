@@ -1,0 +1,244 @@
+---
+title: "OTA Update Testing and Validation — Before You Push to 100,000 Devices"
+description: "An untested OTA system is not an OTA system — it's a fleet-bricking mechanism waiting for production. Systematic test coverage for the full update pipeline: happy path, interrupted transfer, power fail, rollback, and security rejection."
+phase: 10
+module: "10-10-bootloaders-and-ota"
+order: 5
+estimatedMinutes: 20
+difficulty: 4
+prerequisites:
+  - "10-10-bootloaders-and-ota/04"
+standards:
+  primaryAnchor: "MCUboot Project (mcuboot.com)"
+  cs2023: ["SE-Testing", "SE-Quality"]
+  swebok: []
+  bloom: "evaluate"
+  sfia: 4
+  dreyfus: "proficient"
+vocabulary:
+  - ota-test-plan
+  - power-fail-test
+  - rollback-validation
+  - canary-deployment
+  - phased-rollout
+  - golden-image
+  - fleet-health-metric
+  - version-downgrade-attack
+learningOutcomes:
+  - "Write a test plan covering the critical OTA failure modes: incomplete download, power loss during flash, rollback on crash"
+  - "Execute a power-fail test using a GPIO-controlled relay to cut power at precise moments during update"
+  - "Define fleet health metrics that detect a bad OTA update before it reaches all devices"
+  - "Explain why version downgrade must be prevented and how MCUboot's anti-rollback fuses enforce it"
+professionalContext: "Every engineer who has deployed a firmware update to a fleet of devices in production has a story about something going wrong. The engineers who ship updates without incident are the ones who tested all the failure modes before the update hit 100% of the fleet. This lesson is the insurance policy against fleet disasters."
+thresholdConcept: false
+---
+
+## Why this matters
+
+A smart home company updates 50,000 thermostat firmware. The update causes a crash on first boot in 0.3% of devices (a hardware variant the test lab didn't have). Without phased rollout, all 50,000 devices get the bad update simultaneously. With phased rollout (10% → 25% → 100%), only 5,000 devices are affected before the fleet health metrics detect the anomaly and pause the rollout. 45,000 units are saved by the monitoring system.
+
+The monitoring system that detected the anomaly requires: defined health metrics, telemetry from deployed devices, and rollout infrastructure that can pause. None of these are in the firmware — they're the OTA system built around the firmware. This lesson covers how to test the firmware side and how to structure the deployment process to protect the fleet.
+
+## The OTA test matrix
+
+Every OTA system must pass these tests before any deployment:
+
+| Test ID | Scenario                                     | Expected result                                 | Risk if untested                                                           |
+| ------- | -------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------- |
+| OTA-01  | Happy path: complete update                  | Device boots new firmware, confirms healthy     | —                                                                          |
+| OTA-02  | Invalid signature (bit flip in image)        | Bootloader rejects, boots old firmware          | Fleet accepts malicious images                                             |
+| OTA-03  | CRC mismatch (download corruption)           | Transport discards, retries or reports error    | Corrupt image flashed, device bricks                                       |
+| OTA-04  | Incomplete download (connection lost at 60%) | Transfer resumes from offset                    | Full re-download on reconnect (slow but OK) OR wrong image written (brick) |
+| OTA-05  | Power fail during flash write                | Bootloader detects incomplete image, boots old  | Device bricks (no old image to boot)                                       |
+| OTA-06  | New image crashes on first boot              | Bootloader detects unconfirmed boot, rolls back | Device runs bad firmware indefinitely                                      |
+| OTA-07  | Version downgrade attempt                    | Bootloader rejects older version                | Attacker rolls back to vulnerable version                                  |
+| OTA-08  | Wrong hardware variant                       | Transport or manifest rejects                   | Wrong firmware on hardware causes safety hazard                            |
+| OTA-09  | Update during active sensor operation        | Update completes without disrupting sensor data | Loss of data or sensor misbehavior                                         |
+
+## OTA-01: Happy path (baseline)
+
+```bash
+# Build and sign firmware v2.0.0
+imgtool sign --key signing-key.pem --version 2.0.0 ... firmware_v2.bin
+
+# Deploy to test device running v1.0.0
+# Verify via serial console:
+# - Boot log shows "Booting new image v2.0.0"
+# - Application telemetry resumes within 5 seconds
+# - boot_set_confirmed() called (check debug log)
+# - Next boot: no rollback (verify version stays at v2.0.0)
+```
+
+## OTA-05: Power-fail during flash write (critical)
+
+The most dangerous failure mode. Power loss during the flash write leaves the secondary slot in an unknown partial state.
+
+Test setup:
+
+- GPIO-controlled relay (or a bench power supply with scripting support) to cut VDD
+- Firmware with GPIO marker at "flash sector erase start" and "flash write complete"
+
+```c
+/* In the OTA write function: toggle GPIO for logic analyzer correlation */
+void ota_write_sector(uint32_t offset, const uint8_t *data, uint32_t len) {
+    GPIOB->BSRR = (1U << 0);   /* PB0 high: sector erase start */
+    flash_erase_sector(SECONDARY_SLOT_BASE + offset);
+    GPIOB->BSRR = (1U << 16);  /* PB0 low: erase complete */
+
+    GPIOB->BSRR = (1U << 1);   /* PB1 high: write start */
+    flash_write(SECONDARY_SLOT_BASE + offset, data, len);
+    GPIOB->BSRR = (1U << 17);  /* PB1 low: write complete */
+}
+```
+
+Test procedure:
+
+1. Start OTA update
+2. Using logic analyzer trigger + relay: cut power 50 ms after first sector erase (mid-write)
+3. Power on
+4. **Expected**: MCUboot checks secondary slot image header magic bytes. Incomplete erase/write → corrupted magic → MCUboot validates primary slot only → boots old firmware.
+5. Repeat with power cut at different offsets (25%, 50%, 75%, 99% of write)
+
+The primary slot must survive a power fail during a secondary slot write. This is true because the bootloader never modifies the primary slot until AFTER it verifies the secondary slot is complete and valid.
+
+If any power-cut scenario boots a firmware other than the last known-good image, the OTA implementation has a critical bug.
+
+## OTA-06: Rollback on crash
+
+Test that MCUboot rolls back when the application doesn't confirm:
+
+```c
+/* Test firmware that crashes immediately on boot */
+#include "cortex_m_rt.h"
+
+int main(void) {
+    /* Deliberately crash without confirming */
+    volatile uint32_t *null_ptr = NULL;
+    (void)(*null_ptr);   /* HardFault → reset → MCUboot sees unconfirmed boot */
+}
+```
+
+Test procedure:
+
+1. Device running v1.0.0 (confirmed)
+2. Deploy crashing test firmware signed as v2.0.0
+3. MCUboot boots v2.0.0 → crashes → MCUboot increments boot counter
+4. Repeat until boot counter threshold
+5. **Expected**: MCUboot rolls back to v1.0.0; boot log shows "reverting to previous"
+6. v1.0.0 telemetry resumes
+
+Pass criterion: v1.0.0 operational after the crashing v2.0.0 update, no human intervention required.
+
+## OTA-07: Version downgrade prevention
+
+MCUboot's security counter / anti-rollback uses OTP fuses (on supported devices) or persistent flash counters to prevent booting older firmware versions:
+
+```c
+/* MCUboot configuration for anti-rollback */
+#define MCUBOOT_HW_ROLLBACK_PROT  1   /* Enable hardware anti-rollback */
+
+/* In imgtool, set the security counter (monotonic) */
+imgtool sign \
+  --key signing-key.pem \
+  --security-counter 5 \
+  ... firmware_v2.bin
+```
+
+MCUboot stores the highest seen security counter value in OTP fuses or persistent flash. An image with security-counter < stored value is rejected regardless of signature validity.
+
+Test:
+
+1. Deploy firmware with security-counter=5 (verified working)
+2. Attempt to deploy firmware with security-counter=4 (a previous version, perhaps with known vulnerabilities)
+3. **Expected**: MCUboot rejects the older image, continues booting v2.0.0
+4. Boot log: "Security counter too low, rejecting image"
+
+## Phased rollout and fleet health metrics
+
+Never deploy an OTA update to 100% of the fleet simultaneously. Phased rollout:
+
+```
+Day 1: Deploy to 1% of fleet (canary)
+Day 2: Monitor. If health metrics OK: deploy to 10%
+Day 3: Monitor. If OK: deploy to 50%
+Day 4: Monitor. If OK: deploy to 100%
+```
+
+Fleet health metrics that detect a bad update:
+
+```python
+# Pseudo-code for fleet health monitoring
+ALERT_THRESHOLD = 0.02  # 2% crash rate is abnormal
+
+def check_fleet_health(firmware_version):
+    devices_on_version = query_fleet_db(firmware_version=firmware_version)
+    crash_count = query_fleet_db(firmware_version=firmware_version,
+                                  event="crash_within_1_hour_of_boot")
+
+    crash_rate = crash_count / len(devices_on_version)
+
+    if crash_rate > ALERT_THRESHOLD:
+        pause_rollout(firmware_version)
+        alert_ops_team(f"Version {firmware_version} crash rate {crash_rate:.1%} exceeds threshold")
+        # Optionally: push rollback to affected devices
+```
+
+The 2% threshold is a starting point; adjust based on the fleet's baseline crash rate with known-good firmware. Alert thresholds that are too tight produce false alarms; too loose and you miss real problems.
+
+## The golden image
+
+Keep a "golden image" — the last known-good production firmware, signed and tested — archived separately from the release process. If a deployment goes badly and rollback via MCUboot doesn't work (perhaps because the update reached too many devices before detection), the golden image can be deployed directly:
+
+```bash
+# Emergency: deploy golden image to entire fleet
+ota_push_emergency.sh \
+  --image golden_image_v1.2.3_signed.bin \
+  --target all \
+  --priority critical \
+  --bypass-rollout-control   # Skips phased rollout for emergency
+```
+
+The golden image must be a separate artifact from the production release, stored in a secure location, tested independently, and accessible without going through the normal release pipeline.
+
+## Check your understanding
+
+<Quiz
+  questions={[
+    {
+      question:
+        "An OTA test cuts power during the flash write of the secondary slot header (the first 512 bytes of the slot). The device powers back on. MCUboot reads the secondary slot, finds corrupted magic bytes, and attempts to boot the primary slot. The primary slot is intact and verified. What does the device boot?",
+      options: [
+        "The corrupted secondary slot — MCUboot boots whatever is in primary",
+        "The intact primary slot. MCUboot validates the secondary slot first; corrupted magic bytes cause MCUboot to reject the secondary slot and not attempt a swap. MCUboot then validates the primary slot (which was never touched during this update attempt) and boots it. This is the correct behavior — a power fail during secondary-slot write should never affect the primary slot. If the test produces any other result, the OTA flash-write or MCUboot integration has a bug.",
+        "Neither — the device enters recovery mode",
+        "Depends on which sector the power fail hit",
+      ],
+      correct: 1,
+      explanation:
+        "The fundamental guarantee of dual-bank OTA: the primary slot is never touched during secondary slot operations. A power fail at any point during the download-and-write phase should leave the primary slot intact and bootable. MCUboot validates the secondary slot first; if it's invalid (incomplete write, corrupt magic), it falls through to validate and boot the primary. The test is specifically designed to verify this guarantee. Any result other than 'boots primary slot successfully' is a critical bug that must be fixed before production deployment.",
+    },
+    {
+      question:
+        "A phased rollout at 10% fleet coverage shows a 3% boot-time crash rate (expected baseline: 0.1%). The engineering team wants to investigate before pausing the rollout because '3% is only 300 devices out of 100,000 — not that many.' What's the correct response?",
+      options: [
+        "Continue rollout at the current pace to gather more data",
+        "Pause the rollout immediately. 3% crash rate vs 0.1% baseline is a 30× elevation — a strong signal of a regression in the updated firmware, not noise. Continuing the rollout while investigating adds more devices to the problem: at 100% coverage, 3,000 devices crash on boot. Each bricked device (if rollback fails) requires intervention. The correct response: pause rollout, investigate root cause using crash logs from the affected 300 devices (boot logs, HardFault captures from lesson 02), develop a fix, and prepare a corrected v2.0.1 release. Canary rollouts exist precisely to catch this before full fleet exposure.",
+        "3% is within normal variability — continue",
+        "Investigate for 24 hours without pausing rollout",
+      ],
+      correct: 1,
+      explanation:
+        "Statistical signal detection in fleet deployments: a 30× elevation over baseline is a strong signal, not noise. The 'it's only 300 devices' framing ignores the trajectory: continuing to 100% makes it 3,000 devices. Each additional device affected has a cost — data loss, customer experience, support tickets, and potentially service calls. The phased rollout's entire purpose is to limit blast radius. The decision to pause is cheap (rollout halts, no new devices affected); the cost of not pausing is 3,000+ affected devices. Always err on the side of pausing when health metrics deviate significantly from baseline.",
+    },
+  ]}
+/>
+
+## What you've learned in module 10-10
+
+- Bootloader architecture: flash layout, application descriptor, dual-bank OTA, CRC + signature verification, VTOR, rollback via boot counter.
+- MCUboot: the production-quality open-source bootloader that implements these concepts, with imgtool for image signing and the MCUboot simulator for regression testing.
+- OTA transport layer: BLE chunked DFU, MQTT manifest-first approach, HTTPS with certificate pinning — each securing the delivery channel with different properties.
+- Key management: the chain of trust from OTP fuses through MCUboot to the application, HSM-based signing, and the three-phase key rotation protocol.
+- OTA testing: the critical test matrix (happy path, power fail, rollback, downgrade prevention), phased rollout strategy, and fleet health metrics.
+
+You now have the complete embedded engineering stack from silicon power management through secure OTA updates. This is the knowledge that distinguishes a senior embedded engineer from a developer who knows only the application layer.
