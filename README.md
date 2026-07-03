@@ -9,7 +9,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6?style=flat-square&logo=typescript&logoColor=white&labelColor=0a0a12)](https://www.typescriptlang.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-10b981?style=flat-square&labelColor=0a0a12)](CONTRIBUTING.md)
 
-[Live Demo](https://dura.vercel.app) · [Report Bug](https://github.com/Durwood-Studios/Dura/issues) · [Contributing](CONTRIBUTING.md)
+[Live](https://dura.dev) · [Report Bug](https://github.com/Durwood-Studios/Dura/issues) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
