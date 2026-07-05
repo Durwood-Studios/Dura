@@ -33,6 +33,8 @@ export default async function StandardsIndexPage(): Promise<React.ReactElement> 
         </p>
       </header>
 
+      <HowWeUseStandards />
+
       <nav
         aria-label="Standards bodies"
         className="mb-12 flex flex-wrap gap-2 border-y border-[var(--color-border)] py-4"
@@ -85,6 +87,67 @@ export default async function StandardsIndexPage(): Promise<React.ReactElement> 
         </p>
       </footer>
     </main>
+  );
+}
+
+function HowWeUseStandards(): React.ReactElement {
+  const beats = [
+    {
+      title: "Traceable alignment",
+      body: "Every lesson and module is tagged to a real, named education standard in its frontmatter — not “inspired by.” The index below is generated from that data, and the same tags render on each lesson page.",
+    },
+    {
+      title: "Real industry references",
+      body: "Professional lessons cite actual published standards — ISO, IEC, IEEE, ISA, IETF/RFC, MISRA — by edition and clause, so what you learn maps to what the field actually enforces.",
+    },
+    {
+      title: "Currency & honesty",
+      body: "We track each standard’s current revision, stamp when we last verified it, and say so plainly. We don’t claim to be the authoritative source — lessons point you to the official publication.",
+    },
+    {
+      title: "Open & auditable",
+      body: "The mapping and the revision registry are in the AGPLv3 source. Anyone can verify a claim, flag a stale reference, or contribute a correction.",
+    },
+  ];
+
+  return (
+    <section aria-label="How we use standards" className="mb-14">
+      <h2 className="mb-2 text-sm font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
+        How we use standards
+      </h2>
+      <p className="mb-6 max-w-[640px] text-[var(--color-text-secondary)]">
+        Standards are load-bearing in DURA, not decoration. Two kinds are in play: the education
+        standards this page indexes (how the curriculum is structured) and the industry standards
+        the lessons reference (what the field enforces). Here is how we handle both.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {beats.map((b) => (
+          <div
+            key={b.title}
+            className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5"
+          >
+            <h3 className="mb-1.5 font-semibold text-[var(--color-text-primary)]">{b.title}</h3>
+            <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">{b.body}</p>
+          </div>
+        ))}
+      </div>
+      <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2 text-sm">
+        <Link
+          href="/standards-currency"
+          className="font-medium text-[var(--color-accent)] hover:underline"
+        >
+          Standards currency &amp; disclaimer &rarr;
+        </Link>
+        <a
+          href="https://github.com/Durwood-Studios/Dura"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-medium text-[var(--color-accent)] hover:underline"
+        >
+          Audit the source &rarr;
+        </a>
+      </div>
+    </section>
   );
 }
 
