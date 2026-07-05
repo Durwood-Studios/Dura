@@ -19,17 +19,18 @@ Skills load on demand — only the relevant one loads per task.
 
 ## Skills in This Folder
 
-| Skill                  | When Claude Code Uses It                                                  |
-| ---------------------- | ------------------------------------------------------------------------- |
-| `dev-loop`             | Writing Claude Code prompts, planning implementation, commit messages     |
-| `audit`                | Before any merge to main — quality gate, finds what's wrong               |
-| `bounded-research`     | Researching APIs, standards, library behaviour before implementing        |
-| `brief`                | Summarising what was built at the end of a phase                          |
-| `bug-reporter`         | Logging any bug found during implementation in standard format            |
-| `mission-lock`         | Tracking goals and decisions across a long multi-phase session            |
-| `premortem`            | Before major architectural decisions — imagines what kills the approach   |
-| `gold-standard`        | Enforcing LFLRS, AINDGS, PPLAS standards — generates compliance artifacts |
-| `frontend-design-plus` | Building any UI component — enforces WCAG 2.2, responsive design          |
+| Skill                  | When Claude Code Uses It                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------- |
+| `dev-loop`             | Writing Claude Code prompts, planning implementation, commit messages                         |
+| `audit`                | Before any merge to main — quality gate, finds what's wrong                                   |
+| `bounded-research`     | Researching APIs, standards, library behaviour before implementing                            |
+| `brief`                | Summarising what was built at the end of a phase                                              |
+| `bug-reporter`         | Logging any bug found during implementation in standard format                                |
+| `mission-lock`         | Tracking goals and decisions across a long multi-phase session                                |
+| `premortem`            | Before major architectural decisions — imagines what kills the approach                       |
+| `gold-standard`        | Enforcing LFLRS, AINDGS, PPLAS standards — generates compliance artifacts                     |
+| `frontend-design-plus` | Building any UI component — enforces WCAG 2.2, responsive design                              |
+| `standards-refresh`    | Keeping cited industry standards current — audits, verifies, updates registry + content, logs |
 
 ---
 
