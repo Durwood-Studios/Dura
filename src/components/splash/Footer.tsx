@@ -89,6 +89,12 @@ export function Footer(): React.ReactElement {
           >
             Terms
           </Link>
+          <Link
+            href="/support"
+            className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
+          >
+            Support
+          </Link>
           <a
             href="https://github.com/Durwood-Studios/Dura"
             target="_blank"
