@@ -7,6 +7,7 @@ import { ScrollTracker } from "@/components/lesson/ScrollTracker";
 import { CompletionGate } from "@/components/lesson/CompletionGate";
 import { BiteMode } from "@/components/lesson/BiteMode";
 import { StandardsBadges } from "@/components/lesson/StandardsBadges";
+import { StandardsDisclaimer } from "@/components/lesson/StandardsDisclaimer";
 import { AITutorMount } from "@/components/lesson/AITutor/AITutorMount";
 import { AnnotationsPanel } from "@/components/lesson/AnnotationsPanel";
 import { AddFlashcardButton } from "@/components/lesson/AddFlashcardButton";
@@ -14,6 +15,7 @@ import { formatMinutes } from "@/lib/utils";
 import { ShareButton } from "@/components/seo/ShareButton";
 import { buildBadges } from "@/lib/standards";
 import { getStandardsForModule } from "@/content/standards-map";
+import { REGISTRY_LAST_REVIEWED } from "@/lib/standards-watch/registry";
 import type { LoadedLesson, NextLessonRef } from "@/lib/content";
 
 interface LessonReaderProps {
@@ -112,6 +114,12 @@ export async function LessonReader({
             <ShareButton url={shareUrl} title={meta.title} text={meta.description} />
           </span>
         </div>
+        {meta.standards.primaryAnchor && (
+          <StandardsDisclaimer
+            anchor={meta.standards.primaryAnchor}
+            reviewedAt={REGISTRY_LAST_REVIEWED}
+          />
+        )}
       </header>
 
       <BiteMode>

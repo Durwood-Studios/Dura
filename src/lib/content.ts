@@ -21,6 +21,7 @@ export interface LessonFrontmatter {
     bloom?: BloomLevel;
     sfia?: number;
     dreyfus?: DreyfusStage;
+    primaryAnchor?: string;
   };
   vocabulary?: string[];
   learningOutcomes?: string[];
@@ -117,6 +118,7 @@ export async function loadLesson(
         cs2023: fm.standards?.cs2023,
         swebok: fm.standards?.swebok,
         sfia: fm.standards?.sfia ? `Level ${fm.standards.sfia}` : undefined,
+        primaryAnchor: fm.standards?.primaryAnchor,
       },
       vocabulary: fm.vocabulary ?? [],
       order: fm.order ?? 0,

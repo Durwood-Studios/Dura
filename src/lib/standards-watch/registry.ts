@@ -13,6 +13,19 @@
 
 import type { StandardRevision } from "./types";
 
+/**
+ * Date the full registry was last reviewed against publishers' catalogs.
+ * Every entry without its own `lastVerified` is treated as confirmed current
+ * as of this date. This is the currency stamp surfaced to learners in the
+ * standards disclaimer, so bump it whenever the quarterly review runs.
+ */
+export const REGISTRY_LAST_REVIEWED = "2026-07-05";
+
+/** The date THIS standard's currency was last confirmed by a human. */
+export function revisionVerifiedDate(entry: StandardRevision): string {
+  return entry.lastVerified ?? REGISTRY_LAST_REVIEWED;
+}
+
 export const STANDARDS_REGISTRY: readonly StandardRevision[] = [
   // ─── Robotics safety family ────────────────────────────────────────────
   {

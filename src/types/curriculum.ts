@@ -20,6 +20,10 @@ export interface LessonMeta {
     dreyfus?: string;
     csta?: string[];
     apcs?: string[];
+    /** The primary industry/professional standard this lesson is anchored to,
+     *  in canonical form with edition — e.g. "ISO 9001:2015", "IEEE 1800-2023".
+     *  Drives the per-lesson standards-currency disclaimer. */
+    primaryAnchor?: string;
   };
   vocabulary: string[];
   order: number;

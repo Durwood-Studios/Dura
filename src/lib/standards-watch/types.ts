@@ -15,6 +15,10 @@ export interface StandardRevision {
   current: string;
   /** ISO date the current revision became effective. */
   effectiveFrom: string;
+  /** ISO date a human last confirmed this entry still reflects the current
+   *  published revision. Falls back to REGISTRY_LAST_REVIEWED when unset.
+   *  This is the currency stamp the learner-facing disclaimer cites. */
+  lastVerified?: string;
   /** Prior revisions and any partial successors. Each entry is the cited
    *  string the previous revision used. Treated as superseded by current. */
   supersededRevisions: readonly string[];

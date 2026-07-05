@@ -60,6 +60,12 @@ export function Footer(): React.ReactElement {
             Standards
           </Link>
           <Link
+            href="/standards-currency"
+            className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
+          >
+            Standards currency
+          </Link>
+          <Link
             href="/open-source"
             className="transition-colors duration-150 hover:text-[#10B981] dark:hover:text-emerald-400"
           >
