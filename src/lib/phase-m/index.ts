@@ -62,7 +62,8 @@ const ASME_Y14_5: PhaseMLesson["standards"][number] = {
 };
 
 const ASME_Y14_41: PhaseMLesson["standards"][number] = {
-  id: "ASME Y14.41-2019",
+  // 2026 edition per ASME catalog (verified 2026-07-05); supersedes Y14.41-2019.
+  id: "ASME Y14.41-2026",
   title: "Digital Product Definition Data Practices (Model-Based Definition — MBD)",
   paywalled: true,
   approxCostUSD: 220,

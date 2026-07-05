@@ -42,8 +42,14 @@ export const STANDARDS_REGISTRY: readonly StandardRevision[] = [
   },
   {
     family: "ISO/TS 15066",
-    current: "ISO 10218-1:2025", // content absorbed into ISO 10218-1:2025
+    // Most TS 15066 content absorbed into ISO 10218-2:2025 (collaborative
+    // applications) with robot-level requirements in 10218-1:2025. TS
+    // 15066:2016 itself is not withdrawn; ISO/AWI 15066-1 is registered in
+    // the TC 299 work programme as its eventual replacement (no target date
+    // published yet, so no inProgress entry — verified 2026-07-05).
+    current: "ISO 10218-1:2025",
     effectiveFrom: "2025-01-01",
+    lastVerified: "2026-07-05",
     supersededRevisions: ["ISO/TS 15066:2016", "ISO/TS 15066"],
   },
   {
@@ -66,7 +72,7 @@ export const STANDARDS_REGISTRY: readonly StandardRevision[] = [
     inProgress: {
       targetRevision: "ISO 13482:202x",
       estimatedEffectiveFrom: "2026-12-31",
-      note: "Revision broadening scope to service robots generally; in progress.",
+      note: "Second edition at FDIS approval stage (ISO/FDIS 13482) as of 2026-07; broadens scope to service robots generally and could publish at any time.",
     },
   },
   {
@@ -118,7 +124,13 @@ export const STANDARDS_REGISTRY: readonly StandardRevision[] = [
     family: "AS9100",
     current: "AS9100D",
     effectiveFrom: "2016-09-20",
+    lastVerified: "2026-07-05",
     supersededRevisions: ["AS9100C", "AS9100B"],
+    inProgress: {
+      targetRevision: "IA9100",
+      estimatedEffectiveFrom: "2026-12-31",
+      note: "IAQG rebrand of AS9100, revised alongside ISO 9001's next edition; balloting under way with publication targeted Q4 2026 and a 2-3 year transition window expected.",
+    },
   },
   {
     family: "IATF 16949",
@@ -136,9 +148,12 @@ export const STANDARDS_REGISTRY: readonly StandardRevision[] = [
   },
   {
     family: "ASME Y14.41",
-    current: "ASME Y14.41-2019",
-    effectiveFrom: "2019-10-25",
-    supersededRevisions: ["ASME Y14.41-2012", "ASME Y14.41-2003"],
+    current: "ASME Y14.41-2026",
+    // ASME catalog lists the 2026 edition (asme.org/codes-standards/y14-standards);
+    // exact issue date not stated — year-start placeholder per registry convention.
+    effectiveFrom: "2026-01-01",
+    lastVerified: "2026-07-05",
+    supersededRevisions: ["ASME Y14.41-2019", "ASME Y14.41-2012", "ASME Y14.41-2003"],
   },
 
   // ─── ISA control hierarchy family ──────────────────────────────────────
