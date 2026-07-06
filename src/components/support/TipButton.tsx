@@ -59,6 +59,7 @@ export function TipButton({ variant = "floating", className }: TipButtonProps): 
 
   async function startCheckout(label: string, amountUsd: number): Promise<void> {
     setError(null);
+    setIsUnavailable(false);
     setPendingTier(label);
     void track("share_clicked", { contentType: "tip", contentId: label });
 
