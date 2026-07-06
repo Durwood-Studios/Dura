@@ -6,6 +6,8 @@ import {
   LayoutDashboard,
   MessageSquare,
   BarChart2,
+  BookOpen,
+  Flag,
   Users,
   HardDrive,
   ShieldAlert,
@@ -16,30 +18,37 @@ import { createClient } from "@/lib/supabase/client";
 
 const NAV = [
   { href: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
-  { href: "/admin/feedback", label: "Feedback", icon: MessageSquare },
   { href: "/admin/analytics", label: "Analytics", icon: BarChart2 },
+  { href: "/admin/content", label: "Content", icon: BookOpen },
   { href: "/admin/users", label: "Users", icon: Users },
-  { href: "/admin/local", label: "Local Tools", icon: HardDrive },
+  { href: "/admin/feedback", label: "Feedback", icon: MessageSquare },
+  { href: "/admin/annotations", label: "Moderation", icon: Flag },
+  { href: "/admin/local", label: "Local", icon: HardDrive },
 ];
 
-function AdminNav() {
+function AdminNav(): React.ReactElement {
   const pathname = usePathname();
 
-  async function handleSignOut() {
+  async function handleSignOut(): Promise<void> {
     const supabase = createClient();
     await supabase.auth.signOut({ scope: "local" });
     window.location.href = "/auth/sign-in";
   }
 
   return (
-    <aside className="flex h-screen w-56 shrink-0 flex-col border-r border-white/8 bg-[#0a0a10]">
+    <aside
+      data-lenis-prevent
+      className="flex h-screen w-56 shrink-0 flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-bg-primary)]"
+    >
       {/* Logo */}
       <div className="flex items-center gap-2 px-5 py-4">
-        <ShieldAlert className="h-4 w-4 text-red-400" />
-        <span className="text-sm font-semibold tracking-wide text-white">DURA Admin</span>
+        <ShieldAlert className="h-4 w-4 text-[var(--color-error)]" aria-hidden />
+        <span className="text-sm font-semibold tracking-wide text-[var(--color-text-primary)]">
+          DURA Admin
+        </span>
       </div>
 
-      <div className="mx-4 border-t border-white/8" />
+      <div className="mx-4 border-t border-[var(--color-border)]" />
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-0.5 px-3 pt-3">
@@ -50,10 +59,10 @@ function AdminNav() {
               key={href}
               href={href}
               className={cn(
-                "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition",
+                "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:outline-none",
                 active
-                  ? "bg-white/8 font-medium text-white"
-                  : "text-white/50 hover:bg-white/4 hover:text-white/80"
+                  ? "bg-[var(--color-bg-surface)] font-medium text-[var(--color-text-primary)]"
+                  : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)] hover:text-[var(--color-text-primary)]"
               )}
             >
               <Icon className="h-4 w-4 shrink-0" aria-hidden />
@@ -64,19 +73,19 @@ function AdminNav() {
       </nav>
 
       {/* Footer */}
-      <div className="border-t border-white/8 px-3 py-3">
+      <div className="border-t border-[var(--color-border)] px-3 py-3">
         <Link
           href="/"
-          className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs text-white/40 transition hover:text-white/70"
+          className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs text-[var(--color-text-muted)] transition hover:text-[var(--color-text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:outline-none"
         >
           ← Back to DURA
         </Link>
         <button
           type="button"
           onClick={() => void handleSignOut()}
-          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs text-white/40 transition hover:text-red-400"
+          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs text-[var(--color-text-muted)] transition hover:text-[var(--color-error)] focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] focus-visible:outline-none"
         >
-          <LogOut className="h-3.5 w-3.5" />
+          <LogOut className="h-3.5 w-3.5" aria-hidden />
           Sign out
         </button>
       </div>
@@ -84,9 +93,13 @@ function AdminNav() {
   );
 }
 
-export function AdminShell({ children }: { children: React.ReactNode }) {
+/**
+ * Admin layout shell: token-driven so it follows the site theme (dark
+ * canonical, light inversion) instead of the old hardcoded dark palette.
+ */
+export function AdminShell({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
-    <div className="flex min-h-screen bg-[#07070d] text-white">
+    <div className="flex min-h-screen bg-[var(--color-bg-primary)] text-[var(--color-text-primary)]">
       <AdminNav />
       <main className="flex-1 overflow-auto">{children}</main>
     </div>
