@@ -5,11 +5,11 @@ export default async function AdminAnalyticsPage() {
 
   const [eventsResult, countByNameResult] = await Promise.all([
     supabase
-      .from("analytics")
+      .from("analytics_events")
       .select("id, user_id, name, timestamp, properties")
       .order("timestamp", { ascending: false })
       .limit(100),
-    supabase.from("analytics").select("name").limit(10000),
+    supabase.from("analytics_events").select("name").limit(10000),
   ]);
 
   const { data: events, error } = eventsResult;

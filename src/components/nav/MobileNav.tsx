@@ -250,7 +250,7 @@ export function MobileDrawer(): React.ReactElement | null {
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 overflow-y-auto px-3 pb-4">
+        <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
           {DRAWER_SECTIONS.map((section, si) => (
             <div key={section.title || si} className="mb-1">
               {section.title && (
