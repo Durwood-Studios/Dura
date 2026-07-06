@@ -16,8 +16,14 @@ interface FeedbackRow {
 }
 
 interface FeedbackSearchParams {
-  category?: string;
-  page?: string;
+  // Next.js delivers repeated query params as arrays — normalize before use.
+  category?: string | string[];
+  page?: string | string[];
+}
+
+/** Collapses a possibly-repeated query param to its first value. */
+function firstParam(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 const PAGE_SIZE = 25;
@@ -90,12 +96,12 @@ export default async function AdminFeedbackPage({
 }): Promise<ReactElement> {
   const params = await searchParams;
 
-  const rawCategory = params.category ?? null;
+  const rawCategory = firstParam(params.category) ?? null;
   const activeCategory = CATEGORIES.includes(rawCategory as (typeof CATEGORIES)[number])
     ? rawCategory
     : null;
 
-  const parsedPage = Number.parseInt(params.page ?? "1", 10);
+  const parsedPage = Number.parseInt(firstParam(params.page) ?? "1", 10);
   const requestedPage = Number.isNaN(parsedPage) ? 1 : Math.max(1, parsedPage);
 
   const supabase = await createClient();

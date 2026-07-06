@@ -37,6 +37,14 @@ function parsePage(raw: string | string[] | undefined): number {
   return Number.isNaN(parsed) || parsed < 1 ? 1 : parsed;
 }
 
+/** Formats a joined date, degrading to an em dash instead of throwing on bad input. */
+function formatJoined(iso: string): string {
+  const parsed = new Date(iso);
+  // Intl.DateTimeFormat.format throws a RangeError on an Invalid Date, which
+  // would crash the whole server render for one malformed row.
+  return Number.isNaN(parsed.getTime()) ? "—" : joinedDate.format(parsed);
+}
+
 function StatCard({
   label,
   value,
@@ -162,6 +170,9 @@ export default async function AdminUsersPage({
   if (signupsResult.error)
     errors.push({ scope: "Signup chart", message: signupsResult.error.message });
   if (pageResult.error) errors.push({ scope: "Profiles table", message: pageResult.error.message });
+  for (const e of errors) {
+    console.error(`[admin/users] ${e.scope} query failed: ${e.message}`);
+  }
 
   const signupSeries = bucketByDay(
     (signupsResult.data ?? []).map((row: { created_at: string }) => ({
@@ -288,7 +299,7 @@ export default async function AdminUsersPage({
                       {profile.id.slice(0, 12)}…
                     </td>
                     <td className="px-4 py-3 text-right text-xs text-[var(--color-text-secondary)] tabular-nums">
-                      {joinedDate.format(new Date(profile.created_at))}
+                      {formatJoined(profile.created_at)}
                     </td>
                   </tr>
                 ))}

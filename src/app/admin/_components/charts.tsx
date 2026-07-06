@@ -68,6 +68,28 @@ function EmptyState({ label }: { label: string }): ReactElement {
   );
 }
 
+/**
+ * Largest finite value in the series, floored at 1 so scaling never divides
+ * by zero. A single NaN/Infinity row must not poison Math.max — that would
+ * turn every plotted coordinate into "NaN" and blank the whole chart.
+ */
+function finiteMax(values: number[]): number {
+  let max = 1;
+  for (const value of values) {
+    if (Number.isFinite(value) && value > max) max = value;
+  }
+  return max;
+}
+
+/**
+ * Clamps value/max to [0, 1]; non-finite or negative values plot at the
+ * baseline instead of emitting NaN coords or drawing outside the viewBox.
+ */
+function safeRatio(value: number, max: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(value / max, 1);
+}
+
 /** Formats a short human-readable date (e.g. "Jun 28") from an ISO date string. */
 function shortDate(iso: string): string {
   const parsed = new Date(`${iso}T00:00:00Z`);
@@ -93,17 +115,21 @@ export function Sparkline({
     return <EmptyState label={label} />;
   }
 
-  const max = Math.max(...points, 1);
+  const max = finiteMax(points);
   const pad = 2;
-  const innerW = width - pad * 2;
-  const innerH = height - pad * 2;
-  // A single point can't form a line — draw a flat segment across the width.
+  const innerW = Math.max(width - pad * 2, 1);
+  const innerH = Math.max(height - pad * 2, 1);
   const step = points.length > 1 ? innerW / (points.length - 1) : innerW;
   const coords = points.map((value, i) => {
-    const x = points.length > 1 ? pad + i * step : pad + innerW / 2;
-    const y = pad + innerH - (value / max) * innerH;
+    const x = pad + i * step;
+    const y = pad + innerH - safeRatio(value, max) * innerH;
     return `${x.toFixed(2)},${y.toFixed(2)}`;
   });
+  // A one-point polyline renders nothing — extend it into a flat segment.
+  if (points.length === 1) {
+    const y = pad + innerH - safeRatio(points[0], max) * innerH;
+    coords.push(`${(pad + innerW).toFixed(2)},${y.toFixed(2)}`);
+  }
 
   return (
     <svg
@@ -147,25 +173,28 @@ export function LineChart({
   // Axis labels are HTML now, so the plot only needs stroke clearance.
   const padTop = 8;
   const padBottom = 8;
-  const innerW = width - padLeft - padRight;
-  const innerH = height - padTop - padBottom;
-  const max = Math.max(...series.map((p) => p.value), 1);
-  const step = series.length > 1 ? innerW / (series.length - 1) : innerW;
+  const innerW = Math.max(width - padLeft - padRight, 1);
+  const innerH = Math.max(height - padTop - padBottom, 1);
+  const max = finiteMax(series.map((p) => p.value));
+  // A one-point polyline renders nothing (and its area polygon degenerates
+  // to a sliver) — plot a single day as a flat full-width segment instead.
+  const plot = series.length === 1 ? [series[0], series[0]] : series;
+  const step = innerW / (plot.length - 1);
 
   const xy = (point: LineChartSeriesPoint, i: number): [number, number] => {
-    const x = series.length > 1 ? padLeft + i * step : padLeft + innerW / 2;
-    const y = padTop + innerH - (point.value / max) * innerH;
+    const x = padLeft + i * step;
+    const y = padTop + innerH - safeRatio(point.value, max) * innerH;
     return [x, y];
   };
 
-  const linePoints = series.map((p, i) =>
+  const linePoints = plot.map((p, i) =>
     xy(p, i)
       .map((n) => n.toFixed(2))
       .join(",")
   );
   const baseline = padTop + innerH;
-  const [firstX] = xy(series[0], 0);
-  const [lastX] = xy(series[series.length - 1], series.length - 1);
+  const [firstX] = xy(plot[0], 0);
+  const [lastX] = xy(plot[plot.length - 1], plot.length - 1);
   const areaPath = `${linePoints.join(" ")} ${lastX.toFixed(2)},${baseline} ${firstX.toFixed(2)},${baseline}`;
 
   const midIndex = Math.floor(series.length / 2);
@@ -225,8 +254,10 @@ export function LineChart({
         aria-hidden
         className="mt-1 flex justify-between text-xs text-[var(--color-text-secondary)]"
       >
+        {/* Keyed by index: callers could pass duplicate dates, which would
+            collide as keys — tick indices are always unique. */}
         {ticks.map((i) => (
-          <span key={series[i].date}>{shortDate(series[i].date)}</span>
+          <span key={i}>{shortDate(series[i].date)}</span>
         ))}
       </div>
     </div>
@@ -247,17 +278,20 @@ export function BarChart({
     return <EmptyState label={label} />;
   }
 
-  const visible = items.slice(0, maxBars);
-  const max = Math.max(...visible.map((item) => item.value), 1);
+  // Clamp so maxBars <= 0 still shows at least one row (a bare empty <ul>
+  // is not an intentional empty state) and negatives don't slice from the end.
+  const visible = items.slice(0, Math.max(1, Math.floor(maxBars)));
+  const max = finiteMax(visible.map((item) => item.value));
 
   return (
     // A real list, not role="img": the labels/values are DOM text screen
     // readers should reach — only the decorative bar SVGs are hidden.
     <ul aria-label={label} className="flex list-none flex-col gap-2">
-      {visible.map((item) => {
-        const pct = Math.max((item.value / max) * 100, 0.5);
+      {visible.map((item, index) => {
+        const pct = Math.max(safeRatio(item.value, max) * 100, 0.5);
         return (
-          <li key={item.label} className="flex items-center gap-3">
+          // Label alone can't key the row: two users can share a display name.
+          <li key={`${index}-${item.label}`} className="flex items-center gap-3">
             <span
               title={item.label}
               className="w-32 shrink-0 truncate text-xs text-[var(--color-text-secondary)] sm:w-40"

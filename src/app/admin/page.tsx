@@ -194,7 +194,6 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
   // analytics_events.timestamp is bigint epoch-ms — filter numerically.
   const trendSinceMs = Date.now() - TREND_DAYS * DAY_MS;
   const todayStartMs = Math.floor(Date.now() / DAY_MS) * DAY_MS;
-  const todayStartIso = new Date(Math.floor(Date.now() / DAY_MS) * DAY_MS).toISOString();
 
   const [
     profilesCountRes,
@@ -249,6 +248,17 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
     return "Query failed — check RLS";
   };
 
+  // Resolve every result's error eagerly so each failure is console.error'd
+  // exactly once, even when a card also has a trend-query failure to report.
+  const profilesCountError = queryError("profiles count", profilesCountRes.error);
+  const eventsCountError = queryError("events count", eventsCountRes.error);
+  const feedbackCountError = queryError("feedback count", feedbackCountRes.error);
+  const eventsTodayError = queryError("events today", eventsTodayRes.error);
+  const eventsTrendError = queryError("events trend", eventTimestampsRes.error);
+  const profileTrendError = queryError("profiles trend", profileTrendRes.error);
+  const feedbackTrendError = queryError("feedback trend", feedbackTrendRes.error);
+  const recentFeedbackError = queryError("recent feedback", recentFeedbackRes.error);
+
   const eventSeries = bucketByDay(eventTimestampsRes.data ?? [], TREND_DAYS);
   const profileSeries = bucketByDay(
     (profileTrendRes.data ?? []).map((row) => ({ timestamp: row.created_at as string })),
@@ -278,7 +288,7 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
           note="Created profiles"
           trend={profileSeries.map((p) => p.value)}
           trendLabel={`New profiles per day, last ${TREND_DAYS} days`}
-          error={queryError("profiles count", profilesCountRes.error)}
+          error={profilesCountError ?? profileTrendError}
         />
         <StatCard
           label="Events"
@@ -288,7 +298,7 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
           note="Consent-gated, aggregated"
           trend={eventSeries.map((p) => p.value)}
           trendLabel={`Analytics events per day, last ${TREND_DAYS} days`}
-          error={queryError("events count", eventsCountRes.error)}
+          error={eventsCountError ?? eventsTrendError}
         />
         <StatCard
           label="Feedback"
@@ -298,14 +308,14 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
           note="All-time submissions"
           trend={feedbackSeries.map((p) => p.value)}
           trendLabel={`Feedback per day, last ${TREND_DAYS} days`}
-          error={queryError("feedback count", feedbackCountRes.error)}
+          error={feedbackCountError ?? feedbackTrendError}
         />
         <StatCard
           label="Events today"
           value={formatCount(eventsTodayRes.count ?? 0)}
           icon={<Zap className="h-4 w-4" />}
           note="Since midnight UTC"
-          error={queryError("events today", eventsTodayRes.error)}
+          error={eventsTodayError}
         />
         <TipsCard revenue={tipsRevenue} />
       </div>
@@ -315,7 +325,7 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
         <h2 className="mb-4 text-sm font-semibold text-[var(--color-text-primary)]">
           Events per day — last {TREND_DAYS} days
         </h2>
-        {eventTimestampsRes.error ? (
+        {eventsTrendError ? (
           <p className="py-6 text-center text-sm text-[var(--color-error)]">
             Couldn&apos;t load events — check the admin RLS policy and try again.
           </p>
@@ -346,7 +356,7 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
           </Link>
         </div>
 
-        {recentFeedbackRes.error ? (
+        {recentFeedbackError ? (
           <p className="py-6 text-center text-sm text-[var(--color-error)]">
             Couldn&apos;t load feedback — check the admin RLS policy and try again.
           </p>
@@ -356,32 +366,36 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
           </p>
         ) : (
           <ul className="divide-y divide-[var(--color-border)]">
-            {recentFeedbackRes.data.map((fb) => (
-              <li key={fb.id as string} className="flex items-start gap-3 py-3">
-                <span
-                  className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-xs font-medium tracking-wide uppercase ${
-                    fb.category === "bug"
-                      ? "bg-[var(--color-error)]/15 text-[var(--color-error)]"
-                      : fb.category === "feature"
-                        ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
-                        : fb.category === "content"
-                          ? "bg-[var(--color-warning)]/15 text-[var(--color-warning)]"
-                          : "bg-[var(--color-border)] text-[var(--color-text-secondary)]"
-                  }`}
-                >
-                  {fb.category as string}
-                </span>
-                <p className="line-clamp-2 flex-1 text-sm text-[var(--color-text-primary)]">
-                  {fb.message as string}
-                </p>
-                <time className="shrink-0 text-xs text-[var(--color-text-secondary)] tabular-nums">
-                  {new Intl.DateTimeFormat("en-US", {
-                    month: "short",
-                    day: "numeric",
-                  }).format(new Date(fb.created_at as string))}
-                </time>
-              </li>
-            ))}
+            {recentFeedbackRes.data.map((fb) => {
+              // category is nullable text — fall back so the pill never renders empty.
+              const category = (fb.category as string | null) ?? "other";
+              return (
+                <li key={fb.id as string} className="flex items-start gap-3 py-3">
+                  <span
+                    className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-xs font-medium tracking-wide uppercase ${
+                      category === "bug"
+                        ? "bg-[var(--color-error)]/15 text-[var(--color-error)]"
+                        : category === "feature"
+                          ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                          : category === "content"
+                            ? "bg-[var(--color-warning)]/15 text-[var(--color-warning)]"
+                            : "bg-[var(--color-border)] text-[var(--color-text-secondary)]"
+                    }`}
+                  >
+                    {category}
+                  </span>
+                  <p className="line-clamp-2 flex-1 text-sm text-[var(--color-text-primary)]">
+                    {fb.message as string}
+                  </p>
+                  <time className="shrink-0 text-xs text-[var(--color-text-secondary)] tabular-nums">
+                    {new Intl.DateTimeFormat("en-US", {
+                      month: "short",
+                      day: "numeric",
+                    }).format(new Date(fb.created_at as string))}
+                  </time>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

@@ -26,7 +26,10 @@ interface RecentEventRow {
  * date past 30 days so old rows stay readable.
  */
 function relativeTime(value: string | number, now: number): string {
-  const ms = typeof value === "number" ? value : Date.parse(value);
+  // Bigint epoch-ms can serialize as a numeric string — Date.parse would
+  // NaN on it, so parse digit-only strings as epoch ms directly.
+  const ms =
+    typeof value === "number" ? value : /^\d+$/.test(value) ? Number(value) : Date.parse(value);
   if (Number.isNaN(ms)) return String(value);
   const diffSec = Math.max(0, Math.round((now - ms) / 1000));
   if (diffSec < 60) return "just now";

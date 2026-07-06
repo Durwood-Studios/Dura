@@ -1,9 +1,13 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 
-type ModerationStatus = "approved" | "rejected";
+const AnnotationIdSchema = z.uuid();
+const StatusSchema = z.enum(["approved", "rejected"]);
+
+type ModerationStatus = z.infer<typeof StatusSchema>;
 
 export interface ModerationResult {
   error: string | null;
@@ -20,6 +24,13 @@ export async function moderateAnnotation(
   annotationId: string,
   newStatus: ModerationStatus
 ): Promise<ModerationResult> {
+  // Server actions are public endpoints — validate args before touching the DB.
+  const idResult = AnnotationIdSchema.safeParse(annotationId);
+  const statusResult = StatusSchema.safeParse(newStatus);
+  if (!idResult.success || !statusResult.success) {
+    return { error: "Invalid moderation request." };
+  }
+
   const supabase = await createClient();
 
   const {
@@ -37,14 +48,31 @@ export async function moderateAnnotation(
     return { error: "Insufficient permissions." };
   }
 
-  const { error } = await supabase
+  const { data: updated, error } = await supabase
     .from("annotations")
-    .update({ status: newStatus, updated_at: new Date().toISOString() })
-    .eq("id", annotationId);
+    .update({ status: statusResult.data, updated_at: new Date().toISOString() })
+    .eq("id", idResult.data)
+    .select("id");
 
   if (error) {
     console.error("[moderateAnnotation] Supabase update error:", error.message);
     return { error: `Database error: ${error.message}` };
+  }
+
+  // RLS silently filters rows it won't let us update — a 0-row update is a
+  // failure, not a success. This fires if the annotation no longer exists OR
+  // the admin_update_annotations policy (staged migration 20260629000005)
+  // has not been applied to the live project yet.
+  if (!updated || updated.length === 0) {
+    console.error(
+      "[moderateAnnotation] Update affected 0 rows for annotation",
+      idResult.data,
+      "— annotation missing, or admin_update_annotations RLS policy not applied."
+    );
+    return {
+      error:
+        "Update was blocked. The annotation may have been removed, or the admin moderation policy (admin_update_annotations) is not applied to the database yet.",
+    };
   }
 
   revalidatePath("/admin/annotations");

@@ -13,11 +13,26 @@ function utcDayKey(ms: number): string {
 }
 
 /**
+ * Parses a row timestamp into epoch milliseconds (NaN when unparseable).
+ *
+ * Bigint epoch-ms columns (analytics_events.timestamp, xp_events.awarded_at,
+ * lesson_progress.started_at/completed_at) normally arrive as JSON numbers,
+ * but can surface as digit strings through generated types or JSON paths —
+ * Date.parse rejects those, so digit strings are converted numerically.
+ * ISO timestamptz strings (created_at etc.) go through Date.parse.
+ */
+function toEpochMs(timestamp: string | number): number {
+  if (typeof timestamp === "number") return timestamp;
+  if (/^-?\d+$/.test(timestamp.trim())) return Number(timestamp);
+  return Date.parse(timestamp);
+}
+
+/**
  * Buckets timestamped rows into zero-filled continuous UTC day buckets
  * ending today. Rows with unparseable timestamps or timestamps outside
  * the window are ignored, so bounded fetches degrade gracefully.
  *
- * @param rows - Rows carrying an ISO timestamp string.
+ * @param rows - Rows carrying an epoch-ms number (bigint columns) or ISO timestamp string.
  * @param days - Number of day buckets to return (today inclusive). Must be >= 1.
  * @returns One entry per day, oldest first: { date: "YYYY-MM-DD", value: count }.
  */
@@ -34,9 +49,12 @@ export function bucketByDay(
     counts.set(utcDayKey(todayStart - i * DAY_MS), 0);
   }
 
+  const windowStart = todayStart - (safeDays - 1) * DAY_MS;
   for (const row of rows) {
-    const ms = typeof row.timestamp === "number" ? row.timestamp : Date.parse(row.timestamp);
-    if (Number.isNaN(ms)) continue;
+    const ms = toEpochMs(row.timestamp);
+    // Bounds-check before utcDayKey: non-finite or out-of-Date-range values
+    // make Date#toISOString throw, and out-of-window rows can never count.
+    if (!Number.isFinite(ms) || ms < windowStart || ms >= todayStart + DAY_MS) continue;
     const key = utcDayKey(Math.floor(ms / DAY_MS) * DAY_MS);
     const current = counts.get(key);
     if (current !== undefined) {
@@ -84,7 +102,7 @@ export function formatCount(n: number): string {
  * distinct user_ids seen in the last 1 and 7 days (rolling, UTC clock).
  * Rows with invalid timestamps are ignored.
  *
- * @param rows - Events carrying a user_id and ISO timestamp.
+ * @param rows - Events carrying a user_id and an epoch-ms number or ISO timestamp.
  * @returns Distinct-user counts: { dau, wau }.
  */
 export function dauWau(rows: { user_id: string; timestamp: string | number }[]): {
@@ -98,8 +116,8 @@ export function dauWau(rows: { user_id: string; timestamp: string | number }[]):
   const daily = new Set<string>();
   const weekly = new Set<string>();
   for (const row of rows) {
-    const ms = typeof row.timestamp === "number" ? row.timestamp : Date.parse(row.timestamp);
-    if (Number.isNaN(ms) || ms > now) continue;
+    const ms = toEpochMs(row.timestamp);
+    if (!Number.isFinite(ms) || ms > now) continue;
     if (ms >= weekAgo) {
       weekly.add(row.user_id);
       if (ms >= dayAgo) {
