@@ -29,7 +29,7 @@ export default async function AdminOverviewPage() {
 
   const [feedbackResult, analyticsResult, profilesResult] = await Promise.all([
     supabase.from("feedback").select("*", { count: "exact", head: true }),
-    supabase.from("analytics").select("*", { count: "exact", head: true }),
+    supabase.from("analytics_events").select("*", { count: "exact", head: true }),
     supabase.from("profiles").select("*", { count: "exact", head: true }),
   ]);
 
