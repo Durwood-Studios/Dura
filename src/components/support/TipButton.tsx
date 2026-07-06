@@ -101,7 +101,8 @@ export function TipButton({ variant = "floating", className }: TipButtonProps): 
       aria-label="Support the developer"
       className={cn(
         variant === "floating" &&
-          "fixed right-6 bottom-[calc(96px+env(safe-area-inset-bottom)+8px)] z-40 inline-flex h-12 w-12 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg-surface)] text-rose-500 shadow-lg transition hover:scale-105 hover:bg-rose-50 lg:bottom-6",
+          // dura-tip-floating is a stable hook so focus/print modes can hide the heart
+          "dura-tip-floating fixed right-6 bottom-[calc(96px+env(safe-area-inset-bottom)+8px)] z-40 inline-flex h-12 w-12 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg-surface)] text-rose-500 shadow-lg transition hover:scale-105 hover:bg-rose-50 lg:bottom-6",
         variant === "inline" &&
           "inline-flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-4 py-2 text-sm font-medium text-[var(--color-text-primary)] transition hover:bg-[var(--color-bg-subtle)]",
         pulseOnce && variant === "floating" && "tip-pulse-once",

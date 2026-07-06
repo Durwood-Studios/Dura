@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ExternalLink, GitBranch, Heart, Scale } from "lucide-react";
 import { buildMetadata } from "@/lib/og";
+import { TipButton } from "@/components/support/TipButton";
 
 export const metadata: Metadata = buildMetadata({
   title: "Open Source",
@@ -157,7 +158,7 @@ export default function OpenSourcePage(): React.ReactElement {
             Goals, gamification, study modes · <strong>shipped</strong>
           </li>
           <li>
-            Marketing pages, TipButton · <strong>in progress</strong>
+            Marketing pages, TipButton (Stripe tips) · <strong>shipped</strong>
           </li>
           <li>Teacher dashboard and export engine · next</li>
           <li>Content sprint — all 539 lessons and 500 dictionary terms · after</li>
@@ -202,6 +203,9 @@ export default function OpenSourcePage(): React.ReactElement {
             <ExternalLink className="h-4 w-4" />
             github.com/Durwood-Studios/Dura
           </a>
+          <div className="mt-3 flex justify-center">
+            <TipButton variant="inline" />
+          </div>
           <div className="mt-3 flex items-center justify-center gap-3 text-xs text-[var(--color-text-muted)]">
             <Link href="/how-it-works" className="hover:text-emerald-600">
               How it works
