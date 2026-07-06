@@ -170,7 +170,10 @@ export function Sidebar(): React.ReactElement {
       <div className="dura-divider mx-4" />
 
       {/* ── Navigation groups ──────────────────────────────────────── */}
-      <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3 pt-3 pb-2">
+      <nav
+        data-lenis-prevent
+        className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3 pt-3 pb-2"
+      >
         {NAV_GROUPS.map((group, groupIdx) => (
           <div key={group.label}>
             {groupIdx > 0 && <div className="dura-divider mx-2 my-2.5" />}
