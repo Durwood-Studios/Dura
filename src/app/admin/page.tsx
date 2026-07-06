@@ -191,6 +191,9 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
   const supabase = await createClient();
 
   const trendSinceIso = new Date(Date.now() - TREND_DAYS * DAY_MS).toISOString();
+  // analytics_events.timestamp is bigint epoch-ms — filter numerically.
+  const trendSinceMs = Date.now() - TREND_DAYS * DAY_MS;
+  const todayStartMs = Math.floor(Date.now() / DAY_MS) * DAY_MS;
   const todayStartIso = new Date(Math.floor(Date.now() / DAY_MS) * DAY_MS).toISOString();
 
   const [
@@ -210,14 +213,14 @@ export default async function AdminOverviewPage(): Promise<ReactElement> {
     supabase
       .from("analytics_events")
       .select("*", { count: "exact", head: true })
-      .gte("timestamp", todayStartIso),
+      .gte("timestamp", todayStartMs),
     // Order newest-first so the .limit() truncation deterministically drops
     // the oldest rows instead of an arbitrary Postgres subset (matches
     // analytics/page.tsx).
     supabase
       .from("analytics_events")
       .select("timestamp")
-      .gte("timestamp", trendSinceIso)
+      .gte("timestamp", trendSinceMs)
       .order("timestamp", { ascending: false })
       .limit(10000),
     supabase

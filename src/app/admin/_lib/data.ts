@@ -22,7 +22,7 @@ function utcDayKey(ms: number): string {
  * @returns One entry per day, oldest first: { date: "YYYY-MM-DD", value: count }.
  */
 export function bucketByDay(
-  rows: { timestamp: string }[],
+  rows: { timestamp: string | number }[],
   days: number
 ): { date: string; value: number }[] {
   const safeDays = Math.max(1, Math.floor(days));
@@ -35,7 +35,7 @@ export function bucketByDay(
   }
 
   for (const row of rows) {
-    const ms = Date.parse(row.timestamp);
+    const ms = typeof row.timestamp === "number" ? row.timestamp : Date.parse(row.timestamp);
     if (Number.isNaN(ms)) continue;
     const key = utcDayKey(Math.floor(ms / DAY_MS) * DAY_MS);
     const current = counts.get(key);
@@ -87,7 +87,7 @@ export function formatCount(n: number): string {
  * @param rows - Events carrying a user_id and ISO timestamp.
  * @returns Distinct-user counts: { dau, wau }.
  */
-export function dauWau(rows: { user_id: string; timestamp: string }[]): {
+export function dauWau(rows: { user_id: string; timestamp: string | number }[]): {
   dau: number;
   wau: number;
 } {
@@ -98,7 +98,7 @@ export function dauWau(rows: { user_id: string; timestamp: string }[]): {
   const daily = new Set<string>();
   const weekly = new Set<string>();
   for (const row of rows) {
-    const ms = Date.parse(row.timestamp);
+    const ms = typeof row.timestamp === "number" ? row.timestamp : Date.parse(row.timestamp);
     if (Number.isNaN(ms) || ms > now) continue;
     if (ms >= weekAgo) {
       weekly.add(row.user_id);

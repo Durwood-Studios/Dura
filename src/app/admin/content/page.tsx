@@ -16,7 +16,7 @@ import { countBy } from "../_lib/data";
 interface ContentEventRow {
   name: string;
   properties: unknown;
-  timestamp: string;
+  timestamp: string | number;
 }
 
 /** Event-name fragments each chart listens for (shown in the empty explainer). */

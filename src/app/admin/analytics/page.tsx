@@ -8,7 +8,7 @@ import { bucketByDay, countBy, dauWau, formatCount } from "../_lib/data";
 interface AggregateEventRow {
   name: string;
   user_id: string | null;
-  timestamp: string;
+  timestamp: string | number;
 }
 
 /** Row shape for the recent-events table. */
@@ -16,7 +16,7 @@ interface RecentEventRow {
   id: string;
   user_id: string | null;
   name: string;
-  timestamp: string;
+  timestamp: string | number;
   properties: unknown;
 }
 
@@ -25,9 +25,9 @@ interface RecentEventRow {
  * Falls back to the raw string when unparseable, and to an absolute
  * date past 30 days so old rows stay readable.
  */
-function relativeTime(iso: string, now: number): string {
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return iso;
+function relativeTime(value: string | number, now: number): string {
+  const ms = typeof value === "number" ? value : Date.parse(value);
+  if (Number.isNaN(ms)) return String(value);
   const diffSec = Math.max(0, Math.round((now - ms) / 1000));
   if (diffSec < 60) return "just now";
   const rtf = new Intl.RelativeTimeFormat("en-US", { numeric: "always", style: "narrow" });
@@ -86,7 +86,8 @@ function QueryError({ scope, message }: { scope: string; message: string }): Rea
 export default async function AdminAnalyticsPage(): Promise<ReactElement> {
   const supabase = await createClient();
   const now = Date.now();
-  const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+  // analytics_events.timestamp is bigint epoch-ms — filter numerically.
+  const thirtyDaysAgoMs = now - 30 * 24 * 60 * 60 * 1000;
 
   const [totalResult, aggregateResult, recentResult] = await Promise.all([
     // Exact count via head request — no rows transferred.
@@ -96,7 +97,7 @@ export default async function AdminAnalyticsPage(): Promise<ReactElement> {
     supabase
       .from("analytics_events")
       .select("name, user_id, timestamp")
-      .gte("timestamp", thirtyDaysAgo)
+      .gte("timestamp", thirtyDaysAgoMs)
       .order("timestamp", { ascending: false })
       .limit(10000),
     supabase
@@ -262,7 +263,7 @@ export default async function AdminAnalyticsPage(): Promise<ReactElement> {
                       </td>
                       <td
                         className="px-4 py-2.5 text-xs whitespace-nowrap text-[var(--color-text-secondary)] tabular-nums"
-                        title={ev.timestamp}
+                        title={String(ev.timestamp)}
                       >
                         {relativeTime(ev.timestamp, now)}
                       </td>
