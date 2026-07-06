@@ -226,7 +226,7 @@ export function MobileDrawer(): React.ReactElement | null {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 lg:hidden">
+    <div data-lenis-prevent className="fixed inset-0 z-50 lg:hidden">
       <button
         type="button"
         aria-label="Close navigation"
