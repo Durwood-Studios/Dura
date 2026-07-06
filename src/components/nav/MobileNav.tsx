@@ -40,6 +40,7 @@ interface DrawerUser {
   email: string;
   name: string | null;
   avatarUrl: string | null;
+  isAdmin: boolean;
 }
 
 interface DrawerStats {
@@ -184,6 +185,8 @@ export function MobileDrawer(): React.ReactElement | null {
             email: sbUser.email ?? "",
             name: (sbUser.user_metadata?.full_name as string | null) ?? null,
             avatarUrl: (sbUser.user_metadata?.avatar_url as string | null) ?? null,
+            // is_admin lives in app_metadata — server-only, cannot be self-modified
+            isAdmin: (sbUser.app_metadata?.is_admin as boolean | undefined) === true,
           });
         }
       } catch {
@@ -291,6 +294,37 @@ export function MobileDrawer(): React.ReactElement | null {
               })}
             </div>
           ))}
+
+          {/* ── Admin (only for accounts with the server-set is_admin claim) ── */}
+          {user?.isAdmin && (
+            <div className="mb-1">
+              <div className="mx-3 my-3 border-t border-[var(--color-border)]" />
+              <p className="mt-4 mb-1 px-3 font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
+                Admin
+              </p>
+              <Link
+                href="/admin"
+                onClick={() => close(false)}
+                className={cn(
+                  "flex items-center gap-3 rounded-lg px-3 py-3.5 text-sm transition",
+                  pathname.startsWith("/admin")
+                    ? "bg-[var(--color-bg-accent)] font-medium text-[var(--color-accent)]"
+                    : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
+                )}
+              >
+                <ShieldCheck
+                  className={cn(
+                    "h-4 w-4 shrink-0",
+                    pathname.startsWith("/admin")
+                      ? "text-[var(--color-accent)]"
+                      : "text-[var(--color-text-muted)]"
+                  )}
+                  aria-hidden
+                />
+                Dashboard
+              </Link>
+            </div>
+          )}
         </nav>
 
         {/* Feedback */}
