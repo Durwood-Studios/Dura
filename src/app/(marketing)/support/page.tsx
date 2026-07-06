@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { CheckCircle2 } from "lucide-react";
-import { SupportTip } from "@/components/support/SupportTip";
-import { isTippingEnabled } from "@/lib/payments/stripe";
+import { TipButton } from "@/components/support/TipButton";
 
 export const metadata: Metadata = {
   title: "Support the developer — DURA",
@@ -10,13 +9,17 @@ export const metadata: Metadata = {
     "DURA is free forever. If it helped you, a voluntary tip supports continued development. It unlocks nothing — the whole platform is already open and free.",
 };
 
+/**
+ * Post-checkout landing page for the tip flow (Stripe redirects here with
+ * ?status=thanks|canceled). The TipButton modal is the single money surface;
+ * this page just says thank you and re-offers it inline.
+ */
 export default async function SupportPage({
   searchParams,
 }: {
   searchParams: Promise<{ status?: string }>;
 }): Promise<React.ReactElement> {
   const { status } = await searchParams;
-  const tippingEnabled = isTippingEnabled();
 
   return (
     <main className="mx-auto max-w-[560px] px-6 py-16">
@@ -51,22 +54,9 @@ export default async function SupportPage({
         </div>
       )}
 
-      {tippingEnabled ? (
-        <SupportTip />
-      ) : (
-        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 text-center text-sm text-[var(--color-text-secondary)]">
-          Tipping isn’t enabled on this deployment. The best free way to help:{" "}
-          <a
-            href="https://github.com/Durwood-Studios/Dura"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[var(--color-accent)] hover:underline"
-          >
-            star the repo
-          </a>{" "}
-          or share DURA with someone learning.
-        </div>
-      )}
+      <div className="flex justify-center">
+        <TipButton variant="inline" />
+      </div>
 
       <div className="mt-8 space-y-3 text-sm leading-relaxed text-[var(--color-text-secondary)]">
         <p>
