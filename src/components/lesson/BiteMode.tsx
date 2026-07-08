@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { usePreferencesStore } from "@/stores/preferences";
+import { useProgressStore } from "@/stores/progress";
 
 interface BiteModeProps {
   children: React.ReactNode;
@@ -69,6 +70,14 @@ function BiteSegmentView({
   const total = segments.length;
   const canPrev = current > 0;
   const canNext = current < total - 1;
+
+  // Window-scroll is meaningless here (ScrollTracker stands down in bite
+  // mode) — report reading progress as segments viewed; the store keeps
+  // the running max.
+  const setScroll = useProgressStore((s) => s.setScroll);
+  useEffect(() => {
+    if (total > 0) setScroll(Math.round(((current + 1) / total) * 100));
+  }, [current, total, setScroll]);
 
   const prev = useCallback(() => {
     if (canPrev) setCurrent((c) => c - 1);

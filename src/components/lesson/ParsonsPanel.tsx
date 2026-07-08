@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useProgressStore } from "@/stores/progress";
 import { ArrowUp, ArrowDown, ChevronRight, ChevronLeft, X } from "lucide-react";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
@@ -57,6 +58,13 @@ export function ParsonsPanel({
   const [result, setResult] = useState<"idle" | "correct" | "wrong">("idle");
   const [revealed, setRevealed] = useState(false);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  // A correct arrangement satisfies the lesson's quiz requirement —
+  // ParsonsPanel counts toward hasQuiz, so it must also be able to pass it.
+  const passQuiz = useProgressStore((s) => s.passQuiz);
+  useEffect(() => {
+    if (result === "correct" && !revealed) passQuiz();
+  }, [result, revealed, passQuiz]);
 
   const moveToTarget = (id: string) => {
     if (revealed) return;

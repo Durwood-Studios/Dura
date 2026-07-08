@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check } from "lucide-react";
 import { track } from "@/lib/analytics";
+import { useProgressStore } from "@/stores/progress";
 import { cn } from "@/lib/utils";
 
 interface FillBlankProps {
@@ -51,6 +52,13 @@ export function FillBlank(props: FillBlankProps): React.ReactElement {
   );
 
   const allCorrect = blanks.every((b) => b.status === "correct");
+
+  // Completing every blank satisfies the lesson's quiz requirement —
+  // FillBlank counts toward hasQuiz, so it must also be able to pass it.
+  const passQuiz = useProgressStore((s) => s.passQuiz);
+  useEffect(() => {
+    if (allCorrect) passQuiz();
+  }, [allCorrect, passQuiz]);
 
   const focusNext = (i: number) => {
     const next = inputRefs.current[i + 1];
