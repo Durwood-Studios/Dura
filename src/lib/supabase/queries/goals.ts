@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/client";
+import type { GoalRow } from "@/lib/supabase/row-contracts";
 import type { Goal } from "@/types/goal";
 
 /**
@@ -11,16 +12,18 @@ import type { Goal } from "@/types/goal";
 export async function syncGoals(userId: string, goals: Goal[]): Promise<void> {
   try {
     const supabase = createClient();
-    const rows = goals.map((goal) => ({
+    // GoalRow pins started_at/deadline/achieved_at to epoch-ms numbers —
+    // the columns are bigint; ISO strings fail the insert.
+    const rows: GoalRow[] = goals.map((goal) => ({
       id: goal.id,
       user_id: userId,
       type: goal.type,
       unit: goal.unit,
       target: goal.target,
       current: goal.current,
-      started_at: new Date(goal.startedAt).toISOString(),
-      deadline: goal.deadline ? new Date(goal.deadline).toISOString() : null,
-      achieved_at: goal.achievedAt ? new Date(goal.achievedAt).toISOString() : null,
+      started_at: goal.startedAt,
+      deadline: goal.deadline,
+      achieved_at: goal.achievedAt,
       label: goal.label,
     }));
 
@@ -55,9 +58,9 @@ export async function fetchGoals(userId: string): Promise<Goal[]> {
       unit: row.unit as Goal["unit"],
       target: Number(row.target),
       current: Number(row.current),
-      startedAt: new Date(row.started_at as string).getTime(),
-      deadline: row.deadline ? new Date(row.deadline as string).getTime() : null,
-      achievedAt: row.achieved_at ? new Date(row.achieved_at as string).getTime() : null,
+      startedAt: Number(row.started_at),
+      deadline: row.deadline === null ? null : Number(row.deadline),
+      achievedAt: row.achieved_at === null ? null : Number(row.achieved_at),
       label: row.label as string,
     }));
   } catch (err) {

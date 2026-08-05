@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/client";
 import { isAnalyticsEnabled } from "@/lib/analytics/consent-gate";
+import type { AnalyticsEventRow, XPEventRow } from "@/lib/supabase/row-contracts";
 import type { AnalyticsEvent } from "@/types/analytics";
 import type { XPEvent } from "@/types/xp";
 
@@ -27,11 +28,13 @@ export async function batchSyncAnalytics(userId: string, events: AnalyticsEvent[
   if (!isAnalyticsEnabled()) return;
   try {
     const supabase = createClient();
-    const rows = events.map((event) => ({
+    // AnalyticsEventRow pins timestamp to epoch-ms number — an ISO string
+    // here fails the insert ("invalid input syntax for type bigint").
+    const rows: AnalyticsEventRow[] = events.map((event) => ({
       id: event.id,
       user_id: userId,
       name: event.name,
-      timestamp: new Date(event.timestamp).toISOString(),
+      timestamp: event.timestamp,
       properties: event.properties,
     }));
 
@@ -62,13 +65,15 @@ export async function batchSyncAnalytics(userId: string, events: AnalyticsEvent[
 export async function syncXPEvents(userId: string, events: XPEvent[]): Promise<void> {
   try {
     const supabase = createClient();
-    const rows = events.map((event) => ({
+    // XPEventRow pins awarded_at to epoch-ms number — an ISO string here
+    // fails the insert ("invalid input syntax for type bigint").
+    const rows: XPEventRow[] = events.map((event) => ({
       id: event.id,
       user_id: userId,
       source: event.source,
       amount: event.amount,
       source_id: event.sourceId,
-      awarded_at: new Date(event.awardedAt).toISOString(),
+      awarded_at: event.awardedAt,
     }));
 
     const { error } = await supabase

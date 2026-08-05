@@ -1,8 +1,14 @@
 import { createClient } from "@/lib/supabase/client";
+import type { CertificateRow } from "@/lib/supabase/row-contracts";
 import type { Certificate } from "@/types/assessment";
 
-/** Row shape returned by the get_certificate_by_hash RPC function. */
-interface CertificateRow {
+/**
+ * Row shape returned by the get_certificate_by_hash RPC function.
+ * completed_at is bigint epoch-ms and PostgREST serializes bigint as a
+ * JSON number, but keep string in the union so a driver change can't
+ * silently break parsing.
+ */
+interface CertificateRpcRow {
   id: string;
   phase_id: string;
   user_id: string | null;
@@ -10,7 +16,7 @@ interface CertificateRow {
   phase_title: string;
   score: number;
   total_questions: number;
-  completed_at: string;
+  completed_at: number | string;
   verification_hash: string;
   standards: string[];
 }
@@ -25,7 +31,9 @@ interface CertificateRow {
 export async function syncCertificates(userId: string, certs: Certificate[]): Promise<void> {
   try {
     const supabase = createClient();
-    const rows = certs.map((cert) => ({
+    // CertificateRow pins completed_at to an epoch-ms number — the
+    // column is bigint; an ISO string fails the insert.
+    const rows: CertificateRow[] = certs.map((cert) => ({
       id: cert.id,
       user_id: userId,
       phase_id: cert.phaseId,
@@ -33,7 +41,7 @@ export async function syncCertificates(userId: string, certs: Certificate[]): Pr
       phase_title: cert.phaseTitle,
       score: cert.score,
       total_questions: cert.totalQuestions,
-      completed_at: new Date(cert.completedAt).toISOString(),
+      completed_at: cert.completedAt,
       verification_hash: cert.verificationHash,
       standards: cert.standards,
     }));
@@ -71,7 +79,7 @@ export async function fetchCertificates(userId: string): Promise<Certificate[]> 
       phaseTitle: row.phase_title as string,
       score: Number(row.score),
       totalQuestions: Number(row.total_questions),
-      completedAt: new Date(row.completed_at as string).getTime(),
+      completedAt: Number(row.completed_at),
       verificationHash: row.verification_hash as string,
       standards: row.standards as string[],
     }));
@@ -93,7 +101,7 @@ export async function getCertificateByHash(hash: string): Promise<Certificate | 
     const supabase = createClient();
     const { data, error } = await supabase.rpc("get_certificate_by_hash", { hash }).single();
 
-    const row = data as unknown as CertificateRow | null;
+    const row = data as unknown as CertificateRpcRow | null;
 
     if (error) {
       // PGRST116 = no rows found, which is expected for invalid hashes
@@ -116,7 +124,7 @@ export async function getCertificateByHash(hash: string): Promise<Certificate | 
       phaseTitle: row.phase_title,
       score: Number(row.score),
       totalQuestions: Number(row.total_questions),
-      completedAt: new Date(row.completed_at).getTime(),
+      completedAt: Number(row.completed_at),
       verificationHash: row.verification_hash,
       standards: row.standards,
     };

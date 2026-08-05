@@ -55,8 +55,8 @@ export async function fetchLessonProgress(userId: string): Promise<LessonProgres
       lessonId: row.lesson_id as string,
       phaseId: row.phase_id as string,
       moduleId: row.module_id as string,
-      startedAt: new Date(row.started_at as string).getTime(),
-      completedAt: row.completed_at ? new Date(row.completed_at as string).getTime() : null,
+      startedAt: Number(row.started_at),
+      completedAt: row.completed_at === null ? null : Number(row.completed_at),
       scrollPercent: Number(row.scroll_percent),
       timeSpentMs: Number(row.time_spent_ms),
       quizPassed: row.quiz_passed as boolean,
@@ -92,7 +92,7 @@ export async function fetchModuleProgress(userId: string): Promise<ModuleProgres
       completedLessons: Number(row.completed_lessons),
       totalLessons: Number(row.total_lessons),
       masteryGatePassed: row.mastery_gate_passed as boolean,
-      unlockedAt: new Date(row.unlocked_at as string).getTime(),
+      unlockedAt: Number(row.unlocked_at),
     }));
   } catch (err) {
     console.error("[fetchModuleProgress] Failed to fetch:", err);
