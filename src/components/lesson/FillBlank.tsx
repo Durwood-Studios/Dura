@@ -52,13 +52,25 @@ export function FillBlank(props: FillBlankProps): React.ReactElement {
   );
 
   const allCorrect = blanks.every((b) => b.status === "correct");
+  const anyRevealed = blanks.some((b) => b.revealed);
 
-  // Completing every blank satisfies the lesson's quiz requirement —
-  // FillBlank counts toward hasQuiz, so it must also be able to pass it.
+  // FillBlank counts toward hasQuiz, so it must be able to pass it —
+  // but only a genuine solve proves recall. Revealed answers finish the
+  // exercise without passing (mirrors ParsonsPanel), and the empty-
+  // answers guard stops a malformed lesson from passing on mount.
+  // retry() below reopens revealed blanks so the gate stays reachable.
+  const passedGenuinely = safeAnswers.length > 0 && allCorrect && !anyRevealed;
   const passQuiz = useProgressStore((s) => s.passQuiz);
   useEffect(() => {
-    if (allCorrect) passQuiz();
-  }, [allCorrect, passQuiz]);
+    if (passedGenuinely) passQuiz();
+  }, [passedGenuinely, passQuiz]);
+
+  const retry = (): void => {
+    setValues((vs) => vs.map((v, i) => (blanks[i].revealed ? "" : v)));
+    setBlanks((bs) =>
+      bs.map((b) => (b.revealed ? { attempts: 0, status: "idle" as const, revealed: false } : b))
+    );
+  };
 
   const focusNext = (i: number) => {
     const next = inputRefs.current[i + 1];
@@ -172,9 +184,20 @@ export function FillBlank(props: FillBlankProps): React.ReactElement {
         </button>
       )}
       {allCorrect && (
-        <p className="mt-4 text-sm font-medium text-emerald-600">
-          {blanks.some((b) => b.revealed) ? "Got it — keep practicing." : "All correct."}
-        </p>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <p className="text-sm font-medium text-emerald-600">
+            {anyRevealed ? "Answers revealed — try again from memory to pass." : "All correct."}
+          </p>
+          {anyRevealed && (
+            <button
+              type="button"
+              onClick={retry}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-subtle)]"
+            >
+              Try again
+            </button>
+          )}
+        </div>
       )}
     </section>
   );

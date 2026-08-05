@@ -213,6 +213,11 @@ function SandboxControls({
         ? "text-amber-600"
         : "text-rose-600";
 
+  // The Sandpack console echoes each statement's return value, so plain
+  // console.log lines are followed by "undefined" — learners read that
+  // as breakage. Coach it away once a run shows repeated echoes.
+  const undefinedEchoes = logs.filter((l) => extractLogText(l.data) === "undefined").length;
+
   // Animate the verdict icon only on a genuine pass with at least one
   // evaluated test (so the celebration earns its mount). Replays on the
   // verdict transition so a learner re-running gets a fresh confirmation.
@@ -268,6 +273,13 @@ function SandboxControls({
           </span>
         )}
       </div>
+      {verdict !== "idle" && undefinedEchoes >= 2 && (
+        <p className="border-b border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-2 text-xs text-[var(--color-text-muted)]">
+          Seeing <code className="font-mono">undefined</code> in the console? That&apos;s the
+          console echoing each statement&apos;s return value —{" "}
+          <code className="font-mono">console.log</code> returns undefined. It&apos;s not an error.
+        </p>
+      )}
       {testCases.length > 0 && (
         <ul className="flex flex-col gap-1 border-b border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-3 text-xs">
           {testCases.map((tc) => {

@@ -1,7 +1,7 @@
 import type { AssessmentQuestion } from "@/types/assessment";
 
 /**
- * Phase 12 question bank — 54 questions across 9 modules.
+ * Phase 12 question bank — 39 questions across 9 modules.
  * Covers modern C++ for HFT, IEEE 754 numerics, cache-aware programming,
  * lock-free data structures, kernel-bypass networking, ITCH/OUCH market data,
  * FIX protocol, the order-book capstone, and quant finance mathematics.

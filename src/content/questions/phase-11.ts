@@ -1,7 +1,7 @@
 import type { AssessmentQuestion } from "@/types/assessment";
 
 /**
- * Phase 11 question bank — 50 questions across 10 modules.
+ * Phase 11 question bank — 41 questions across 10 modules.
  * Covers SystemVerilog basics, UVM architecture, constrained-random stimulus,
  * functional coverage, UVM sequences, SVA/formal verification, UPF low-power,
  * capstone UART TB, clock-domain crossing, and FPGA emulation.
