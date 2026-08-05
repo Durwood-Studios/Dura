@@ -19,9 +19,13 @@ export function generateId(prefix?: string): string {
   return prefix ? `${prefix}_${id}` : id;
 }
 
-/** Format milliseconds as a human-readable duration. */
+/**
+ * Format milliseconds as a human-readable duration. Non-finite input
+ * (NaN from degraded/undecryptable records) renders as "0s" — a NaN
+ * must never reach the screen.
+ */
 export function formatTime(ms: number): string {
-  if (ms < 1000) return "0s";
+  if (!Number.isFinite(ms) || ms < 1000) return "0s";
   const totalSeconds = Math.round(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -31,8 +35,9 @@ export function formatTime(ms: number): string {
   return `${seconds}s`;
 }
 
-/** Format a duration in minutes for "estimated time" UI. */
+/** Format a duration in minutes for "estimated time" UI. NaN-safe. */
 export function formatMinutes(minutes: number): string {
+  if (!Number.isFinite(minutes)) return "0 min";
   if (minutes < 60) return `${minutes} min`;
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
@@ -40,8 +45,9 @@ export function formatMinutes(minutes: number): string {
   return `${hours}h ${mins}m`;
 }
 
-/** Format a count with K/M suffixes. */
+/** Format a count with K/M suffixes. NaN-safe. */
 export function formatCount(n: number): string {
+  if (!Number.isFinite(n)) return "0";
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;

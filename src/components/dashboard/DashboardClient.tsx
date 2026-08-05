@@ -44,12 +44,18 @@ async function loadDashboard(): Promise<DashboardData> {
     const xpEvents = await getAllXPEvents();
     let activityPoints = 0;
     let masteryPoints = 0;
+    // Degraded records (e.g. encrypted rows with no active key) can carry
+    // undefined numeric fields — one NaN in a sum poisons every card.
     for (const evt of xpEvents) {
       const pt = POINT_TYPE_MAP[evt.source];
-      if (pt === "mp") masteryPoints += evt.amount;
-      else activityPoints += evt.amount;
+      const amount = Number.isFinite(evt.amount) ? evt.amount : 0;
+      if (pt === "mp") masteryPoints += amount;
+      else activityPoints += amount;
     }
-    const totalTimeMs = allProgress.reduce((sum, p) => sum + p.timeSpentMs, 0);
+    const totalTimeMs = allProgress.reduce(
+      (sum, p) => sum + (Number.isFinite(p.timeSpentMs) ? p.timeSpentMs : 0),
+      0
+    );
     const streak = await getCurrentStreak();
     const due = await getDueCards();
     let nextDue: number | null = null;
@@ -62,10 +68,10 @@ async function loadDashboard(): Promise<DashboardData> {
     }
     const lastLesson =
       allProgress.slice().sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0] ?? null;
-    const earliestStartedAt =
-      allProgress.length > 0
-        ? Math.min(...allProgress.map((p) => p.startedAt).filter((t) => t > 0))
-        : null;
+    const startTimes = allProgress
+      .map((p) => p.startedAt)
+      .filter((t) => Number.isFinite(t) && t > 0);
+    const earliestStartedAt = startTimes.length > 0 ? Math.min(...startTimes) : null;
 
     // Determine which phases are fully completed
     const completedByPhase = new Map<string, number>();
@@ -476,7 +482,7 @@ export function DashboardClient(): React.ReactElement {
 
 function formatRelativeFromNow(timestamp: number, now: number = Date.now()): string {
   const ms = timestamp - now;
-  if (ms <= 0) return "now";
+  if (!Number.isFinite(ms) || ms <= 0) return "now";
   const minutes = Math.round(ms / 60_000);
   if (minutes < 60) return `in ${minutes}m`;
   const hours = Math.round(minutes / 60);

@@ -15,7 +15,8 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
   const complete = useGoalsStore((s) => s.complete);
   const achieved = goal.achievedAt !== null;
 
-  const ratio = goal.target === 0 ? 0 : Math.min(1, progress / goal.target);
+  const rawRatio = goal.target === 0 ? 0 : Math.min(1, progress / goal.target);
+  const ratio = Number.isFinite(rawRatio) ? rawRatio : 0;
   const percent = Math.round(ratio * 100);
 
   // Deadline-aware pacing color

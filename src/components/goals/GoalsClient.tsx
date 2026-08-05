@@ -45,7 +45,10 @@ async function computeProgress(goals: Goal[]): Promise<Map<string, number>> {
         } else if (goal.unit === "minutes") {
           const todayRecords = allProgress.filter((p) => (p.completedAt ?? p.startedAt) >= today);
           const minutes = Math.round(
-            todayRecords.reduce((sum, p) => sum + p.timeSpentMs, 0) / 60_000
+            todayRecords.reduce(
+              (sum, p) => sum + (Number.isFinite(p.timeSpentMs) ? p.timeSpentMs : 0),
+              0
+            ) / 60_000
           );
           progressMap.set(goal.id, minutes);
         }
