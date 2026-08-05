@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import dynamic from "next/dynamic";
 import { Nav } from "@/components/splash/Nav";
 import { Footer } from "@/components/splash/Footer";
+import { TOTAL_LESSONS, TOTAL_PHASES } from "@/lib/curriculum-stats";
 
 const Hero = dynamic(() => import("@/components/splash/Hero").then((m) => m.Hero));
 const PathSelector = dynamic(() =>
@@ -14,8 +15,7 @@ const CTA = dynamic(() => import("@/components/splash/CTA").then((m) => m.CTA));
 
 export const metadata: Metadata = {
   title: "DURA — Engineering Education, Free Forever",
-  description:
-    "An open-source learning platform from your first click to engineering leadership. 15 phases, 539 lessons, offline-first.",
+  description: `An open-source learning platform from your first click to engineering leadership. ${TOTAL_PHASES} phases, ${TOTAL_LESSONS} lessons, offline-first.`,
 };
 
 export default function Home(): React.ReactElement {

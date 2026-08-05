@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { listAllLessons } from "@/lib/curriculum";
+import { TOTAL_LESSONS, TOTAL_MODULES, TOTAL_PHASES } from "@/lib/curriculum-stats";
 import { PrintChrome } from "@/components/teacher/PrintChrome";
 import { formatMinutes } from "@/lib/utils";
 
@@ -25,7 +26,8 @@ export default async function CurriculumMapPage(): Promise<React.ReactElement> {
         </p>
         <h1 className="mt-1 text-4xl font-semibold">Engineering education, hardened by design</h1>
         <p className="mt-3 text-sm text-[var(--color-text-secondary)]">
-          15 phases · 118 modules · 539 lessons · ~3,500 hours · Free forever
+          {TOTAL_PHASES} phases · {TOTAL_MODULES} modules · {TOTAL_LESSONS} lessons · ~3,500 hours ·
+          Free forever
         </p>
         <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
           Currently {authoredTotal} lessons authored. Generated{" "}

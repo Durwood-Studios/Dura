@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ExternalLink, GitBranch, Heart, Scale } from "lucide-react";
 import { buildMetadata } from "@/lib/og";
+import { TOTAL_LESSONS } from "@/lib/curriculum-stats";
 import { TipButton } from "@/components/support/TipButton";
 
 export const metadata: Metadata = buildMetadata({
@@ -161,7 +162,7 @@ export default function OpenSourcePage(): React.ReactElement {
             Marketing pages, TipButton (Stripe tips) · <strong>shipped</strong>
           </li>
           <li>Teacher dashboard and export engine · next</li>
-          <li>Content sprint — all 539 lessons and 500 dictionary terms · after</li>
+          <li>Content sprint — all {TOTAL_LESSONS} lessons and 500 dictionary terms · after</li>
           <li>Polish, PWA, accessibility audit, launch · last</li>
         </ol>
       </section>

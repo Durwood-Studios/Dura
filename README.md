@@ -15,11 +15,11 @@
 
 ---
 
-A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 539 lessons across 15 phases, a technical dictionary, spaced-repetition flashcards, code sandboxes, and cross-device sync — all offline-capable, all free forever.
+A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 660 lessons across 15 phases, a technical dictionary, spaced-repetition flashcards, code sandboxes, and cross-device sync — all offline-capable, all free forever.
 
 ## Features
 
-- **539 lessons** across 15 phases — Digital Literacy through specialty engineering tracks
+- **660 lessons** across 15 phases — Digital Literacy through specialty engineering tracks
 - **Learning paths / career tracks** — structured progressions with skill graphs
 - **FSRS-5 spaced repetition** — flashcard system for long-term retention
 - **Code sandboxes** — write and run code in-browser with templates, fullscreen, console, and save management
@@ -83,7 +83,7 @@ Next.js 15 (App Router) · TypeScript strict · Tailwind v4 · Supabase (19 tabl
 | 13    | Robotics                   | 12      |
 | 14    | Manufacturing              | 16      |
 
-**Total: 15 phases · 539 lessons**
+**Total: 15 phases · 660 lessons**
 
 Standards: ACM CS2023 · SWEBOK v4 · SFIA 9 · CSTA K-12 · AP CS Principles · AP CS A · ISTE
 

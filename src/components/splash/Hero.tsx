@@ -2,14 +2,15 @@
 
 import { motion, useReducedMotion } from "motion/react";
 import Link from "next/link";
+import { TOTAL_LESSONS, TOTAL_PHASES } from "@/lib/curriculum-stats";
 
 interface StatChip {
   label: string;
 }
 
 const STATS: StatChip[] = [
-  { label: "539 Lessons" },
-  { label: "15 Phases" },
+  { label: `${TOTAL_LESSONS} Lessons` },
+  { label: `${TOTAL_PHASES} Phases` },
   { label: "3,500+ Hours" },
   { label: "Free Forever" },
 ];

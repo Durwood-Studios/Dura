@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight, Shield, BookOpen, Code2 } from "lucide-react";
 import { buildMetadata } from "@/lib/og";
+import { TOTAL_LESSONS, TOTAL_MODULES, TOTAL_PHASES } from "@/lib/curriculum-stats";
 import { TipButton } from "@/components/support/TipButton";
 
 export const metadata: Metadata = buildMetadata({
@@ -42,8 +43,9 @@ export default function AboutPage(): React.ReactElement {
           at every step — what would that look like?
         </p>
         <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          The answer is 15 phases, 118 modules, 539 lessons, and hardened assessments between every
-          step. Built by one person in the open, because that&apos;s the only way to keep it honest.
+          The answer is {TOTAL_PHASES} phases, {TOTAL_MODULES} modules, {TOTAL_LESSONS} lessons, and
+          hardened assessments between every step. Built by one person in the open, because
+          that&apos;s the only way to keep it honest.
         </p>
       </section>
 
