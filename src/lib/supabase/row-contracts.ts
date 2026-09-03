@@ -113,4 +113,6 @@ export const EPOCH_MS_COLUMNS: Record<string, readonly string[]> = {
   xp_events: ["awarded_at"],
   sandbox_saves: ["created_at", "updated_at"],
   track_progress: ["completed_at"],
+  tutorial_progress: ["started_at", "completed_at"],
+  dojo_sessions: ["started_at", "completed_at"],
 };

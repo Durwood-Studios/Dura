@@ -23,7 +23,11 @@ const MIGRATIONS_DIR = path.resolve(process.cwd(), "supabase/migrations");
  */
 function epochMsColumnsFromDDL(): Record<string, string[]> {
   const tables: Record<string, string[]> = {};
-  const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql"));
+  // Recursive: migrations live in "Already Ran/" and "Need To Run/" subfolders,
+  // and DDL must stay contract-checked before it is applied, not after.
+  const files = readdirSync(MIGRATIONS_DIR, { recursive: true, encoding: "utf8" }).filter((f) =>
+    f.endsWith(".sql")
+  );
   expect(files.length).toBeGreaterThan(0);
 
   for (const file of files) {
@@ -42,7 +46,11 @@ function epochMsColumnsFromDDL(): Record<string, string[]> {
       if (!currentTable) continue;
       const colMatch = line.match(/^\s+(\w+)\s+bigint\b.*--\s*epoch ms/i);
       if (colMatch) {
-        (tables[currentTable] ??= []).push(colMatch[1]);
+        // Dedupe: a table can be declared `if not exists` in more than one
+        // migration (tutorial_progress is in both 014 and 20260629000004),
+        // and the manifest lists each column once.
+        const columns = (tables[currentTable] ??= []);
+        if (!columns.includes(colMatch[1])) columns.push(colMatch[1]);
       }
     }
   }
