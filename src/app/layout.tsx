@@ -3,6 +3,7 @@ import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import { ThemeProvider } from "@/components/providers/ThemeProvider";
 import { AnalyticsProvider } from "@/components/providers/AnalyticsProvider";
+import { ChunkRecovery } from "@/components/pwa/ChunkRecovery";
 import "./globals.css";
 
 /**
@@ -114,6 +115,7 @@ export default function RootLayout({
               "<!-- You're reading the source. That's exactly the kind of curiosity DURA is built for. github.com/Durwood-Studios/Dura -->",
           }}
         />
+        <ChunkRecovery />
         <ThemeProvider>
           <AnalyticsProvider>{children}</AnalyticsProvider>
         </ThemeProvider>
