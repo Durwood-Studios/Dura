@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { buildPlan } from "@/lib/prescription/engine";
 import { buildLiveInputs } from "@/lib/prescription/sources";
 import type { DailyPlan } from "@/lib/prescription/types";
@@ -57,12 +58,26 @@ export function LiveDailyPrescription(): React.ReactElement {
   }
 
   if (status.kind === "error") {
+    // Degraded, not broken: local records were unreadable (commonly a
+    // key waiting on sign-in). Keep the learner moving instead of
+    // showing a red wall — their data is intact on this device.
     return (
-      <section className="rounded-xl border border-[var(--color-rating-again)]/30 bg-[var(--color-rating-again)]/5 p-5">
+      <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5">
         <p className="text-sm font-semibold text-[var(--color-text-primary)]">
-          Could not build a plan from local data.
+          Today&apos;s plan is taking a break.
         </p>
-        <p className="mt-1 text-xs text-[var(--color-text-muted)]">{status.message}</p>
+        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+          Your saved work is safe on this device — we just can&apos;t read it for planning right
+          now. Signing in usually brings it back. Meanwhile, picking up where you left off works
+          fine.
+        </p>
+        <Link
+          href="/paths"
+          className="mt-3 inline-flex items-center rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600"
+        >
+          Continue learning
+        </Link>
+        <p className="mt-3 font-mono text-xs text-[var(--color-text-muted)]">{status.message}</p>
       </section>
     );
   }

@@ -31,6 +31,7 @@
 import { deriveEncryptionKey, forgetEncryptionKeys } from "./encryption";
 
 const DEVICE_SECRET_KEY = "dura:idb:device-secret";
+const LAST_AUTH_UID_KEY = "dura:idb:last-auth-uid";
 
 export type EncryptionKeyTier = "auth" | "device" | "unavailable";
 
@@ -64,6 +65,47 @@ export async function resolveEncryptionKey(
   const seed = `device:${deviceSecret}`;
   const key = await deriveEncryptionKey(seed);
   return { tier: "device", key, seed };
+}
+
+/**
+ * Remember the signed-in auth UID so the auth-tier key stays derivable
+ * when the backend is unreachable (paused project, offline, DNS gone).
+ * Without this, a failed session refresh downgraded the app to the
+ * device-tier key and every auth-tier record read as "no active
+ * encryption key" — locking a learner out of their own local data.
+ *
+ * The UID adds no attack surface on this device: Supabase already
+ * persists the full session (UID included) in localStorage. This copy
+ * just survives session expiry, which the SDK's copy does not. Cleared
+ * on explicit sign-out only — never on a network failure.
+ */
+export function rememberLastAuthUser(uid: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LAST_AUTH_UID_KEY, uid);
+  } catch (err) {
+    console.error("[encryption-key] Failed to persist last auth uid:", err);
+  }
+}
+
+/** Last signed-in auth UID, or null if none recorded / storage blocked. */
+export function readLastAuthUser(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(LAST_AUTH_UID_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Explicit sign-out: the auth-tier key must no longer be derivable. */
+export function forgetLastAuthUser(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(LAST_AUTH_UID_KEY);
+  } catch {
+    // storage blocked — nothing to forget
+  }
 }
 
 /**

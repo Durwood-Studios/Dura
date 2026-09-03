@@ -3,7 +3,12 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { fullSync, startBackgroundSync, stopBackgroundSync } from "@/lib/supabase/sync";
-import { resolveEncryptionKey } from "@/lib/idb/encryption-key";
+import {
+  resolveEncryptionKey,
+  rememberLastAuthUser,
+  readLastAuthUser,
+  forgetLastAuthUser,
+} from "@/lib/idb/encryption-key";
 import { setActiveKey } from "@/lib/idb/active-key";
 import type { User } from "@supabase/supabase-js";
 
@@ -50,19 +55,26 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
   useEffect(() => {
     const supabase = createClient();
 
-    // Get initial session
+    // Boot from the LOCALLY cached session — getSession() reads storage
+    // and never blocks on the network. getUser() (a network validation
+    // call) used to run here, and when the backend was unreachable it
+    // reported "no user", downgrading the app to the device-tier key
+    // while every record was encrypted under the auth tier — the learner
+    // was locked out of their own local data. Offline-first means the
+    // cloud can never be required just to READ what's on this device.
     supabase.auth
-      .getUser()
-      .then(({ data: { user: initialUser } }) => {
-        setUser(initialUser);
+      .getSession()
+      .then(({ data: { session } }) => {
+        const bootUser = session?.user ?? null;
+        setUser(bootUser);
         setLoading(false);
 
-        // Install the IDB encryption key as early as possible so the
-        // first flashcard read/write has a key in scope. Runs for both
-        // anonymous (device tier) and signed-in (auth tier) sessions.
-        void installEncryptionKey(initialUser?.id ?? null);
+        if (bootUser) rememberLastAuthUser(bootUser.id);
+        // No resolvable session (expired + refresh unreachable) still
+        // decrypts with the last signed-in user's key — reads are local.
+        void installEncryptionKey(bootUser?.id ?? readLastAuthUser());
 
-        if (initialUser && !syncTriggeredRef.current) {
+        if (bootUser && !syncTriggeredRef.current) {
           syncTriggeredRef.current = true;
           fullSync().catch((err: unknown) => {
             console.error("[auth] Initial sync failed:", err);
@@ -72,33 +84,41 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       })
       .catch(() => {
         setLoading(false);
-        // Even on auth error, install the device-tier key so anonymous
-        // mode encryption still works.
-        void installEncryptionKey(null);
+        void installEncryptionKey(readLastAuthUser());
       });
 
     // Listen for auth changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       const sessionUser = session?.user ?? null;
       setUser(sessionUser);
       setLoading(false);
 
-      // Re-install the encryption key on every auth change so
-      // sign-in / sign-out flips the key tier correctly.
-      void installEncryptionKey(sessionUser?.id ?? null);
-
       if (sessionUser) {
-        // User signed in — trigger full sync and start background sync
-        fullSync().catch((err: unknown) => {
-          console.error("[auth] Sync on auth change failed:", err);
-        });
+        rememberLastAuthUser(sessionUser.id);
+        void installEncryptionKey(sessionUser.id);
+        // Guarded: this event also fires on TOKEN_REFRESHED and
+        // INITIAL_SESSION — a full sync per hourly refresh is waste.
+        if (!syncTriggeredRef.current) {
+          syncTriggeredRef.current = true;
+          fullSync().catch((err: unknown) => {
+            console.error("[auth] Sync on auth change failed:", err);
+          });
+        }
         startBackgroundSync();
-      } else {
-        // User signed out — stop background sync
+      } else if (event === "SIGNED_OUT") {
+        // Explicit sign-out: drop the auth-tier key entirely.
+        forgetLastAuthUser();
+        void installEncryptionKey(null);
         stopBackgroundSync();
         syncTriggeredRef.current = false;
+      } else {
+        // Session lost without a sign-out (refresh failed while the
+        // backend is unreachable). Keep decrypting with the last known
+        // auth key; pause sync until a real session returns.
+        void installEncryptionKey(readLastAuthUser());
+        stopBackgroundSync();
       }
     });
 
