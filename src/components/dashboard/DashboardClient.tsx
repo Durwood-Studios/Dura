@@ -147,7 +147,11 @@ function getStreakMessage(days: number): string | null {
 
 const COMEBACK_STORAGE_KEY = "dura-comeback-dismissed";
 
-export function DashboardClient(): React.ReactElement {
+export function DashboardClient({
+  lessonTitles = {},
+}: {
+  lessonTitles?: Record<string, string>;
+}): React.ReactElement {
   const [data, setData] = useState<DashboardData | null>(null);
   const [comebackDismissed, setComebackDismissed] = useState(false);
   const showStreak = usePreferencesStore((s) => s.prefs.showStreak);
@@ -307,7 +311,7 @@ export function DashboardClient(): React.ReactElement {
       </div>
 
       {/* ── Today's prescription ────────────────────────────────────── */}
-      <LiveDailyPrescription />
+      <LiveDailyPrescription lessonTitles={lessonTitles} />
 
       {/* ── Stat cards ──────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

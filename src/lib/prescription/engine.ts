@@ -1,5 +1,5 @@
+import { lessonRouteId } from "@/lib/lesson-identity";
 import {
-  ADVANCE_STREAK,
   MINUTES_PER_CARD,
   PRESSURE_BUCKETS,
   REMEDIATION_STREAK,
@@ -49,7 +49,7 @@ export function buildPlan(inputs: PrescriptionInputs): DailyPlan {
     blocks.push(fsrsBlock(inputs.fsrs.dueNow, fsrsMinutes));
   }
 
-  const advanceBlocks = splitAdvance(advanceMinutes, inputs.phase, inputs.session);
+  const advanceBlocks = splitAdvance(advanceMinutes, inputs.phase);
   blocks.push(...advanceBlocks);
 
   const signalQuality = computeSignalQuality(inputs);
@@ -70,7 +70,7 @@ function isFreshLearner(inputs: PrescriptionInputs): boolean {
   const atPhaseZero =
     inputs.phase.currentPhase === 0 &&
     inputs.phase.lessonsCompletedInModule === 0 &&
-    inputs.phase.currentLessonId === "01";
+    lessonRouteId(inputs.phase.currentLessonId) === "01";
   return noFsrs && atPhaseZero;
 }
 
@@ -121,14 +121,17 @@ function lessonBlock(phase: PhaseProgress, minutes: number, suffix?: string): Pl
     phase.lessonsInModule > 0
       ? Math.round((phase.lessonsCompletedInModule / phase.lessonsInModule) * 100)
       : 0;
-  const target = `Lesson ${phase.currentPhase}.${phase.currentModuleId.split("-")[1] ?? "x"}.${phase.currentLessonId}`;
+  const target = "Your current lesson";
   return {
     kind: "lesson",
     minutes,
-    title: suffix ? `Lesson advance · ${suffix}` : "Lesson advance",
+    title: suffix ? "Take it at your own pace" : "Continue learning",
     target,
-    href: `/paths/${phase.currentPhase}/${phase.currentModuleId}/${phase.currentLessonId}`,
-    rationale: `${progressFraction}% through Phase ${phase.currentPhase} Module ${phase.currentModuleId}.`,
+    href: `/paths/${phase.currentPhase}/${phase.currentModuleId}/${lessonRouteId(phase.currentLessonId)}`,
+    rationale:
+      progressFraction > 0
+        ? `${phase.lessonsCompletedInModule} of ${phase.lessonsInModule} lessons complete in this module.`
+        : "Read the explanation, try the practice, then check what you learned.",
   };
 }
 
@@ -150,7 +153,7 @@ function remediationBlock(phase: PhaseProgress, minutes: number, topic: string):
     minutes,
     title: "Focused remediation",
     target: topic,
-    href: `/paths/${phase.currentPhase}/${phase.currentModuleId}/${phase.currentLessonId}`,
+    href: `/paths/${phase.currentPhase}/${phase.currentModuleId}/${lessonRouteId(phase.currentLessonId)}`,
     rationale: `Three consecutive "again" ratings on this topic — re-deriving from scratch beats grinding more cards.`,
   };
 }
@@ -159,10 +162,10 @@ function freshStartBlock(minutes: number): PlanBlock {
   return {
     kind: "fresh-start",
     minutes,
-    title: "Begin Phase 0 — How Computers Think",
-    target: "Lesson 0.1.01",
+    title: "Start with the foundations",
+    target: "How Computers Think",
     href: "/paths/0/0-1/01",
-    rationale: "No prior signal yet. Starting at the beginning is the honest move.",
+    rationale: "Discover how computers represent information, then try it for yourself.",
   };
 }
 
@@ -170,13 +173,9 @@ function freshStartBlock(minutes: number): PlanBlock {
 // Advance-time splitter
 // ─────────────────────────────────────────────────────────────────────────────
 
-function splitAdvance(
-  minutes: number,
-  phase: PhaseProgress,
-  session: SessionSignal | undefined
-): PlanBlock[] {
+function splitAdvance(minutes: number, phase: PhaseProgress): PlanBlock[] {
   if (minutes < 1) return [];
-  if (minutes <= TARGET_BLOCK_MINUTES + 2) {
+  if (!phase.masteryGate.available || minutes <= TARGET_BLOCK_MINUTES + 2) {
     return [lessonBlock(phase, minutes)];
   }
   const blocks: PlanBlock[] = [];
@@ -193,10 +192,6 @@ function splitAdvance(
     return blocks;
   }
 
-  // If the session shows easy-rating streaks, advance to the next lesson
-  // section. Otherwise stay on the current lesson.
-  const onEasyStreak = consecutiveTail(session?.recentRatings ?? [], "easy") >= ADVANCE_STREAK;
-  blocks.push(lessonBlock(phase, remaining, onEasyStreak ? "next section" : "continued"));
   return blocks;
 }
 
@@ -232,8 +227,7 @@ function coldStartPlan(inputs: PrescriptionInputs): DailyPlan {
     totalMinutes: minutes,
     blocks,
     signalQuality: "fresh",
-    summary:
-      "No history yet — today is a clean start. The plan keeps it simple: open Phase 0, work the first lesson, see how far you get.",
+    summary: "Begin with one lesson. Take your time with the examples and practice.",
   };
 }
 
@@ -267,9 +261,9 @@ function summarize(
   const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0);
   const honesty =
     signalQuality === "fresh"
-      ? "No signal yet"
+      ? "A little time to build your skills"
       : signalQuality === "warming"
-        ? "Limited signal"
+        ? "Build on what you have learned"
         : "Calibrated to your recent work";
   const debt =
     inputs.fsrs.dueNow >= 50

@@ -148,3 +148,25 @@ describe("buildPlan — block links", () => {
     }
   });
 });
+
+describe("durable lesson identities in daily plans", () => {
+  it("recognizes the first lesson after progress ID migration", () => {
+    const inputs = { ...COLD_START, phase: { ...COLD_START.phase, currentLessonId: "0/0-1/01" } };
+    const plan = buildPlan(inputs);
+    expect(plan.blocks).toHaveLength(1);
+    expect(plan.blocks[0].href).toBe("/paths/0/0-1/01");
+    expect(plan.summary).not.toContain("signal");
+  });
+  it("keeps one lesson as one step and creates a valid route", () => {
+    const inputs = {
+      ...LIGHT_REVIEW_DAY,
+      fsrs: { dueNow: 0, newCount: 1, oldestOverdueDays: 0 },
+      phase: { ...LIGHT_REVIEW_DAY.phase, currentLessonId: "2/2-1/04" },
+    };
+    const plan = buildPlan(inputs);
+    expect(plan.blocks).toHaveLength(1);
+    expect(plan.blocks[0].minutes).toBe(30);
+    expect(plan.blocks[0].href.split("/")).toHaveLength(5);
+    expect(plan.blocks[0].target).not.toContain("/04");
+  });
+});

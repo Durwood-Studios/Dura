@@ -20,7 +20,11 @@ type Status =
  * positions when reads fail, so the engine still produces a plan — usually the
  * fresh-start plan. The UI never blocks on a database error.
  */
-export function LiveDailyPrescription(): React.ReactElement {
+export function LiveDailyPrescription({
+  lessonTitles = {},
+}: {
+  lessonTitles?: Record<string, string>;
+}): React.ReactElement {
   const [status, setStatus] = useState<Status>({ kind: "loading" });
 
   useEffect(() => {
@@ -82,5 +86,5 @@ export function LiveDailyPrescription(): React.ReactElement {
     );
   }
 
-  return <DailyPrescription plan={status.plan} />;
+  return <DailyPrescription plan={status.plan} lessonTitles={lessonTitles} />;
 }

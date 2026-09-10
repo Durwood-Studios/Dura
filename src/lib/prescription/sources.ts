@@ -1,3 +1,4 @@
+import { lessonRouteId } from "@/lib/lesson-identity";
 /**
  * Live source adapters — the impure side of the daily prescription.
  *
@@ -93,7 +94,7 @@ export function derivePhaseProgress(progressRecords: LessonProgress[]): PhasePro
   return {
     currentPhase: phaseIdToNumber(focus.phaseId),
     currentModuleId: focus.moduleId,
-    currentLessonId: focus.lessonId,
+    currentLessonId: lessonRouteId(focus.lessonId),
     lessonsCompletedInModule: completedInModule,
     lessonsInModule,
     masteryGate: {
