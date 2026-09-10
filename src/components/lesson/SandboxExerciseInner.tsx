@@ -12,7 +12,13 @@ import {
 import { Play, RotateCcw, Eye, Check, X, Circle } from "lucide-react";
 import { track } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
-import { buildHarnessJs, INDEX_HTML, PASS_MARKER, FAIL_MARKER } from "@/lib/sandbox/harness";
+import {
+  buildHarnessJs,
+  INDEX_HTML,
+  PASS_MARKER,
+  FAIL_MARKER,
+  MANUAL_MARKER,
+} from "@/lib/sandbox/harness";
 import { CircleCheckIcon } from "@/components/ui/circle-check";
 import { usePlayOnMount } from "@/components/celebration/usePlayOnMount";
 
@@ -45,8 +51,7 @@ const LANGUAGE_FILE_MAP = {
   html: "/index.html",
 } as const satisfies Record<SandboxLanguage, string>;
 
-type TestState = "pending" | "pass" | "fail";
-type Verdict = "idle" | "pass" | "fail" | "partial";
+import { gradeExercise, type TestState, type Verdict } from "@/lib/sandbox/verdict";
 
 const SANDPACK_THEME = {
   colors: {
@@ -120,6 +125,8 @@ function SandboxControls({
       const text = extractLogText(log.data);
       if (text.startsWith(PASS_MARKER)) {
         map.set(text.slice(PASS_MARKER.length), "pass");
+      } else if (text.startsWith(MANUAL_MARKER)) {
+        map.set(text.slice(MANUAL_MARKER.length), "manual");
       } else if (text.startsWith(FAIL_MARKER)) {
         map.set(text.slice(FAIL_MARKER.length), "fail");
       }
@@ -136,45 +143,11 @@ function SandboxControls({
       pendingCheck.current = false;
 
       const hasErrors = logs.some((l) => l.method === "error");
-      const hasOutput = logs.some(
-        (l) => (l.method === "log" || l.method === "info") && extractLogText(l.data).length > 0
-      );
-
-      // Lock the per-testcase state from this run.
       setTestStates(new Map(markers));
-
-      const evaluable = Array.from(markers.values());
-      const failed = evaluable.filter((s) => s === "fail").length;
-      const passed = evaluable.filter((s) => s === "pass").length;
-
-      if (hasErrors) {
-        setVerdict("fail");
-        setVerdictMessage("Check the errors above");
-      } else if (evaluable.length > 0) {
-        if (failed === 0) {
-          setVerdict("pass");
-          setVerdictMessage(
-            `${passed} of ${evaluable.length} check${passed === 1 ? "" : "s"} passed`
-          );
-        } else if (passed > 0) {
-          setVerdict("partial");
-          setVerdictMessage(`${passed} of ${evaluable.length} checks passed`);
-        } else {
-          setVerdict("fail");
-          setVerdictMessage(`0 of ${evaluable.length} checks passed`);
-        }
-      } else if (!hasOutput) {
-        setVerdict("fail");
-        setVerdictMessage("No output — did your code run?");
-      } else {
-        setVerdict("pass");
-        setVerdictMessage(testCases.length > 0 ? "Ran — verify the checks below" : "Ran cleanly");
-      }
-
-      void track("sandbox_executed", {
-        language,
-        success: !hasErrors && (evaluable.length === 0 ? hasOutput : failed === 0),
-      });
+      const result = gradeExercise(testCases, markers, hasErrors);
+      setVerdict(result.verdict);
+      setVerdictMessage(result.message);
+      void track("sandbox_executed", { language, success: result.success });
     }, 800);
 
     return () => clearTimeout(timer);
@@ -191,6 +164,7 @@ function SandboxControls({
   }, [sandpack, resetLogs]);
 
   const reset = () => {
+    pendingCheck.current = false;
     sandpack.updateFile(mainFile, initialCode);
     setVerdict("idle");
     setVerdictMessage("");
@@ -199,6 +173,7 @@ function SandboxControls({
   };
 
   const showSolution = () => {
+    pendingCheck.current = false;
     sandpack.updateFile(mainFile, solution);
     setVerdict("idle");
     setVerdictMessage("");
@@ -255,6 +230,8 @@ function SandboxControls({
         )}
         {verdict !== "idle" && (
           <span
+            role="status"
+            aria-live="polite"
             className={cn(
               "inline-flex w-full items-center gap-1 text-xs font-medium sm:ml-auto sm:w-auto",
               verdictColor

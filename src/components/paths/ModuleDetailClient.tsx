@@ -1,5 +1,6 @@
 "use client";
 
+import { lessonIdentity } from "@/lib/lesson-identity";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, ChevronLeft, Check } from "lucide-react";
@@ -78,19 +79,19 @@ export function ModuleDetailClient({
       ) : (
         <ul className="flex flex-col gap-2">
           {lessons.map((lesson) => {
-            const record = progress.get(lesson.id);
+            const record = progress.get(lessonIdentity(phaseId, moduleId, lesson.id));
             const done = record?.completedAt !== null && record?.completedAt !== undefined;
             const isNext =
               !done &&
               lessons.every((l) => {
                 if (l.order < lesson.order) {
-                  const r = progress.get(l.id);
+                  const r = progress.get(lessonIdentity(phaseId, moduleId, l.id));
                   return r?.completedAt !== null && r?.completedAt !== undefined;
                 }
                 return true;
               }) &&
               lessons.filter((l) => {
-                const r = progress.get(l.id);
+                const r = progress.get(lessonIdentity(phaseId, moduleId, l.id));
                 return !(r?.completedAt !== null && r?.completedAt !== undefined);
               })[0]?.id === lesson.id;
             return (

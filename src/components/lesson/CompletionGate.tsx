@@ -1,10 +1,12 @@
 "use client";
 
+import { lessonRouteId } from "@/lib/lesson-identity";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Check, Lock, ArrowRight, Repeat } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { useAuth } from "@/components/providers/AuthProvider";
 import { useProgressStore } from "@/stores/progress";
 import { XP_AWARDS, levelFromXP } from "@/lib/xp";
 import { track } from "@/lib/analytics";
@@ -141,19 +143,9 @@ export function CompletionGate({
   const mountedRef = useRef(true);
 
   // Auth state — checked once on mount; offline-first completion never blocked
-  const [isAuthed, setIsAuthed] = useState(false);
+  const { user } = useAuth();
+  const isAuthed = user !== null;
   const [showSyncPrompt, setShowSyncPrompt] = useState(false);
-  useEffect(() => {
-    createClient()
-      .auth.getUser()
-      .then(({ data }) => {
-        setIsAuthed(!!data.user);
-      })
-      .catch(() => {
-        // Auth unavailable — treat as unauthenticated
-        setIsAuthed(false);
-      });
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -236,7 +228,7 @@ export function CompletionGate({
 
   if (completed || celebrating) {
     const shareUrl = current
-      ? `${SITE_URL}/paths/${current.phaseId}/${current.moduleId}/${current.lessonId}`
+      ? `${SITE_URL}/paths/${current.phaseId}/${current.moduleId}/${lessonRouteId(current.lessonId)}`
       : SITE_URL;
     const shareText = `Just learned about ${lessonTitle} on DURA`;
 

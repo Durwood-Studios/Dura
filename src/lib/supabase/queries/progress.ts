@@ -1,3 +1,4 @@
+import { lessonIdentity } from "@/lib/lesson-identity";
 import { createClient } from "@/lib/supabase/client";
 import type { LessonProgress, ModuleProgress } from "@/types/curriculum";
 
@@ -52,7 +53,11 @@ export async function fetchLessonProgress(userId: string): Promise<LessonProgres
     }
 
     return (data ?? []).map((row) => ({
-      lessonId: row.lesson_id as string,
+      lessonId: lessonIdentity(
+        row.phase_id as string,
+        row.module_id as string,
+        row.lesson_id as string
+      ),
       phaseId: row.phase_id as string,
       moduleId: row.module_id as string,
       startedAt: Number(row.started_at),

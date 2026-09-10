@@ -1,3 +1,4 @@
+import { migrateLessonIdentities } from "@/lib/db/migrate-lesson-identity";
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import type { LessonProgress, ModuleProgress, PhaseProgress } from "@/types/curriculum";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
@@ -197,7 +198,16 @@ export function getDB(): Promise<DuraDB> {
         console.error("[dura-db] connection terminated unexpectedly");
         dbPromise = null;
       },
-    });
+    })
+      .then(async (db): Promise<DuraDB> => {
+        await migrateLessonIdentities(db);
+        return db;
+      })
+      .catch((error: unknown): never => {
+        dbPromise = null;
+        console.error("[dura-db] Initialization failed", error);
+        throw error;
+      });
   }
   return dbPromise;
 }

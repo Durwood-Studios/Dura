@@ -1,3 +1,4 @@
+import { lessonIdentity } from "@/lib/lesson-identity";
 /**
  * Learner record import — the inverse of export.ts.
  *
@@ -310,7 +311,10 @@ export async function applyLearnerRecord(parsed: {
   // ── Lesson progress (sidecar) ──────────────────────────────────────────────
   let lessonProgressRestored = 0;
   for (const progress of sidecar.lesson_progress ?? []) {
-    await db.put("progress", progress);
+    await db.put("progress", {
+      ...progress,
+      lessonId: lessonIdentity(progress.phaseId, progress.moduleId, progress.lessonId),
+    });
     lessonProgressRestored++;
   }
 

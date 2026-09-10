@@ -28,7 +28,13 @@ export async function saveToOPFS(data: unknown): Promise<void> {
     const root = await navigator.storage.getDirectory();
     const handle = await root.getFileHandle(SNAPSHOT_FILENAME, { create: true });
     const writable = await handle.createWritable();
-    await writable.write(JSON.stringify(data));
+    await writable.write(
+      JSON.stringify(data, (_key: string, value: unknown): unknown =>
+        value instanceof ArrayBuffer
+          ? { __duraArrayBuffer: Array.from(new Uint8Array(value)) }
+          : value
+      )
+    );
     await writable.close();
   } catch (error) {
     console.warn("[opfs] save failed — IndexedDB is source of truth", error);
@@ -43,7 +49,24 @@ export async function loadFromOPFS<T = unknown>(): Promise<T | null> {
     const file = await handle.getFile();
     const text = await file.text();
     if (!text) return null;
-    return JSON.parse(text) as T;
+    return JSON.parse(text, (_key: string, value: unknown): unknown => {
+      if (value && typeof value === "object" && "__duraArrayBuffer" in value) {
+        const bytes = value.__duraArrayBuffer;
+        if (
+          !Array.isArray(bytes) ||
+          !bytes.every(
+            (byte: unknown): boolean =>
+              typeof byte === "number" && Number.isInteger(byte) && byte >= 0 && byte <= 255
+          )
+        )
+          throw new Error("Invalid backup binary data");
+        return new Uint8Array(bytes).buffer;
+      }
+      if (_key === "_e" && !(value instanceof ArrayBuffer)) {
+        throw new Error("This backup has lost its encrypted data and cannot be restored");
+      }
+      return value;
+    }) as T;
   } catch (error) {
     if (error instanceof DOMException && error.name === "NotFoundError") {
       return null;

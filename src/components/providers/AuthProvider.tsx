@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { fullSync, startBackgroundSync, stopBackgroundSync } from "@/lib/supabase/sync";
 import {
   resolveEncryptionKey,
@@ -11,21 +11,6 @@ import {
 } from "@/lib/idb/encryption-key";
 import { setActiveKey } from "@/lib/idb/active-key";
 import type { User } from "@supabase/supabase-js";
-
-/**
- * Resolve and install the IDB encryption key for the current auth state.
- * Anonymous users get the device-tier key; signed-in users get the
- * auth-tier key. P5-A.2 — the IDB encryption wrapper reads peekActiveKey()
- * synchronously on every flashcard read/write.
- */
-async function installEncryptionKey(authUserId: string | null): Promise<void> {
-  try {
-    const resolution = await resolveEncryptionKey(authUserId);
-    setActiveKey(resolution);
-  } catch (err) {
-    console.error("[auth] Failed to resolve IDB encryption key:", err);
-  }
-}
 
 interface AuthContextValue {
   user: User | null;
@@ -53,83 +38,76 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
   const syncTriggeredRef = useRef(false);
 
   useEffect(() => {
-    const supabase = createClient();
+    let cancelled = false;
+    let generation = 0;
 
-    // Boot from the LOCALLY cached session — getSession() reads storage
-    // and never blocks on the network. getUser() (a network validation
-    // call) used to run here, and when the backend was unreachable it
-    // reported "no user", downgrading the app to the device-tier key
-    // while every record was encrypted under the auth tier — the learner
-    // was locked out of their own local data. Offline-first means the
-    // cloud can never be required just to READ what's on this device.
-    supabase.auth
-      .getSession()
-      .then(({ data: { session } }) => {
-        const bootUser = session?.user ?? null;
-        setUser(bootUser);
+    const initialize = async (nextUser: User | null, signedOut = false): Promise<void> => {
+      const request = ++generation;
+      try {
+        if (signedOut) forgetLastAuthUser();
+        if (nextUser) rememberLastAuthUser(nextUser.id);
+        // Children must not read encrypted IDB records until their key is installed.
+        const resolution = await resolveEncryptionKey(
+          nextUser?.id ?? (signedOut ? null : readLastAuthUser())
+        );
+        if (cancelled || request !== generation) return;
+        setActiveKey(resolution);
+        setUser(nextUser);
         setLoading(false);
-
-        if (bootUser) rememberLastAuthUser(bootUser.id);
-        // No resolvable session (expired + refresh unreachable) still
-        // decrypts with the last signed-in user's key — reads are local.
-        void installEncryptionKey(bootUser?.id ?? readLastAuthUser());
-
-        if (bootUser && !syncTriggeredRef.current) {
-          syncTriggeredRef.current = true;
-          fullSync().catch((err: unknown) => {
-            console.error("[auth] Initial sync failed:", err);
-          });
+        if (nextUser && isSupabaseConfigured()) {
+          if (!syncTriggeredRef.current) {
+            syncTriggeredRef.current = true;
+            void fullSync().catch((error: unknown): void => {
+              console.error("[auth] Initial sync failed:", error);
+            });
+          }
           startBackgroundSync();
+        } else {
+          stopBackgroundSync();
+          if (signedOut) syncTriggeredRef.current = false;
         }
+      } catch (error) {
+        console.error("[auth] Initialization failed:", error);
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    if (!isSupabaseConfigured()) {
+      void initialize(null);
+      return (): void => {
+        cancelled = true;
+      };
+    }
+
+    const supabase = createClient();
+    // Cached sessions allow local records to remain readable without a network round trip.
+    void supabase.auth
+      .getSession()
+      .then(({ data: { session } }): void => {
+        if (generation === 0) void initialize(session?.user ?? null);
       })
-      .catch(() => {
-        setLoading(false);
-        void installEncryptionKey(readLastAuthUser());
+      .catch((error: unknown): void => {
+        console.error("[auth] Cached session unavailable:", error);
+        if (generation === 0) void initialize(null);
       });
 
-    // Listen for auth changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
-      const sessionUser = session?.user ?? null;
-      setUser(sessionUser);
-      setLoading(false);
-
-      if (sessionUser) {
-        rememberLastAuthUser(sessionUser.id);
-        void installEncryptionKey(sessionUser.id);
-        // Guarded: this event also fires on TOKEN_REFRESHED and
-        // INITIAL_SESSION — a full sync per hourly refresh is waste.
-        if (!syncTriggeredRef.current) {
-          syncTriggeredRef.current = true;
-          fullSync().catch((err: unknown) => {
-            console.error("[auth] Sync on auth change failed:", err);
-          });
-        }
-        startBackgroundSync();
-      } else if (event === "SIGNED_OUT") {
-        // Explicit sign-out: drop the auth-tier key entirely.
-        forgetLastAuthUser();
-        void installEncryptionKey(null);
-        stopBackgroundSync();
-        syncTriggeredRef.current = false;
-      } else {
-        // Session lost without a sign-out (refresh failed while the
-        // backend is unreachable). Keep decrypting with the last known
-        // auth key; pause sync until a real session returns.
-        void installEncryptionKey(readLastAuthUser());
-        stopBackgroundSync();
-      }
+    } = supabase.auth.onAuthStateChange((event, session): void => {
+      void initialize(session?.user ?? null, event === "SIGNED_OUT");
     });
 
-    return () => {
+    return (): void => {
+      cancelled = true;
       subscription.unsubscribe();
+      stopBackgroundSync();
     };
   }, []);
 
   const signOut = useCallback(async (): Promise<void> => {
     try {
       stopBackgroundSync();
+      if (!isSupabaseConfigured()) return;
       const supabase = createClient();
       await supabase.auth.signOut();
       setUser(null);
@@ -139,7 +117,17 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
     }
   }, []);
 
-  return <AuthContext.Provider value={{ user, loading, signOut }}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{ user, loading, signOut }}>
+      {loading ? (
+        <p role="status" className="p-6">
+          Preparing your local learning record…
+        </p>
+      ) : (
+        children
+      )}
+    </AuthContext.Provider>
+  );
 }
 
 /**

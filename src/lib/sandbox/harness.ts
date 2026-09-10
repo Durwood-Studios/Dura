@@ -18,6 +18,7 @@
 
 export const PASS_MARKER = "__DURA_PASS__:";
 export const FAIL_MARKER = "__DURA_FAIL__:";
+export const MANUAL_MARKER = "__DURA_MANUAL__:";
 
 /**
  * Build the harness JavaScript for a given test-case set. Test cases are
@@ -30,19 +31,20 @@ export function buildHarnessJs(testCases: string[]): string {
 (function () {
   var TESTS = ${serialized};
   TESTS.forEach(function (tc) {
+    var check;
     try {
-      // Indirect eval — evaluates in global scope so top-level function
-      // declarations from /index.js are visible.
-      var result = (0, eval)(tc);
-      if (typeof result === "boolean") {
-        if (result) {
-          console.log("${PASS_MARKER}" + tc);
-        } else {
-          console.log("${FAIL_MARKER}" + tc);
-        }
-      }
+      check = new Function("return (" + tc + "\\n);");
     } catch (e) {
-      // Not evaluable as a boolean expression — leave as descriptive checklist item.
+      // Legacy prose is a manual checklist, never proof of correctness.
+      console.log("${MANUAL_MARKER}" + tc);
+      return;
+    }
+    try {
+      var result = check();
+      console.log((result === true ? "${PASS_MARKER}" : "${FAIL_MARKER}") + tc);
+    } catch (e) {
+      // Missing functions and other runtime failures are failed checks.
+      console.log("${FAIL_MARKER}" + tc);
     }
   });
 })();

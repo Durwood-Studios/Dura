@@ -1,3 +1,4 @@
+import { migrateLessonIdentities } from "@/lib/db/migrate-lesson-identity";
 import { getDB, type DuraDB } from "@/lib/db";
 import type { LessonProgress, ModuleProgress, PhaseProgress } from "@/types/curriculum";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
@@ -118,6 +119,7 @@ export async function restoreSnapshotToIDB(snapshot: LearnerRecordSnapshot): Pro
     bulkPut(db, "xp-events", snapshot.xpEvents),
     bulkPut(db, "tutorial-progress", snapshot.tutorialProgress),
   ]);
+  await migrateLessonIdentities(db);
 }
 
 async function bulkPut<S extends keyof LearnerStoreMap>(

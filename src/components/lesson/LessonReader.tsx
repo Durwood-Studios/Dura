@@ -1,3 +1,4 @@
+import { lessonIdentity } from "@/lib/lesson-identity";
 import Link from "next/link";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { evaluate } from "@mdx-js/mdx";
@@ -137,7 +138,7 @@ export async function LessonReader({
         vocabulary={meta.vocabulary}
       />
 
-      <AnnotationsPanel lessonId={meta.id} />
+      <AnnotationsPanel lessonId={lessonIdentity(meta.phaseId, meta.moduleId, meta.id)} />
 
       {(prev || next) && (
         <nav
@@ -168,7 +169,10 @@ export async function LessonReader({
       )}
 
       <AITutorMount meta={meta} lessonBody={body} />
-      <AddFlashcardButton lessonId={meta.id} lessonTitle={meta.title} />
+      <AddFlashcardButton
+        lessonId={lessonIdentity(meta.phaseId, meta.moduleId, meta.id)}
+        lessonTitle={meta.title}
+      />
     </article>
   );
 }

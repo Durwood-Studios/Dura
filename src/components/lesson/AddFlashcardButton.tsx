@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { BookOpen, Check, X } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
 import { createCard } from "@/lib/fsrs";
 import { putCard } from "@/lib/db/flashcards";
 import { track } from "@/lib/analytics";
@@ -15,7 +14,7 @@ interface AddFlashcardButtonProps {
 
 /**
  * Floating "Add to flashcards" button rendered on every lesson page.
- * Only visible for authenticated users. Creates a card in IDB (local-first)
+ * Available with or without an account. Creates a card in IDB (local-first)
  * with the lesson's title pre-filled as the front, so learners can save any
  * concept from a lesson — not just the 44 lessons that have VocabTooltip terms.
  *
@@ -26,8 +25,6 @@ export function AddFlashcardButton({
   lessonId,
   lessonTitle,
 }: AddFlashcardButtonProps): React.ReactElement | null {
-  // null = still loading; false = not authed; true = authed
-  const [isAuthed, setIsAuthed] = useState<boolean | null>(null);
   const [open, setOpen] = useState(false);
   const [term, setTerm] = useState(lessonTitle);
   const [definition, setDefinition] = useState("");
@@ -35,14 +32,6 @@ export function AddFlashcardButton({
   const [justSaved, setJustSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-
-  // Auth check — one-shot on mount. Mirrors CompletionGate's approach.
-  useEffect(() => {
-    createClient()
-      .auth.getUser()
-      .then(({ data }) => setIsAuthed(!!data.user))
-      .catch(() => setIsAuthed(false));
-  }, []);
 
   // Close on Escape or outside click
   useEffect(() => {
@@ -60,9 +49,6 @@ export function AddFlashcardButton({
       document.removeEventListener("mousedown", onDocClick);
     };
   }, [open]);
-
-  // Don't render during auth load or when not signed in
-  if (isAuthed === null || !isAuthed) return null;
 
   const handleSave = async (): Promise<void> => {
     const trimmedTerm = term.trim();

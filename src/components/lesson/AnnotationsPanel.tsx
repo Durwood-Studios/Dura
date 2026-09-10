@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -15,7 +15,8 @@ import {
   Plus,
   Loader2,
 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { isSupabaseConfigured } from "@/lib/supabase/client";
+import { useAuth } from "@/components/providers/AuthProvider";
 import {
   getAnnotations,
   submitAnnotation,
@@ -133,30 +134,17 @@ export function AnnotationsPanel({ lessonId }: AnnotationsPanelProps): React.Rea
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [hasFetched, setHasFetched] = useState(false);
-  const [isSupabaseAvailable, setIsSupabaseAvailable] = useState(true);
+  const [isSupabaseAvailable, setIsSupabaseAvailable] = useState(isSupabaseConfigured);
 
   // Auth state
-  const [userId, setUserId] = useState<string | null>(null);
+  const { user } = useAuth();
+  const userId = user?.id ?? null;
 
   // Form state
   const [formType, setFormType] = useState<AnnotationType>("tip");
   const [formContent, setFormContent] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-
-  // Resolve auth user once on mount — no re-check needed between votes
-  useEffect(() => {
-    const client = createClient();
-    client.auth
-      .getUser()
-      .then(({ data }) => {
-        setUserId(data.user?.id ?? null);
-      })
-      .catch(() => {
-        // auth unavailable — anonymous browsing is fine
-        setUserId(null);
-      });
-  }, []);
 
   // Fetch annotations the first time the panel is opened
   const fetchAnnotations = useCallback(async (): Promise<void> => {

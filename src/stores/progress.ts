@@ -1,3 +1,4 @@
+import { lessonIdentity } from "@/lib/lesson-identity";
 import { create } from "zustand";
 import { putLessonProgress, getLessonProgress } from "@/lib/db/progress";
 import { track } from "@/lib/analytics";
@@ -20,6 +21,8 @@ interface ProgressState {
   reset: () => void;
 }
 
+let startRequest = 0;
+
 export const useProgressStore = create<ProgressState>((set, get) => ({
   current: null,
   scrollPercent: 0,
@@ -28,8 +31,19 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
   quizScore: null,
   startedAt: null,
 
-  start: async (lessonId, phaseId, moduleId) => {
+  start: async (lessonId: string, phaseId: string, moduleId: string): Promise<void> => {
+    const request = ++startRequest;
+    set({
+      current: null,
+      scrollPercent: 0,
+      timeSpentMs: 0,
+      quizPassed: false,
+      quizScore: null,
+      startedAt: null,
+    });
+    lessonId = lessonIdentity(phaseId, moduleId, lessonId);
     const existing = await getLessonProgress(lessonId);
+    if (request !== startRequest) return;
     const next: LessonProgress = existing ?? {
       lessonId,
       phaseId,

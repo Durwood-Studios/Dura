@@ -1,5 +1,6 @@
 "use client";
 
+import { lessonIdentity } from "@/lib/lesson-identity";
 import { useEffect, useRef } from "react";
 import { useProgressStore } from "@/stores/progress";
 import { usePreferencesStore } from "@/stores/preferences";
@@ -30,9 +31,12 @@ export function ScrollTracker({
   const startedFor = useRef<string | null>(null);
 
   useEffect(() => {
-    if (startedFor.current === lessonId) return;
-    startedFor.current = lessonId;
-    void start(lessonId, phaseId, moduleId);
+    const identity = lessonIdentity(phaseId, moduleId, lessonId);
+    if (startedFor.current === identity) return;
+    startedFor.current = identity;
+    void start(lessonId, phaseId, moduleId).catch((error: unknown): void => {
+      console.error("[lesson] Could not start progress tracking", error);
+    });
   }, [lessonId, phaseId, moduleId, start]);
 
   useEffect(() => {

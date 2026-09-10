@@ -1,3 +1,4 @@
+import { lessonIdentity } from "@/lib/lesson-identity";
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import {
@@ -35,7 +36,10 @@ export async function getLessonProgress(lessonId: string): Promise<LessonProgres
 export async function putLessonProgress(progress: LessonProgress): Promise<void> {
   try {
     const db = await getDB();
-    await putEncryptedLessonProgress(db, progress);
+    await putEncryptedLessonProgress(db, {
+      ...progress,
+      lessonId: lessonIdentity(progress.phaseId, progress.moduleId, progress.lessonId),
+    });
     triggerShadowWrite();
   } catch (error) {
     console.error("[progress] putLessonProgress failed", error);

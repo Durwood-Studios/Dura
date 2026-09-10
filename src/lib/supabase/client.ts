@@ -1,6 +1,11 @@
 import { createBrowserClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+/** Whether optional cloud sync is configured for this build. */
+export function isSupabaseConfigured(): boolean {
+  return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+}
+
 /**
  * Browser-side Supabase client. Safe to call from Client Components.
  * Reads the public URL + anon key from environment — both are designed

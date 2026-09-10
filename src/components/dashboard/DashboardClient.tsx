@@ -1,5 +1,7 @@
 "use client";
 
+import { lessonRouteId } from "@/lib/lesson-identity";
+
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { BookOpen, Repeat, ArrowRight, Clock, Flame, Zap, Trophy } from "lucide-react";
@@ -205,7 +207,7 @@ export function DashboardClient(): React.ReactElement {
   const level = levelProgress(data.totalXp);
   const streakAlive = isStreakAlive(data.streak);
   const continueHref = data.lastLesson
-    ? `/paths/${data.lastLesson.phaseId}/${data.lastLesson.moduleId}/${data.lastLesson.lessonId}`
+    ? `/paths/${data.lastLesson.phaseId}/${data.lastLesson.moduleId}/${lessonRouteId(data.lastLesson.lessonId)}`
     : "/paths/0/0-1/01";
   const phaseColor = data.lastLesson
     ? (getPhase(data.lastLesson.phaseId)?.color ?? "#10b981")
@@ -414,7 +416,7 @@ export function DashboardClient(): React.ReactElement {
             </h2>
             <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
               {data.lastLesson
-                ? `Resume ${data.lastLesson.lessonId} in ${data.lastLesson.moduleId}.`
+                ? `Resume ${lessonRouteId(data.lastLesson.lessonId)} in ${data.lastLesson.moduleId}.`
                 : "Phase 0 begins with a single lesson on binary."}
             </p>
             <span className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-all group-hover:bg-emerald-600 group-hover:shadow-md">
