@@ -29,7 +29,7 @@ export async function syncAssessmentResults(
     }));
     const { error } = await supabase
       .from("assessment_results")
-      .upsert(rows, { onConflict: "id,user_id" });
+      .upsert(rows, { onConflict: "id,user_id", ignoreDuplicates: true });
     if (error) {
       console.error("[syncAssessmentResults] Upsert error:", error.message);
       throw error;

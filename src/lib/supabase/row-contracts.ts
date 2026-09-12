@@ -94,10 +94,9 @@ export interface CertificateRow {
 
 /**
  * Every bigint epoch-ms column in supabase/migrations, keyed by the
- * table name as created in the migration. Live names differ for two
- * tables (014-reconciliation renames `analytics` → `analytics_events`
- * and `activity_feed` → `activity`); the manifest keeps the migration
- * name because the contract test parses the DDL.
+ * table name as created in the migration. The staged analytics reconciliation renames `analytics` to
+ * `analytics_events`; this baseline manifest keeps the original name
+ * because its contract test parses supabase/migrations.
  */
 export const EPOCH_MS_COLUMNS: Record<string, readonly string[]> = {
   lesson_progress: ["started_at", "completed_at"],

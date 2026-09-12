@@ -46,7 +46,9 @@ export async function syncCertificates(userId: string, certs: Certificate[]): Pr
       standards: cert.standards,
     }));
 
-    const { error } = await supabase.from("certificates").upsert(rows, { onConflict: "id" });
+    const { error } = await supabase
+      .from("certificates")
+      .upsert(rows, { onConflict: "user_id,id" });
 
     if (error) {
       console.error("[syncCertificates] Upsert error:", error.message);

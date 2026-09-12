@@ -40,7 +40,7 @@ export async function batchSyncAnalytics(userId: string, events: AnalyticsEvent[
 
     const { error } = await supabase
       .from("analytics_events")
-      .upsert(rows, { onConflict: "id", ignoreDuplicates: true });
+      .upsert(rows, { onConflict: "user_id,id", ignoreDuplicates: true });
 
     if (error) {
       console.error("[batchSyncAnalytics] Upsert error:", error.message);
@@ -78,7 +78,7 @@ export async function syncXPEvents(userId: string, events: XPEvent[]): Promise<v
 
     const { error } = await supabase
       .from("xp_events")
-      .upsert(rows, { onConflict: "id", ignoreDuplicates: true });
+      .upsert(rows, { onConflict: "user_id,id", ignoreDuplicates: true });
 
     if (error) {
       console.error("[syncXPEvents] Upsert error:", error.message);

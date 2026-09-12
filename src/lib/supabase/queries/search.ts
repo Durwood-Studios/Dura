@@ -15,7 +15,7 @@ interface SearchResult {
  *
  * TODO(dustin): This requires an embedding generation Edge Function to convert
  * the query string into a vector before calling the RPC. Until that function
- * is deployed, this returns an empty array. Wire up once the
+ * is deployed, text search uses the public content_embeddings metadata. Wire up once the
  * `generate_embedding` Edge Function is live and the `search_content` DB
  * function accepts a vector parameter.
  */
@@ -98,7 +98,7 @@ export async function textSearchContent(
     const pattern = `%${safe}%`;
 
     let builder = supabase
-      .from("content_index")
+      .from("content_embeddings")
       .select("id, content_type, title, slug, body_preview, metadata")
       .or(`title.ilike.${pattern},body_preview.ilike.${pattern}`)
       .limit(limit);

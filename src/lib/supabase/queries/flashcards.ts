@@ -136,7 +136,9 @@ export async function syncReviewLogs(userId: string, logs: ReviewLog[]): Promise
       state: log.state,
     }));
 
-    const { error } = await supabase.from("review_logs").upsert(rows, { onConflict: "id" });
+    const { error } = await supabase
+      .from("review_logs")
+      .upsert(rows, { onConflict: "user_id,id", ignoreDuplicates: true });
 
     if (error) {
       console.error("[syncReviewLogs] Upsert error:", error.message);

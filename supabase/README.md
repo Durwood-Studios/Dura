@@ -8,7 +8,9 @@
 
 1. Copy `.env.example` to `.env.local`
 2. Fill in `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-3. Run migrations in order:
+3. For a new database, review the baseline migrations in order. Before enabling cloud features, also reconcile the [staged repairs](staged/README.md); the historical baseline alone does not match all current clients. Never apply these instructions blindly to an existing production database.
+
+   Baseline examples:
    - `001-profiles.sql` — User profiles (auto-created on sign-up via trigger)
    - `002-progress.sql` — Lesson, module, and phase progress tracking
    - `003-flashcards.sql` — FSRS-5 flashcards and review logs
@@ -17,10 +19,10 @@
    - `006-functions.sql` — Server-side RPC functions (sync_progress, get_certificate_by_hash)
    - `007-views.sql` — Aggregation views (user_stats, module_progress)
    - `008-seed.sql` — Optional seed data for development
+
 4. Enable auth providers in the Supabase dashboard:
    - Email/Password
    - GitHub OAuth
-   - Google OAuth
 5. Set the **Site URL** and **Redirect URLs** in Auth settings:
    - Site URL: `http://localhost:3000` (dev) or your production URL
    - Redirect URLs: `http://localhost:3000/auth/callback`, `https://yourdomain.com/auth/callback`
@@ -49,7 +51,7 @@
 | `activity`           | Presence and activity feed entries with auto-triggers.              |
 | `content_embeddings` | pgvector embeddings for semantic search across all content.         |
 
-**Total: 19 tables.**
+The table inventory and live deployment must be reconciled with the staged repairs; repository presence does not establish production application status.
 
 ## RLS
 
@@ -57,7 +59,7 @@ All tables have Row Level Security enabled. Users can only read and write their 
 
 - `certificates` — publicly readable by verification hash via the `get_certificate_by_hash` RPC function (used by `/verify/[hash]`)
 - `annotations` / `annotation_votes` — community-readable within the app
-- `feedback` _(staged, not yet applied)_ — anonymous inserts allowed; admin-read only
+- `feedback` _(staged, not yet applied)_ — anonymous submissions through an insert-only RPC; admin-read only
 
 ## Admin Access
 
@@ -66,7 +68,7 @@ Admin read access to sensitive tables (`feedback`, `analytics`, `profiles`, `les
 1. In Supabase Studio → Authentication → Users, run:
    ```sql
    UPDATE auth.users
-   SET raw_app_meta_data = '{"is_admin": true}'
+   SET raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || '{"is_admin": true}'::jsonb
    WHERE email = 'your@email.com';
    ```
 2. Sign out and sign back in to refresh the JWT.
@@ -92,7 +94,7 @@ The app works fully offline. Supabase sync is optional — it adds cross-device 
 
 ## Migrations
 
-### Applied (001–013)
+### Checked-in baseline (001–013; live application status unverified)
 
 - `001-profiles.sql` — User profiles (auto-created on sign-up via trigger)
 - `002-progress.sql` — Lesson, module, and phase progress tracking
@@ -108,12 +110,9 @@ The app works fully offline. Supabase sync is optional — it adds cross-device 
 - `012-auth-metadata.sql` — Instant preferences sync via auth user metadata
 - `013-moat-features.sql` — Difficulty calibration, community annotations, research analytics views
 
-### Staged (not yet applied)
+### Staged repairs (not applied by this work)
 
-These live in `supabase/staged/` and are **not** applied to the live project yet:
-
-- `016-feedback.sql` — `feedback` table; anonymous inserts allowed, admin-read only via JWT claim
-- `017-admin-rls.sql` — Admin read RLS policies for `feedback`, `analytics`, `profiles`, and `lesson_progress` using the `app_metadata.is_admin` JWT claim
+See [staged/README.md](staged/README.md) for files 014–019, their exact data impact, and the disposable PostgreSQL validation workflow. These repair missing analytics reconciliation, learner stores, feedback delivery, admin moderation, signup, and progress RPC permissions. Compare with the actual live schema before applying: older private migration numbers may overlap.
 
 ## Free Tier Limits & Graceful Degradation
 

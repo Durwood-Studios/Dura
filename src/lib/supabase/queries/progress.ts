@@ -19,7 +19,7 @@ export async function syncLessonProgress(
     const supabase = createClient();
     const { error } = await supabase.rpc("sync_progress", {
       p_user_id: userId,
-      p_data: JSON.stringify(progress),
+      p_data: progress,
     });
 
     if (error) {
