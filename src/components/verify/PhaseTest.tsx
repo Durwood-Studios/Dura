@@ -59,7 +59,7 @@ export function PhaseTest({
   const [answers, setAnswers] = useState<Map<string, number[]>>(new Map());
   const [submitted, setSubmitted] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
   const [, setLatestResult] = useState<AssessmentResult | null>(null);
   const [resultRecord, setResultRecord] = useState<{
     score: number;
@@ -208,7 +208,10 @@ export function PhaseTest({
   // Auto-submit on time up
   useEffect(() => {
     if (status === "in-progress" && timeUp) {
-      void finish();
+      const timer = setTimeout((): void => {
+        void finish();
+      }, 0);
+      return (): void => clearTimeout(timer);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, timeUp]);

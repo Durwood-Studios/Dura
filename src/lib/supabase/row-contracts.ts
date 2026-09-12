@@ -90,6 +90,7 @@ export interface CertificateRow {
   completed_at: number;
   verification_hash: Certificate["verificationHash"];
   standards: Certificate["standards"];
+  server_credential?: string | null;
 }
 
 /**

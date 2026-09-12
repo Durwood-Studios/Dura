@@ -59,4 +59,6 @@ export interface Certificate {
    * learner identity, assessment completion, or all displayed record fields.
    */
   signature?: string;
+  /** Full purpose-separated signed server-scored assessment claims, verified independently. */
+  serverCredential?: string;
 }

@@ -48,8 +48,8 @@ export function CertificateList(): React.ReactElement {
           No certificates yet
         </h2>
         <p className="mx-auto mt-2 max-w-sm text-sm text-[var(--color-text-secondary)]">
-          Certificates are earned by passing phase verification tests. Each one is cryptographically
-          verified and shareable. Complete your first phase to earn one.
+          Certificates are earned by passing phase verification tests. Each one is a shareable local
+          learning record. Complete your first phase to earn one.
         </p>
         <Link
           href="/paths/0"
@@ -70,7 +70,11 @@ export function CertificateList(): React.ReactElement {
         return (
           <li key={cert.id}>
             <Link
-              href={`/verify/${cert.verificationHash}`}
+              href={
+                cert.serverCredential
+                  ? `/verify/issued?credential=${encodeURIComponent(cert.serverCredential)}`
+                  : `/verify/${cert.verificationHash}`
+              }
               className="block overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-sm transition hover:shadow-md"
             >
               <div
@@ -81,7 +85,8 @@ export function CertificateList(): React.ReactElement {
               >
                 <Award className="h-5 w-5 text-[var(--color-text-primary)]" aria-hidden />
                 <p className="mt-2 font-mono text-xs text-[var(--color-text-muted)] uppercase">
-                  Phase {cert.phaseId} · Verified
+                  Phase {cert.phaseId} ·{" "}
+                  {cert.serverCredential ? "Server-scored" : "Learning record"}
                 </p>
                 <h3 className="mt-1 text-base font-semibold text-[var(--color-text-primary)]">
                   {cert.phaseTitle}

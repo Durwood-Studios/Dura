@@ -31,8 +31,10 @@ export async function checkSignature(hash: string, signature: string): Promise<b
 
 export function buildSignedShareUrl(
   baseUrl: string,
-  certificate: Pick<Certificate, "verificationHash" | "signature">
+  certificate: Pick<Certificate, "verificationHash" | "signature" | "serverCredential">
 ): string {
+  if (certificate.serverCredential)
+    return `${baseUrl}/verify/issued?credential=${encodeURIComponent(certificate.serverCredential)}`;
   const path = `${baseUrl}/verify/${certificate.verificationHash}`;
   return certificate.signature
     ? `${path}?${SIG_PARAM}=${encodeURIComponent(certificate.signature)}`

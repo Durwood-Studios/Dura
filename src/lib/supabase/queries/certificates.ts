@@ -19,6 +19,7 @@ interface CertificateRpcRow {
   completed_at: number | string;
   verification_hash: string;
   standards: string[];
+  server_credential?: string | null;
 }
 
 /**
@@ -44,6 +45,7 @@ export async function syncCertificates(userId: string, certs: Certificate[]): Pr
       completed_at: cert.completedAt,
       verification_hash: cert.verificationHash,
       standards: cert.standards,
+      ...(cert.serverCredential ? { server_credential: cert.serverCredential } : {}),
     }));
 
     const { error } = await supabase
@@ -84,6 +86,8 @@ export async function fetchCertificates(userId: string): Promise<Certificate[]> 
       completedAt: Number(row.completed_at),
       verificationHash: row.verification_hash as string,
       standards: row.standards as string[],
+      serverCredential:
+        typeof row.server_credential === "string" ? row.server_credential : undefined,
     }));
   } catch (err) {
     console.error("[fetchCertificates] Failed to fetch:", err);
@@ -129,6 +133,7 @@ export async function getCertificateByHash(hash: string): Promise<Certificate | 
       completedAt: Number(row.completed_at),
       verificationHash: row.verification_hash,
       standards: row.standards,
+      serverCredential: row.server_credential ?? undefined,
     };
   } catch (err) {
     console.error("[getCertificateByHash] Failed to fetch:", err);

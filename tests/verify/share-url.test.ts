@@ -46,3 +46,9 @@ describe("readSignatureFromUrl", () => {
     expect(readSignatureFromUrl(new URLSearchParams(`sig=${SIG}extra`))).toBeNull();
   });
 });
+
+it("shares a complete issued credential instead of the mutable registry hash route", () => {
+  expect(buildSignedShareUrl(BASE, { ...CERT_BASE, serverCredential: "payload.signature" })).toBe(
+    `${BASE}/verify/issued?credential=payload.signature`
+  );
+});

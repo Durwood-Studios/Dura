@@ -61,7 +61,7 @@ export function MasteryGate({
     results: QuestionResult[];
   } | null>(null);
   const [retryAt, setRetryAt] = useState<number | null>(null);
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
 
   // Tick for cooldown countdown
   useEffect(() => {
@@ -441,8 +441,7 @@ function MasteryPassedDisplay({
     ran.current = true;
 
     if (!shouldAnimate) {
-      // Reduced-motion: instant border flash + show full score
-      setScoreDisplay(scoreTarget);
+      // Reduced-motion renders the target directly without an animation update.
       return;
     }
 
@@ -518,7 +517,7 @@ function MasteryPassedDisplay({
             Passed {latestResult && new Date(latestResult.completedAt).toLocaleDateString()}
           </p>
           <p className="mt-1 font-mono text-2xl font-semibold text-[color:oklch(58%_0.18_145)]">
-            {scoreDisplay}%
+            {shouldAnimate ? scoreDisplay : scoreTarget}%
           </p>
           <button
             type="button"

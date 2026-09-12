@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { CertificateList } from "@/components/verify/CertificateList";
 
@@ -11,8 +12,14 @@ export default function VerifyPage(): React.ReactElement {
     <main className="mx-auto max-w-3xl px-6 py-10">
       <h1 className="mb-1 text-3xl font-semibold">Skills Verification</h1>
       <p className="mb-8 text-[var(--color-text-secondary)]">
-        Hardened assessments. Verifiable certificates. Stored locally on your device.
+        Local learning certificates and optional server-scored assessment results.
       </p>
+      <Link
+        href="/verify/assessment"
+        className="mb-6 inline-flex min-h-12 items-center rounded-lg bg-[var(--color-accent)] px-5 py-3 font-semibold text-white"
+      >
+        Take a server-scored assessment
+      </Link>
       <CertificateList />
     </main>
   );
