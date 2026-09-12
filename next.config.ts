@@ -4,6 +4,8 @@ import type { NextConfig } from "next";
 const withSerwist = withSerwistInit({
   swSrc: "src/app/sw.ts",
   swDest: "public/sw.js",
+  // Reconnecting must preserve unsaved learning work instead of navigating away.
+  reloadOnOnline: false,
   disable: process.env.NODE_ENV === "development",
 });
 

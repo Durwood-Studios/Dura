@@ -23,6 +23,41 @@ function clearDuraStorage(storage: Storage): void {
   }
 }
 
+async function unregisterServiceWorkers(): Promise<void> {
+  if (!("serviceWorker" in navigator)) return;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const unregister = (async (): Promise<void> => {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(
+        registrations.map(
+          (registration: ServiceWorkerRegistration): Promise<boolean> => registration.unregister()
+        )
+      );
+    } catch (error) {
+      console.warn("[clearAllData] Service worker cleanup did not finish", error);
+    }
+  })();
+  try {
+    // Chromium can leave unregister pending after an interrupted installation.
+    // Registration holds app code, not the learner record. Actual cache deletion
+    // remains mandatory below because runtime caches can contain response data.
+    await Promise.race([
+      unregister,
+      new Promise<void>((resolve): void => {
+        timeout = setTimeout((): void => {
+          console.warn(
+            "[clearAllData] Service worker unregister is still pending; learner records were erased"
+          );
+          resolve();
+        }, 1000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /**
  * Erase this device's learner data and sign out locally. Cloud records are retained.
  * Await completion before reloading so in-memory stores are discarded. Failures
@@ -48,14 +83,7 @@ export async function clearAllData(): Promise<void> {
     clearDuraStorage(localStorage);
     clearDuraStorage(sessionStorage);
 
-    if ("serviceWorker" in navigator) {
-      const registrations = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(
-        registrations.map(
-          (registration: ServiceWorkerRegistration): Promise<boolean> => registration.unregister()
-        )
-      );
-    }
+    await unregisterServiceWorkers();
     if ("caches" in window) {
       const keys = await caches.keys();
       await Promise.all(keys.map((key: string): Promise<boolean> => caches.delete(key)));

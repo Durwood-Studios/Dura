@@ -51,6 +51,9 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdateState {
     }
 
     let cancelled = false;
+    let intervalId: number | undefined;
+    let registration: ServiceWorkerRegistration | undefined;
+    const trackedWorkers = new Map<ServiceWorker, () => void>();
 
     const handleWaiting = (sw: ServiceWorker | null): void => {
       if (!sw || cancelled) return;
@@ -60,15 +63,19 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdateState {
 
     const trackInstalling = (sw: ServiceWorker | null): void => {
       if (!sw) return;
-      sw.addEventListener("statechange", () => {
+      if (trackedWorkers.has(sw)) return;
+      const onStateChange = (): void => {
         // `installed` while a controller exists means the new SW is
         // waiting to take over from the active one. First-install (no
         // prior controller) is not an "update" from the user's POV.
         if (sw.state === "installed" && navigator.serviceWorker.controller) {
           handleWaiting(sw);
         }
-      });
+      };
+      trackedWorkers.set(sw, onStateChange);
+      sw.addEventListener("statechange", onStateChange);
     };
+    const onUpdateFound = (): void => trackInstalling(registration?.installing ?? null);
 
     void navigator.serviceWorker
       .getRegistration()
@@ -81,23 +88,21 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdateState {
           handleWaiting(reg.waiting);
         }
 
-        reg.addEventListener("updatefound", () => {
-          trackInstalling(reg.installing);
-        });
+        registration = reg;
+        reg.addEventListener("updatefound", onUpdateFound);
+        trackInstalling(reg.installing);
 
         // Polling layer — most browsers check on navigation, but a
         // long-lived tab won't refresh on its own. Once an hour is
         // generous enough to be invisible without being silent.
-        const intervalId = window.setInterval(
+        intervalId = window.setInterval(
           () => {
-            void reg.update();
+            void reg.update().catch((error: unknown): void => {
+              console.error("[sw-update] Update check failed:", error);
+            });
           },
           60 * 60 * 1000
         );
-
-        return () => {
-          window.clearInterval(intervalId);
-        };
       })
       .catch((err) => {
         console.error("[sw-update] getRegistration failed:", err);
@@ -105,6 +110,11 @@ export function useServiceWorkerUpdate(): ServiceWorkerUpdateState {
 
     return (): void => {
       cancelled = true;
+      if (intervalId !== undefined) window.clearInterval(intervalId);
+      registration?.removeEventListener("updatefound", onUpdateFound);
+      for (const [worker, listener] of trackedWorkers) {
+        worker.removeEventListener("statechange", listener);
+      }
     };
   }, []);
 

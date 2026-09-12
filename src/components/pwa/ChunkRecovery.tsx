@@ -40,6 +40,9 @@ async function repairAndReload(): Promise<void> {
 }
 
 function attemptRecovery(reason: string): void {
+  // A lazy chunk may be uncached when a learner goes offline. Clearing the
+  // working offline cache cannot repair a network outage and can strand them.
+  if (!navigator.onLine) return;
   try {
     if (window.sessionStorage.getItem(RECOVERY_GUARD_KEY)) return;
     window.sessionStorage.setItem(RECOVERY_GUARD_KEY, "1");

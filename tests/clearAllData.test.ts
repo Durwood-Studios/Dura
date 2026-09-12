@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAllData, exportAllData } from "@/lib/clearAllData";
 
 const mocks = vi.hoisted(() => ({
@@ -38,6 +38,10 @@ vi.mock("@/lib/supabase/client", () => ({
 }));
 
 describe("complete local reset", () => {
+  afterEach((): void => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
   beforeEach(() => {
     vi.resetAllMocks();
     localStorage.clear();
@@ -123,5 +127,24 @@ describe("complete local reset", () => {
     expect(dump.feedback).toEqual([]);
     expect(dump["dojo-sessions"]).toEqual([]);
     expect(dump["future-store"]).toEqual([]);
+  });
+  it("finishes erasing caches when service-worker unregistration never settles", async (): Promise<void> => {
+    vi.useFakeTimers();
+    const unregister = vi.fn((): Promise<boolean> => new Promise((): void => {}));
+    const removeCache = vi.fn().mockResolvedValue(true);
+    vi.stubGlobal("navigator", {
+      serviceWorker: { getRegistrations: vi.fn().mockResolvedValue([{ unregister }]) },
+    });
+    vi.stubGlobal("caches", {
+      keys: vi.fn().mockResolvedValue(["runtime-cache"]),
+      delete: removeCache,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation((): void => {});
+    const resetting = clearAllData();
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(resetting).resolves.toBeUndefined();
+    expect(mocks.erase).toHaveBeenCalledOnce();
+    expect(removeCache).toHaveBeenCalledWith("runtime-cache");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("unregister is still pending"));
   });
 });
