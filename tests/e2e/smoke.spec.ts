@@ -19,7 +19,7 @@ import { test, expect, type ConsoleMessage } from "@playwright/test";
 const HOT_PATHS = [
   { name: "home", url: "/" },
   { name: "discover", url: "/discover" },
-  { name: "lesson", url: "/paths/0-digital-literacy/0-1-how-computers-think/01-binary" },
+  { name: "lesson", url: "/paths/0/0-1/01" },
   { name: "review", url: "/review" },
   { name: "settings", url: "/settings" },
   // sandbox: exercises the Sandpack host bundle. Catches CSP regressions
@@ -114,6 +114,13 @@ for (const route of HOT_PATHS) {
     // useEffect-fired fetches). 2s is generous on a healthy build and
     // short enough to keep the suite fast.
     await page.waitForTimeout(2000);
+    // App Router can stream a not-found page with HTTP 200. Check content too.
+    await expect(page.getByRole("heading", { name: "Wrong path. Right spirit." })).toHaveCount(0);
+    if (route.name === "lesson") {
+      await expect(
+        page.getByRole("heading", { name: "Binary: The Language of Machines", exact: true })
+      ).toBeVisible();
+    }
 
     expect(
       consoleErrors,
