@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 const STORAGE_KEY = "dura-discovery-passport";
 
@@ -70,6 +70,7 @@ export function markActivityComplete(slug: string): void {
     if (!completed.includes(slug)) {
       completed.push(slug);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(completed));
+      window.dispatchEvent(new Event("dura:discovery-changed"));
     }
   } catch {
     // localStorage unavailable — silently ignore
@@ -86,22 +87,26 @@ function readCompleted(): string[] {
   }
 }
 
+function readPassportSnapshot(): string {
+  return JSON.stringify(readCompleted());
+}
+function subscribePassport(notify: () => void): () => void {
+  window.addEventListener("storage", notify);
+  window.addEventListener("dura:discovery-changed", notify);
+  return (): void => {
+    window.removeEventListener("storage", notify);
+    window.removeEventListener("dura:discovery-changed", notify);
+  };
+}
+
 /** Passport stamp tracker showing completion across all Discovery Zone activities. */
 export function Passport(): React.ReactElement {
-  const [completed, setCompleted] = useState<string[]>([]);
-
-  useEffect(() => {
-    setCompleted(readCompleted());
-
-    // Re-read on storage changes from other tabs
-    function handleStorage(e: StorageEvent): void {
-      if (e.key === STORAGE_KEY) {
-        setCompleted(readCompleted());
-      }
-    }
-    window.addEventListener("storage", handleStorage);
-    return () => window.removeEventListener("storage", handleStorage);
-  }, []);
+  const snapshot = useSyncExternalStore(
+    subscribePassport,
+    readPassportSnapshot,
+    (): string => "[]"
+  );
+  const completed: string[] = JSON.parse(snapshot) as string[];
 
   const completedSet = new Set(completed);
   const total = ALL_ACTIVITIES.length;

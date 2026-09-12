@@ -82,14 +82,16 @@ export default async function ModuleWorkbookPage({
 
 /** Server component that evaluates MDX with @mdx-js/mdx (preserves JSX expression props). */
 async function LessonMDX({ body }: { body: string }): Promise<React.ReactElement> {
+  let compiled: Awaited<ReturnType<typeof evaluate>> | null = null;
   try {
-    const { default: MDXContent } = await evaluate(body, {
+    compiled = await evaluate(body, {
       ...runtime,
       development: false,
     });
-    return <MDXContent components={mdxComponents} />;
   } catch (error) {
     console.error("[print] MDX evaluation failed:", error);
-    return <p className="text-sm text-red-500">Failed to render lesson content.</p>;
   }
+  if (!compiled) return <p className="text-sm text-red-500">Failed to render lesson content.</p>;
+  const MDXContent = compiled.default;
+  return <MDXContent components={mdxComponents} />;
 }

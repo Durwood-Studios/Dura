@@ -73,10 +73,7 @@ export function CommandPalette(): React.ReactElement | null {
 
   // Fetch dictionary terms when query changes
   useEffect(() => {
-    if (query.length < 2) {
-      setTermResults([]);
-      return;
-    }
+    if (query.length < 2) return;
     const controller = new AbortController();
     const timer = setTimeout(async () => {
       try {
@@ -102,14 +99,27 @@ export function CommandPalette(): React.ReactElement | null {
     };
   }, [query]);
 
-  // Reset state when opening
-  useEffect(() => {
+  const [previousOpen, setPreviousOpen] = useState(open);
+  const [previousQuery, setPreviousQuery] = useState(query);
+  const [previousResultCount, setPreviousResultCount] = useState(termResults.length);
+  if (open !== previousOpen) {
+    setPreviousOpen(open);
     if (open) {
       setQuery("");
       setTermResults([]);
       setActiveIndex(0);
-      setTimeout(() => inputRef.current?.focus(), 50);
     }
+  }
+  if (query !== previousQuery || termResults.length !== previousResultCount) {
+    setPreviousQuery(query);
+    setPreviousResultCount(termResults.length);
+    setActiveIndex(0);
+    if (query.length < 2 && termResults.length > 0) setTermResults([]);
+  }
+  useEffect(() => {
+    if (!open) return;
+    const timer = setTimeout(() => inputRef.current?.focus(), 50);
+    return () => clearTimeout(timer);
   }, [open]);
 
   // Global ⌘K / Ctrl+K shortcut
@@ -149,11 +159,6 @@ export function CommandPalette(): React.ReactElement | null {
       navigate(allResults[activeIndex].href);
     }
   };
-
-  // Reset active index when results change
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [query, termResults.length]);
 
   if (!open) return null;
 

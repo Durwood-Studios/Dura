@@ -15,16 +15,20 @@ const COLORS = ["#10b981", "#06b6d4", "#f59e0b", "#8b5cf6", "#f472b6", "#a3e635"
  * Zero animation JS — only random initial transforms.
  */
 export function Confetti({ active, particles = 20 }: ConfettiProps): React.ReactElement | null {
-  const [visible, setVisible] = useState(false);
+  const [expired, setExpired] = useState(false);
+  const [previousActive, setPreviousActive] = useState(active);
+  if (active !== previousActive) {
+    setPreviousActive(active);
+    setExpired(false);
+  }
 
   useEffect(() => {
     if (!active) return;
-    setVisible(true);
-    const timer = setTimeout(() => setVisible(false), 2000);
+    const timer = setTimeout(() => setExpired(true), 2000);
     return () => clearTimeout(timer);
   }, [active]);
 
-  if (!visible) return null;
+  if (!active || expired) return null;
 
   return (
     <div
@@ -32,9 +36,9 @@ export function Confetti({ active, particles = 20 }: ConfettiProps): React.React
       className="confetti pointer-events-none fixed inset-0 z-[60] overflow-hidden motion-reduce:hidden"
     >
       {Array.from({ length: particles }, (_, i) => {
-        const angle = (Math.random() * 360).toFixed(0);
-        const distance = (60 + Math.random() * 220).toFixed(0);
-        const delay = (Math.random() * 0.1).toFixed(2);
+        const angle = ((i * 137.508) % 360).toFixed(0);
+        const distance = (60 + ((i * 83) % 220)).toFixed(0);
+        const delay = ((i % 5) * 0.02).toFixed(2);
         const color = COLORS[i % COLORS.length];
         return (
           <span

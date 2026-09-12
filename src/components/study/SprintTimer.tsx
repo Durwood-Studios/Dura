@@ -27,7 +27,7 @@ export function SprintTimer(): React.ReactElement | null {
   const pause = useSprintStore((s) => s.pause);
   const reset = useSprintStore((s) => s.reset);
   const tick = useSprintStore((s) => s.tick);
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     const id = setInterval(() => {

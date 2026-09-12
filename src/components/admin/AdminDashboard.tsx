@@ -160,6 +160,7 @@ export function AdminDashboard(): React.ReactElement {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Starts asynchronous IndexedDB hydration; state changes occur after the storage read completes.
     void loadIDBData();
   }, [loadIDBData]);
 
@@ -168,6 +169,7 @@ export function AdminDashboard(): React.ReactElement {
     setIsClearing(true);
     try {
       await clearAllData();
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- Discard stale in-memory learner/auth state after sign-out or reset.
       window.location.href = "/";
     } catch (error) {
       console.error("[AdminDashboard] Clear failed:", error);

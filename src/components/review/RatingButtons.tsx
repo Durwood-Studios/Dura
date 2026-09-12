@@ -61,9 +61,11 @@ export function RatingButtons({ card, visible, onRate }: RatingButtonsProps): Re
   const [tapped, setTapped] = useState<ReviewRating | null>(null);
 
   // Reset tapped state when card changes (new card presented)
-  useEffect(() => {
+  const [previousCard, setPreviousCard] = useState(card);
+  if (card !== previousCard) {
+    setPreviousCard(card);
     setTapped(null);
-  }, [card]);
+  }
 
   useEffect(() => {
     if (!visible) return;

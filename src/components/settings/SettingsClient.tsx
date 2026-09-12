@@ -165,6 +165,7 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
     setClearError(null);
     try {
       await clearAllData();
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- Discard stale in-memory learner/auth state after sign-out or reset.
       window.location.href = "/";
     } catch (error) {
       console.error("[settings] Local reset failed:", error);
@@ -522,6 +523,7 @@ function NotificationToggle(): React.ReactElement {
   const [supported, setSupported] = useState(false);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Browser notification permission is read after hydration and updated by the permission action.
     setSupported(notificationsSupported());
     setEnabled(notificationsEnabled() && notificationsHavePermission());
   }, []);

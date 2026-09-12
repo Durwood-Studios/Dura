@@ -87,7 +87,7 @@ export function ExportHubClient({
   };
 
   /** Wraps an export action: prevents concurrent clicks, shows status, catches errors. */
-  const guard = (label: string, fn: () => Promise<void> | void) => async () => {
+  const guard = async (label: string, fn: () => Promise<void> | void): Promise<void> => {
     if (generating.current) return;
     generating.current = true;
     setStatus(`Generating ${label}…`);
@@ -113,27 +113,30 @@ export function ExportHubClient({
           formats={[
             {
               label: "CSV",
-              onClick: guard("dura-dictionary.csv", async () => {
-                const { dictionaryCSV } = await import("@/lib/exports/dictionary-export");
-                const { downloadCSV } = await import("@/lib/exports/download");
-                downloadCSV("dura-dictionary.csv", dictionaryCSV());
-              }),
+              onClick: () =>
+                guard("dura-dictionary.csv", async () => {
+                  const { dictionaryCSV } = await import("@/lib/exports/dictionary-export");
+                  const { downloadCSV } = await import("@/lib/exports/download");
+                  downloadCSV("dura-dictionary.csv", dictionaryCSV());
+                }),
             },
             {
               label: "Anki TXT",
-              onClick: guard("dura-dictionary-anki.txt", async () => {
-                const { dictionaryAnki } = await import("@/lib/exports/dictionary-export");
-                const { downloadText } = await import("@/lib/exports/download");
-                downloadText("dura-dictionary-anki.txt", dictionaryAnki(), "text/plain");
-              }),
+              onClick: () =>
+                guard("dura-dictionary-anki.txt", async () => {
+                  const { dictionaryAnki } = await import("@/lib/exports/dictionary-export");
+                  const { downloadText } = await import("@/lib/exports/download");
+                  downloadText("dura-dictionary-anki.txt", dictionaryAnki(), "text/plain");
+                }),
             },
             {
               label: "JSON",
-              onClick: guard("dura-dictionary.json", async () => {
-                const { dictionaryJSON } = await import("@/lib/exports/dictionary-export");
-                const { downloadJSON } = await import("@/lib/exports/download");
-                downloadJSON("dura-dictionary.json", dictionaryJSON());
-              }),
+              onClick: () =>
+                guard("dura-dictionary.json", async () => {
+                  const { dictionaryJSON } = await import("@/lib/exports/dictionary-export");
+                  const { downloadJSON } = await import("@/lib/exports/download");
+                  downloadJSON("dura-dictionary.json", dictionaryJSON());
+                }),
             },
           ]}
         />
@@ -146,19 +149,21 @@ export function ExportHubClient({
           formats={[
             {
               label: "JSON",
-              onClick: guard("dura-quiz-bank.json", async () => {
-                const { quizBankJSON } = await import("@/lib/exports/quiz-export");
-                const { downloadJSON } = await import("@/lib/exports/download");
-                downloadJSON("dura-quiz-bank.json", quizBankJSON());
-              }),
+              onClick: () =>
+                guard("dura-quiz-bank.json", async () => {
+                  const { quizBankJSON } = await import("@/lib/exports/quiz-export");
+                  const { downloadJSON } = await import("@/lib/exports/download");
+                  downloadJSON("dura-quiz-bank.json", quizBankJSON());
+                }),
             },
             {
               label: "CSV",
-              onClick: guard("dura-quiz-bank.csv", async () => {
-                const { quizBankCSV } = await import("@/lib/exports/quiz-export");
-                const { downloadCSV } = await import("@/lib/exports/download");
-                downloadCSV("dura-quiz-bank.csv", quizBankCSV());
-              }),
+              onClick: () =>
+                guard("dura-quiz-bank.csv", async () => {
+                  const { quizBankCSV } = await import("@/lib/exports/quiz-export");
+                  const { downloadCSV } = await import("@/lib/exports/download");
+                  downloadCSV("dura-quiz-bank.csv", quizBankCSV());
+                }),
             },
           ]}
         />
@@ -171,11 +176,12 @@ export function ExportHubClient({
           formats={[
             {
               label: "CSV",
-              onClick: guard("dura-standards.csv", async () => {
-                const { standardsCSV } = await import("@/lib/exports/standards-export");
-                const { downloadCSV } = await import("@/lib/exports/download");
-                downloadCSV("dura-standards.csv", standardsCSV(standards, lessons));
-              }),
+              onClick: () =>
+                guard("dura-standards.csv", async () => {
+                  const { standardsCSV } = await import("@/lib/exports/standards-export");
+                  const { downloadCSV } = await import("@/lib/exports/download");
+                  downloadCSV("dura-standards.csv", standardsCSV(standards, lessons));
+                }),
             },
           ]}
         />
@@ -188,14 +194,15 @@ export function ExportHubClient({
           formats={[
             {
               label: "JSON",
-              onClick: guard("dura-lessons.json", async () => {
-                const { downloadJSON } = await import("@/lib/exports/download");
-                downloadJSON("dura-lessons.json", {
-                  exportedAt: new Date().toISOString(),
-                  count: lessons.length,
-                  lessons,
-                });
-              }),
+              onClick: () =>
+                guard("dura-lessons.json", async () => {
+                  const { downloadJSON } = await import("@/lib/exports/download");
+                  downloadJSON("dura-lessons.json", {
+                    exportedAt: new Date().toISOString(),
+                    count: lessons.length,
+                    lessons,
+                  });
+                }),
             },
           ]}
         />

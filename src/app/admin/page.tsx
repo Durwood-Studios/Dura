@@ -1,3 +1,4 @@
+import { currentReportTime } from "@/lib/admin/report-time";
 import type { ReactElement, ReactNode } from "react";
 import Link from "next/link";
 import {
@@ -43,7 +44,7 @@ async function getTipsRevenue(): Promise<TipsRevenue> {
   if (!stripe) return { state: "unconfigured" };
 
   try {
-    const since = Math.floor((Date.now() - 30 * DAY_MS) / 1000);
+    const since = Math.floor((currentReportTime() - 30 * DAY_MS) / 1000);
 
     const byCurrency = new Map<string, number>();
     let count = 0;
@@ -190,10 +191,10 @@ const QUICK_LINKS = [
 export default async function AdminOverviewPage(): Promise<ReactElement> {
   const supabase = await createClient();
 
-  const trendSinceIso = new Date(Date.now() - TREND_DAYS * DAY_MS).toISOString();
+  const trendSinceIso = new Date(currentReportTime() - TREND_DAYS * DAY_MS).toISOString();
   // analytics_events.timestamp is bigint epoch-ms — filter numerically.
-  const trendSinceMs = Date.now() - TREND_DAYS * DAY_MS;
-  const todayStartMs = Math.floor(Date.now() / DAY_MS) * DAY_MS;
+  const trendSinceMs = currentReportTime() - TREND_DAYS * DAY_MS;
+  const todayStartMs = Math.floor(currentReportTime() / DAY_MS) * DAY_MS;
 
   const [
     profilesCountRes,

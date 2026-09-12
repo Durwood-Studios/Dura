@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useHydrated } from "@/hooks/useHydrated";
+
+import { useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import { Sparkles, X, RefreshCw } from "lucide-react";
@@ -203,11 +205,10 @@ export function UpdateAvailable(): React.ReactElement | null {
   const { updateAvailable, applyUpdate } = useServiceWorkerUpdate();
   const [phase, setPhase] = useState<Phase>("pill");
   const [blackout, setBlackout] = useState(false);
-  const [mounted, setMounted] = useState(false);
+  const mounted = useHydrated();
   const prefersReduced = useReducedMotion() ?? false;
 
   // Portal requires the DOM — only activate after first client render
-  useEffect(() => setMounted(true), []);
 
   if (!updateAvailable) return null;
 

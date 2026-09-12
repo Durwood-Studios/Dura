@@ -149,6 +149,7 @@ export function Sidebar(): React.ReactElement {
       // POST to server-side route so the refresh token is revoked server-side,
       // not just cleared from client storage (OWASP A07 — session management).
       await fetch("/api/auth/sign-out", { method: "POST" });
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- Discard stale in-memory learner/auth state after sign-out or reset.
       window.location.href = "/auth/sign-in";
     } catch (error) {
       console.error("[sidebar] sign-out failed", error);

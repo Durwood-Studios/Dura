@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useHydrated } from "@/hooks/useHydrated";
+import { useAIAvailability } from "@/hooks/useAIAvailability";
+
+import { useState } from "react";
 import dynamic from "next/dynamic";
 import { Sparkles } from "lucide-react";
-import { isAIConsented, subscribeAIConsentChanges } from "@/lib/ai/consent-gate";
-import { hasAnthropicKey } from "@/lib/ai/key-storage";
+
 import type { LessonMeta } from "@/types/curriculum";
 
 /**
@@ -27,18 +29,9 @@ interface AITutorMountProps {
 }
 
 export function AITutorMount({ meta, lessonBody }: AITutorMountProps): React.ReactElement | null {
-  const [hydrated, setHydrated] = useState(false);
-  const [available, setAvailable] = useState(false);
+  const hydrated = useHydrated();
+  const available = useAIAvailability();
   const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    setHydrated(true);
-    const refresh = (): void => {
-      setAvailable(isAIConsented() && hasAnthropicKey());
-    };
-    refresh();
-    return subscribeAIConsentChanges(refresh);
-  }, []);
 
   if (!hydrated || !available) return null;
 

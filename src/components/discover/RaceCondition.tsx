@@ -327,13 +327,7 @@ export function RaceCondition(): React.ReactElement {
   const rngRef = useRef<() => number>(mulberry32(INITIAL_SEED));
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // After mount, swap in a fresh random seed so two visits don't produce the
-  // exact same schedule. Hydration uses INITIAL_SEED on both server and client;
-  // this effect runs only on the client, post-hydration.
-  useEffect(() => {
-    setSeed(Math.floor(Math.random() * 2_000_000_000));
-  }, []);
-
+  // A fixed initial seed keeps hydration deterministic; the reroll control chooses a new schedule.
   const ops = useMemo<Op[][]>(() => (atomic ? buildOpsAtomic() : buildOpsNonAtomic()), [atomic]);
 
   const stop = useCallback((): void => {
@@ -349,13 +343,6 @@ export function RaceCondition(): React.ReactElement {
     setState(initialState());
     rngRef.current = mulberry32(seed);
   }, [seed, stop]);
-
-  // Reset machine whenever atomic mode or seed changes.
-  useEffect(() => {
-    stop();
-    setState(initialState());
-    rngRef.current = mulberry32(seed);
-  }, [atomic, seed, stop]);
 
   useEffect(() => {
     return () => {
@@ -453,8 +440,12 @@ export function RaceCondition(): React.ReactElement {
   );
 
   const newSeed = useCallback((): void => {
-    setSeed(Math.floor(Math.random() * 2_000_000_000));
-  }, []);
+    const nextSeed = Math.floor(Math.random() * 2_000_000_000);
+    stop();
+    setState(initialState());
+    rngRef.current = mulberry32(nextSeed);
+    setSeed(nextSeed);
+  }, [stop]);
 
   // Mark complete: at least 3 non-atomic runs AND at least one observed race.
   useEffect(() => {
@@ -494,7 +485,10 @@ export function RaceCondition(): React.ReactElement {
           <input
             type="checkbox"
             checked={atomic}
-            onChange={(e) => setAtomic(e.target.checked)}
+            onChange={(e) => {
+              reset();
+              setAtomic(e.target.checked);
+            }}
             className="h-4 w-4 accent-emerald-500"
           />
           Atomic increment (lock)

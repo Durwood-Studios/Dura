@@ -1,5 +1,7 @@
 "use client";
 
+import { useCurrentTime } from "@/hooks/useCurrentTime";
+
 import { lessonRouteId } from "@/lib/lesson-identity";
 
 import { useEffect, useState } from "react";
@@ -152,6 +154,7 @@ export function DashboardClient({
 }: {
   lessonTitles?: Record<string, string>;
 }): React.ReactElement {
+  const now = useCurrentTime(true, 60000);
   const [data, setData] = useState<DashboardData | null>(null);
   const [comebackDismissed, setComebackDismissed] = useState(false);
   const showStreak = usePreferencesStore((s) => s.prefs.showStreak);
@@ -160,6 +163,7 @@ export function DashboardClient({
   useEffect(() => {
     void loadDashboard().then(setData);
     if (sessionStorage.getItem(COMEBACK_STORAGE_KEY)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Read the tab-local dismissal only after hydration to preserve the server snapshot.
       setComebackDismissed(true);
     }
   }, []);
@@ -222,12 +226,12 @@ export function DashboardClient({
   // Journey day counter
   const journeyDays =
     data.earliestStartedAt !== null
-      ? Math.max(1, Math.ceil((Date.now() - data.earliestStartedAt) / 86_400_000))
+      ? Math.max(1, Math.ceil((now - data.earliestStartedAt) / 86_400_000))
       : 1;
 
   // Comeback detection: last activity > 7 days ago
   const lastActivityMs = data.lastLesson?.startedAt ?? 0;
-  const daysSinceLastActivity = lastActivityMs > 0 ? (Date.now() - lastActivityMs) / 86_400_000 : 0;
+  const daysSinceLastActivity = lastActivityMs > 0 ? (now - lastActivityMs) / 86_400_000 : 0;
   const showComeback = lastActivityMs > 0 && daysSinceLastActivity > 7 && !comebackDismissed;
 
   function dismissComeback(): void {

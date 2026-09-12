@@ -46,7 +46,7 @@ export function DictionaryClient({
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<string | undefined>(undefined);
   const [difficulty, setDifficulty] = useState<DictionaryDifficulty>("intermediate");
-  const [terms, setTerms] = useState<DictionaryTerm[]>(initialTerms);
+  const [searchedTerms, setTerms] = useState<DictionaryTerm[]>(initialTerms);
   const [loading, setLoading] = useState(false);
   const [showAllChips, setShowAllChips] = useState(false);
 
@@ -92,11 +92,10 @@ export function DictionaryClient({
   }, []);
 
   const hasFilters = query || category;
+  const terms = hasFilters ? searchedTerms : initialTerms;
   useEffect(() => {
-    if (!hasFilters) {
-      setTerms(initialTerms);
-      return;
-    }
+    if (!hasFilters) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize the remote search request and its pending indicator with the current query.
     void fetchTerms(query, category);
   }, [query, category, fetchTerms, hasFilters, initialTerms]);
 

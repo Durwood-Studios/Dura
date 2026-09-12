@@ -137,54 +137,57 @@ export function TreasureMap(): React.ReactElement {
   useEffect(() => {
     if (!isRunning || runStep < 0) return;
 
-    if (runStep >= commands.length) {
-      // Ran out of commands without reaching treasure
-      setIsRunning(false);
-      setRunStep(-1);
-      // Check if we're on treasure
-      if (playerPos.row === level.treasure.row && playerPos.col === level.treasure.col) {
-        setMessage("You found the treasure!");
-        setMessageType("success");
-        if (levelIndex === LEVELS.length - 1 && !completed) {
-          setCompleted(true);
-          markActivityComplete("treasure-map");
+    timerRef.current = setTimeout(
+      () => {
+        if (runStep >= commands.length) {
+          // Ran out of commands without reaching treasure
+          setIsRunning(false);
+          setRunStep(-1);
+          // Check if we're on treasure
+          if (playerPos.row === level.treasure.row && playerPos.col === level.treasure.col) {
+            setMessage("You found the treasure!");
+            setMessageType("success");
+            if (levelIndex === LEVELS.length - 1 && !completed) {
+              setCompleted(true);
+              markActivityComplete("treasure-map");
+            }
+          } else {
+            setMessage("You didn't reach the treasure. Try again!");
+            setMessageType("error");
+          }
+          return;
         }
-      } else {
-        setMessage("You didn't reach the treasure. Try again!");
-        setMessageType("error");
-      }
-      return;
-    }
 
-    timerRef.current = setTimeout(() => {
-      const nextPos = applyDirection(playerPos, commands[runStep]);
+        const nextPos = applyDirection(playerPos, commands[runStep]);
 
-      if (!isInBounds(nextPos) || level.walls[nextPos.row][nextPos.col]) {
-        // Hit a wall or went out of bounds
-        setIsRunning(false);
-        setRunStep(-1);
-        setMessage("Oops! Hit a wall. Try again.");
-        setMessageType("error");
-        return;
-      }
-
-      setPlayerPos(nextPos);
-
-      if (nextPos.row === level.treasure.row && nextPos.col === level.treasure.col) {
-        // Reached treasure
-        setIsRunning(false);
-        setRunStep(-1);
-        setMessage("You found the treasure!");
-        setMessageType("success");
-        if (levelIndex === LEVELS.length - 1 && !completed) {
-          setCompleted(true);
-          markActivityComplete("treasure-map");
+        if (!isInBounds(nextPos) || level.walls[nextPos.row][nextPos.col]) {
+          // Hit a wall or went out of bounds
+          setIsRunning(false);
+          setRunStep(-1);
+          setMessage("Oops! Hit a wall. Try again.");
+          setMessageType("error");
+          return;
         }
-        return;
-      }
 
-      setRunStep((s) => s + 1);
-    }, 400);
+        setPlayerPos(nextPos);
+
+        if (nextPos.row === level.treasure.row && nextPos.col === level.treasure.col) {
+          // Reached treasure
+          setIsRunning(false);
+          setRunStep(-1);
+          setMessage("You found the treasure!");
+          setMessageType("success");
+          if (levelIndex === LEVELS.length - 1 && !completed) {
+            setCompleted(true);
+            markActivityComplete("treasure-map");
+          }
+          return;
+        }
+
+        setRunStep((s) => s + 1);
+      },
+      runStep >= commands.length ? 0 : 400
+    );
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);

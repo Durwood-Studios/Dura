@@ -20,7 +20,7 @@
  * subscription fires.
  */
 
-import { useEffect, useState } from "react";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { SPRINGS } from "@/lib/motion/springs";
 
 const MEDIA_QUERY = "(prefers-reduced-motion: reduce)";
@@ -53,36 +53,7 @@ function readPreference(): MotionPreference {
 }
 
 export function useMotionPreference(): MotionPreference {
-  // Default to full motion for SSR — hydration corrects on first effect.
-  const [pref, setPref] = useState<MotionPreference>(FULL_MOTION);
-
-  useEffect(() => {
-    setPref(readPreference());
-    if (typeof window === "undefined" || !window.matchMedia) return;
-
-    let mql: MediaQueryList;
-    try {
-      mql = window.matchMedia(MEDIA_QUERY);
-    } catch {
-      return;
-    }
-
-    const onChange = (): void => {
-      setPref(mql.matches ? REDUCED_MOTION : FULL_MOTION);
-    };
-
-    if (typeof mql.addEventListener === "function") {
-      mql.addEventListener("change", onChange);
-      return () => mql.removeEventListener("change", onChange);
-    }
-    // Safari < 14 fallback
-    if (typeof mql.addListener === "function") {
-      mql.addListener(onChange);
-      return () => mql.removeListener(onChange);
-    }
-  }, []);
-
-  return pref;
+  return useMediaQuery(MEDIA_QUERY) ? REDUCED_MOTION : FULL_MOTION;
 }
 
 /**

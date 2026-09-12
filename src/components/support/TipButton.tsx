@@ -49,6 +49,7 @@ export function TipButton({ variant = "floating", className }: TipButtonProps): 
     if (variant !== "floating") return;
     try {
       if (!localStorage.getItem(STORAGE_KEY)) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize a one-time animation with the browser-local acknowledgement after hydration.
         setPulseOnce(true);
         localStorage.setItem(STORAGE_KEY, "1");
       }
@@ -79,6 +80,7 @@ export function TipButton({ variant = "floating", className }: TipButtonProps): 
       }
       const { url } = (await res.json()) as { url?: string };
       if (url) {
+        // eslint-disable-next-line react-hooks/immutability -- Browser Location is an external navigation API, not immutable React state.
         window.location.href = url;
         return;
       }

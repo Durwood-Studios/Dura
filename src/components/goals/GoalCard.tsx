@@ -1,5 +1,6 @@
 "use client";
 
+import { useCurrentTime } from "@/hooks/useCurrentTime";
 import { Trash2, Check } from "lucide-react";
 import { useGoalsStore } from "@/stores/goals";
 import { cn } from "@/lib/utils";
@@ -20,7 +21,7 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
   const percent = Math.round(ratio * 100);
 
   // Deadline-aware pacing color
-  const now = Date.now();
+  const now = useCurrentTime(true, 60000);
   const ontrack = (() => {
     if (!goal.deadline) return ratio >= 0.25; // rough daily/weekly heuristic
     const totalMs = goal.deadline - goal.startedAt;

@@ -1,3 +1,4 @@
+import { currentReportTime } from "@/lib/admin/report-time";
 import type { ReactElement } from "react";
 
 import Link from "next/link";
@@ -44,7 +45,7 @@ function relativeTime(iso: string): string {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return iso;
 
-  const diff = ms - Date.now();
+  const diff = ms - currentReportTime();
   const abs = Math.abs(diff);
   const MINUTE = 60_000;
   const HOUR = 60 * MINUTE;
@@ -105,7 +106,7 @@ export default async function AdminFeedbackPage({
   const requestedPage = Number.isNaN(parsedPage) ? 1 : Math.max(1, parsedPage);
 
   const supabase = await createClient();
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const weekAgo = new Date(currentReportTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
   const [totalRes, weekRes, ...categoryResults] = await Promise.all([
     supabase.from("feedback").select("id", { count: "exact", head: true }),

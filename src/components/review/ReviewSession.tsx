@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
+import { useCurrentTime } from "@/hooks/useCurrentTime";
 import { RotateCcw, ArrowRight } from "lucide-react";
 import { useAnimate } from "motion/react";
 import { useReviewStore } from "@/stores/review";
@@ -51,6 +52,7 @@ export function ReviewSession(): React.ReactElement {
   const flippedAt = useReviewStore((s) => s.flippedAt);
   const sessionStats = useReviewStore((s) => s.sessionStats);
   const sessionComplete = useReviewStore((s) => s.sessionComplete);
+  const now = useCurrentTime(!sessionComplete);
   const startedAt = useReviewStore((s) => s.startedAt);
   const loading = useReviewStore((s) => s.loading);
   const dueCount = useReviewStore((s) => s.dueCount);
@@ -106,7 +108,7 @@ export function ReviewSession(): React.ReactElement {
     const total = sessionStats.correct + sessionStats.wrong;
     const accuracy = total === 0 ? 0 : Math.round((sessionStats.correct / total) * 100);
     const xp = earnedXP;
-    const elapsedMs = startedAt ? Date.now() - startedAt : 0;
+    const elapsedMs = startedAt ? Math.max(0, now - startedAt) : 0;
     return (
       <div className="mx-auto max-w-xl py-16 text-center" role="status" aria-live="polite">
         <h2 className="text-3xl font-semibold text-[var(--color-text-primary)]">

@@ -35,6 +35,7 @@ export function AIFeaturesPanel(): React.ReactElement {
   const [keyOnFile, setKeyOnFile] = useState(false);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Hydrate consent and key snapshots from browser storage before subscribing to external changes.
     setHydrated(true);
     setConsent(getAIConsentState());
     setKeyOnFile(hasAnthropicKey());

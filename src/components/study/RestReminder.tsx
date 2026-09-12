@@ -45,6 +45,7 @@ export function RestReminder(): React.ReactElement | null {
       sessionStorage.setItem(SESSION_START_KEY, String(Date.now()));
     }
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronize the initial tab session clock before starting its periodic external timer.
     checkConditions();
     const id = setInterval(checkConditions, CHECK_INTERVAL_MS);
     return () => clearInterval(id);

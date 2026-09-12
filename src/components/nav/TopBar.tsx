@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Menu, Search, Sun, Moon } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { usePreferencesStore } from "@/stores/preferences";
@@ -18,14 +18,7 @@ export function TopBar(): React.ReactElement {
   // first client render agree. Reading `window.matchMedia` directly here
   // caused React #418 on /settings when a learner's OS preferred dark and
   // theme was "system": server rendered `<Moon />`, client rendered `<Sun />`.
-  const [systemDark, setSystemDark] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    setSystemDark(mq.matches);
-    const handler = (e: MediaQueryListEvent): void => setSystemDark(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, []);
+  const systemDark = useMediaQuery("(prefers-color-scheme: dark)");
 
   const isDark = theme === "dark" || (theme === "system" && systemDark);
 

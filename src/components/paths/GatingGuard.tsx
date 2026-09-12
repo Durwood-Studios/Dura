@@ -32,10 +32,7 @@ export function GatingGuard({
 
   useEffect(() => {
     if (!hydrated) return;
-    if (!strictGating) {
-      setState("unlocked");
-      return;
-    }
+    if (!strictGating) return;
     void isModuleUnlocked(phaseId, moduleId, true).then((unlocked) => {
       if (unlocked) {
         setState("unlocked");
@@ -46,7 +43,7 @@ export function GatingGuard({
     });
   }, [phaseId, moduleId, strictGating, hydrated]);
 
-  if (state === "loading") {
+  if (!hydrated || (strictGating && state === "loading")) {
     return (
       <div className="space-y-4 px-6 py-10">
         <Skeleton className="h-8 w-48" />
@@ -56,7 +53,7 @@ export function GatingGuard({
     );
   }
 
-  if (state === "locked" && prerequisite) {
+  if (strictGating && state === "locked" && prerequisite) {
     return <LockedModule moduleTitle={moduleTitle} prerequisite={prerequisite} />;
   }
 

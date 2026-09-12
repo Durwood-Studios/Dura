@@ -64,10 +64,7 @@ export function ActivityFeed({ userId }: ActivityFeedProps): React.ReactElement 
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    if (!userId) {
-      setIsLoading(false);
-      return;
-    }
+    if (!userId) return;
 
     void fetchActivityFeed(userId, 10)
       .then(setItems)

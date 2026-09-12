@@ -1,3 +1,4 @@
+import { currentReportTime } from "@/lib/admin/report-time";
 import type { ReactElement, ReactNode } from "react";
 import Link from "next/link";
 import { User, ChevronLeft, ChevronRight } from "lucide-react";
@@ -124,7 +125,7 @@ export default async function AdminUsersPage({
   const { page: rawPage } = await searchParams;
   const supabase = await createClient();
 
-  const now = Date.now();
+  const now = currentReportTime();
   const todayStartIso = new Date(Math.floor(now / DAY_MS) * DAY_MS).toISOString();
   const weekAgoIso = new Date(now - 7 * DAY_MS).toISOString();
   const windowStartIso = new Date(

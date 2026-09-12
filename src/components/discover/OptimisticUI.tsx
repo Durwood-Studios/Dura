@@ -97,6 +97,7 @@ export function OptimisticUI(): React.ReactElement {
   const timeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   /** Completion-gate tracking. */
+  const [completionState, setCompletionState] = useState({ rollbacks: 0, pessimisticClicks: 0 });
   const optimisticRollbacksRef = useRef<number>(0);
   const pessimisticClicksRef = useRef<number>(0);
   const completedRef = useRef<boolean>(false);
@@ -132,6 +133,15 @@ export function OptimisticUI(): React.ReactElement {
     },
     [latencyMs, failureRatePct]
   );
+
+  const displayLikedRef = useRef<boolean>(displayLiked);
+  const displayCountRef = useRef<number>(displayCount);
+  useEffect(() => {
+    displayLikedRef.current = displayLiked;
+  }, [displayLiked]);
+  useEffect(() => {
+    displayCountRef.current = displayCount;
+  }, [displayCount]);
 
   const fireOptimisticClick = useCallback((): void => {
     const id = nextIdRef.current++;
@@ -185,6 +195,7 @@ export function OptimisticUI(): React.ReactElement {
           return cur;
         });
         optimisticRollbacksRef.current += 1;
+        setCompletionState((previous) => ({ ...previous, rollbacks: previous.rollbacks + 1 }));
         setRollbackFlash(true);
         const flashHandle = setTimeout(() => {
           timeoutsRef.current.delete(flashHandle);
@@ -209,14 +220,6 @@ export function OptimisticUI(): React.ReactElement {
    * render. This is what production code uses version numbers for — and
    * the comment above fireOptimisticClick names that explicitly.
    */
-  const displayLikedRef = useRef<boolean>(displayLiked);
-  const displayCountRef = useRef<number>(displayCount);
-  useEffect(() => {
-    displayLikedRef.current = displayLiked;
-  }, [displayLiked]);
-  useEffect(() => {
-    displayCountRef.current = displayCount;
-  }, [displayCount]);
 
   const firePessimisticClick = useCallback((): void => {
     if (pessimisticPending) return; // ignore clicks while one is in flight
@@ -238,6 +241,10 @@ export function OptimisticUI(): React.ReactElement {
       },
     ]);
     pessimisticClicksRef.current += 1;
+    setCompletionState((previous) => ({
+      ...previous,
+      pessimisticClicks: previous.pessimisticClicks + 1,
+    }));
 
     issueRequest(
       id,
@@ -289,6 +296,7 @@ export function OptimisticUI(): React.ReactElement {
     setRollbackFlash(false);
     setRequests([]);
     optimisticRollbacksRef.current = 0;
+    setCompletionState({ rollbacks: 0, pessimisticClicks: 0 });
     pessimisticClicksRef.current = 0;
     nextIdRef.current = 1;
     // Note: completedRef is intentionally NOT reset — once earned, the
@@ -348,12 +356,6 @@ export function OptimisticUI(): React.ReactElement {
 
   /** Show the last 12 requests in the queue visualization. */
   const queueSlice = useMemo(() => requests.slice(-12), [requests]);
-
-  const completionState = {
-    rollbacks: optimisticRollbacksRef.current,
-    pessimisticClicks: pessimisticClicksRef.current,
-    done: completedRef.current,
-  };
 
   return (
     <div className="space-y-5">

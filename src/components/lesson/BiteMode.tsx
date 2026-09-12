@@ -75,6 +75,7 @@ function BiteSegmentView({
 
     for (let i = 0; i < segs.length; i++) {
       for (const node of segs[i]) {
+        // eslint-disable-next-line react-hooks/immutability -- These are DOM nodes discovered from the lesson container, intentionally updated outside React ownership.
         node.style.display = i === current ? "" : "none";
       }
     }

@@ -181,6 +181,7 @@ export function InstallGuide(): React.ReactElement {
 
   useEffect(() => {
     const detected = detectPlatform();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Browser platform detection is unavailable during server rendering; hydrate the installation instructions.
     if (detected !== "unknown") setActivePlatform(detected);
   }, []);
 

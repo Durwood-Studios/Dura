@@ -17,10 +17,10 @@ export function FractalTree(): React.ReactElement {
   const [angle, setAngle] = useState(25);
   const [length, setLength] = useState(55);
   const [colorIndex, setColorIndex] = useState(0);
-  const [hasCompleted, setHasCompleted] = useState(false);
+  const hasCompleted = useRef(false);
 
   const drawTree = useCallback(
-    (
+    function drawBranch(
       ctx: CanvasRenderingContext2D,
       x: number,
       y: number,
@@ -28,7 +28,7 @@ export function FractalTree(): React.ReactElement {
       ang: number,
       currentDepth: number,
       branchColor: string
-    ): void => {
+    ): void {
       if (currentDepth === 0) return;
 
       const endX = x + len * Math.sin((ang * Math.PI) / 180);
@@ -43,8 +43,8 @@ export function FractalTree(): React.ReactElement {
       ctx.stroke();
 
       const shrink = 0.7;
-      drawTree(ctx, endX, endY, len * shrink, ang - angle, currentDepth - 1, branchColor);
-      drawTree(ctx, endX, endY, len * shrink, ang + angle, currentDepth - 1, branchColor);
+      drawBranch(ctx, endX, endY, len * shrink, ang - angle, currentDepth - 1, branchColor);
+      drawBranch(ctx, endX, endY, len * shrink, ang + angle, currentDepth - 1, branchColor);
     },
     [angle]
   );
@@ -62,11 +62,11 @@ export function FractalTree(): React.ReactElement {
     // extent stays within ~230px of the trunk).
     drawTree(ctx, 250, 470, length, 0, depth, PRESET_COLORS[colorIndex].value);
 
-    if (depth >= 4 && !hasCompleted) {
-      setHasCompleted(true);
+    if (depth >= 4 && !hasCompleted.current) {
+      hasCompleted.current = true;
       markActivityComplete("fractal-tree");
     }
-  }, [depth, angle, length, colorIndex, drawTree, hasCompleted]);
+  }, [depth, angle, length, colorIndex, drawTree]);
 
   return (
     <div className="flex flex-col items-center gap-6">

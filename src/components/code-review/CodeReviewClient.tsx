@@ -1,11 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useHydrated } from "@/hooks/useHydrated";
+import { useAIAvailability } from "@/hooks/useAIAvailability";
+
+import { useCallback, useState } from "react";
 import { Sparkles, Loader2, CircleAlert } from "lucide-react";
 import Link from "next/link";
 import { chat, AIInvalidKeyError, AIKeyMissingError } from "@/lib/ai/anthropic-client";
-import { isAIConsented, subscribeAIConsentChanges } from "@/lib/ai/consent-gate";
-import { hasAnthropicKey } from "@/lib/ai/key-storage";
+
 import {
   CodeReviewSchema,
   type CodeReview,
@@ -80,23 +82,14 @@ function tryParse(raw: string): CodeReview | null {
 }
 
 export function CodeReviewClient(): React.ReactElement {
-  const [hydrated, setHydrated] = useState(false);
-  const [available, setAvailable] = useState(false);
+  const hydrated = useHydrated();
+  const available = useAIAvailability();
   const [code, setCode] = useState("");
   const [language, setLanguage] = useState<(typeof LANGUAGES)[number]["value"]>("javascript");
   const [submitting, setSubmitting] = useState(false);
   const [review, setReview] = useState<CodeReview | null>(null);
   const [rawFallback, setRawFallback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setHydrated(true);
-    const refresh = (): void => {
-      setAvailable(isAIConsented() && hasAnthropicKey());
-    };
-    refresh();
-    return subscribeAIConsentChanges(refresh);
-  }, []);
 
   const run = useCallback(async () => {
     if (!code.trim() || submitting) return;

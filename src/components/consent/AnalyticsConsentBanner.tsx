@@ -1,13 +1,26 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useSyncExternalStore } from "react";
 import {
+  CONSENT_CHANGED_EVENT,
   declineAnalyticsConsent,
   grantAnalyticsConsent,
   hasMadeConsentChoice,
 } from "@/lib/analytics/consent-gate";
 import { purgeAnalyticsQueue } from "@/lib/analytics";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+
+function needsChoice(): boolean {
+  return !hasMadeConsentChoice();
+}
+function subscribeConsent(notify: () => void): () => void {
+  window.addEventListener(CONSENT_CHANGED_EVENT, notify);
+  window.addEventListener("storage", notify);
+  return (): void => {
+    window.removeEventListener(CONSENT_CHANGED_EVENT, notify);
+    window.removeEventListener("storage", notify);
+  };
+}
 
 interface AnalyticsConsentBannerProps {
   onAccept?: () => void;
@@ -28,12 +41,8 @@ export function AnalyticsConsentBanner({
   onAccept,
   onDecline,
 }: AnalyticsConsentBannerProps): React.ReactElement | null {
-  const [visible, setVisible] = useState(false);
+  const visible = useSyncExternalStore(subscribeConsent, needsChoice, (): boolean => false);
   const bannerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setVisible(!hasMadeConsentChoice());
-  }, []);
 
   // Confine Tab/Shift+Tab within the banner while it is visible (WCAG 2.1 SC 2.1.2).
   // Hook is called unconditionally; trap is inactive until visible becomes true.
@@ -43,14 +52,12 @@ export function AnalyticsConsentBanner({
 
   const handleAccept = (): void => {
     grantAnalyticsConsent();
-    setVisible(false);
     onAccept?.();
   };
 
   const handleDecline = (): void => {
     declineAnalyticsConsent();
     void purgeAnalyticsQueue();
-    setVisible(false);
     onDecline?.();
   };
 

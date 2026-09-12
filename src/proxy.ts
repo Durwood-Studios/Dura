@@ -30,7 +30,7 @@ function matchRateLimit(
   );
 }
 
-export async function middleware(request: NextRequest): Promise<NextResponse> {
+export async function proxy(request: NextRequest): Promise<NextResponse> {
   const matched = matchRateLimit(request.nextUrl.pathname);
 
   if (matched) {

@@ -26,6 +26,7 @@ export function LocalResetBoundary({ children }: LocalResetBoundaryProps): React
     try {
       const { clearAllData } = await import("@/lib/clearAllData");
       await clearAllData();
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- Discard stale in-memory learner/auth state after sign-out or reset.
       window.location.href = "/";
     } catch (error) {
       console.error("[reset] Recovery failed", error);

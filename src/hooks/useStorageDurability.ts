@@ -33,6 +33,7 @@ export function useStorageDurability(): DurabilityStatus {
 
   useEffect(() => {
     if (typeof navigator === "undefined" || !navigator.storage?.persist) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Browser storage capabilities are determined after hydration, before requesting persistence.
       setStatus("unsupported");
       return;
     }

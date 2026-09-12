@@ -40,7 +40,7 @@ export function AssessmentQuiz(): React.ReactElement {
   const [answers, setAnswers] = useState<SkillAnswer[]>([]);
   const [result, setLocalResult] = useState<SkillAssessmentResult | null>(null);
   const [selectedPath, setSelectedPath] = useState<PathId | null>(null);
-  const [startTime] = useState(Date.now());
+  const [startTime] = useState(() => Date.now());
 
   // Prefix flight state (the 5 "below Phase 0" questions, scored separately).
   const [prefixIndex, setPrefixIndex] = useState(0);
@@ -224,7 +224,7 @@ export function AssessmentQuiz(): React.ReactElement {
             {score.correct}/{score.total} correct — {dreyfusLabel(score.dreyfusLevel)}
           </p>
           <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-            Completed in {Math.round((Date.now() - startTime) / 60000)} minutes
+            Completed in {Math.round((result.completedAt - startTime) / 60000)} minutes
           </p>
         </div>
 

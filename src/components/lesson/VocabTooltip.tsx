@@ -60,9 +60,11 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
     return v ?? "intermediate";
   });
 
-  useEffect(() => {
+  const [previousTier, setPreviousTier] = useState(userTier);
+  if (userTier !== previousTier) {
+    setPreviousTier(userTier);
     setTier(userTier);
-  }, [userTier]);
+  }
 
   // Fetch term data when tooltip opens
   useEffect(() => {

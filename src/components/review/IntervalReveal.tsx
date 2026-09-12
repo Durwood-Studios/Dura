@@ -27,13 +27,17 @@ export function IntervalReveal({
   const { shouldAnimate } = useMotionPreference();
   const [visible, setVisible] = useState(false);
 
+  const [previousInterval, setPreviousInterval] = useState(interval);
+  if (interval !== previousInterval) {
+    setPreviousInterval(interval);
+    setVisible(false);
+  }
+
   useEffect(() => {
     if (interval) {
       // Tiny defer so the element mounts before the opacity transition fires
       const id = requestAnimationFrame(() => setVisible(true));
       return () => cancelAnimationFrame(id);
-    } else {
-      setVisible(false);
     }
   }, [interval]);
 

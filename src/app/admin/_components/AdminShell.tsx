@@ -32,6 +32,7 @@ function AdminNav(): React.ReactElement {
   async function handleSignOut(): Promise<void> {
     const supabase = createClient();
     await supabase.auth.signOut({ scope: "local" });
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- Discard stale in-memory learner/auth state after sign-out or reset.
     window.location.href = "/auth/sign-in";
   }
 

@@ -1,5 +1,8 @@
 "use client";
 
+import { useCurrentTime } from "@/hooks/useCurrentTime";
+import { useHydrated } from "@/hooks/useHydrated";
+
 import { useEffect, useState } from "react";
 
 // v2: v1 cached wttr.in's full HTML page (browser UA bug); the key bump
@@ -20,23 +23,16 @@ function isValidWeather(text: string): boolean {
 /** Displays current time and weather for Aiken, SC. Fails silently. */
 export function AikenWeather(): React.ReactElement | null {
   const [weather, setWeather] = useState<string | null>(null);
-  const [time, setTime] = useState<string>("");
-
-  useEffect(() => {
-    const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
-    setTime(formatter.format(new Date()));
-
-    const interval = setInterval(() => {
-      setTime(formatter.format(new Date()));
-    }, 60_000);
-
-    return () => clearInterval(interval);
-  }, []);
+  const now = useCurrentTime(true, 60000);
+  const hydrated = useHydrated();
+  const time = hydrated
+    ? new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      }).format(new Date(now))
+    : "";
 
   useEffect(() => {
     async function fetchWeather(): Promise<void> {

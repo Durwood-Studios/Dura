@@ -133,7 +133,8 @@ export function CompletionGate({
     if (!ready) wasReadyRef.current = false;
   }, [ready]);
 
-  const [celebrating, setCelebrating] = useState(false);
+  const [wasCelebrated, setCelebrating] = useState(false);
+  const celebrating = Boolean(completed) || wasCelebrated;
   const [earnedXP, setEarnedXP] = useState(0);
   const [previousLevel, setPreviousLevel] = useState<number | null>(null);
   const [newLevel, setNewLevel] = useState<number | null>(null);
@@ -158,10 +159,14 @@ export function CompletionGate({
   }, []);
   const xp = useTween(earnedXP, XP_TWEEN_MS, celebrating);
   const completedLessonId = completed ? current?.lessonId : undefined;
+  const [previousCompletedLessonId, setPreviousCompletedLessonId] = useState(completedLessonId);
+  if (previousCompletedLessonId !== completedLessonId) {
+    setPreviousCompletedLessonId(completedLessonId);
+    setEarnedXP(0);
+  }
 
   useEffect((): (() => void) => {
     let isCancelled = false;
-    setEarnedXP(0);
     if (completedLessonId) {
       void (async (): Promise<void> => {
         try {
@@ -198,13 +203,6 @@ export function CompletionGate({
     ],
     [scrollOk, timeOk, quizPassed, requiredMinutes, timeRemainingMs, timeProgress, hasQuiz]
   );
-
-  // If the lesson was already completed in a previous session, skip celebration animation.
-  useEffect(() => {
-    if (completed && !celebrating) {
-      setCelebrating(true);
-    }
-  }, [completed, celebrating]);
 
   // After celebrating, fetch due card count and completed lesson count.
   useEffect(() => {

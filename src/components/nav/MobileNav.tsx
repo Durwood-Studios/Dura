@@ -220,6 +220,7 @@ export function MobileDrawer(): React.ReactElement | null {
     } catch {
       // proceed to navigate regardless
     }
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- Discard stale in-memory learner/auth state after sign-out or reset.
     window.location.href = "/auth/sign-in";
   }
 

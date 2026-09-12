@@ -12,7 +12,11 @@ interface SearchBarProps {
 export function SearchBar({ value, onChange, placeholder }: SearchBarProps): React.ReactElement {
   const [local, setLocal] = useState(value);
 
-  useEffect(() => setLocal(value), [value]);
+  const [previousValue, setPreviousValue] = useState(value);
+  if (value !== previousValue) {
+    setPreviousValue(value);
+    setLocal(value);
+  }
 
   // Debounce 300ms
   useEffect(() => {

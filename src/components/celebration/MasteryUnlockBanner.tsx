@@ -42,6 +42,7 @@ export function MasteryUnlockBanner({
       const key = storageKey(phaseId, moduleId);
       if (window.localStorage.getItem(key) === "1") return;
       window.localStorage.setItem(key, "1");
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- A one-time celebration is synchronized with its persisted browser acknowledgement after hydration.
       setShow(true);
     } catch {
       // localStorage unavailable (private mode quota, etc.) — skip silently.

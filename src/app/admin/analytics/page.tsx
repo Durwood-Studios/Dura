@@ -1,3 +1,4 @@
+import { currentReportTime } from "@/lib/admin/report-time";
 import type { ReactElement } from "react";
 
 import { createClient } from "@/lib/supabase/server";
@@ -88,7 +89,7 @@ function QueryError({ scope, message }: { scope: string; message: string }): Rea
  */
 export default async function AdminAnalyticsPage(): Promise<ReactElement> {
   const supabase = await createClient();
-  const now = Date.now();
+  const now = currentReportTime();
   // analytics_events.timestamp is bigint epoch-ms — filter numerically.
   const thirtyDaysAgoMs = now - 30 * 24 * 60 * 60 * 1000;
 

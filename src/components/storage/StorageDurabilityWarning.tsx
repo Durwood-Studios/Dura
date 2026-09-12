@@ -22,6 +22,7 @@ export function StorageDurabilityWarning(): React.ReactElement | null {
 
   useEffect(() => {
     if (typeof localStorage === "undefined") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Hydrate the persistent browser acknowledgement; server rendering cannot read localStorage.
       setDismissed(false);
       return;
     }

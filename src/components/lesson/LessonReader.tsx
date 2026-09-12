@@ -125,6 +125,7 @@ export async function LessonReader({
 
       <BiteMode>
         <div className="lesson-prose">
+          {/* eslint-disable-next-line react-hooks/static-components -- Server-evaluated authored MDX has no client component identity to preserve. */}
           <MDXContent components={mdxComponents} />
         </div>
       </BiteMode>

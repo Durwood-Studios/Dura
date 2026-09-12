@@ -140,6 +140,7 @@ export function InstallPrompt(): React.ReactElement | null {
     const standalone =
       window.matchMedia("(display-mode: standalone)").matches ||
       ("standalone" in navigator && (navigator as unknown as { standalone: boolean }).standalone);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Hydrate the browser installation state while registering the native install-prompt subscription.
     setIsStandalone(Boolean(standalone));
     if (standalone) return;
 
@@ -151,6 +152,7 @@ export function InstallPrompt(): React.ReactElement | null {
     const handler = (e: Event) => {
       e.preventDefault();
       setDeferredPrompt(e as BeforeInstallPromptEvent);
+      if (!localStorage.getItem(DISMISSED_KEY)) setShow(true);
     };
     window.addEventListener("beforeinstallprompt", handler);
 
@@ -161,12 +163,6 @@ export function InstallPrompt(): React.ReactElement | null {
       clearTimeout(timer);
     };
   }, []);
-
-  useEffect(() => {
-    if (deferredPrompt && !isStandalone && !localStorage.getItem(DISMISSED_KEY)) {
-      setShow(true);
-    }
-  }, [deferredPrompt, isStandalone]);
 
   const handleInstall = useCallback(async () => {
     if (deferredPrompt) {

@@ -14,7 +14,7 @@ export function FreeformSandboxSkeleton(): React.ReactElement {
       <div className="grid grid-cols-1 lg:grid-cols-2">
         <div className="space-y-2 border-b border-[var(--color-border)] p-4 lg:border-r lg:border-b-0">
           {Array.from({ length: 10 }, (_, i) => (
-            <Skeleton key={i} className="h-3" style={{ width: `${50 + Math.random() * 40}%` }} />
+            <Skeleton key={i} className="h-3" style={{ width: `${50 + ((i * 17) % 40)}%` }} />
           ))}
         </div>
         <div className="space-y-2 p-4">

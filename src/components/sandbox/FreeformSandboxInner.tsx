@@ -935,7 +935,8 @@ interface ToolbarProps {
   onLanguageChange: (next: SandboxLanguage) => void;
   saves: SandboxSave[];
   refreshSaves: () => Promise<void>;
-  currentSaveId: React.MutableRefObject<string | null>;
+  currentSaveId: string | null;
+  onSavedId: (id: string | null) => void;
   onLoadSave: (save: SandboxSave) => void;
   onDeleteSave: (id: string) => Promise<void>;
   onTemplateSelect: (code: string) => void;
@@ -951,6 +952,7 @@ function Toolbar({
   saves,
   refreshSaves,
   currentSaveId,
+  onSavedId,
   onLoadSave,
   onDeleteSave,
   onTemplateSelect,
@@ -974,7 +976,7 @@ function Toolbar({
   const doSave = async (manual: boolean): Promise<void> => {
     const code = currentCode();
     if (!manual && code === lastSavedCode.current) return;
-    const id = currentSaveId.current ?? generateId("snip");
+    const id = currentSaveId ?? generateId("snip");
     const now = Date.now();
     const existing = saves.find((s) => s.id === id);
     const save: SandboxSave = {
@@ -986,7 +988,7 @@ function Toolbar({
       updatedAt: now,
     };
     await putSave(save);
-    currentSaveId.current = id;
+    onSavedId(id);
     lastSavedCode.current = code;
     setSavedAt(now);
     if (manual) await refreshSaves();
@@ -999,11 +1001,15 @@ function Toolbar({
     await refreshSaves();
   };
 
-  // Auto-save
+  const saveActionRef = useRef(doSave);
   useEffect(() => {
-    const id = setInterval(() => void doSave(false), AUTOSAVE_MS);
+    saveActionRef.current = doSave;
+  });
+
+  // The interval reads the latest save identity and editor state without restarting on every keystroke.
+  useEffect(() => {
+    const id = setInterval(() => void saveActionRef.current(false), AUTOSAVE_MS);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [language]);
 
   const copy = async () => {
@@ -1192,7 +1198,8 @@ export default function FreeformSandboxInner(): React.ReactElement {
   const [saves, setSaves] = useState<SandboxSave[]>([]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showConsole, setShowConsole] = useState(true);
-  const currentSaveId = useRef<string | null>(null);
+  const [currentSaveId, setCurrentSaveId] = useState<string | null>(null);
+  const [workspaceVersion, setWorkspaceVersion] = useState(0);
 
   const showPreview = language === "html" || language === "react";
   // Editor height: taller by default, even taller in fullscreen
@@ -1206,7 +1213,7 @@ export default function FreeformSandboxInner(): React.ReactElement {
   };
 
   useEffect(() => {
-    void refreshSaves();
+    void getRecentSaves(20).then(setSaves);
   }, []);
 
   // Fullscreen: Esc to exit
@@ -1222,24 +1229,27 @@ export default function FreeformSandboxInner(): React.ReactElement {
   const switchLanguage = (next: SandboxLanguage) => {
     setLanguage(next);
     setCode(TEMPLATES[next][0].code);
-    currentSaveId.current = null;
+    setCurrentSaveId(null);
+    setWorkspaceVersion((version) => version + 1);
   };
 
   const loadSave = (save: SandboxSave) => {
     setLanguage(save.language);
     setCode(save.code);
-    currentSaveId.current = save.id;
+    setCurrentSaveId(save.id);
+    setWorkspaceVersion((version) => version + 1);
   };
 
   const handleDeleteSave = async (id: string): Promise<void> => {
     await deleteSave(id);
-    if (currentSaveId.current === id) currentSaveId.current = null;
+    if (currentSaveId === id) setCurrentSaveId(null);
     await refreshSaves();
   };
 
   const handleTemplateSelect = (templateCode: string) => {
     setCode(templateCode);
-    currentSaveId.current = null;
+    setCurrentSaveId(null);
+    setWorkspaceVersion((version) => version + 1);
   };
 
   return (
@@ -1250,7 +1260,7 @@ export default function FreeformSandboxInner(): React.ReactElement {
       )}
     >
       <SandpackProvider
-        key={`${language}-${currentSaveId.current ?? "fresh"}-${code.slice(0, 20)}`}
+        key={`${language}-${workspaceVersion}`}
         template={TEMPLATE[language]}
         theme={SANDPACK_THEME}
         files={{ [ENTRY_FILE[language]]: { code, active: true } }}
@@ -1262,6 +1272,7 @@ export default function FreeformSandboxInner(): React.ReactElement {
           saves={saves}
           refreshSaves={refreshSaves}
           currentSaveId={currentSaveId}
+          onSavedId={setCurrentSaveId}
           onLoadSave={loadSave}
           onDeleteSave={handleDeleteSave}
           onTemplateSelect={handleTemplateSelect}
