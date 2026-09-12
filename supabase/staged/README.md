@@ -1,5 +1,7 @@
 # Staged database repairs
 
+For the verified existing Dura production project, use the [manual run/skip matrix](live/README.md#manual-run-queue-for-this-dura-project). The proposals below are not a batch to apply: the target-specific patch includes only the missing changes. No hosted application is confirmed.
+
 These files are reviewable proposals for the contracts used by the app. They have **not been applied to production**. They reconstruct missing repository setup; they are not recovered copies of the original private migrations.
 
 Before applying anything, export the live schema and compare tables, columns, indexes, grants, functions, and policies. Migration numbers referenced by older private notes may already exist with different contents. Do not mark these applied or run them over that schema blindly. Each file is transactional. Existing additive tables intentionally fail rather than hiding incompatible definitions.
@@ -12,6 +14,7 @@ Before applying anything, export the live schema and compare tables, columns, in
 | 017  | Admin read policies                                                  | Allows JWT app_metadata.is_admin=true to read feedback, analytics, profiles and progress |
 | 018  | Annotation moderation, column grants and vote totals                 | Enables moderation; prevents author self-approval; reconciles and maintains vote totals  |
 | 019  | Profile email column and progress RPC caller permissions             | Fixes new-signup trigger; prevents cross-account progress writes                         |
+| 020  | Bounded signed credential storage and extended public hash lookup    | Preserves certificates; adds nullable public signed artifact, independently verified     |
 
 Apply missing changes in numeric order only after schema reconciliation and human review. Do not edit historical migrations to make a deployed database appear aligned. No service-role key is needed in the application, and no deployment automation applies these files.
 
@@ -25,6 +28,10 @@ Migration 014 rejects global unique IDs on learner event/certificate tables rath
 
 ## Certificate issuance boundary
 
-Public `/api/verify/sign` now always returns `503 trusted-issuance-unavailable`. Its old arbitrary-client-hash signing behavior could not prove learner identity or assessment completion. Offline certificates still save, print, and share as learner-controlled records. Historical signatures remain checkable only as hash receipts, with unavailable checks distinct from invalid signatures. Existing hashes omit some displayed fields, so their receipt does not attest the complete certificate.
+Public `/api/verify/sign` remains disabled: arbitrary caller-supplied hashes cannot prove an assessment score. The new optional `/verify/assessment` flow uses `/api/verify/assessment/start` and `/submit`: the server selects questions, binds an expiring signed challenge to an HttpOnly same-site browser cookie, validates the submitted selections, and signs every result claim only after a passing server-computed score. It requires the existing server-only `VERIFICATION_HMAC_SECRET` (at least 32 random characters); no service-role key or database is needed for issuance or verification.
 
-Trusted credential issuance is deferred until a separately designed authority validates assessment evidence, authorizes issuance, signs a versioned canonical payload covering every claim, and defines revocation. The public registry is learner-written and cannot serve as trusted evidence. Historical hashes remain unchanged so existing links continue working.
+The attempt and credential HMAC purposes are separated from each other and from historical hash receipts. Tokens do not include answer keys. A question-bank digest rejects attempts whose questions changed during deployment. Requests are bounded before JSON parsing. Issued claims are immutable and verified directly at `/verify/issued?credential=...`, never inferred from learner-written registry rows. Share links contain the self-reported name and score, are noindex, and use no-referrer metadata. Keep the signing secret stable across deployment instances; replacing it invalidates previous credentials and outstanding attempts. Individual revocation is not supported by this stateless format.
+
+The claim is deliberately limited: **the server scored submitted answers**, in an **unproctored assessment with unlimited practice**. The self-reported name, independent knowledge, identity, and accreditation are not verified. The public question bank is study material; repeat guesses and external assistance are possible. Identical submissions replay to the same signed claims; retries are allowed rather than pretending to enforce one attempt without durable authority. The signed timestamp is the attempt start, not an asserted completion time.
+
+Local offline assessments remain independent and continue to issue learner-controlled learning records. New issued tokens also persist locally in certificates; optional cloud synchronization requires the `server_credential` contract (staged020 for a reconstructed baseline, included in the target-specific live patch for existing Dura) and retains the token unchanged. A stored token is only trusted after server signature verification. Historical 32/64-character hash identifiers and receipts are unchanged and are not upgraded into server-scored credentials.

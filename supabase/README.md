@@ -41,7 +41,7 @@
 | `skill_assessments`  | Skill-level assessment definitions and configurations.              |
 | `assessment_results` | Mastery gate and phase verification exam results.                   |
 | `certificates`       | Phase completion certificates with verification hashes.             |
-| `analytics`          | Append-only behavioral analytics (lesson starts, completions, etc). |
+| `analytics_events`   | Append-only behavioral analytics (lesson starts, completions, etc). |
 | `xp_events`          | Append-only XP award log (lesson, quiz, flashcard, etc).            |
 | `sandbox_saves`      | Persisted sandbox editor state per lesson per user.                 |
 | `track_progress`     | Learning track enrollment and overall track progress.               |
@@ -59,11 +59,11 @@ All tables have Row Level Security enabled. Users can only read and write their 
 
 - `certificates` — publicly readable by verification hash via the `get_certificate_by_hash` RPC function (used by `/verify/[hash]`)
 - `annotations` / `annotation_votes` — community-readable within the app
-- `feedback` _(staged, not yet applied)_ — anonymous submissions through an insert-only RPC; admin-read only
+- `feedback` — exists on the verified Dura project with anonymous/owner INSERT and admin-only reads; the retry-safe submission RPC is prepared in the target-specific patch
 
 ## Admin Access
 
-Admin read access to sensitive tables (`feedback`, `analytics`, `profiles`, `lesson_progress`) is gated by a JWT claim. To grant admin access to a user:
+Admin read access to sensitive tables (`feedback`, `analytics_events`, `profiles`, `lesson_progress`) is gated by a JWT claim. To grant admin access to a user:
 
 1. In Supabase Studio → Authentication → Users, run:
    ```sql
@@ -94,7 +94,7 @@ The app works fully offline. Supabase sync is optional — it adds cross-device 
 
 ## Migrations
 
-### Checked-in baseline (001–013; live application status unverified)
+### Checked-in baseline (001–013; do not replay against existing Dura)
 
 - `001-profiles.sql` — User profiles (auto-created on sign-up via trigger)
 - `002-progress.sql` — Lesson, module, and phase progress tracking
@@ -112,7 +112,9 @@ The app works fully offline. Supabase sync is optional — it adds cross-device 
 
 ### Staged repairs (not applied by this work)
 
-See [staged/README.md](staged/README.md) for files 014–019, their exact data impact, and the disposable PostgreSQL validation workflow. These repair missing analytics reconciliation, learner stores, feedback delivery, admin moderation, signup, and progress RPC permissions. Compare with the actual live schema before applying: older private migration numbers may overlap.
+See [staged/README.md](staged/README.md) for proposals 014–020 and local fixture validation. These are historical contract-repair proposals, not the run queue for the existing production database.
+
+Read-only inspection verified 24 public tables with RLS, tenant composite keys, `analytics_events`, profile email, optional learner stores, existing admin policies and a guarded `sync_progress`. For this project, use the [manual run/skip matrix](staged/live/README.md#manual-run-queue-for-this-dura-project) and its single target-specific reconciliation patch. No hosted application is confirmed. The user runs the reviewed SQL manually after checking the target and current schema; do not run the baseline or staged 014–020 as a batch.
 
 ## Free Tier Limits & Graceful Degradation
 
