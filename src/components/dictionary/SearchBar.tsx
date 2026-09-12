@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { Search, X } from "lucide-react";
-import { debounce } from "@/lib/utils";
 
 interface SearchBarProps {
   value: string;
@@ -17,10 +16,9 @@ export function SearchBar({ value, onChange, placeholder }: SearchBarProps): Rea
 
   // Debounce 300ms
   useEffect(() => {
-    const handler = debounce((next: string) => onChange(next), 300);
-    handler(local);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [local]);
+    const timer = window.setTimeout((): void => onChange(local), 300);
+    return (): void => window.clearTimeout(timer);
+  }, [local, onChange]);
 
   return (
     <div className="relative">
@@ -30,6 +28,7 @@ export function SearchBar({ value, onChange, placeholder }: SearchBarProps): Rea
       />
       <input
         type="search"
+        aria-label="Search dictionary terms"
         value={local}
         onChange={(e) => setLocal(e.target.value)}
         placeholder={placeholder}
