@@ -130,6 +130,8 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
   const prefs = usePreferencesStore((s) => s.prefs);
   const update = usePreferencesStore((s) => s.update);
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -159,9 +161,18 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
   };
 
   const handleClear = async (): Promise<void> => {
-    await clearAllData();
-    setConfirmingClear(false);
-    window.location.href = "/";
+    setIsClearing(true);
+    setClearError(null);
+    try {
+      await clearAllData();
+      window.location.href = "/";
+    } catch (error) {
+      console.error("[settings] Local reset failed:", error);
+      setClearError(
+        error instanceof Error ? error.message : "Unable to clear local data. Please retry."
+      );
+      setIsClearing(false);
+    }
   };
 
   return (
@@ -326,7 +337,7 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
             className="inline-flex items-center gap-2 rounded-lg border border-rose-300 bg-rose-50 px-4 py-2 text-xs font-medium text-rose-700 transition hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-400 dark:hover:bg-rose-950/50"
           >
             <Trash2 className="h-3.5 w-3.5" />
-            Clear all data
+            Clear local data
           </button>
         </div>
         <RestoreFromFile />
@@ -337,7 +348,10 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
         <div className="flex items-start gap-3">
           <Shield className="mt-0.5 h-4 w-4 text-emerald-500" />
           <div className="text-xs text-[var(--color-text-secondary)]">
-            <p>All your data is stored locally on this device. No cookies. No tracking.</p>
+            <p>
+              Learning records are stored on this device, with optional account sync. Usage
+              analytics stay off until you opt in. Signed-in sessions use essential cookies.
+            </p>
             <p className="mt-2 flex gap-3">
               <Link
                 href="/privacy"
@@ -423,15 +437,23 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
               id="clear-title"
               className="mt-2 text-lg font-semibold text-[var(--color-text-primary)]"
             >
-              Clear all data?
+              Clear local data?
             </h3>
             <p id="clear-desc" className="mt-1 text-sm text-[var(--color-text-secondary)]">
-              This permanently deletes your progress, flashcards, goals, certificates, and
-              preferences on this device. There is no undo.
+              This permanently deletes this device’s learning records, feedback, Dojo history,
+              preferences, offline backups, and saved AI key and consent. You will be signed out on
+              this device. Cloud records remain and can return when you sign in again. Other DURA
+              tabs will pause until reloaded. There is no undo.
             </p>
+            {clearError && (
+              <p role="alert" className="mt-3 text-sm text-[var(--color-error)]">
+                {clearError}
+              </p>
+            )}
             <div className="mt-4 flex gap-2">
               <button
                 type="button"
+                disabled={isClearing}
                 onClick={() => setConfirmingClear(false)}
                 className="flex-1 rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-subtle)]"
               >
@@ -439,10 +461,11 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
               </button>
               <button
                 type="button"
+                disabled={isClearing}
                 onClick={() => void handleClear()}
                 className="flex-1 rounded-lg bg-rose-500 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-600"
               >
-                Delete everything
+                {isClearing ? "Clearing…" : "Delete local data"}
               </button>
             </div>
           </div>

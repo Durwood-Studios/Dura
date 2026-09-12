@@ -43,6 +43,7 @@ export async function putLessonProgress(progress: LessonProgress): Promise<void>
     triggerShadowWrite();
   } catch (error) {
     console.error("[progress] putLessonProgress failed", error);
+    throw error;
   }
 }
 

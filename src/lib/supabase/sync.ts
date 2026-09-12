@@ -40,6 +40,38 @@ interface SyncResult {
 
 let backgroundSyncInterval: ReturnType<typeof setInterval> | null = null;
 
+let isResetting = false;
+const activeOperations = new Set<Promise<unknown>>();
+
+async function trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const pending = operation();
+  activeOperations.add(pending);
+  try {
+    return await pending;
+  } finally {
+    activeOperations.delete(pending);
+  }
+}
+
+/** Push changes unless a local data reset has suspended synchronization. */
+export async function pushChanges(): Promise<number> {
+  if (isResetting) return 0;
+  return trackOperation(performPushChanges);
+}
+
+/** Pull changes unless a local data reset has suspended synchronization. */
+export async function pullChanges(): Promise<{ pulled: number; conflicts: number }> {
+  if (isResetting) return { pulled: 0, conflicts: 0 };
+  return trackOperation(performPullChanges);
+}
+
+/** Drain writes before erasing local data; synchronization stays paused until reload. */
+export async function suspendSyncForReset(): Promise<void> {
+  isResetting = true;
+  stopBackgroundSync();
+  await Promise.allSettled(activeOperations);
+}
+
 /**
  * Check if user is authenticated. Returns user ID or null.
  */
@@ -93,7 +125,7 @@ export async function fullSync(): Promise<SyncResult> {
  * Called in background every 30 seconds when online.
  * Returns the number of records pushed.
  */
-export async function pushChanges(): Promise<number> {
+async function performPushChanges(): Promise<number> {
   const userId = await getAuthUserId();
   if (!userId) return 0;
 
@@ -202,7 +234,7 @@ export async function pushChanges(): Promise<number> {
  * Pull remote data and merge with local.
  * Called on sign-in and periodically.
  */
-export async function pullChanges(): Promise<{ pulled: number; conflicts: number }> {
+async function performPullChanges(): Promise<{ pulled: number; conflicts: number }> {
   const userId = await getAuthUserId();
   if (!userId) return { pulled: 0, conflicts: 0 };
 
@@ -468,7 +500,7 @@ function maxNullable(a: number | null, b: number | null): number | null {
  * when available to avoid blocking the main thread.
  */
 export function startBackgroundSync(): void {
-  if (backgroundSyncInterval) return;
+  if (isResetting || backgroundSyncInterval) return;
 
   backgroundSyncInterval = setInterval(() => {
     if (!navigator.onLine) return;

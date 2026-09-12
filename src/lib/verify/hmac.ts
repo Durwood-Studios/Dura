@@ -1,12 +1,10 @@
 /**
  * Server-side HMAC signing for certificate verification hashes.
  *
- * Threat model: the existing SHA-256 verification hash defeats casual URL
- * forging in DevTools but the salt is in the JS bundle, so a determined
- * attacker who reads the bundle can compute hashes for arbitrary cert
- * payloads. This module adds the layer that the bundle salt cannot
- * provide — a signature anchored to a secret that NEVER leaves the
- * server.
+ * Historical signatures establish only that this server signed a hash. The old
+ * public endpoint accepted arbitrary client hashes, so these receipts do not
+ * attest learner identity, achievement, or all displayed certificate fields.
+ * Public issuance is disabled pending trusted server-side assessment evidence.
  *
  * Algorithm: HMAC-SHA-256 of the verification hash. The signature is
  * 32 bytes → 64 hex chars. Verification compares signatures with a
@@ -35,7 +33,7 @@ export function isSigningConfigured(): boolean {
 /**
  * Sign a verification hash. Returns null when the server is not
  * provisioned with a secret — caller must handle that as a soft failure
- * (the certificate is still valid, it just has no math-anchored badge).
+ * (historical receipt checks become unavailable).
  */
 export function signHash(hash: string): string | null {
   if (!HEX_RE.test(hash)) return null;

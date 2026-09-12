@@ -12,7 +12,6 @@ import { ReviewProgress } from "@/components/review/ReviewProgress";
 import { Spinner } from "@/components/ui/Spinner";
 import { schedule } from "@/lib/fsrs";
 import { formatTime } from "@/lib/utils";
-import { XP_AWARDS } from "@/lib/xp";
 import type { ReviewRating } from "@/types/flashcard";
 
 /** Labels for each rating value — shown alongside the interval on card exit. */
@@ -44,6 +43,9 @@ function formatRelative(timestamp: number, now: number = Date.now()): string {
 }
 
 export function ReviewSession(): React.ReactElement {
+  const earnedXP = useReviewStore((s) => s.earnedXP);
+  const reviewError = useReviewStore((s) => s.error);
+  const isSaving = useReviewStore((s) => s.isSaving);
   const queue = useReviewStore((s) => s.queue);
   const index = useReviewStore((s) => s.index);
   const flippedAt = useReviewStore((s) => s.flippedAt);
@@ -64,6 +66,7 @@ export function ReviewSession(): React.ReactElement {
 
   const handleRate = useCallback(
     (rating: ReviewRating): void => {
+      if (isSaving) return;
       const card = queue[index];
       if (card) {
         const { intervalDays } = schedule(card, rating);
@@ -77,7 +80,7 @@ export function ReviewSession(): React.ReactElement {
       }
       void rate(rating);
     },
-    [queue, index, rate]
+    [queue, index, rate, isSaving]
   );
 
   useEffect(() => {
@@ -102,7 +105,7 @@ export function ReviewSession(): React.ReactElement {
   if (sessionComplete) {
     const total = sessionStats.correct + sessionStats.wrong;
     const accuracy = total === 0 ? 0 : Math.round((sessionStats.correct / total) * 100);
-    const xp = total * XP_AWARDS.flashcard;
+    const xp = earnedXP;
     const elapsedMs = startedAt ? Date.now() - startedAt : 0;
     return (
       <div className="mx-auto max-w-xl py-16 text-center" role="status" aria-live="polite">
@@ -141,6 +144,11 @@ export function ReviewSession(): React.ReactElement {
 
   return (
     <div className="mx-auto max-w-2xl py-12">
+      {reviewError && (
+        <p role="alert" className="mb-4 text-sm text-[var(--color-error)]">
+          {reviewError}
+        </p>
+      )}
       {/* WCAG 2.2 — announce per-card progress so screen-reader users
           know where they are in the queue without scanning the visual
           progress bar. Updates whenever `index` changes, which is the

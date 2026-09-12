@@ -42,7 +42,7 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
       >
         <Award className="mx-auto h-14 w-14 text-[var(--color-text-primary)]" aria-hidden />
         <p className="mt-3 font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
-          DURA · Verified
+          DURA · Learning certificate
         </p>
         <h1 className="mt-1 text-3xl font-semibold text-[var(--color-text-primary)]">
           {certificate.phaseTitle}
@@ -50,12 +50,16 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
       </header>
 
       <div className="px-8 py-6 text-center">
-        <p className="text-sm text-[var(--color-text-secondary)]">This certifies that</p>
+        <p className="text-sm text-[var(--color-text-secondary)]">Learning record for</p>
         <p className="mt-1 text-2xl font-semibold text-[var(--color-text-primary)]">
           {certificate.displayName}
         </p>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          demonstrated mastery of {certificate.phaseTitle} through verified assessment
+          completed a locally scored assessment of {certificate.phaseTitle}
+        </p>
+
+        <p className="mt-3 text-sm text-[var(--color-text-secondary)]">
+          This learner-controlled record is not an independently issued credential.
         </p>
 
         <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3">
@@ -123,8 +127,8 @@ export function CertificateView({ certificate }: CertificateViewProps): React.Re
           </button>
           <ShareButton
             url={url}
-            title={`${certificate.phaseTitle} — Verified on DURA`}
-            text="I just verified my mastery on DURA."
+            title={`${certificate.phaseTitle} — Learning certificate on DURA`}
+            text="I completed a learning assessment on DURA."
           />
         </div>
       </footer>

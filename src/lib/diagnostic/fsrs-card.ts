@@ -14,7 +14,10 @@
  * its output to durable state.
  */
 
-import { getCard, logReview, putCard } from "@/lib/db/flashcards";
+import { getCard } from "@/lib/db/flashcards";
+import { getDB } from "@/lib/db";
+import { putEncryptedCardReview } from "@/lib/idb/encrypted-store";
+import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import { createCard, schedule } from "@/lib/fsrs";
 import { generateId } from "@/lib/utils";
 import type { FlashCard } from "@/types/flashcard";
@@ -86,8 +89,7 @@ export async function recordDiagnosticAnswer(
   const existing = await getCard(id);
   const baseCard = existing ?? materializeCard(question);
   const { card: nextCard } = schedule(baseCard, result.rating, now);
-  await putCard(nextCard);
-  await logReview({
+  await putEncryptedCardReview(await getDB(), nextCard, {
     id: generateId("review"),
     cardId: id,
     rating: result.rating,
@@ -96,4 +98,5 @@ export async function recordDiagnosticAnswer(
     scheduledDays: nextCard.scheduledDays,
     state: nextCard.state,
   });
+  triggerShadowWrite();
 }

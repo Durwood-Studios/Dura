@@ -167,6 +167,24 @@ export async function putEncryptedReviewLog(db: DuraDB, log: ReviewLog): Promise
   await db.put("reviewLogs", sealed);
 }
 
+/** Commit a scheduled card and its review log together, after encryption finishes. */
+export async function putEncryptedCardReview(
+  db: DuraDB,
+  card: FlashCard,
+  log: ReviewLog
+): Promise<void> {
+  const [sealedCard, sealedLog] = await Promise.all([
+    dehydrate(card),
+    dehydrateGeneric(log, REVIEW_LOG_PLAINTEXT),
+  ]);
+  const transaction = db.transaction(["flashcards", "reviewLogs"], "readwrite");
+  await Promise.all([
+    transaction.objectStore("flashcards").put(sealedCard),
+    transaction.objectStore("reviewLogs").put(sealedLog),
+    transaction.done,
+  ]);
+}
+
 export async function getAllEncryptedReviewLogs(db: DuraDB): Promise<ReviewLog[]> {
   const stored = await db.getAll("reviewLogs");
   return Promise.all(stored.map((r) => hydrateGeneric(r, "reviewLog") as Promise<ReviewLog>));

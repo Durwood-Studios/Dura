@@ -1,3 +1,4 @@
+import { assertCurrentStorageGeneration } from "@/lib/storage/reset-coordination";
 import { migrateLessonIdentities } from "@/lib/db/migrate-lesson-identity";
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import type { LessonProgress, ModuleProgress, PhaseProgress } from "@/types/curriculum";
@@ -98,8 +99,50 @@ export interface DuraDBSchema extends DBSchema {
 export type DuraDB = IDBPDatabase<DuraDBSchema>;
 
 let dbPromise: Promise<DuraDB> | null = null;
+let resetDatabase: DuraDB | null = null;
+
+function protectDatabase(db: DuraDB): DuraDB {
+  return new Proxy(db, {
+    get(target: DuraDB, property: string | symbol): unknown {
+      const value: unknown = Reflect.get(target, property);
+      if (typeof value !== "function") return value;
+      if (!["put", "add", "delete", "clear", "transaction"].includes(String(property)))
+        return value.bind(target);
+      return (...args: unknown[]): unknown => {
+        if (property !== "transaction" || args[1] === "readwrite") assertCurrentStorageGeneration();
+        return Reflect.apply(value, target, args);
+      };
+    },
+  });
+}
+
+/** Open the connection before invalidating this tab along with its peers. */
+export async function prepareDatabaseReset(): Promise<void> {
+  if (!resetDatabase) await openDatabase(true);
+}
+
+/** The sole reset bypass: erase every store using the underlying connection. */
+export async function eraseDatabaseForReset(): Promise<void> {
+  if (!resetDatabase) throw new Error("Database reset was not prepared");
+  const stores = Array.from(resetDatabase.objectStoreNames);
+  if (stores.length === 0) return;
+  const transaction = resetDatabase.transaction(stores, "readwrite");
+  await Promise.all([
+    ...stores.map((store): Promise<void> => transaction.objectStore(store).clear()),
+    transaction.done,
+  ]);
+}
 
 export function getDB(): Promise<DuraDB> {
+  try {
+    assertCurrentStorageGeneration();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return openDatabase();
+}
+
+function openDatabase(isPreparingReset = false): Promise<DuraDB> {
   if (typeof window === "undefined") {
     return Promise.reject(new Error("IndexedDB is only available in the browser"));
   }
@@ -197,11 +240,14 @@ export function getDB(): Promise<DuraDB> {
       terminated() {
         console.error("[dura-db] connection terminated unexpectedly");
         dbPromise = null;
+        resetDatabase = null;
       },
     })
       .then(async (db): Promise<DuraDB> => {
-        await migrateLessonIdentities(db);
-        return db;
+        const protectedDB = protectDatabase(db);
+        if (!isPreparingReset) await migrateLessonIdentities(protectedDB);
+        resetDatabase = db;
+        return protectedDB;
       })
       .catch((error: unknown): never => {
         dbPromise = null;

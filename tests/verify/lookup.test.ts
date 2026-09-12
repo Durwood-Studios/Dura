@@ -82,3 +82,12 @@ describe("lookupCertificate", () => {
     expect(getRemote).not.toHaveBeenCalled();
   });
 });
+
+it("falls through to registry when IndexedDB is unavailable", async () => {
+  vi.mocked(getLocal).mockRejectedValueOnce(new Error("Storage blocked"));
+  vi.mocked(getRemote).mockResolvedValueOnce(FIXTURE);
+  expect(await lookupCertificate(FIXTURE.verificationHash)).toEqual({
+    certificate: FIXTURE,
+    source: "registry",
+  });
+});

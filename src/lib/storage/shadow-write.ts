@@ -21,9 +21,10 @@ let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 let inFlight: Promise<void> | null = null;
 let periodicTimer: ReturnType<typeof setInterval> | null = null;
 let flushersRegistered = false;
+let isResetting = false;
 
 async function performShadowWrite(): Promise<void> {
-  if (!opfsAvailable()) return;
+  if (isResetting || !opfsAvailable()) return;
   try {
     const snapshot = await buildLearnerSnapshot();
     await saveToOPFS(snapshot);
@@ -37,13 +38,11 @@ async function performShadowWrite(): Promise<void> {
  * path; many calls in quick succession produce one OPFS write.
  */
 export function triggerShadowWrite(): void {
-  if (!opfsAvailable()) return;
+  if (isResetting || !opfsAvailable()) return;
   if (pendingTimer) clearTimeout(pendingTimer);
   pendingTimer = setTimeout(() => {
     pendingTimer = null;
-    inFlight = performShadowWrite().finally(() => {
-      inFlight = null;
-    });
+    void flushShadowWrite();
   }, DEBOUNCE_MS);
 }
 
@@ -52,17 +51,20 @@ export function triggerShadowWrite(): void {
  * pagehide handlers see the final state on disk before the tab dies.
  */
 export async function flushShadowWrite(): Promise<void> {
-  if (!opfsAvailable()) return;
+  if (isResetting || !opfsAvailable()) return;
   if (pendingTimer) {
     clearTimeout(pendingTimer);
     pendingTimer = null;
   }
   if (inFlight) {
     await inFlight;
+    // A queued flush must capture mutations made while the previous snapshot was writing.
+    return flushShadowWrite();
   }
-  inFlight = performShadowWrite();
+  inFlight = performShadowWrite().finally((): void => {
+    inFlight = null;
+  });
   await inFlight;
-  inFlight = null;
 }
 
 /**
@@ -99,8 +101,19 @@ export function registerShadowWriteFlushers(): () => void {
   };
 }
 
+/** Prevent queued or lifecycle snapshots from restoring erased records after a reset. */
+export async function suspendShadowWritesForReset(): Promise<void> {
+  isResetting = true;
+  if (pendingTimer) clearTimeout(pendingTimer);
+  pendingTimer = null;
+  if (periodicTimer) clearInterval(periodicTimer);
+  periodicTimer = null;
+  await inFlight;
+}
+
 /** Test-only: reset all module-level state. */
 export function _resetShadowWriteForTests(): void {
+  isResetting = false;
   if (pendingTimer) {
     clearTimeout(pendingTimer);
     pendingTimer = null;

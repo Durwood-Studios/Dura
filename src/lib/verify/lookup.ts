@@ -39,9 +39,14 @@ function isRegistryConfigured(): boolean {
   );
 }
 
+/** Resolve local certificates even offline, with registry fallback when storage is unavailable. */
 export async function lookupCertificate(hash: string): Promise<CertificateLookupResult | null> {
-  const local = await getLocalCertificate(hash);
-  if (local) return { certificate: local, source: "local" };
+  try {
+    const local = await getLocalCertificate(hash);
+    if (local) return { certificate: local, source: "local" };
+  } catch (error: unknown) {
+    console.error("[verify/lookup] Local lookup failed; trying registry", error);
+  }
 
   if (!isRegistryConfigured()) return null;
 

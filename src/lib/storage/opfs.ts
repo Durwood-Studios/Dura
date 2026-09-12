@@ -1,3 +1,4 @@
+import { assertCurrentStorageGeneration } from "@/lib/storage/reset-coordination";
 /**
  * Origin Private File System (OPFS) shadow layer.
  *
@@ -28,14 +29,21 @@ export async function saveToOPFS(data: unknown): Promise<void> {
     const root = await navigator.storage.getDirectory();
     const handle = await root.getFileHandle(SNAPSHOT_FILENAME, { create: true });
     const writable = await handle.createWritable();
-    await writable.write(
-      JSON.stringify(data, (_key: string, value: unknown): unknown =>
-        value instanceof ArrayBuffer
-          ? { __duraArrayBuffer: Array.from(new Uint8Array(value)) }
-          : value
-      )
-    );
-    await writable.close();
+    try {
+      assertCurrentStorageGeneration();
+      await writable.write(
+        JSON.stringify(data, (_key: string, value: unknown): unknown =>
+          value instanceof ArrayBuffer
+            ? { __duraArrayBuffer: Array.from(new Uint8Array(value)) }
+            : value
+        )
+      );
+      assertCurrentStorageGeneration();
+      await writable.close();
+    } catch (error) {
+      await writable.abort();
+      throw error;
+    }
   } catch (error) {
     console.warn("[opfs] save failed — IndexedDB is source of truth", error);
   }
@@ -83,6 +91,7 @@ export async function deleteOPFSSnapshot(): Promise<void> {
     await root.removeEntry(SNAPSHOT_FILENAME);
   } catch (error) {
     if (error instanceof DOMException && error.name === "NotFoundError") return;
-    console.warn("[opfs] delete failed", error);
+    console.error("[opfs] delete failed", error);
+    throw error;
   }
 }

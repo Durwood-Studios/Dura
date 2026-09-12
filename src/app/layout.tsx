@@ -1,6 +1,8 @@
+import { LocalResetBoundary } from "@/components/providers/LocalResetBoundary";
 import type { Metadata, Viewport } from "next";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
+import { FeedbackDelivery } from "@/components/providers/FeedbackDelivery";
 import { ThemeProvider } from "@/components/providers/ThemeProvider";
 import { AnalyticsProvider } from "@/components/providers/AnalyticsProvider";
 import { ChunkRecovery } from "@/components/pwa/ChunkRecovery";
@@ -120,9 +122,12 @@ export default function RootLayout({
           }}
         />
         <ChunkRecovery />
-        <ThemeProvider>
-          <AnalyticsProvider>{children}</AnalyticsProvider>
-        </ThemeProvider>
+        <LocalResetBoundary>
+          <ThemeProvider>
+            <FeedbackDelivery />
+            <AnalyticsProvider>{children}</AnalyticsProvider>
+          </ThemeProvider>
+        </LocalResetBoundary>
       </body>
     </html>
   );

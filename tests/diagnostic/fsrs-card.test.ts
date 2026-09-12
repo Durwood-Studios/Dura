@@ -16,7 +16,11 @@ vi.mock("@/lib/utils", async () => {
 });
 
 import { cardIdFor, materializeCard, recordDiagnosticAnswer } from "@/lib/diagnostic/fsrs-card";
-import { getCard, logReview, putCard } from "@/lib/db/flashcards";
+import { getCard } from "@/lib/db/flashcards";
+import { putEncryptedCardReview } from "@/lib/idb/encrypted-store";
+vi.mock("@/lib/db", () => ({ getDB: vi.fn(async () => ({})) }));
+vi.mock("@/lib/idb/encrypted-store", () => ({ putEncryptedCardReview: vi.fn() }));
+vi.mock("@/lib/storage/shadow-write", () => ({ triggerShadowWrite: vi.fn() }));
 import { IEEE_754_DECIMAL, POSIX_SIGNAL_SAFETY } from "@/lib/diagnostic/examples";
 import type { EvaluationResult } from "@/lib/diagnostic/types";
 
@@ -38,8 +42,7 @@ const WRONG_RESULT: EvaluationResult = {
 
 beforeEach(() => {
   vi.mocked(getCard).mockReset();
-  vi.mocked(putCard).mockReset();
-  vi.mocked(logReview).mockReset();
+  vi.mocked(putEncryptedCardReview).mockReset();
 });
 
 describe("cardIdFor", () => {
@@ -82,10 +85,9 @@ describe("recordDiagnosticAnswer", () => {
     await recordDiagnosticAnswer(IEEE_754_DECIMAL, SETTLED_RESULT, 1_700_000_000_000);
 
     expect(getCard).toHaveBeenCalledWith("diag-phase-1-ieee754-decimal-sum-01");
-    expect(putCard).toHaveBeenCalledOnce();
-    expect(logReview).toHaveBeenCalledOnce();
+    expect(putEncryptedCardReview).toHaveBeenCalledOnce();
 
-    const persistedCard = vi.mocked(putCard).mock.calls[0][0];
+    const persistedCard = vi.mocked(putEncryptedCardReview).mock.calls[0][1];
     expect(persistedCard.id).toBe("diag-phase-1-ieee754-decimal-sum-01");
     expect(persistedCard.reps).toBe(1);
     expect(persistedCard.lastReview).toBe(1_700_000_000_000);
@@ -98,7 +100,7 @@ describe("recordDiagnosticAnswer", () => {
 
     await recordDiagnosticAnswer(IEEE_754_DECIMAL, WRONG_RESULT, 1_700_000_000_000);
 
-    const persistedCard = vi.mocked(putCard).mock.calls[0][0];
+    const persistedCard = vi.mocked(putEncryptedCardReview).mock.calls[0][1];
     expect(persistedCard.state).toBe("relearning");
     expect(persistedCard.lapses).toBe(1);
   });
@@ -118,7 +120,7 @@ describe("recordDiagnosticAnswer", () => {
 
     await recordDiagnosticAnswer(IEEE_754_DECIMAL, SETTLED_RESULT, 1_700_000_000_000);
 
-    const persistedCard = vi.mocked(putCard).mock.calls[0][0];
+    const persistedCard = vi.mocked(putEncryptedCardReview).mock.calls[0][1];
     expect(persistedCard.id).toBe("diag-phase-1-ieee754-decimal-sum-01");
     expect(persistedCard.reps).toBe(4); // incremented from 3
     expect(persistedCard.lastReview).toBe(1_700_000_000_000);
@@ -129,7 +131,7 @@ describe("recordDiagnosticAnswer", () => {
 
     await recordDiagnosticAnswer(IEEE_754_DECIMAL, SETTLED_RESULT, 1_700_000_000_000);
 
-    const reviewLog = vi.mocked(logReview).mock.calls[0][0];
+    const reviewLog = vi.mocked(putEncryptedCardReview).mock.calls[0][2];
     expect(reviewLog.cardId).toBe("diag-phase-1-ieee754-decimal-sum-01");
     expect(reviewLog.rating).toBe("good");
     expect(reviewLog.reviewedAt).toBe(1_700_000_000_000);

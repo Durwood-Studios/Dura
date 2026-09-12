@@ -28,6 +28,7 @@ export function Question({
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [confidence, setConfidence] = useState<ConfidenceLevel | undefined>(undefined);
   const [result, setResult] = useState<EvaluationResult | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const needsConfidence = question.confidenceCheck === true;
   const canSubmit =
@@ -42,16 +43,21 @@ export function Question({
     );
     setResult(next);
     if (persistToFsrs) {
-      // Fire-and-forget — the FSRS bridge tolerates store-read failures and
-      // the UI must not block on IndexedDB latency. The next dashboard load
-      // will see the persisted card.
-      void recordDiagnosticAnswer(question, next);
+      void recordDiagnosticAnswer(question, next).catch((error: unknown): void => {
+        console.error("[diagnostic] Could not save review card", error);
+        setSaveError("Your answer was checked, but its review card could not be saved.");
+      });
     }
     onResolved?.(next);
   }
 
   return (
     <div className="flex flex-col gap-5">
+      {saveError && (
+        <p role="alert" className="text-sm text-[var(--color-error)]">
+          {saveError}
+        </p>
+      )}
       <div className="flex flex-col gap-2">
         <span className="text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
           {question.difficulty} · {question.tags?.join(" · ")}

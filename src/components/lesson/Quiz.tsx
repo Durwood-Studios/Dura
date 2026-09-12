@@ -79,6 +79,8 @@ export function Quiz(props: QuizProps): React.ReactElement {
   const [submitted, setSubmitted] = useState(false);
   const [history, setHistory] = useState<AnswerRecord[]>([]);
   const [done, setDone] = useState(false);
+  const [earnedXP, setEarnedXP] = useState(0);
+  const [cardSaveError, setCardSaveError] = useState<string | null>(null);
   const [addedTerms, setAddedTerms] = useState<Set<string>>(new Set());
   const [termCache, setTermCache] = useState<Map<string, DictionaryTerm>>(new Map());
   const passQuiz = useProgressStore((s) => s.passQuiz);
@@ -166,12 +168,14 @@ export function Quiz(props: QuizProps): React.ReactElement {
     const correctCount = history.filter((h) => h.correct).length;
     const finalScore = correctCount / total;
     setDone(true);
-    void setQuizScore(finalScore);
+    void setQuizScore(finalScore).catch((error: unknown): void => {
+      console.error("[quiz] Could not save score", error);
+    });
     if (finalScore >= passingScore) {
       passQuiz();
       void track("quiz_passed", { score: finalScore, total });
       if (currentLesson) {
-        void awardXPWithToast("quiz", XP_AWARDS.quiz, currentLesson.lessonId);
+        void awardXPWithToast("quiz", XP_AWARDS.quiz, currentLesson.lessonId).then(setEarnedXP);
       }
     }
   };
@@ -186,18 +190,24 @@ export function Quiz(props: QuizProps): React.ReactElement {
     return Array.from(slugs);
   })();
 
-  const addTermToDeck = async (slug: string) => {
-    const term = termCache.get(slug);
-    if (!term) return;
-    const card = createCard({
-      id: generateId("card"),
-      front: term.term,
-      back: term.definitions.intermediate,
-      termSlug: slug,
-    });
-    await putCard(card);
-    setAddedTerms((prev) => new Set(prev).add(slug));
-    void track("flashcard_rated", { source: "quiz-summary", slug });
+  const addTermToDeck = async (slug: string): Promise<void> => {
+    setCardSaveError(null);
+    try {
+      const term = termCache.get(slug);
+      if (!term) return;
+      const card = createCard({
+        id: generateId("card"),
+        front: term.term,
+        back: term.definitions.intermediate,
+        termSlug: slug,
+      });
+      await putCard(card);
+      setAddedTerms((prev) => new Set(prev).add(slug));
+      void track("flashcard_rated", { source: "quiz-summary", slug });
+    } catch (error) {
+      console.error("[quiz] Could not save flashcard", error);
+      setCardSaveError("Could not save this card. Please retry.");
+    }
   };
 
   if (done) {
@@ -206,6 +216,11 @@ export function Quiz(props: QuizProps): React.ReactElement {
     const passed = finalScore >= passingScore;
     return (
       <section className="my-8 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+        {cardSaveError && (
+          <p role="alert" className="mb-3 text-sm text-[var(--color-error)]">
+            {cardSaveError}
+          </p>
+        )}
         <header className="mb-4 text-center">
           <h3 className="text-2xl font-semibold text-[var(--color-text-primary)]">
             {passed ? "Nice work" : "Almost there"}
@@ -213,8 +228,8 @@ export function Quiz(props: QuizProps): React.ReactElement {
           <p className="mt-1 text-[var(--color-text-secondary)]">
             {correctCount} / {total} correct · {Math.round(finalScore * 100)}%
           </p>
-          {passed && (
-            <p className="mt-1 text-sm font-medium text-emerald-600">+{XP_AWARDS.quiz} XP earned</p>
+          {earnedXP > 0 && (
+            <p className="mt-1 text-sm font-medium text-emerald-600">+{earnedXP} XP earned</p>
           )}
         </header>
         {missedTerms.length > 0 && (
@@ -257,6 +272,7 @@ export function Quiz(props: QuizProps): React.ReactElement {
             setSubmitted(false);
             setHistory([]);
             setDone(false);
+            setEarnedXP(0);
             setAddedTerms(new Set());
           }}
           className="mt-6 rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text-secondary)] transition hover:bg-[var(--color-bg-subtle)]"

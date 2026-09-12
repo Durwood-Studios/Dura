@@ -57,6 +57,8 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
       xpEarned: 0,
       synced: 0,
     };
+    if (!existing) await putLessonProgress(next);
+    if (request !== startRequest) return;
     set({
       current: next,
       scrollPercent: next.scrollPercent,
@@ -65,38 +67,40 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
       quizScore: next.quizScore ?? null,
       startedAt: Date.now(),
     });
-    if (!existing) await putLessonProgress(next);
     void track("lesson_started", { lessonId, phaseId, moduleId });
   },
 
-  setScroll: (percent) => {
-    const max = Math.max(get().scrollPercent, percent);
+  setScroll: (percent: number): void => {
+    if (!Number.isFinite(percent)) return;
+    const max = Math.max(get().scrollPercent, Math.min(100, Math.max(0, percent)));
     set({ scrollPercent: max });
   },
 
-  tick: (deltaMs) => {
+  tick: (deltaMs: number): void => {
+    if (!Number.isFinite(deltaMs) || deltaMs < 0) return;
     set({ timeSpentMs: get().timeSpentMs + deltaMs });
   },
 
   passQuiz: () => set({ quizPassed: true }),
 
-  setQuizScore: async (score) => {
-    set({ quizScore: score });
+  setQuizScore: async (score: number): Promise<void> => {
+    if (!Number.isFinite(score) || score < 0 || score > 1) return;
     const current = get().current;
     if (!current) return;
     const updated: LessonProgress = {
       ...current,
       quizScore: score,
-      quizPassed: current.quizPassed || score >= 0.8,
+      quizPassed: get().quizPassed || current.quizPassed || score >= 0.8,
       synced: 0,
     };
-    set({ current: updated });
+    set({ current: updated, quizScore: score, quizPassed: updated.quizPassed });
     await putLessonProgress(updated);
   },
 
-  complete: async (xp) => {
+  complete: async (xp: number): Promise<void> => {
+    const request = startRequest;
     const current = get().current;
-    if (!current) return;
+    if (!current || current.completedAt !== null) return;
     const completed: LessonProgress = {
       ...current,
       scrollPercent: get().scrollPercent,
@@ -107,11 +111,13 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
       xpEarned: xp,
       synced: 0,
     };
-    set({ current: completed });
     await putLessonProgress(completed);
+    if (request === startRequest && get().current?.lessonId === current.lessonId)
+      set({ current: completed });
   },
 
-  reset: () =>
+  reset: (): void => {
+    startRequest++;
     set({
       current: null,
       scrollPercent: 0,
@@ -119,5 +125,6 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
       quizPassed: false,
       quizScore: null,
       startedAt: null,
-    }),
+    });
+  },
 }));

@@ -28,6 +28,7 @@ export async function putCard(card: FlashCard): Promise<void> {
     triggerShadowWrite();
   } catch (error) {
     console.error("[flashcards] putCard failed", error);
+    throw error;
   }
 }
 

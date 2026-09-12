@@ -13,7 +13,7 @@ interface CertificateLookupProps {
   hash: string;
 }
 
-type SignatureStatus = "unchecked" | "valid" | "invalid";
+type SignatureStatus = "unchecked" | "unavailable" | "valid" | "invalid";
 
 type LoadState =
   | { kind: "loading" }
@@ -30,7 +30,7 @@ export function CertificateLookup({ hash }: CertificateLookupProps): React.React
 
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
+    const load = async (): Promise<void> => {
       try {
         const result = await lookupCertificate(hash);
         if (cancelled) return;
@@ -53,7 +53,7 @@ export function CertificateLookup({ hash }: CertificateLookupProps): React.React
         if (signature) {
           const valid = await checkSignature(hash, signature);
           if (cancelled) return;
-          signatureStatus = valid ? "valid" : "invalid";
+          signatureStatus = valid === null ? "unavailable" : valid ? "valid" : "invalid";
         }
 
         setState({
@@ -107,13 +107,17 @@ export function CertificateLookup({ hash }: CertificateLookupProps): React.React
   }
 
   const sourceLabel =
-    state.source === "local" ? "Verified on this device" : "Verified via DURA public registry";
+    state.source === "local"
+      ? "Learning record on this device"
+      : "Learning record in DURA public registry";
   const signatureLabel =
     state.signatureStatus === "valid"
-      ? " · Math-anchored signature valid"
+      ? " · Historical hash receipt matches; achievement is not independently verified"
       : state.signatureStatus === "invalid"
-        ? " · Signature did not verify"
-        : "";
+        ? " · Historical hash receipt did not match"
+        : state.signatureStatus === "unavailable"
+          ? " · Signature check unavailable — try again when connected"
+          : "";
 
   return (
     <>

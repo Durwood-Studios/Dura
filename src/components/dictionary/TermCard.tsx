@@ -30,6 +30,8 @@ interface TermCardProps {
 
 export function TermCard({ term, difficulty }: TermCardProps): React.ReactElement {
   const [inDeck, setInDeck] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     void getCardByTermSlug(term.slug).then((card) => {
@@ -37,21 +39,31 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
     });
   }, [term.slug]);
 
-  const addToDeck = async () => {
-    const existing = await getCardByTermSlug(term.slug);
-    if (existing) {
+  const addToDeck = async (): Promise<void> => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      const existing = await getCardByTermSlug(term.slug);
+      if (existing) {
+        setInDeck(true);
+        return;
+      }
+      const card = createCard({
+        id: generateId("card"),
+        front: term.term,
+        back: term.definitions[difficulty],
+        termSlug: term.slug,
+      });
+      await putCard(card);
       setInDeck(true);
-      return;
+      void track("flashcard_rated", { source: "dictionary", slug: term.slug });
+    } catch (error) {
+      console.error("[dictionary] Could not save flashcard", error);
+      setSaveError("Could not save this card. Please retry.");
+    } finally {
+      setIsSaving(false);
     }
-    const card = createCard({
-      id: generateId("card"),
-      front: term.term,
-      back: term.definitions[difficulty],
-      termSlug: term.slug,
-    });
-    await putCard(card);
-    setInDeck(true);
-    void track("flashcard_rated", { source: "dictionary", slug: term.slug });
   };
 
   const firstPhase = term.phaseIds[0];
@@ -66,6 +78,11 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
       />
 
       <div className="flex flex-1 flex-col gap-3 p-5">
+        {saveError && (
+          <p role="alert" className="text-sm text-[var(--color-error)]">
+            {saveError}
+          </p>
+        )}
         <header className="flex items-start justify-between gap-3">
           <Link
             href={`/dictionary/${term.slug}`}
@@ -100,7 +117,7 @@ export function TermCard({ term, difficulty }: TermCardProps): React.ReactElemen
             <button
               type="button"
               onClick={() => void addToDeck()}
-              disabled={inDeck}
+              disabled={inDeck || isSaving}
               className={cn(
                 "inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition",
                 inDeck

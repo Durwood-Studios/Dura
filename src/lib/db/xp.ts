@@ -10,17 +10,22 @@ function deterministicId(source: XPEventSource, sourceId: string): string {
   return `xp_${source}_${sourceId}`;
 }
 
+/** Return a newly persisted award, or null when already awarded or storage fails. */
 export async function awardXP(
   source: XPEventSource,
   amount: number,
   sourceId: string
 ): Promise<XPEvent | null> {
   try {
-    if (amount <= 0) return null;
+    if (!Number.isFinite(amount) || amount <= 0) return null;
     const id = deterministicId(source, sourceId);
     const db = await getDB();
-    const existing = await db.get("xp-events", id);
-    if (existing) return existing;
+    const transaction = db.transaction("xp-events", "readwrite");
+    const existing = await transaction.store.get(id);
+    if (existing) {
+      await transaction.done;
+      return null;
+    }
     const event: XPEvent = {
       id,
       source,
@@ -28,7 +33,8 @@ export async function awardXP(
       sourceId,
       awardedAt: Date.now(),
     };
-    await db.put("xp-events", event);
+    await transaction.store.put(event);
+    await transaction.done;
     triggerShadowWrite();
     return event;
   } catch (error) {

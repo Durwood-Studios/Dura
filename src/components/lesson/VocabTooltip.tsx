@@ -50,6 +50,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
   const [open, setOpen] = useState(false);
   const [term, setTerm] = useState<DictionaryTerm | null>(null);
   const [inDeck, setInDeck] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [justAdded, setJustAdded] = useState(false);
   const [tier, setTier] = useState<DictionaryDifficulty>("intermediate");
   const containerRef = useRef<HTMLSpanElement | null>(null);
@@ -104,6 +105,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
 
   const addToDeck = async () => {
     if (!term) return;
+    setSaveError(null);
     try {
       const existing = await getCardByTermSlug(slug);
       if (existing) {
@@ -123,6 +125,7 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
       void track("flashcard_rated", { source: "vocab-tooltip", slug });
     } catch (error) {
       console.error("[VocabTooltip] Failed to add to deck:", error);
+      setSaveError("Could not save this card. Please retry.");
     }
   };
 
@@ -182,6 +185,11 @@ export function VocabTooltip({ slug, children }: VocabTooltipProps): React.React
                       {i < term.seeAlso.length - 1 && ", "}
                     </span>
                   ))}
+                </span>
+              )}
+              {saveError && (
+                <span role="alert" className="text-sm text-[var(--color-error)]">
+                  {saveError}
                 </span>
               )}
               <span className="flex items-center gap-2">

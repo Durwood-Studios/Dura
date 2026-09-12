@@ -54,12 +54,9 @@ export interface Certificate {
   verificationHash: string;
   standards: string[];
   /**
-   * HMAC-SHA-256 signature of the verification hash, issued by
-   * /api/verify/sign and anchored to a server-held secret. Optional
-   * because (a) certs earned before the signing layer shipped won't
-   * have one, and (b) the signing endpoint returns 503 when the
-   * deployment has no VERIFICATION_HMAC_SECRET — the cert is still
-   * valid, it just lacks the math-anchored badge.
+   * Historical server receipt for the verification hash. Public issuance is
+   * disabled: old receipts accepted arbitrary client hashes and do not prove
+   * learner identity, assessment completion, or all displayed record fields.
    */
   signature?: string;
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Award, Clock, ShieldCheck } from "lucide-react";
 import { QuestionDisplay } from "@/components/verify/QuestionDisplay";
@@ -10,12 +10,12 @@ import {
   canRetakeAssessment,
   ASSESSMENT_PASSING_SCORE,
 } from "@/lib/assessment";
-import { putResult, getLatestResult } from "@/lib/db/assessments";
+import { getLatestResult } from "@/lib/db/assessments";
 import { awardXPWithToast } from "@/lib/xp-manager";
 import { XP_AWARDS } from "@/lib/xp";
-import { putCertificate, getCertificatesByPhase } from "@/lib/db/certificates";
+import { getCertificatesByPhase } from "@/lib/db/certificates";
+import { saveVerification } from "@/lib/verify/persistence";
 import { generateVerificationHash } from "@/lib/crypto";
-import { requestSignature } from "@/lib/verify/client";
 import { track } from "@/lib/analytics";
 import { generateId, formatTime, cn } from "@/lib/utils";
 import { Confetti } from "@/components/motion/Confetti";
@@ -67,6 +67,9 @@ export function PhaseTest({
     results: QuestionResult[];
   } | null>(null);
   const [certificate, setCertificate] = useState<Certificate | null>(null);
+  const isFinishingRef = useRef(false);
+  const [isFinishing, setIsFinishing] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [retryAt, setRetryAt] = useState<number | null>(null);
 
   // Tick for timer
@@ -125,75 +128,81 @@ export function PhaseTest({
   const remaining = Math.max(0, TIME_LIMIT_MS - elapsed);
   const timeUp = startedAt !== null && remaining <= 0;
 
-  const finish = async () => {
-    const answerMap = new Map<string, number | number[] | null>();
-    for (const q of questions) {
-      const a = answers.get(q.id);
-      if (!a || a.length === 0) {
-        answerMap.set(q.id, null);
-      } else if (q.type === "multiple-select") {
-        answerMap.set(q.id, a);
-      } else {
-        answerMap.set(q.id, a[0]);
+  const finish = async (): Promise<void> => {
+    if (isFinishingRef.current || questions.length === 0) return;
+    isFinishingRef.current = true;
+    setIsFinishing(true);
+    setSaveError(null);
+    try {
+      const answerMap = new Map<string, number | number[] | null>();
+      for (const q of questions) {
+        const a = answers.get(q.id);
+        if (!a || a.length === 0) {
+          answerMap.set(q.id, null);
+        } else if (q.type === "multiple-select") {
+          answerMap.set(q.id, a);
+        } else {
+          answerMap.set(q.id, a[0]);
+        }
       }
-    }
-    const scored = scoreAssessment(questions, answerMap);
-    const passed = scored.score >= ASSESSMENT_PASSING_SCORE;
-    const completedAt = Date.now();
-    const record: AssessmentResult = {
-      id: generateId("ar"),
-      type: "phase-verification",
-      targetId: phaseId,
-      score: scored.score,
-      totalQuestions: questions.length,
-      correctCount: scored.correctCount,
-      passed,
-      startedAt: startedAt ?? completedAt,
-      completedAt,
-      timeSpentMs: startedAt ? completedAt - startedAt : 0,
-      questionResults: scored.results,
-    };
-    await putResult(record);
-    setLatestResult(record);
-    setResultRecord(scored);
-
-    if (passed) {
-      const standards = Array.from(
-        new Set(questions.flatMap((q) => q.standards?.cs2023 ?? []).filter(Boolean))
-      );
-      const certBase: Omit<Certificate, "id" | "verificationHash"> = {
-        phaseId,
-        userId: null,
-        displayName: "Anonymous Learner",
-        phaseTitle,
-        score: scored.score,
-        totalQuestions: questions.length,
-        completedAt,
-        standards,
-      };
-      const verificationHash = await generateVerificationHash(certBase);
-      // Request an HMAC signature from the server-side signing endpoint.
-      // Returns null when (a) the deployment has no VERIFICATION_HMAC_SECRET,
-      // or (b) the request fails. Either way the cert is still valid — it
-      // just won't carry the math-anchored badge until backfilled.
-      const signature = (await requestSignature(verificationHash)) ?? undefined;
-      const cert: Certificate = {
-        ...certBase,
-        id: generateId("cert"),
-        verificationHash,
-        signature,
-      };
-      await putCertificate(cert);
-      setCertificate(cert);
-      void track("verification_passed", {
+      const scored = scoreAssessment(questions, answerMap);
+      const passed = scored.score >= ASSESSMENT_PASSING_SCORE;
+      const completedAt = Date.now();
+      const record: AssessmentResult = {
+        id: generateId("ar"),
         type: "phase-verification",
         targetId: phaseId,
         score: scored.score,
-      });
-      void awardXPWithToast("verification", XP_AWARDS.verification, phaseId);
-      void awardXPWithToast("phase-complete", XP_AWARDS.phaseComplete, phaseId);
+        totalQuestions: questions.length,
+        correctCount: scored.correctCount,
+        passed,
+        startedAt: startedAt ?? completedAt,
+        completedAt,
+        timeSpentMs: startedAt ? completedAt - startedAt : 0,
+        questionResults: scored.results,
+      };
+
+      if (passed) {
+        const standards = Array.from(
+          new Set(questions.flatMap((q) => q.standards?.cs2023 ?? []).filter(Boolean))
+        );
+        const certBase: Omit<Certificate, "id" | "verificationHash"> = {
+          phaseId,
+          userId: null,
+          displayName: "Anonymous Learner",
+          phaseTitle,
+          score: scored.score,
+          totalQuestions: questions.length,
+          completedAt,
+          standards,
+        };
+        const verificationHash = await generateVerificationHash(certBase);
+        const cert: Certificate = {
+          ...certBase,
+          id: generateId("cert"),
+          verificationHash,
+        };
+        await saveVerification(record, cert);
+        setCertificate(cert);
+        void track("verification_passed", {
+          type: "phase-verification",
+          targetId: phaseId,
+          score: scored.score,
+        });
+        void awardXPWithToast("verification", XP_AWARDS.verification, phaseId);
+        void awardXPWithToast("phase-complete", XP_AWARDS.phaseComplete, phaseId);
+      }
+      if (!passed) await saveVerification(record);
+      setLatestResult(record);
+      setResultRecord(scored);
+      setStatus("results");
+    } catch (error: unknown) {
+      console.error("[PhaseTest] Could not finish assessment:", error);
+      setSaveError("Your result could not be saved. Keep this page open and try saving again.");
+    } finally {
+      isFinishingRef.current = false;
+      setIsFinishing(false);
     }
-    setStatus("results");
   };
 
   // Auto-submit on time up
@@ -205,7 +214,7 @@ export function PhaseTest({
   }, [status, timeUp]);
 
   const toggleOption = (i: number) => {
-    if (submitted || !current) return;
+    if (submitted || !current || timeUp || isFinishing || saveError) return;
     setAnswers((prev) => {
       const next = new Map(prev);
       const existing = next.get(current.id) ?? [];
@@ -309,7 +318,7 @@ export function PhaseTest({
               <li>· {VERIFICATION_QUESTION_COUNT} questions across all modules</li>
               <li>· 60-minute time limit</li>
               <li>· 80% to pass</li>
-              <li>· Passing generates a verifiable certificate</li>
+              <li>· Passing saves a local learning certificate</li>
             </ul>
             <button
               type="button"
@@ -363,11 +372,24 @@ export function PhaseTest({
           onToggle={toggleOption}
         />
         <div className="mt-4">
+          {saveError && (
+            <div role="alert" className="mb-3 text-sm text-[var(--color-error)]">
+              <p>{saveError}</p>
+              <button
+                type="button"
+                onClick={() => void finish()}
+                disabled={isFinishing}
+                className="mt-2 min-h-12 rounded-lg border px-4"
+              >
+                {isFinishing ? "Saving…" : "Try saving again"}
+              </button>
+            </div>
+          )}
           {!submitted ? (
             <button
               type="button"
               onClick={submit}
-              disabled={selected.length === 0}
+              disabled={selected.length === 0 || isFinishing || timeUp || !!saveError}
               className={cn(
                 "rounded-lg px-4 py-2 text-sm font-semibold transition",
                 selected.length > 0
@@ -381,6 +403,7 @@ export function PhaseTest({
             <button
               type="button"
               onClick={nextQuestion}
+              disabled={isFinishing || !!saveError}
               className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600"
             >
               {index + 1 === questions.length ? "Finish" : "Next question"}

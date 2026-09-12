@@ -1,108 +1,73 @@
-import { getDB } from "@/lib/db";
+import {
+  beginLocalReset,
+  finishLocalReset,
+  RESET_GENERATION_KEY,
+} from "@/lib/storage/reset-coordination";
+import { pauseFeedbackDelivery } from "@/lib/feedback/delivery";
+import { DB_VERSION, getDB, prepareDatabaseReset, eraseDatabaseForReset } from "@/lib/db";
 import { resetDeviceSecret } from "@/lib/idb/encryption-key";
 import { clearActiveKey } from "@/lib/idb/active-key";
+import { deleteOPFSSnapshot } from "@/lib/storage/opfs";
+import { suspendShadowWritesForReset } from "@/lib/storage/shadow-write";
+import { clearLocalSession, isSupabaseConfigured } from "@/lib/supabase/client";
+import { suspendSyncForReset } from "@/lib/supabase/sync";
+
+function clearDuraStorage(storage: Storage): void {
+  const keys = Array.from(
+    { length: storage.length },
+    (_value: unknown, index: number): string | null => storage.key(index)
+  );
+  for (const key of keys) {
+    if (key !== RESET_GENERATION_KEY && (key?.startsWith("dura-") || key?.startsWith("dura:")))
+      storage.removeItem(key);
+  }
+}
 
 /**
- * All IndexedDB object stores in the DURA database.
- * Must stay in sync with the upgrade handler in db.ts.
- */
-const ALL_IDB_STORES = [
-  "progress",
-  "moduleProgress",
-  "phaseProgress",
-  "flashcards",
-  "reviewLogs",
-  "goals",
-  "preferences",
-  "dictionaryCache",
-  "analytics",
-  "sandbox-saves",
-  "assessment-results",
-  "certificates",
-  "xp-events",
-  "tutorial-progress",
-] as const;
-
-/** Known localStorage keys set by DURA. */
-const LOCAL_STORAGE_KEYS = ["dura-theme", "dura-skill-assessment", "dura-tip-seen"];
-
-/**
- * Completely erases all user data:
- * 1. All IndexedDB object stores
- * 2. All known localStorage keys
- * 3. All sessionStorage
- * 4. Service worker unregistration + cache clearing
- *
- * Call this from Settings → Clear All Data.
- * After calling, redirect to "/" — the app will reinitialize with defaults.
- *
- * TODO(phase-j): When Supabase auth is added, also call the Supabase
- * delete-user-data API endpoint before clearing local state.
+ * Erase this device's learner data and sign out locally. Cloud records are retained.
+ * Await completion before reloading so in-memory stores are discarded. Failures
+ * are surfaced to the caller; never report a successful reset after a partial erase.
  */
 export async function clearAllData(): Promise<void> {
-  // 1. Clear all IndexedDB stores
+  let generation: string | null = null;
   try {
-    const db = await getDB();
-    for (const store of ALL_IDB_STORES) {
-      try {
-        await db.clear(store);
-      } catch (error) {
-        console.error(`[clearAllData] IDB clear failed for ${store}:`, error);
-      }
+    await prepareDatabaseReset();
+    generation = beginLocalReset();
+    await pauseFeedbackDelivery();
+    await suspendSyncForReset();
+    await suspendShadowWritesForReset();
+    if (isSupabaseConfigured()) {
+      await clearLocalSession();
     }
-  } catch (error) {
-    console.error("[clearAllData] Failed to open IDB:", error);
-  }
 
-  // 1b. Reset the device secret + drop the in-memory key cache so any
-  // residual encrypted blobs (e.g. in OPFS shadow snapshots) become
-  // permanently unrecoverable. Required by the encryption wrapper's
-  // P5-A.2 contract — clearing learner data must invalidate cryptographic
-  // material too, otherwise an attacker who holds an old IDB snapshot
-  // could replay it under the same device secret.
-  try {
+    // Remove recoverable backups before the authoritative record and its key.
+    await deleteOPFSSnapshot();
+    await eraseDatabaseForReset();
     resetDeviceSecret();
     clearActiveKey();
-  } catch (error) {
-    console.error("[clearAllData] Failed to reset encryption key material:", error);
-  }
+    clearDuraStorage(localStorage);
+    clearDuraStorage(sessionStorage);
 
-  // 2. Clear known localStorage keys
-  for (const key of LOCAL_STORAGE_KEYS) {
-    try {
-      localStorage.removeItem(key);
-    } catch {
-      // ignore — private mode
-    }
-  }
-
-  // 3. Clear all sessionStorage
-  try {
-    sessionStorage.clear();
-  } catch {
-    // ignore
-  }
-
-  // 4. Unregister service workers + clear all caches
-  if ("serviceWorker" in navigator) {
-    try {
+    if ("serviceWorker" in navigator) {
       const registrations = await navigator.serviceWorker.getRegistrations();
-      for (const reg of registrations) {
-        await reg.unregister();
-      }
-    } catch (error) {
-      console.error("[clearAllData] SW unregister failed:", error);
+      await Promise.all(
+        registrations.map(
+          (registration: ServiceWorkerRegistration): Promise<boolean> => registration.unregister()
+        )
+      );
     }
-  }
-  if ("caches" in window) {
-    try {
+    if ("caches" in window) {
       const keys = await caches.keys();
-      for (const key of keys) {
-        await caches.delete(key);
-      }
-    } catch (error) {
-      console.error("[clearAllData] Cache clear failed:", error);
+      await Promise.all(keys.map((key: string): Promise<boolean> => caches.delete(key)));
     }
+  } catch (error) {
+    console.error("[clearAllData] Local reset failed:", error);
+    throw new Error(
+      "Some local data could not be cleared. Close other DURA tabs and retry. If it still fails, reload this page and try again.",
+      { cause: error }
+    );
+  } finally {
+    if (generation) finishLocalReset(generation);
   }
 }
 
@@ -121,10 +86,10 @@ export async function exportAllData(): Promise<string> {
   const db = await getDB();
   const dump: Record<string, unknown> = {
     exportedAt: new Date().toISOString(),
-    version: 5,
+    version: DB_VERSION,
   };
 
-  for (const store of ALL_IDB_STORES) {
+  for (const store of Array.from(db.objectStoreNames)) {
     try {
       dump[store] = await db.getAll(store);
     } catch (error) {

@@ -13,7 +13,7 @@ import { track } from "@/lib/analytics";
 import { getDueCards } from "@/lib/db/flashcards";
 import { getCompletedLessonCount } from "@/lib/db/progress";
 import { getTotalXP } from "@/lib/db/xp";
-import { awardXPWithToast } from "@/lib/xp-manager";
+import { awardSavedLessonXP } from "@/lib/xp-manager";
 import { extendStreak } from "@/lib/streak-manager";
 import { Confetti } from "@/components/motion/Confetti";
 import { ShareButton } from "@/components/seo/ShareButton";
@@ -134,6 +134,7 @@ export function CompletionGate({
   }, [ready]);
 
   const [celebrating, setCelebrating] = useState(false);
+  const [earnedXP, setEarnedXP] = useState(0);
   const [previousLevel, setPreviousLevel] = useState<number | null>(null);
   const [newLevel, setNewLevel] = useState<number | null>(null);
   const [dueAfter, setDueAfter] = useState<number>(0);
@@ -141,6 +142,8 @@ export function CompletionGate({
   const [streakDays, setStreakDays] = useState<number>(0);
   const [streakExtended, setStreakExtended] = useState<boolean>(false);
   const mountedRef = useRef(true);
+  const isCompletingRef = useRef(false);
+  const [completionError, setCompletionError] = useState<string | null>(null);
 
   // Auth state — checked once on mount; offline-first completion never blocked
   const { user } = useAuth();
@@ -148,11 +151,38 @@ export function CompletionGate({
   const [showSyncPrompt, setShowSyncPrompt] = useState(false);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
   }, []);
-  const xp = useTween(XP_AWARDS.lesson, XP_TWEEN_MS, celebrating);
+  const xp = useTween(earnedXP, XP_TWEEN_MS, celebrating);
+  const completedLessonId = completed ? current?.lessonId : undefined;
+
+  useEffect((): (() => void) => {
+    let isCancelled = false;
+    setEarnedXP(0);
+    if (completedLessonId) {
+      void (async (): Promise<void> => {
+        try {
+          const before = await getTotalXP();
+          const earned = await awardSavedLessonXP(completedLessonId);
+          const after = await getTotalXP();
+          if (isCancelled) return;
+          setEarnedXP(earned);
+          if (earned > 0) {
+            setPreviousLevel(levelFromXP(before));
+            setNewLevel(levelFromXP(after));
+          }
+        } catch (error) {
+          console.error("[gate] Could not restore completed lesson XP", error);
+        }
+      })();
+    }
+    return (): void => {
+      isCancelled = true;
+    };
+  }, [completedLessonId]);
 
   type Check = { label: string; done: boolean; subtitle?: string; progress?: number };
   const checks = useMemo<Check[]>(
@@ -185,23 +215,23 @@ export function CompletionGate({
     );
   }, [celebrating]);
 
-  const onComplete = async () => {
-    if (!current || completed) return;
+  const onComplete = async (): Promise<void> => {
+    if (!current || completed || !ready || isCompletingRef.current) return;
+    isCompletingRef.current = true;
+    setCompletionError(null);
     try {
-      const before = await getTotalXP();
-      if (!mountedRef.current) return;
-      setPreviousLevel(levelFromXP(before));
       await complete(XP_AWARDS.lesson);
-      await awardXPWithToast("lesson", XP_AWARDS.lesson, current.lessonId);
       if (!mountedRef.current) return;
-      const after = before + XP_AWARDS.lesson;
-      setNewLevel(levelFromXP(after));
       setCelebrating(true);
       // Nudge unauthenticated learners toward sign-in so progress syncs
       if (!isAuthed) setShowSyncPrompt(true);
     } catch (error) {
       console.error("[gate] completion failed", error);
+      if (mountedRef.current)
+        setCompletionError("Your completion could not be saved. Please try again.");
       return;
+    } finally {
+      isCompletingRef.current = false;
     }
     // Extend the streak and record whether it grew.
     try {
@@ -254,6 +284,11 @@ export function CompletionGate({
 
   return (
     <section className="my-12 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+      {completionError && (
+        <p role="alert" className="mb-3 text-sm text-[var(--color-error)]">
+          {completionError}
+        </p>
+      )}
       <h2 className="mb-3 text-xl font-semibold text-[var(--color-text-primary)]">
         Finish this lesson
       </h2>

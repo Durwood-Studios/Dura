@@ -1,48 +1,31 @@
-/**
- * Client-side helpers for the HMAC signing layer.
- *
- *   requestSignature(hash)        — earner-side, called when a cert is created
- *   checkSignature(hash, sig)     — verifier-side, called when the URL has ?sig=
- *   buildSignedShareUrl(...)      — earner-side, build the URL with ?sig=
- *   readSignatureFromUrl()        — verifier-side, read ?sig= from the location
- *
- * All four functions degrade silently — the cert + verify flows work without
- * signatures, the math-anchored badge just doesn't appear.
+/** Helpers for sharing certificates and checking historical hash receipts.
+ * A receipt is not evidence of assessment completion or learner identity.
  */
 
 import type { Certificate } from "@/types/assessment";
 
-const SIGN_ENDPOINT = "/api/verify/sign";
 const CHECK_ENDPOINT = "/api/verify/check";
 const SIG_PARAM = "sig";
 
-export async function requestSignature(hash: string): Promise<string | null> {
-  try {
-    const res = await fetch(SIGN_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ hash }),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { signature?: unknown };
-    return typeof data.signature === "string" ? data.signature : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function checkSignature(hash: string, signature: string): Promise<boolean> {
+/** Return null when verification is unavailable, distinct from a rejected signature. */
+export async function checkSignature(hash: string, signature: string): Promise<boolean | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout((): void => controller.abort(), 10_000);
   try {
     const res = await fetch(CHECK_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ hash, signature }),
+      signal: controller.signal,
     });
-    if (!res.ok) return false;
+    if (!res.ok) return null;
     const data = (await res.json()) as { valid?: unknown };
-    return data.valid === true;
-  } catch {
-    return false;
+    return typeof data.valid === "boolean" ? data.valid : null;
+  } catch (error: unknown) {
+    console.error("[verify] Signature check unavailable:", error);
+    return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

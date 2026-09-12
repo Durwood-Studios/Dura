@@ -5,6 +5,7 @@ import {
   flushShadowWrite,
   registerShadowWriteFlushers,
   triggerShadowWrite,
+  suspendShadowWritesForReset,
 } from "@/lib/storage/shadow-write";
 
 vi.mock("@/lib/storage/opfs", () => ({
@@ -77,5 +78,36 @@ describe("LFLRS-R1 — shadow-write debounce + flush", () => {
     const teardown2 = registerShadowWriteFlushers();
     teardown1();
     teardown2();
+  });
+  it("reset cancels pending writes and blocks lifecycle flushes until reload", async () => {
+    const { saveToOPFS } = await import("@/lib/storage/opfs");
+    triggerShadowWrite();
+    await suspendShadowWritesForReset();
+    triggerShadowWrite();
+    await flushShadowWrite();
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(saveToOPFS).not.toHaveBeenCalled();
+  });
+
+  it("reset waits for an in-flight backup before deletion can proceed", async () => {
+    const { saveToOPFS } = await import("@/lib/storage/opfs");
+    let finish: () => void = (): void => {};
+    vi.mocked(saveToOPFS).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+    );
+    const writing = flushShadowWrite();
+    await Promise.resolve();
+    let hasDrained = false;
+    const draining = suspendShadowWritesForReset().then((): void => {
+      hasDrained = true;
+    });
+    await Promise.resolve();
+    expect(hasDrained).toBe(false);
+    finish();
+    await Promise.all([writing, draining]);
+    expect(hasDrained).toBe(true);
   });
 });
