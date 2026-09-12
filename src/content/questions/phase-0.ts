@@ -1,8 +1,8 @@
 import type { AssessmentQuestion } from "@/types/assessment";
 
 /**
- * Phase 0 question bank — 60 questions across 4 modules (15 each).
- * Difficulty spread per module: 6 easy, 6 medium, 3 hard.
+ * Phase 0 question bank — 76 questions across 5 modules (15 per original module, 16 in the reading bridge).
+ * Difficulty ranges from direct traces to boundary and regression reasoning.
  * Every question tests a concept from a specific Phase 0 lesson.
  */
 
@@ -71,7 +71,7 @@ export const PHASE_0_QUESTIONS: AssessmentQuestion[] = [
     "0-1-q4",
     "0-1",
     "multiple-choice",
-    "Which of the following is closest in size to one binary kilobyte?",
+    "Which of the following is closest in size to one kibibyte (KiB)?",
     ["1,000 bytes", "1,024 bytes", "1,048,576 bytes", "100 bytes"],
     1,
     "1 KB (binary) = 2^10 = 1024 bytes.",
@@ -854,5 +854,199 @@ export const PHASE_0_QUESTIONS: AssessmentQuestion[] = [
     "git stash saves uncommitted changes to a stack. Switch branches, do the urgent fix, return, `git stash pop` to restore your work-in-progress.",
     "hard",
     ["git", "stash"]
+  ),
+
+  // Reading bridge questions include their own inputs and requirements.
+  q(
+    "0-5-q1",
+    "0-5",
+    "multiple-choice",
+    'A program runs console.log("First") then console.log("Second"). What is displayed?',
+    ["First then Second", "Second then First", "Both words alphabetically"],
+    0,
+    "Display instructions run in their written order.",
+    "easy",
+    ["order"]
+  ),
+  q(
+    "0-5-q2",
+    "0-5",
+    "multiple-choice",
+    'What does console.log("Save file") do?',
+    ["Saves a file", "Displays the words Save file", "Creates a folder"],
+    1,
+    "Quoted text is data to display, not another command.",
+    "easy",
+    ["output"]
+  ),
+  q(
+    "0-5-q3",
+    "0-5",
+    "multiple-choice",
+    "const seats = 4; const extra = 1; console.log(seats + extra); What is displayed?",
+    ["41", "4", "5"],
+    2,
+    "Both named values are numbers, so + adds them.",
+    "easy",
+    ["values"]
+  ),
+  q(
+    "0-5-q4",
+    "0-5",
+    "multiple-choice",
+    'After const seats = 4, what does console.log("seats") display?',
+    ["4", "seats", "Nothing"],
+    1,
+    "Quotation marks create literal text instead of a variable lookup.",
+    "easy",
+    ["values"]
+  ),
+  q(
+    "0-5-q5",
+    "0-5",
+    "multiple-choice",
+    "A rule accepts score >= 6. Which input tests the equality boundary?",
+    ["5", "6", "7"],
+    1,
+    "The exact cutoff tests whether equality is included.",
+    "medium",
+    ["boundary"]
+  ),
+  q(
+    "0-5-q6",
+    "0-5",
+    "multiple-choice",
+    "if (tickets >= 3) displays Enter; else displays Wait. What appears for tickets = 2?",
+    ["Enter", "Wait", "Both"],
+    1,
+    "The condition is false, so only the else branch runs.",
+    "easy",
+    ["branch"]
+  ),
+  q(
+    "0-5-q7",
+    "0-5",
+    "multiple-choice",
+    "A loop starts count at 1, runs while count <= 2, and adds 1 after each display. What is displayed?",
+    ["1, 2", "1, 2, 3", "2 only"],
+    0,
+    "After displaying 2, count becomes 3 and the condition fails.",
+    "medium",
+    ["loop"]
+  ),
+  q(
+    "0-5-q8",
+    "0-5",
+    "multiple-choice",
+    "A loop starts count at 1 and checks count <= 0 before its body. How many body executions occur?",
+    ["Zero", "One", "Unlimited"],
+    0,
+    "The first condition is already false.",
+    "medium",
+    ["loop"]
+  ),
+  q(
+    "0-5-q9",
+    "0-5",
+    "multiple-choice",
+    "function addFee(price) { return price + 2; } What does addFee(0) return?",
+    ["0", "2", "Nothing"],
+    1,
+    "The supplied input is zero; the function adds two and returns the result.",
+    "easy",
+    ["function"]
+  ),
+  q(
+    "0-5-q10",
+    "0-5",
+    "multiple-choice",
+    "A function returns 7 but contains no display instruction and its caller does not display the result. What appears?",
+    ["7 automatically", "The function name", "No displayed output from that call"],
+    2,
+    "Returning passes a value to the caller; displaying it is a separate operation.",
+    "medium",
+    ["return"]
+  ),
+  q(
+    "0-5-q11",
+    "0-5",
+    "multiple-choice",
+    "Requirement: add two credits. Code returns cost + 3. For cost = 4, which expected/actual pair is correct?",
+    ["Expected 6, actual 7", "Expected 7, actual 7", "Expected 7, actual 6"],
+    0,
+    "Expected follows the requirement; actual follows the implementation.",
+    "medium",
+    ["testing"]
+  ),
+  q(
+    "0-5-q12",
+    "0-5",
+    "multiple-choice",
+    "Code produces 7 where the requirement says 6. What is the sound next step?",
+    [
+      "Change the expected answer to 7 without checking the requirement",
+      "Investigate and repair the mismatch, then rerun the case",
+      "Treat any number as correct",
+    ],
+    1,
+    "A passing run is useful only when it matches the intended requirement.",
+    "medium",
+    ["testing"]
+  ),
+  q(
+    "0-5-q13",
+    "0-5",
+    "multiple-choice",
+    "Which bug report contains reproducible evidence?",
+    [
+      "It is broken",
+      "The author is careless",
+      "Calling addFee(4) returned 7; the add-two rule requires 6",
+    ],
+    2,
+    "The input, observed output, and expectation allow someone else to repeat the check.",
+    "medium",
+    ["report"]
+  ),
+  q(
+    "0-5-q14",
+    "0-5",
+    "multiple-choice",
+    "Which detail belongs in a public reproduction example?",
+    [
+      "A customer password",
+      "An artificial input that reproduces the problem",
+      "A private access key",
+    ],
+    1,
+    "Use synthetic data when it demonstrates the behavior without disclosing private information.",
+    "easy",
+    ["report"]
+  ),
+  q(
+    "0-5-q15",
+    "0-5",
+    "multiple-choice",
+    "A policy admits ages at least 12, but code uses age > 12. Which input exposes the defect?",
+    ["11", "12", "13"],
+    1,
+    "Only the equality case separates > from >= at twelve.",
+    "hard",
+    ["regression"]
+  ),
+  q(
+    "0-5-q16",
+    "0-5",
+    "multiple-choice",
+    "A repaired cutoff passes tests below, at, and above the boundary. What do those tests show?",
+    [
+      "Those tested cases match the rule",
+      "Every possible input must be safe",
+      "The original failure should never be tested again",
+    ],
+    0,
+    "Keep the original failure as a regression case; a few passing cases do not establish all behavior.",
+    "hard",
+    ["regression"]
   ),
 ];

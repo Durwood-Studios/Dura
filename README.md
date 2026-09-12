@@ -15,11 +15,11 @@
 
 ---
 
-A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 660 lessons across 15 phases, a technical dictionary, spaced-repetition flashcards, code sandboxes, and cross-device sync — all offline-capable, all free forever.
+A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 668 lessons across 15 phases, a technical dictionary, spaced-repetition flashcards, code sandboxes, and cross-device sync — all offline-capable, all free forever.
 
 ## Features
 
-- **660 lessons** across 15 phases — Digital Literacy through specialty engineering tracks
+- **668 lessons** across 15 phases — Digital Literacy through specialty engineering tracks
 - **Learning paths / career tracks** — structured progressions with skill graphs
 - **FSRS-5 spaced repetition** — flashcard system for long-term retention
 - **Code sandboxes** — write and run code in-browser with templates, fullscreen, console, and save management
@@ -62,7 +62,7 @@ Next.js 15 (App Router) · TypeScript strict · Tailwind v4 · Supabase (19 tabl
 
 | Phase | Focus                    | Lessons |
 | ----- | ------------------------ | ------- |
-| 0     | Digital Literacy         | 16      |
+| 0     | Digital Literacy         | 24      |
 | 1     | Programming Fundamentals | 50      |
 | 2     | Web Development          | 60      |
 | 3     | CS Fundamentals          | 45      |
@@ -77,13 +77,15 @@ Next.js 15 (App Router) · TypeScript strict · Tailwind v4 · Supabase (19 tabl
 
 | Phase | Focus                      | Lessons |
 | ----- | -------------------------- | ------- |
-| 10    | Embedded / Firmware        | 10      |
-| 11    | Hardware Verification      | 10      |
-| 12    | Quantitative / HFT Systems | 12      |
-| 13    | Robotics                   | 12      |
-| 14    | Manufacturing              | 16      |
+| 10    | Embedded / Firmware        | 47      |
+| 11    | Hardware Verification      | 32      |
+| 12    | Quantitative / HFT Systems | 30      |
+| 13    | Robotics                   | 37      |
+| 14    | Manufacturing              | 35      |
 
-**Total: 15 phases · 660 lessons**
+**Total: 15 phases · 668 lessons**
+
+Phase 0 includes an eight-lesson reading and testing bridge with offline guided practice and competency quizzes. Legacy LP-1.0 migration is tracked in [the curriculum conformance inventory](standards/pedagogy/CONFORMANCE.md).
 
 Standards: ACM CS2023 · SWEBOK v4 · SFIA 9 · CSTA K-12 · AP CS Principles · AP CS A · ISTE
 

@@ -14,6 +14,8 @@
 export interface StandardsAlignment {
   phaseId: string;
   moduleId: string;
+  /** Pending mappings are withheld from learner-facing standards claims. */
+  alignmentStatus?: "pending-review" | "lesson-metadata-only";
   csta: string[];
   apCSP: string[];
   apCSA: string[];
@@ -541,8 +543,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
 
   // ── Phase E: Embedded / Firmware (→ Phase 10 after rename) ────────────────
   {
-    phaseId: "e",
-    moduleId: "e-1",
+    phaseId: "10",
+    moduleId: "10-1",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -551,8 +554,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEC:61508-3:Functional Safety of Software", "MISRA-C:2023"],
   },
   {
-    phaseId: "e",
-    moduleId: "e-2",
+    phaseId: "10",
+    moduleId: "10-2",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -561,8 +565,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["MISRA-C:2023", "ARM:Cortex-M Architecture Reference Manual"],
   },
   {
-    phaseId: "e",
-    moduleId: "e-3",
+    phaseId: "10",
+    moduleId: "10-3",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -571,8 +576,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEC:61508-3:Functional Safety", "MISRA-C:2023"],
   },
   {
-    phaseId: "e",
-    moduleId: "e-4",
+    phaseId: "10",
+    moduleId: "10-4",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -581,8 +587,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEC:61508-3", "MISRA-C:2023", "ISO:26262-6:Software (Automotive)"],
   },
   {
-    phaseId: "e",
-    moduleId: "e-5",
+    phaseId: "10",
+    moduleId: "10-5",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -591,8 +598,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEC:61508-3", "MISRA-C:2023"],
   },
   {
-    phaseId: "e",
-    moduleId: "e-6",
+    phaseId: "10",
+    moduleId: "10-6",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -601,8 +609,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEC:61508-3", "ISO:26262-6"],
   },
   {
-    phaseId: "e",
-    moduleId: "e-7",
+    phaseId: "10",
+    moduleId: "10-7",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -615,8 +624,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     ],
   },
   {
-    phaseId: "e",
-    moduleId: "e-8",
+    phaseId: "10",
+    moduleId: "10-8",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -627,8 +637,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
 
   // ── Phase H: Hardware Engineering (→ Phase 11 after rename) ───────────────
   {
-    phaseId: "h",
-    moduleId: "h-1",
+    phaseId: "11",
+    moduleId: "11-1",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -637,8 +648,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEEE:1284", "IEC:60068:Environmental Testing"],
   },
   {
-    phaseId: "h",
-    moduleId: "h-2",
+    phaseId: "11",
+    moduleId: "11-2",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -647,8 +659,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IPC:2221:PCB Design Standard", "IPC:7711", "IEC:60068"],
   },
   {
-    phaseId: "h",
-    moduleId: "h-3",
+    phaseId: "11",
+    moduleId: "11-3",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -657,8 +670,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEEE:1076:VHDL", "IEEE:1800:SystemVerilog"],
   },
   {
-    phaseId: "h",
-    moduleId: "h-4",
+    phaseId: "11",
+    moduleId: "11-4",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -667,8 +681,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEEE:1149.1:JTAG", "IEEE:1149.7:Compact JTAG"],
   },
   {
-    phaseId: "h",
-    moduleId: "h-5",
+    phaseId: "11",
+    moduleId: "11-5",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -677,8 +692,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEC:60068", "IEC:61000-4:EMC Testing"],
   },
   {
-    phaseId: "h",
-    moduleId: "h-6",
+    phaseId: "11",
+    moduleId: "11-6",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -689,8 +705,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
 
   // ── Phase Q: Quantitative / HFT Systems (→ Phase 12 after rename) ─────────
   {
-    phaseId: "q",
-    moduleId: "q-1",
+    phaseId: "12",
+    moduleId: "12-1",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -702,8 +719,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     ],
   },
   {
-    phaseId: "q",
-    moduleId: "q-2",
+    phaseId: "12",
+    moduleId: "12-2",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -712,8 +730,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["FIX:Protocol", "IEEE:802.3:Ethernet"],
   },
   {
-    phaseId: "q",
-    moduleId: "q-3",
+    phaseId: "12",
+    moduleId: "12-3",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -722,8 +741,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["FIX:Protocol", "FINRA:Rule 5310:Best Execution"],
   },
   {
-    phaseId: "q",
-    moduleId: "q-4",
+    phaseId: "12",
+    moduleId: "12-4",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -732,8 +752,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISO:15022", "SEC:Rule 15c3-5:Market Access Rule"],
   },
   {
-    phaseId: "q",
-    moduleId: "q-5",
+    phaseId: "12",
+    moduleId: "12-5",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -745,8 +766,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     ],
   },
   {
-    phaseId: "q",
-    moduleId: "q-6",
+    phaseId: "12",
+    moduleId: "12-6",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -755,8 +777,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["FIX:Protocol", "MiFID:II:Best Execution RTS 27/28"],
   },
   {
-    phaseId: "q",
-    moduleId: "q-7",
+    phaseId: "12",
+    moduleId: "12-7",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -765,8 +788,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEEE:802.3", "Linux:DPDK", "SEC:Rule 15c3-5"],
   },
   {
-    phaseId: "q",
-    moduleId: "q-8",
+    phaseId: "12",
+    moduleId: "12-8",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -782,8 +806,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
 
   // ── Phase R: Robotics Software Engineering (→ Phase 13 after rename) ──────
   {
-    phaseId: "r",
-    moduleId: "r-1",
+    phaseId: "13",
+    moduleId: "13-1",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -792,8 +817,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISO:10218-1:2025:Robot Safety", "ROS:2:Communication Standard"],
   },
   {
-    phaseId: "r",
-    moduleId: "r-2",
+    phaseId: "13",
+    moduleId: "13-2",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -802,8 +828,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISO:10218-1:2025", "ISO:9283:Manipulator Performance"],
   },
   {
-    phaseId: "r",
-    moduleId: "r-3",
+    phaseId: "13",
+    moduleId: "13-3",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -812,8 +839,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISO:10218-1:2025", "IEC:62443-3-3:System Security Requirements"],
   },
   {
-    phaseId: "r",
-    moduleId: "r-4",
+    phaseId: "13",
+    moduleId: "13-4",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -822,8 +850,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISO:10218-1:2025", "ISO:9283"],
   },
   {
-    phaseId: "r",
-    moduleId: "r-5",
+    phaseId: "13",
+    moduleId: "13-5",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -832,8 +861,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISO:10218-1:2025", "IEC:61508-3:Functional Safety", "ISO:9283"],
   },
   {
-    phaseId: "r",
-    moduleId: "r-6",
+    phaseId: "13",
+    moduleId: "13-6",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -843,8 +873,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     owasp: ["A05:2021 Security Misconfiguration", "A01:2021 Broken Access Control"],
   },
   {
-    phaseId: "r",
-    moduleId: "r-7",
+    phaseId: "13",
+    moduleId: "13-7",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -853,8 +884,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISO:10218-2:2025:Robot Integration", "ISO:15066:Collaborative Robots"],
   },
   {
-    phaseId: "r",
-    moduleId: "r-8",
+    phaseId: "13",
+    moduleId: "13-8",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -865,8 +897,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
 
   // ── Phase M: Manufacturing Systems Engineering (→ Phase 14 after rename) ──
   {
-    phaseId: "m",
-    moduleId: "m-1",
+    phaseId: "14",
+    moduleId: "14-1",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -878,8 +911,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     ],
   },
   {
-    phaseId: "m",
-    moduleId: "m-2",
+    phaseId: "14",
+    moduleId: "14-2",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -888,8 +922,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISA:88:Batch Control", "IEC:61512:Batch Control"],
   },
   {
-    phaseId: "m",
-    moduleId: "m-3",
+    phaseId: "14",
+    moduleId: "14-3",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -898,8 +933,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISA:95", "ISA:88", "IEC:62541:OPC UA"],
   },
   {
-    phaseId: "m",
-    moduleId: "m-4",
+    phaseId: "14",
+    moduleId: "14-4",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -908,8 +944,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEC:62541:OPC UA", "IEC:61158:Fieldbus", "IEEE:802.3"],
   },
   {
-    phaseId: "m",
-    moduleId: "m-5",
+    phaseId: "14",
+    moduleId: "14-5",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -922,8 +959,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     ],
   },
   {
-    phaseId: "m",
-    moduleId: "m-6",
+    phaseId: "14",
+    moduleId: "14-6",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -939,8 +977,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     ],
   },
   {
-    phaseId: "m",
-    moduleId: "m-7",
+    phaseId: "14",
+    moduleId: "14-7",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -953,8 +992,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     ],
   },
   {
-    phaseId: "m",
-    moduleId: "m-8",
+    phaseId: "14",
+    moduleId: "14-8",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -969,8 +1009,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     nice: ["SP-TRD-001:Technology R&D", "OV-MGT-001:Program/Project Management"],
   },
   {
-    phaseId: "m",
-    moduleId: "m-9",
+    phaseId: "14",
+    moduleId: "14-9",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -979,8 +1020,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["ISO:23247:Digital Twin for Manufacturing", "OPC:UA", "ISA:95"],
   },
   {
-    phaseId: "m",
-    moduleId: "m-10",
+    phaseId: "14",
+    moduleId: "14-10",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -993,8 +1035,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     ],
   },
   {
-    phaseId: "m",
-    moduleId: "m-11",
+    phaseId: "14",
+    moduleId: "14-11",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -1003,8 +1046,9 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
     professionalStandards: ["IEC:62541:OPC UA", "ISO:23247", "IEEE:2413:IoT Architecture"],
   },
   {
-    phaseId: "m",
-    moduleId: "m-12",
+    phaseId: "14",
+    moduleId: "14-12",
+    alignmentStatus: "pending-review",
     csta: [],
     apCSP: [],
     apCSA: [],
@@ -1019,6 +1063,223 @@ export const PHASE_STANDARDS: StandardsAlignment[] = [
       "IEC:62541:OPC UA",
     ],
   },
+  // Added modules have lesson-level claims; broader mappings require review.
+  {
+    phaseId: "0",
+    moduleId: "0-5",
+    alignmentStatus: "lesson-metadata-only",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "1",
+    moduleId: "1-7",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "2",
+    moduleId: "2-6",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "2",
+    moduleId: "2-7",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "3",
+    moduleId: "3-6",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "4",
+    moduleId: "4-6",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "5",
+    moduleId: "5-5",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "6",
+    moduleId: "6-8",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "6",
+    moduleId: "6-9",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "7",
+    moduleId: "7-5",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "8",
+    moduleId: "8-6",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "8",
+    moduleId: "8-7",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-9",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "9",
+    moduleId: "9-10",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "10",
+    moduleId: "10-9",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "10",
+    moduleId: "10-10",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "11",
+    moduleId: "11-7",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "11",
+    moduleId: "11-8",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "11",
+    moduleId: "11-9",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "11",
+    moduleId: "11-10",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "12",
+    moduleId: "12-9",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "13",
+    moduleId: "13-9",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "14",
+    moduleId: "14-13",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
+  {
+    phaseId: "14",
+    moduleId: "14-14",
+    alignmentStatus: "pending-review",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
 ];
 
 /** Look up the standards alignment for a specific module. */
@@ -1026,15 +1287,23 @@ export function getStandardsForModule(
   phaseId: string,
   moduleId: string
 ): StandardsAlignment | undefined {
-  return PHASE_STANDARDS.find((s) => s.phaseId === phaseId && s.moduleId === moduleId);
+  return PHASE_STANDARDS.find(
+    (s) =>
+      s.phaseId === phaseId && s.moduleId === moduleId && s.alignmentStatus !== "pending-review"
+  );
 }
 
 /** Find all modules that cover a given AP CSP or AP CSA topic. */
 export function getModulesByAPTopic(topic: string): StandardsAlignment[] {
-  return PHASE_STANDARDS.filter((s) => s.apCSP.includes(topic) || s.apCSA.includes(topic));
+  return PHASE_STANDARDS.filter(
+    (s) =>
+      s.alignmentStatus !== "pending-review" && (s.apCSP.includes(topic) || s.apCSA.includes(topic))
+  );
 }
 
 /** Find all modules that cover a given CSTA standard code. */
 export function getModulesByCSTAStandard(code: string): StandardsAlignment[] {
-  return PHASE_STANDARDS.filter((s) => s.csta.includes(code));
+  return PHASE_STANDARDS.filter(
+    (s) => s.alignmentStatus !== "pending-review" && s.csta.includes(code)
+  );
 }

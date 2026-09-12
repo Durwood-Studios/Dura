@@ -2,44 +2,48 @@
 
 > A public-facing view of where DURA is and where it's going. Updated when reality changes — not on a fixed cadence.
 >
-> Last updated: 2026-06-18
+> Last updated: 2026-09-12
 
 DURA is built in the open. This roadmap reflects the actual state of the work, including what's shipped, what's mid-flight, and what's deliberately deferred. Anything not on this list either hasn't been planned yet or isn't on the table.
 
 ---
 
-## Now — shipped and live
+## Implemented in the repository
 
-These are in production on [dura.vercel.app](https://dura.vercel.app) today.
+These features are present in source. This inventory does not certify the currently deployed production revision.
 
-### Curriculum (~456 lessons across 15 phases)
+### Curriculum (668 lessons across 15 phases)
 
-**Core track (10 phases, ~406 lessons)**
+**Core track (10 phases, 487 lessons)**
 
-| Phase | Focus                    | Lessons | Status  |
-| ----- | ------------------------ | ------- | ------- |
-| 0     | Digital Literacy         | 16      | ✅ Live |
-| 1     | Programming Fundamentals | 45      | ✅ Live |
-| 2     | Web Development          | 50      | ✅ Live |
-| 3     | CS Fundamentals          | 40      | ✅ Live |
-| 4     | Backend Engineering      | 45      | ✅ Live |
-| 5     | Systems Engineering      | 35      | ✅ Live |
-| 6     | AI/ML Engineering        | 50      | ✅ Live |
-| 7     | Advanced Systems         | 30      | ✅ Live |
-| 8     | Professional Practice    | 35      | ✅ Live |
-| 9     | CTO Track                | 60      | ✅ Live |
+| Phase | Focus                    | Lessons | Status   |
+| ----- | ------------------------ | ------- | -------- |
+| 0     | Digital Literacy         | 24      | Authored |
+| 1     | Programming Fundamentals | 50      | Authored |
+| 2     | Web Development          | 60      | Authored |
+| 3     | CS Fundamentals          | 45      | Authored |
+| 4     | Backend Engineering      | 50      | Authored |
+| 5     | Systems Engineering      | 40      | Authored |
+| 6     | AI/ML Engineering        | 71      | Authored |
+| 7     | Advanced Systems         | 35      | Authored |
+| 8     | Professional Practice    | 44      | Authored |
+| 9     | CTO Track                | 68      | Authored |
 
-**Specialty track (5 phases, ~50 lessons)**
+**Specialty track (5 phases, 181 lessons)**
 
-| Phase | Focus                      | Lessons | Status  |
-| ----- | -------------------------- | ------- | ------- |
-| 10    | Embedded & Firmware        | 8       | ✅ Live |
-| 11    | Hardware Verification      | 8       | ✅ Live |
-| 12    | Quantitative / HFT Systems | 8       | ✅ Live |
-| 13    | Robotics                   | 8       | ✅ Live |
-| 14    | Manufacturing              | 12      | ✅ Live |
+| Phase | Focus                      | Lessons | Status   |
+| ----- | -------------------------- | ------- | -------- |
+| 10    | Embedded & Firmware        | 47      | Authored |
+| 11    | Hardware Verification      | 32      | Authored |
+| 12    | Quantitative / HFT Systems | 30      | Authored |
+| 13    | Robotics                   | 37      | Authored |
+| 14    | Manufacturing              | 35      | Authored |
 
 ### Platform
+
+- Optional AI tutor and code review surfaces are implemented (`src/components/lesson/AITutor/`, `src/components/code-review/`); provider/network behavior needs environment-specific verification.
+- Offline indicator is implemented (`src/components/pwa/OfflineIndicator.tsx`).
+- Playwright browser tests exist under `tests/e2e/`; production and authenticated journeys still require configured environments.
 
 - Offline-first PWA — works fully without internet after first load
 - Mastery-gated progression — advance when you prove it, not when time passes
@@ -95,24 +99,11 @@ These are in production on [dura.vercel.app](https://dura.vercel.app) today.
 
 Work that is actively running now.
 
-### Curriculum gap-fill (~20 new modules across all 15 phases)
+### Curriculum pedagogy migration
 
-Lessons and modules being authored to close gaps identified in the standards-alignment audit:
+The previously listed gap-fill modules are authored, including TypeScript, OOP, discrete mathematics, queues, concurrency, classical ML, vision, formal methods/GPU, system design, incident management, due diligence, governance, and specialty expansions. Phase 0 now has 24 lessons, including eight lessons on tracing and testing code.
 
-- **Phase 1** — OOP & Classes module
-- **Phase 2** — TypeScript module (critical gap), Real-Time/WebSockets module
-- **Phase 3** — Discrete Mathematics module
-- **Phase 4** — Message Queues & Event-Driven Architecture module
-- **Phase 5** — Concurrency & Parallelism module
-- **Phase 6** — Classical ML Foundations module, Computer Vision module
-- **Phase 7** — Formal Methods & GPU Programming module
-- **Phase 8** — System Design at Scale module, Incident Management module
-- **Phase 9** — Technical Due Diligence module, Compliance & Governance module
-- **Phase 10** — Power Management module, Bootloaders/OTA module
-- **Phase 11** — Clock Domain Crossing module, Emulation/Acceleration module
-- **Phase 12** — Quantitative Finance Mathematics module
-- **Phase 13** — Robotics Science Fundamentals module (kinematics, SLAM, control)
-- **Phase 14** — CNC/CAM module, Metrology/Supply Chain module
+The 16 original Phase 0 lessons now have explicit prerequisites, measurable outcomes, guided practice suited to beginners, and assessment-aligned Bloom tags. A per-lesson LP-1.0 baseline blocks new structural regressions. **403 legacy lessons still need explicit prerequisites and outcomes**; full semantic pedagogy review is incremental. Sixty-five module standards mappings await semantic review and are withheld from learner-facing alignment claims. See [the conformance inventory](standards/pedagogy/CONFORMANCE.md).
 
 ### Supabase go-live
 
@@ -130,19 +121,15 @@ Roughly in priority order. Dates are intent, not commitments.
 
 ### Learning surfaces
 
-- AI tutor — Claude-API-backed Q&A scoped to lesson context, consent-gated, no training-data retention
-- Code review surface — submit a code sample, receive structured feedback with explanations
 - Functional feedback submission flow wired to Supabase (UI exists, backend pending go-live)
 
 ### Profile & identity
 
 - Avatar file upload (currently URL input only — full file upload deferred until storage bucket is configured)
-- PWA offline indicator and sync status badge
 
 ### Platform hygiene
 
 - Semantic versioning + in-app audit log (release notes surface, like an app store changelog)
-- Playwright e2e smoke suite covering 5 hot paths (lesson, review, discover, certificate, auth)
 - CSP `unsafe-eval` removal once Sandpack execution path is reconfirmed safe
 
 ### Mobile
@@ -156,7 +143,7 @@ DURA's framing is "a global tool for all software engineers." The language regis
 1. **Phase 1 — extraction.** Audit the ~2,000 UI strings; route through a `t()` helper. English baseline first. No user-visible change.
 2. **Phase 2 — RTL + bidi.** Wire `dir="rtl"` swap; verify lesson reader, sidebar, and dictionary in Arabic + Hebrew.
 3. **Phase 3 — machine-translated baseline.** Translate the UI string catalog; flip each locale's `enabled` flag after native-speaker validation. Lessons remain English-only.
-4. **Phase 4 — community + AI-assisted lesson translation.** 456 lessons × N languages is a six-to-seven-figure translation surface. Community-first, AI-translated drafts as a baseline. Provenance and credit tracked per lesson per locale.
+4. **Phase 4 — community + AI-assisted lesson translation.** 668 lessons × N languages is a six-to-seven-figure translation surface. Community-first, AI-translated drafts as a baseline. Provenance and credit tracked per lesson per locale.
 
 This will not happen in a single sprint. The scaffolding is here so contributions can flow in piece by piece.
 

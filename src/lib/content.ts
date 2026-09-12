@@ -2,6 +2,7 @@ import "server-only";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
+import { canonicalModuleId } from "@/lib/curriculum-ids";
 import { PHASES } from "@/content/phases";
 import type { BloomLevel, DreyfusStage, LessonMeta } from "@/types/curriculum";
 
@@ -26,6 +27,8 @@ export interface LessonFrontmatter {
   vocabulary?: string[];
   learningOutcomes?: string[];
   prerequisites?: string[];
+  professionalContext?: string;
+  thresholdConcept?: boolean;
 }
 
 export interface LoadedLesson {
@@ -71,9 +74,7 @@ async function findLessonFile(moduleDir: string, lessonId: string): Promise<stri
 async function findModuleDir(phaseDir: string, moduleId: string): Promise<string | null> {
   if (!(await fileExists(phaseDir))) return null;
   const entries = await fs.readdir(phaseDir, { withFileTypes: true });
-  const match = entries.find(
-    (e) => e.isDirectory() && (e.name === moduleId || e.name.startsWith(`${moduleId}-`))
-  );
+  const match = entries.find((e) => e.isDirectory() && canonicalModuleId(e.name) === moduleId);
   return match ? path.join(phaseDir, match.name) : null;
 }
 
@@ -124,6 +125,8 @@ export async function loadLesson(
       order: fm.order ?? 0,
       learningOutcomes: fm.learningOutcomes,
       prerequisites: fm.prerequisites,
+      professionalContext: fm.professionalContext,
+      thresholdConcept: fm.thresholdConcept,
     };
 
     return { meta, frontmatter: fm, body: content, filePath };
@@ -148,7 +151,15 @@ export async function listAllLessonParams(): Promise<
       const modules = await fs.readdir(phaseDir, { withFileTypes: true });
       for (const modEntry of modules) {
         if (!modEntry.isDirectory()) continue;
-        const moduleId = modEntry.name.match(/^(\d+-\d+)/)?.[1] ?? modEntry.name.split("-")[0];
+        const moduleId = canonicalModuleId(modEntry.name);
+        if (
+          !moduleId ||
+          !PHASES.find((phase) => phase.id === phaseId)?.modules.some(
+            (module) => module.id === moduleId
+          )
+        ) {
+          throw new Error(`Unregistered content module: ${modEntry.name}`);
+        }
         const modDir = path.join(phaseDir, modEntry.name);
         const files = await fs.readdir(modDir);
         for (const file of files) {

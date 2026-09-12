@@ -10,5 +10,5 @@
  * checks it stays in sync.
  */
 export const TOTAL_PHASES = 15;
-export const TOTAL_MODULES = 118;
-export const TOTAL_LESSONS = 660;
+export const TOTAL_MODULES = 119;
+export const TOTAL_LESSONS = 668;

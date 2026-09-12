@@ -1,3 +1,4 @@
+import { canonicalModuleId } from "@/lib/curriculum-ids";
 import type { AssessmentQuestion } from "@/types/assessment";
 
 /**
@@ -21,7 +22,7 @@ function q(
   return {
     id,
     phaseId: "12",
-    moduleId,
+    moduleId: canonicalModuleId(moduleId) ?? moduleId,
     type,
     question,
     options,

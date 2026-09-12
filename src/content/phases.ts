@@ -30,9 +30,9 @@ export const PHASES: Phase[] = [
     description:
       "How computers think, your first terminal, how the internet works, and setting up a real dev environment. The vocabulary and mental models every engineer assumes you already have.",
     color: "#6ee7b7",
-    estimatedHours: 50,
-    moduleCount: 4,
-    lessonCount: 16,
+    estimatedHours: 52,
+    moduleCount: 5,
+    lessonCount: 24,
     order: 0,
     modules: [
       mod(
@@ -70,6 +70,15 @@ export const PHASES: Phase[] = [
         "Editors, git basics, dotfiles, package managers — the workshop you'll spend years in.",
         12,
         4
+      ),
+      mod(
+        "0",
+        5,
+        "reading-and-testing-code",
+        "Reading and Testing Code",
+        "Trace values, decisions, loops, and function calls; compare expected results and report reproducible bugs.",
+        2,
+        8
       ),
     ],
   },
@@ -725,7 +734,7 @@ export const PHASES: Phase[] = [
     color: "#fb923c",
     estimatedHours: 18.5,
     moduleCount: 10,
-    lessonCount: 10,
+    lessonCount: 47,
     order: 12,
     modules: [
       mod(
@@ -735,7 +744,7 @@ export const PHASES: Phase[] = [
         "C Toolchain for ARM Cortex-M",
         "GCC arm-none-eabi, linker scripts, startup code, and the build flow that produces a flashable binary.",
         1.5,
-        1
+        6
       ),
       mod(
         "10",
@@ -744,7 +753,7 @@ export const PHASES: Phase[] = [
         "Bare-Metal C — Registers, Peripherals, the Boot Sequence",
         "Memory-mapped I/O, volatile, the vector table, and the journey from reset vector to main().",
         1.5,
-        1
+        5
       ),
       mod(
         "10",
@@ -753,7 +762,7 @@ export const PHASES: Phase[] = [
         "Interrupts and DMA",
         "ISRs without the pitfalls plus DMA-driven peripheral transfers. The hardware-software contract at the interrupt boundary.",
         1.5,
-        1
+        4
       ),
       mod(
         "10",
@@ -762,7 +771,7 @@ export const PHASES: Phase[] = [
         "RTOS Fundamentals — Tasks, Queues, Priority Inversion",
         "FreeRTOS / Zephyr as references. Schedulers, queues, mutexes, and the priority-inversion failure mode that bit Mars Pathfinder.",
         2,
-        1
+        5
       ),
       mod(
         "10",
@@ -771,7 +780,7 @@ export const PHASES: Phase[] = [
         "Drivers — UART, SPI, I2C, ADC",
         "The four buses every embedded engineer writes against. Polled, interrupt-driven, and DMA-driven implementations with the choice criteria documented.",
         2,
-        1
+        5
       ),
       mod(
         "10",
@@ -780,7 +789,7 @@ export const PHASES: Phase[] = [
         "Rust on Cortex-M — embedded-hal + RTIC",
         "Rust's embedded-hal trait ecosystem and RTIC's task model. The memory-safety argument made concrete.",
         2,
-        1
+        5
       ),
       mod(
         "10",
@@ -789,7 +798,7 @@ export const PHASES: Phase[] = [
         "MISRA-C:2023 — When Style Is a Safety Requirement",
         "Why specific MISRA rules exist, what bugs they prevent, and how the deviation-policy mechanism works. Practical, not bureaucratic.",
         1.25,
-        1
+        4
       ),
       mod(
         "10",
@@ -798,7 +807,7 @@ export const PHASES: Phase[] = [
         "Capstone — A Real-Time Sensor Pipeline",
         "ADC + DMA + RTOS task + UART telemetry on STM32F4. End-to-end firmware that compiles, flashes, and runs. Hash-anchored via /verify.",
         3,
-        1
+        3
       ),
       mod(
         "10",
@@ -807,7 +816,7 @@ export const PHASES: Phase[] = [
         "Power Management",
         "Sleep modes, wake sources, stop mode on STM32. Cut MCU power 99% using low-power peripheral design.",
         1.5,
-        1
+        5
       ),
       mod(
         "10",
@@ -816,7 +825,7 @@ export const PHASES: Phase[] = [
         "Bootloaders and OTA",
         "Flash layout, dual-bank failsafe OTA, signature verification before executing application images.",
         2,
-        1
+        5
       ),
     ],
   },
@@ -835,7 +844,7 @@ export const PHASES: Phase[] = [
     color: "#a78bfa",
     estimatedHours: 16.0,
     moduleCount: 10,
-    lessonCount: 10,
+    lessonCount: 32,
     order: 13,
     modules: [
       mod(
@@ -845,7 +854,7 @@ export const PHASES: Phase[] = [
         "SystemVerilog Basics for Verification",
         "IEEE 1800-2023 in operational terms. Data types beyond Verilog, interfaces, classes.",
         1.5,
-        1
+        5
       ),
       mod(
         "11",
@@ -854,7 +863,7 @@ export const PHASES: Phase[] = [
         "UVM Testbench Architecture",
         "Driver, Monitor, Sequencer, Agent, Scoreboard, Env, Test. IEEE 1800.2-2020.",
         2,
-        1
+        4
       ),
       mod(
         "11",
@@ -863,7 +872,7 @@ export const PHASES: Phase[] = [
         "Constrained-Random Stimulus",
         "Randomization, constraint blocks, the most productive DV methodology.",
         1.5,
-        1
+        6
       ),
       mod(
         "11",
@@ -872,7 +881,7 @@ export const PHASES: Phase[] = [
         "Functional Coverage — Coverpoints, Bins, Cross",
         "Coverage closure: random stimulus + coverage = 'when am I done'.",
         1.5,
-        1
+        4
       ),
       mod(
         "11",
@@ -881,7 +890,7 @@ export const PHASES: Phase[] = [
         "UVM Sequences and Virtual Sequences",
         "Sequence library, layered sequences, virtual sequences coordinating agents.",
         1.5,
-        1
+        5
       ),
       mod(
         "11",
@@ -890,7 +899,7 @@ export const PHASES: Phase[] = [
         "Formal Verification — SVA Assertions",
         "SystemVerilog Assertions, formal-vs-simulation tradeoffs.",
         1.5,
-        1
+        4
       ),
       mod(
         "11",
@@ -944,7 +953,7 @@ export const PHASES: Phase[] = [
     color: "#f59e0b",
     estimatedHours: 16,
     moduleCount: 9,
-    lessonCount: 12,
+    lessonCount: 30,
     order: 14,
     modules: [
       mod(
@@ -954,7 +963,7 @@ export const PHASES: Phase[] = [
         "Modern C++ for HFT",
         "Move semantics, templates, constexpr, concepts, std::span — the deliberate subset HFT teams write in.",
         2,
-        1
+        9
       ),
       mod(
         "12",
@@ -963,7 +972,7 @@ export const PHASES: Phase[] = [
         "IEEE 754 Numerics",
         "Binary64 operationally. Fast-math, denormals, FMA, deterministic-FP for risk.",
         1.5,
-        1
+        5
       ),
       mod(
         "12",
@@ -972,7 +981,7 @@ export const PHASES: Phase[] = [
         "Cache-Aware Programming + False Sharing",
         "x86-64 cache hierarchy, line size, prefetch, false sharing between threads.",
         1.5,
-        1
+        6
       ),
       mod(
         "12",
@@ -1026,7 +1035,7 @@ export const PHASES: Phase[] = [
         "Quant Finance Mathematics",
         "Probability, statistics, and stochastic processes for trading: distributions, hypothesis testing, time-series.",
         2,
-        4
+        5
       ),
     ],
   },
@@ -1045,7 +1054,7 @@ export const PHASES: Phase[] = [
     color: "#818cf8",
     estimatedHours: 13,
     moduleCount: 9,
-    lessonCount: 12,
+    lessonCount: 37,
     order: 10,
     modules: [
       mod(
@@ -1055,7 +1064,7 @@ export const PHASES: Phase[] = [
         "ISO 8373 Vocabulary",
         "The canonical robotics glossary — manipulator, end-effector, pose, workspace, collaborative operation. Every downstream lesson drifts without it.",
         1,
-        1
+        5
       ),
       mod(
         "13",
@@ -1064,7 +1073,7 @@ export const PHASES: Phase[] = [
         "ISO 12100 Risk Assessment",
         "The four-step risk-assessment process every machinery-safety standard inherits. Limits, hazards, estimation, evaluation.",
         1,
-        1
+        4
       ),
       mod(
         "13",
@@ -1073,7 +1082,7 @@ export const PHASES: Phase[] = [
         "Functional Safety: PL ↔ SIL",
         "IEC 61508 as parent. ISO 13849 (PL a-e) and IEC 62061 (SIL 1-3) derive from it with different architectural choices.",
         1,
-        1
+        5
       ),
       mod(
         "13",
@@ -1082,7 +1091,7 @@ export const PHASES: Phase[] = [
         "The Four Collaborative Modes",
         "ISO 10218-1:2025 absorbed ISO/TS 15066. The four modes — SMS, HG, SSM, PFL — have distinct sensor, control-system, and risk-assessment implications.",
         1,
-        1
+        5
       ),
       mod(
         "13",
@@ -1091,7 +1100,7 @@ export const PHASES: Phase[] = [
         "PFL Testing: RIA TR R15.806",
         "Application-level safety validation for power-and-force-limiting cobots. PFL-certified robot ≠ PFL-validated application.",
         1,
-        1
+        5
       ),
       mod(
         "13",
@@ -1100,7 +1109,7 @@ export const PHASES: Phase[] = [
         "ROS 2 + ROS-Industrial",
         "Hands-on against URsim following the ROS-Industrial public curriculum. No vendor-issued ROS 2 cert exists — Open Robotics + Apex.Grace are the paths.",
         2,
-        1
+        6
       ),
       mod(
         "13",
@@ -1127,7 +1136,7 @@ export const PHASES: Phase[] = [
         "Robotics Science Fundamentals",
         "Forward/inverse kinematics, robot perception, state estimation, planning algorithms.",
         2,
-        4
+        5
       ),
     ],
   },
@@ -1147,7 +1156,7 @@ export const PHASES: Phase[] = [
     color: "#2dd4bf",
     estimatedHours: 19.5,
     moduleCount: 14,
-    lessonCount: 16,
+    lessonCount: 35,
     order: 11,
     modules: [
       mod(
@@ -1157,7 +1166,7 @@ export const PHASES: Phase[] = [
         "ISO 9001 Baseline",
         "Universal Quality Management System standard. 7 QM principles. ISO 9001 certifies the ISMS process — not individual products.",
         1,
-        1
+        7
       ),
       mod(
         "14",
@@ -1166,7 +1175,7 @@ export const PHASES: Phase[] = [
         "Industry Supersets: AS9100 + IATF 16949",
         "Aerospace (AS9100D) and automotive (IATF 16949) extend ISO 9001 with sector-specific requirements.",
         1,
-        1
+        6
       ),
       mod(
         "14",
@@ -1175,7 +1184,7 @@ export const PHASES: Phase[] = [
         "IATF Core Tools",
         "Five Core Tools required for IATF 16949 audits: APQP, PPAP, FMEA, MSA, SPC.",
         2,
-        1
+        4
       ),
       mod(
         "14",
@@ -1184,7 +1193,7 @@ export const PHASES: Phase[] = [
         "Lean / Toyota Production System",
         "Two pillars: JIT + Jidoka. PDCA underneath. Practitioner tools: 5S, SMED, Kaizen, A3, Andon, Heijunka, Kanban.",
         1,
-        1
+        6
       ),
       mod(
         "14",
@@ -1301,5 +1310,5 @@ export const CONTENT_COUNTS = {
   /** Total dictionary terms across all batches. */
   dictionaryTerms: 500,
   /** Total assessment questions across all phases. */
-  assessmentQuestions: 564,
+  assessmentQuestions: 860,
 } as const;

@@ -12,10 +12,10 @@
  *
  * Per-lesson frontmatter contract:
  *   standards:
- *     cs2023:  string[]   non-empty, ACM CS2023 knowledge-area codes
- *     swebok:  string[]   non-empty, SWEBOK v4 KA labels
+ *     cs2023:  string[]   when applicable, ACM CS2023 knowledge-area codes
+ *     swebok:  string[]   when applicable, SWEBOK v4 KA labels
  *     bloom:   enum       remember | understand | apply | analyze | evaluate | create
- *     sfia:    integer    1..7
+ *     sfia:    integer    1..7, required from phase 4 onward
  *     dreyfus: enum       novice | advanced-beginner | competent | proficient | expert
  *
  * Module-level rows in PHASE_STANDARDS (standards-map.ts) provide the codes
@@ -38,6 +38,12 @@ const BLOOM = new Set(["remember", "understand", "apply", "analyze", "evaluate",
 const DREYFUS = new Set(["novice", "advanced-beginner", "competent", "proficient", "expert"]);
 const SFIA_MIN = 1;
 const SFIA_MAX = 7;
+const LEGACY_PHASES = { e: "10", h: "11", q: "12", r: "13", m: "14" };
+
+function canonicalModuleId(value) {
+  const match = /^(\d+|[ehqrm])-(\d+)(?:-|$)/.exec(value);
+  return match ? `${LEGACY_PHASES[match[1]] ?? match[1]}-${match[2]}` : value;
+}
 
 // ── Walk lesson tree ────────────────────────────────────────────────────────
 function walkMdx(dir) {
@@ -63,11 +69,15 @@ const mapSource = readFileSync(mapPath, "utf8");
 const mappedPairs = new Set();
 const PAIR_RE = /phaseId:\s*"([^"]+)"\s*,\s*moduleId:\s*"([^"]+)"/g;
 for (const m of mapSource.matchAll(PAIR_RE)) {
-  mappedPairs.add(`${m[1]}::${m[2]}`);
+  mappedPairs.add(`${LEGACY_PHASES[m[1]] ?? m[1]}::${canonicalModuleId(m[2])}`);
 }
 
 // ── Audit ───────────────────────────────────────────────────────────────────
 const errors = [];
+const legacyIssues = [];
+const legacyBaseline = JSON.parse(
+  readFileSync(resolve(repoRoot, "standards/pedagogy/lp-1.0-legacy-baseline.json"), "utf8")
+);
 const lessonModulePairs = new Set();
 
 for (const path of lessonPaths) {
@@ -87,7 +97,8 @@ for (const path of lessonPaths) {
     continue;
   }
 
-  const phase = String(fm.phase ?? "");
+  const rawPhase = String(fm.phase ?? "");
+  const phase = LEGACY_PHASES[rawPhase] ?? rawPhase;
   const moduleSlug = String(fm.module ?? "");
   if (!phase || !moduleSlug) {
     errors.push({ path: rel, issue: "missing phase or module key" });
@@ -96,7 +107,7 @@ for (const path of lessonPaths) {
   // standards-map.ts uses short module IDs like "0-1"; lesson frontmatter
   // uses the full directory slug like "0-1-how-computers-think". Normalize
   // by extracting the leading "N-N" prefix for the cross-check.
-  const moduleShort = moduleSlug.match(/^\d+-\d+/)?.[0] ?? moduleSlug;
+  const moduleShort = canonicalModuleId(moduleSlug);
   lessonModulePairs.add(`${phase}::${moduleShort}`);
 
   const s = fm.standards;
@@ -105,14 +116,27 @@ for (const path of lessonPaths) {
     continue;
   }
 
-  if (!Array.isArray(s.cs2023) || s.cs2023.length === 0) {
-    errors.push({ path: rel, issue: "standards.cs2023 must be a non-empty array" });
-  }
-  if (!Array.isArray(s.swebok) || s.swebok.length === 0) {
-    errors.push({ path: rel, issue: "standards.swebok must be a non-empty array" });
+  // LP-1.0 requires these mappings only when applicable. An empty array is an
+  // explicit absence of a claim, not a reason to invent unrelated standards.
+  for (const key of ["cs2023", "swebok"]) {
+    if (
+      s[key] !== undefined &&
+      (!Array.isArray(s[key]) ||
+        s[key].some((value) => typeof value !== "string" || value.trim().length === 0))
+    ) {
+      errors.push({
+        path: rel,
+        issue: `standards.${key} must be an array of non-empty strings when supplied`,
+      });
+    }
   }
   if (typeof s.bloom !== "string" || !BLOOM.has(s.bloom)) {
-    errors.push({
+    // Only the exact existing missing-Bloom findings are grandfathered by LP-1.0.
+    // Invalid supplied values and all new lessons still fail the gate.
+    const allowed =
+      s.bloom === undefined &&
+      legacyBaseline[relative(phasesDir, path)]?.includes("metadata:bloom");
+    (allowed ? legacyIssues : errors).push({
       path: rel,
       issue: `standards.bloom must be one of {${[...BLOOM].join(", ")}} (got ${JSON.stringify(s.bloom)})`,
     });
@@ -123,7 +147,10 @@ for (const path of lessonPaths) {
       issue: `standards.dreyfus must be one of {${[...DREYFUS].join(", ")}} (got ${JSON.stringify(s.dreyfus)})`,
     });
   }
-  if (!Number.isInteger(s.sfia) || s.sfia < SFIA_MIN || s.sfia > SFIA_MAX) {
+  if (
+    (Number(phase) >= 4 || s.sfia !== undefined) &&
+    (!Number.isInteger(s.sfia) || s.sfia < SFIA_MIN || s.sfia > SFIA_MAX)
+  ) {
     errors.push({
       path: rel,
       issue: `standards.sfia must be an integer ${SFIA_MIN}..${SFIA_MAX} (got ${JSON.stringify(s.sfia)})`,
@@ -168,10 +195,22 @@ if (mapRowsWithoutLessons.length > 0) {
   console.warn("");
 }
 
+if (legacyIssues.length > 0) {
+  console.warn(
+    `⚠ ${legacyIssues.length} pre-existing missing Bloom declarations remain in the LP-1.0 migration baseline:`
+  );
+  for (const issue of legacyIssues) console.warn(`  ${issue.path}`);
+}
+const pendingMappings = [...mapSource.matchAll(/alignmentStatus:\s*"pending-review"/g)].length;
+if (pendingMappings > 0)
+  console.warn(
+    `⚠ ${pendingMappings} module mappings await semantic review and are withheld from learner-facing claims.`
+  );
+
 if (ok) {
   console.log(
     `✓ standards-alignment: ${lessonCount} lessons checked, ` +
-      `${lessonModulePairs.size} unique modules covered, no drift.`
+      `${lessonModulePairs.size} unique module records covered, no new structural drift.`
   );
   process.exit(0);
 }
