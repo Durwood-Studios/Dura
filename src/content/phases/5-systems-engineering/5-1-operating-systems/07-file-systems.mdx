@@ -4,22 +4,29 @@ description: "Understand how file systems organize data on disk using inodes, di
 phase: 5
 module: "5-1-operating-systems"
 order: 7
-difficulty: "intermediate"
+difficulty: 3
 bloom: "analyze"
-vocabulary: ["inode", "directory", "hard-link", "journaling", "file-descriptor"]
-standards:
-  cs2023: ["OS-1"]
-  swebok: ["Computing Fundamentals"]
-  bloom: "analyze"
-  sfia: 4
-  dreyfus: "competent"
+vocabulary: ["inode","directory","hard-link","journaling","file-descriptor"]
+standards: {"cs2023":["OS-1"],"swebok":["Computing Fundamentals"],"bloom":"analyze","sfia":4,"dreyfus":"competent"}
+estimatedMinutes: 15
+prerequisites: ["5/5-1/06"]
+thresholdConcept: false
+learningOutcomes: ["Tracks directory names and link counts separately","Preserve access through an already open descriptor","Identify the final-reference condition for reclamation"]
 ---
 
-# File Systems: How Data Persists
+## Why this matters
 
 When you save a file and reboot your machine, the file is still there. This feels obvious — but making data persist reliably across power failures, crashes, and decades is one of the most carefully engineered problems in systems design. The file system is the OS subsystem responsible for this persistence.
 
 A file system imposes structure on the raw bytes of a storage device. Without a file system, a disk is just a sequence of numbered sectors with no meaning. With a file system, those sectors become files, directories, permissions, timestamps, and a navigable hierarchy. The file system is the map that makes the raw territory of storage navigable.
+
+## Start with something familiar
+
+Two directory entries can point to one stored document; removing one entry does not necessarily remove the document itself.
+
+## The mental model
+
+> A filename is a directory reference to a filesystem object. Hard links and open handles can keep that object reachable after one name is removed.
 
 ## What a "File" Really Is
 
@@ -92,141 +99,25 @@ Journaling can cover metadata only (faster, but data blocks might be incomplete)
 
 **btrfs** (B-tree File System) takes a copy-on-write approach. Rather than overwriting data in place, btrfs writes new versions to new locations and then atomically updates the tree. This makes snapshots instant and cheap (you just reference the existing tree), enables built-in checksumming (data corruption is detected), and allows per-file compression. The trade-off: more complex, historically less stable for certain workloads, and with some overhead for write-heavy workloads.
 
-<SandboxExercise
-  title="Inode Table Simulator"
-  instructions="Build a simplified inode-based file system simulator. Implement a `FileSystem` class that maintains an inode table and a root directory. Support: `create(path, content)` — allocates a new inode, stores content, adds the filename to the directory; `stat(path)` — returns inode metadata (size, links, permissions, mtime); `link(existingPath, newPath)` — creates a hard link (same inode, second directory entry); `unlink(path)` — removes a directory entry and decrements the link count, freeing the inode when count reaches 0; and `read(path)` — returns file content."
-  starterCode={`class FileSystem {
-  constructor() {
-    this.inodes = new Map();    // inodeNum -> { content, size, links, mtime, permissions }
-    this.directory = new Map(); // path -> inodeNum
-    this.nextInode = 1;
-  }
 
-_allocateInode(content, permissions = "rw-r--r--") {
-// TODO: create and store an inode, return its number
-}
 
-create(path, content) {
-// TODO: allocate inode, add directory entry
-}
+## Guided practice
 
-stat(path) {
-// TODO: return inode metadata for the file at path
-}
+Does unlinking the last filename necessarily make an existing open descriptor invalid immediately?
 
-link(existingPath, newPath) {
-// TODO: create a new directory entry pointing to the same inode, increment link count
-}
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-unlink(path) {
-// TODO: remove directory entry, decrement link count, free inode if count reaches 0
-}
+No. The open reference can keep the underlying file object available until it is closed.
 
-read(path) {
-// TODO: return the file's content
-}
-}
+</details>
 
-const fs = new FileSystem();
+## Check your understanding
 
-fs.create("/notes.txt", "Hello, world!");
-fs.create("/data.log", "ERROR: something failed");
-
-console.log(fs.stat("/notes.txt"));
-console.log(fs.read("/notes.txt"));
-
-fs.link("/notes.txt", "/backup.txt");
-console.log("After hard link:", fs.stat("/notes.txt")); // links should be 2
-
-fs.unlink("/notes.txt");
-console.log("After unlink /notes.txt:", fs.stat("/backup.txt")); // still accessible, links=1
-
-fs.unlink("/backup.txt"); // now inode should be freed
-`}
-  solution={`class FileSystem {
-constructor() {
-this.inodes = new Map();
-this.directory = new Map();
-this.nextInode = 1;
-}
-
-_allocateInode(content, permissions = "rw-r--r--") {
-const num = this.nextInode++;
-this.inodes.set(num, {
-num,
-content,
-size: content.length,
-links: 1,
-permissions,
-mtime: new Date().toISOString(),
-});
-return num;
-}
-
-create(path, content) {
-if (this.directory.has(path)) {
-throw new Error(\`EEXIST: file already exists: \${path}\`);
-}
-const inodeNum = this._allocateInode(content);
-this.directory.set(path, inodeNum);
-console.log(\`Created \${path} -> inode \${inodeNum}\`);
-}
-
-_getInode(path) {
-const num = this.directory.get(path);
-if (num === undefined) throw new Error(\`ENOENT: no such file: \${path}\`);
-return this.inodes.get(num);
-}
-
-stat(path) {
-const inode = this._getInode(path);
-const { content: _c, ...meta } = inode;
-return meta;
-}
-
-link(existingPath, newPath) {
-const num = this.directory.get(existingPath);
-if (num === undefined) throw new Error(\`ENOENT: \${existingPath}\`);
-if (this.directory.has(newPath)) throw new Error(\`EEXIST: \${newPath}\`);
-this.directory.set(newPath, num);
-this.inodes.get(num).links++;
-console.log(\`Linked \${newPath} -> inode \${num} (links now \${this.inodes.get(num).links})\`);
-}
-
-unlink(path) {
-const num = this.directory.get(path);
-if (num === undefined) throw new Error(\`ENOENT: \${path}\`);
-this.directory.delete(path);
-const inode = this.inodes.get(num);
-inode.links--;
-console.log(\`Unlinked \${path} (inode \${num} links now \${inode.links})\`);
-if (inode.links === 0) {
-this.inodes.delete(num);
-console.log(\` -> inode \${num} freed (no more links)\`);
-}
-}
-
-read(path) {
-return this._getInode(path).content;
-}
-}
-
-const fs = new FileSystem();
-
-fs.create("/notes.txt", "Hello, world!");
-fs.create("/data.log", "ERROR: something failed");
-
-console.log(fs.stat("/notes.txt"));
-console.log("Content:", fs.read("/notes.txt"));
-
-fs.link("/notes.txt", "/backup.txt");
-console.log("After hard link:", fs.stat("/notes.txt"));
-
-fs.unlink("/notes.txt");
-console.log("After unlink /notes.txt:", fs.stat("/backup.txt"));
-
-fs.unlink("/backup.txt");
-`}
+<WrittenExercise
+ instructions={"Analyze a Unix-like file with two hard links, a.txt and b.txt, and one open file descriptor. Unlink a.txt, then b.txt. Explain name lookup, link count, and whether the open descriptor can still read. State when storage becomes reclaimable in this simplified case."}
+ rubric={["Tracks directory names and link counts separately","Preserves access through an already open descriptor","Identifies the final-reference condition for reclamation"]}
+ modelAnswer={"After unlinking a.txt, its name no longer resolves and the link count drops from two to one; b.txt and the open descriptor remain usable. After unlinking b.txt, the link count is zero and neither name resolves, but the already open descriptor can still access the file. Once the final open reference is closed, the unlinked object can be reclaimed under this simplified model. Unlink removes a name; it is not identical to immediately erasing every byte."}
 />
 
 <Quiz
@@ -254,7 +145,13 @@ fs.unlink("/backup.txt");
 />
 
 <FillBlank
-  sentence="A ___ is a second directory entry that points to the same inode as an existing file, so both names share the same data and metadata."
+  question="A ___ is a second directory entry that points to the same inode as an existing file, so both names share the same data and metadata."
   answer="hard link"
-  hint="It's a ___ link — not a symbolic link, but a direct reference to the inode."
+  hints={["It's a ___ link \u2014 not a symbolic link, but a direct reference to the inode."]}
 />
+
+## What you learned
+
+- Tracks directory names and link counts separately
+- Preserve access through an already open descriptor
+- Identify the final-reference condition for reclamation

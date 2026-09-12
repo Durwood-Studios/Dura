@@ -6,55 +6,33 @@ module: "q-5-kernel-bypass-networking"
 order: 5
 estimatedMinutes: 90
 difficulty: 4
-prerequisites:
-  - "q-4-lock-free-data-structures"
-  - "5-2-computer-networking"
-standards:
-  primaryAnchor: "DPDK Programmer’s Guide"
-  cs2023: []
-  swebok: []
-  bloom: "understand"
-  sfia: 4
-  dreyfus: "competent"
-vocabulary:
-  - kernel-bypass
-  - poll-mode-driver
-  - busy-polling
-  - interrupt-coalescing
-  - context-switch
-  - system-call
-  - zero-copy
-  - dma
-  - descriptor-ring
-  - hugepages
-  - uio-vfio
-  - io-uring
-  - submission-queue
-  - completion-queue
-  - af-xdp
-  - ebpf
-  - tail-latency
-learningOutcomes:
-  - "Explain the four sources of latency the Linux kernel network stack adds on the receive path (interrupt, copy, protocol processing, context switch / syscall)"
-  - "Describe how a DPDK poll-mode driver reads packets from a NIC descriptor ring without an interrupt or a system call, and why that costs one CPU core at 100% utilization"
-  - "Justify when busy-polling kernel bypass is worth burning a core and when io_uring or AF_XDP is the better trade"
-  - "Read a DPDK receive loop using the real rte_eth_rx_burst API and explain each step's purpose"
-  - "Contrast io_uring's submission/completion ring model with the read()/write() syscall-per-operation model it replaces"
-professionalContext: "On a trading venue, the difference between a fill and a miss is frequently measured in single-digit microseconds, and a meaningful fraction of that budget is consumed inside the operating system's network stack before your strategy code ever sees a packet. HFT firms run kernel-bypass stacks (DPDK, Solarflare/Onload, Exablaze) on dedicated cores precisely to delete that overhead, and a quant developer who cannot articulate where the microseconds go — interrupt, copy, syscall, context switch — cannot reason about their own tail latency. This lesson is the vocabulary and the mental model you are expected to walk into a low-latency interview already holding: not how to tune a specific NIC, but why the kernel is in the way and what the industry does about it."
+prerequisites: ["12/12-4/04","5/5-2/07"]
+standards: {"primaryAnchor":"DPDK Programmer’s Guide","cs2023":[],"swebok":[],"bloom":"understand","sfia":4,"dreyfus":"competent"}
+vocabulary: ["kernel-bypass","poll-mode-driver","busy-polling","interrupt-coalescing","context-switch","system-call","zero-copy","dma","descriptor-ring","hugepages","uio-vfio","io-uring","submission-queue","completion-queue","af-xdp","ebpf","tail-latency"]
+learningOutcomes: ["Distinguish kernel participation in both designs","Explain CPU and protocol responsibility tradeoffs","Identify meaningful end-to-end measurement conditions"]
+professionalContext: "Explain the difference between replacing repeated socket calls with io_uring and adopting a DPDK poll-mode receive path. Compare kernel participation, CPU use, packet-processing responsibility, and the evidence needed to establish an end-to-end latency improvement."
 thresholdConcept: false
 ---
 
-## Why this lesson exists
+## Why this matters
 
 You have written a strategy that decides in 200 nanoseconds. You have a lock-free SPSC ring (Lesson Q4) handing market-data events to it with no contention. Then you measure end to end and the number is 8 microseconds, not 200 nanoseconds. The other 7.8 microseconds vanished somewhere between the wire and your code.
 
 They vanished inside the operating system. A packet arriving on the network card does not appear in your program — it appears in the kernel, which interrupts a CPU, copies the bytes, walks the TCP/IP stack, wakes your process, and only then lets `recv()` hand you the data. Every one of those steps costs time, and for a venue where a fill depends on single-digit microseconds, that overhead is the difference between trading and watching. This lesson explains where the time goes and the two families of fixes the industry uses: full kernel bypass (DPDK) and the lighter-weight alternatives (io_uring, AF_XDP).
 
+## Start with something familiar
+
+One delivery system hands batches to the existing sorting office; another operates its own sorting machinery and inherits the responsibilities that office handled.
+
+## The mental model
+
+> io_uring coordinates I/O with the kernel through shared submission and completion structures. Poll-mode kernel-bypass designs move more packet handling into user space and change ownership, resource, and operational requirements.
+
 ## First principles — what happens to a packet on Linux today
 
 Start from the normal path, the one every socket program you have ever written uses. A packet lands on the network interface card — the **NIC**, the hardware that connects the machine to the network. On stock Linux, four things then happen before your code runs:
 
-1. **The interrupt.** The NIC raises a hardware interrupt to tell the CPU "a packet arrived." The CPU stops whatever it was doing, saves its state, and jumps into the kernel's interrupt handler. This is a **context-switch** — the CPU abandons one stream of work to run another, saving and restoring register state. It is not free; it costs hundreds of nanoseconds to low microseconds, and it pollutes the CPU caches you spent Lesson Q3 keeping warm.
+1. **Notification and polling.** Linux networking commonly combines hardware notification with polling mechanisms such as NAPI. An interrupt enters a handler; that transition is not necessarily a scheduler switch to another process. Do not assume one full interrupt and process switch for every packet.
 
 2. **The copy.** The kernel receives the packet into kernel memory, then later copies it into your process's memory when you call `recv()`. That is one full pass over the bytes that does no useful work — pure data movement across the kernel/user boundary.
 
@@ -238,59 +216,39 @@ Before the competency check, fill in the trade-offs. Each blank is the single be
   ]}
 />
 
+## Worked task
+
+Explain the difference between replacing repeated socket calls with io_uring and adopting a DPDK poll-mode receive path. Compare kernel participation, CPU use, packet-processing responsibility, and the evidence needed to establish an end-to-end latency improvement.
+
+<details>
+<summary>Reveal a worked answer</summary>
+
+io_uring submits operations to the kernel and observes completions through shared rings; it is not generally a replacement of the kernel network stack with a user-space stack. A DPDK poll-mode design can receive through supported user-space drivers and dedicate substantial CPU time to polling, while the application must supply the relevant protocol and packet-handling responsibilities. Exact driver and coexistence arrangements vary. Measure wire-to-application or the stated boundary under representative load, loss, batching, and recovery, rather than assume an API substitution removes all latency.
+
+</details>
+
+## Guided practice
+
+Does using io_uring mean the kernel no longer processes the submitted socket I/O?
+
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
+
+No. Shared rings reduce interaction overhead while the kernel still executes those operations.
+
+</details>
+
 ## Check your understanding
 
-<Quiz
-  questions={[
-    {
-      question:
-        "A junior engineer proposes switching the firm's market-data receiver from recv() on a UDP socket to a DPDK poll-mode driver, and asks what the dominant cost of that change is. The most accurate answer is:",
-      options: [
-        "DPDK is slower per packet because user-space code cannot be as optimized as the kernel's C network stack",
-        "DPDK dedicates a CPU core to busy-polling the NIC at 100% utilization whether or not packets are arriving; in exchange it removes the interrupt, the kernel copy, kernel protocol processing, and the per-packet syscall from the receive path, so the trade is 'one burned core for a much lower and more predictable latency'",
-        "DPDK requires rewriting the strategy logic, because market-data parsing must move into the kernel as an eBPF program",
-        "DPDK only helps throughput, not latency, because it relies on interrupt-coalescing to batch packets",
-      ],
-      correct: 1,
-      explanation:
-        "The defining cost of a poll-mode driver is the dedicated, always-100% core: polling means continuously checking the descriptor ring, so the core never idles. The payoff is deleting all four kernel costs from the data path — interrupt (and its context switch), the user/kernel copy, kernel TCP/IP processing, and the per-operation syscall. User-space code is not inherently slower (option A); parsing stays in user space, not the kernel (option C — eBPF is AF_XDP, and even there parsing need not move into the kernel); and interrupt-coalescing is a stock-kernel throughput knob DPDK does not use because it does not use interrupts at all (option D).",
-    },
-    {
-      question:
-        "io_uring and DPDK both improve I/O performance, but they sit at different points on the 'let the kernel do it' ↔ 'do it yourself' spectrum. Which statement correctly distinguishes them?",
-      options: [
-        "Both remove the NIC from kernel control; io_uring is simply the newer name for DPDK",
-        "io_uring removes the per-operation syscall by sharing submission and completion rings with the kernel, but the kernel still owns the NIC and runs the network stack; DPDK removes the kernel from the data path entirely by binding the NIC to a pass-through driver and polling it from user space",
-        "io_uring requires hugepages and VFIO just like DPDK, so the setup cost is identical",
-        "DPDK keeps the kernel in the path and io_uring takes it out — io_uring is the more extreme bypass of the two",
-      ],
-      correct: 1,
-      explanation:
-        "io_uring is a kernel I/O interface: it keeps the kernel owning the NIC and running the stack, and attacks one specific cost — the syscall — by letting you submit and reap many operations through shared rings instead of one syscall per operation. DPDK is full kernel bypass: VFIO/UIO hands the NIC to user space, hugepages back the DMA buffers, and a poll-mode driver reads the descriptor ring with no kernel involvement on the data path. Option D inverts the two; option A conflates them; option C wrongly attributes DPDK's hugepage/VFIO requirements to io_uring, which needs neither.",
-    },
-    {
-      question:
-        "A team wants most of DPDK's receive-latency win but needs the machine to remain a normal Linux host — other processes must keep getting network access, and operators do not want to unbind the NIC from Linux with VFIO. Which technology fits, and why?",
-      options: [
-        "DPDK, because it is always the correct choice when latency matters",
-        "Plain epoll + recv, because it is the only option that keeps the NIC under Linux",
-        "AF_XDP, because it uses an eBPF/XDP hook in the NIC driver to redirect selected packets into a user-space buffer ring at near-DPDK speed while the NIC stays under Linux's control and the rest of its traffic flows through the normal stack",
-        "Interrupt-coalescing, because batching interrupts gives the same result as kernel bypass",
-      ],
-      correct: 2,
-      explanation:
-        "AF_XDP is the deliberate middle ground: an XDP eBPF program at the earliest receive hook redirects chosen packets into a user-space ring, giving close to DPDK throughput for those packets without taking the NIC away from Linux — so the host keeps normal networking for everything else. DPDK (option A) would require unbinding the NIC, exactly what the team is avoiding. epoll + recv (option B) keeps Linux in control but gives none of the bypass win. Interrupt-coalescing (option D) is a stock throughput knob and does not approach kernel-bypass latency.",
-    },
-  ]}
-/>
+
+
+<Quiz question={"Which description of io_uring is accurate?"} options={["It submits work to the kernel through shared ring structures","It always removes the kernel network stack","It guarantees zero copies for every operation"]} answer={0} explanation={"Kernel participation remains. Supported operations, flags, and drivers determine particular copy and scheduling behavior."} />
 
 ## What you learned
 
-- The Linux kernel network stack adds four distinct latencies on the receive path — the interrupt (and its context switch), the copy across the kernel/user boundary, kernel protocol processing, and the per-operation syscall — and stock mitigations like interrupt-coalescing help throughput without reaching an HFT latency floor.
-- **Kernel bypass** deletes the kernel intermediary: user space owns the NIC (via VFIO/UIO), reads packets from a descriptor ring the NIC DMAs into hugepage buffers (zero-copy), and a poll-mode driver busy-polls instead of taking interrupts.
-- DPDK's poll-mode driver buys microseconds by burning a CPU core at 100% forever; that trade is correct for a dedicated trading path and wasteful for sporadic, general-purpose traffic.
-- io_uring keeps the kernel in the path but removes the per-operation syscall via shared submission/completion rings — the right tool when you want a large win without surrendering the NIC or dedicating a polling core.
-- AF_XDP, built on eBPF/XDP, is the middle ground: near-bypass receive speed while the NIC stays under Linux's control.
+- Distinguish kernel participation in both designs
+- Explain CPU and protocol responsibility tradeoffs
+- Identify meaningful end-to-end measurement conditions
 
 ## What's next
 

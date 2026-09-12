@@ -4,6 +4,7 @@ import { Quiz } from "@/components/lesson/Quiz";
 import { FillBlank } from "@/components/lesson/FillBlank";
 import { ParsonsPanel } from "@/components/lesson/ParsonsPanel";
 import { VocabTooltip } from "@/components/lesson/VocabTooltip";
+import { WrittenExercise } from "@/components/lesson/WrittenExercise";
 import { SandboxExercise } from "@/components/lesson/SandboxExercise";
 import { VocabHighlighter } from "@/components/lesson/VocabHighlighter";
 import { TryInDiscovery } from "@/components/lesson/TryInDiscovery";
@@ -26,6 +27,7 @@ export const mdxComponents: MDXComponentsType = {
   ParsonsPanel: ParsonsPanel as unknown as MDXComponentsType[string],
   VocabTooltip: VocabTooltip as unknown as MDXComponentsType[string],
   SandboxExercise: SandboxExercise as unknown as MDXComponentsType[string],
+  WrittenExercise: WrittenExercise as unknown as MDXComponentsType[string],
   VocabHighlighter: VocabHighlighter as unknown as MDXComponentsType[string],
   TryInDiscovery: TryInDiscovery as unknown as MDXComponentsType[string],
   SplitPane: SplitPane as unknown as MDXComponentsType[string],

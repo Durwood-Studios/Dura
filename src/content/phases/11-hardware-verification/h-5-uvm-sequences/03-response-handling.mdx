@@ -6,35 +6,27 @@ module: "h-5-uvm-sequences"
 order: 3
 estimatedMinutes: 60
 difficulty: 4
-prerequisites:
-  - "h-5-uvm-sequences/02-sequencer-arbitration"
-standards:
-  primaryAnchor: "IEEE 1800.2-2020 (UVM)"
-  cs2023: []
-  swebok: []
-  bloom: "apply"
-  sfia: 4
-  dreyfus: "competent"
-vocabulary:
-  - get-response
-  - put-response
-  - response-id
-  - response-queue
-  - use-response-handler
-learningOutcomes:
-  - "Write a driver that sends a response transaction back to the sequence"
-  - "Write a sequence that calls get_response() and processes the returned transaction"
-  - "Explain why response IDs prevent responses from routing to the wrong sequence"
-  - "Choose between in-body get_response() and a response handler callback"
+prerequisites: ["11/11-5/02"]
+standards: {"primaryAnchor":"IEEE 1800.2-2020 (UVM)","cs2023":[],"swebok":[],"bloom":"apply","sfia":4,"dreyfus":"competent"}
+vocabulary: ["get-response","put-response","response-id","response-queue","use-response-handler"]
+learningOutcomes: ["Write a driver that sends a response transaction back to the sequence","Write a sequence that calls get_response() and processes the returned transaction","Explain why response IDs prevent responses from routing to the wrong sequence","Choose between in-body get_response() and a response handler callback"]
 professionalContext: "Protocols with split transactions — AXI with out-of-order responses, PCIe completions, APB read returns — require sequences that send a request and then wait for a response. Engineers who implement this correctly model full request/response pairs; engineers who skip it only model the stimulus half and miss response-dependent bugs like incorrect address decoding or data corruption on reads."
 thresholdConcept: false
 ---
 
-## Why responses matter
+## Why this matters
 
 The H5-01 sequence pattern drives transactions at the DUT and moves on. Many protocols require the other direction too: the sequence sends a READ request, and then needs to receive the returned data to check it against the expected value, or to generate the next request based on what was read.
 
 Without response handling, sequences are one-way. With it, they model full protocol round-trips.
+
+## Start with something familiar
+
+A numbered claim ticket lets a customer match a returned item to the original request.
+
+## The mental model
+
+> Sequence responses need correct sequence and transaction identification, bounded queues, and consumption by the intended requester.
 
 ## The response flow
 
@@ -199,130 +191,37 @@ This issues all 16 reads without waiting for any response, then waits for all re
 
 APB and SPI are sequential — in-body `get_response()`. AXI and PCIe are pipelined — use the callback pattern.
 
-## Check your understanding
-
-<SandboxExercise
-  language="systemverilog"
-  instructions={`A simple APB read driver and sequence are shown. The driver drives the APB read but NEVER sends a response back to the sequence. The sequence tries to call get_response() but gets nothing.
-
-Task:
-
-1. Fix the driver: after capturing PRDATA from the interface, create a response transaction, call set_id_info(req), and send it back with item_done(rsp).
-2. Fix the sequence: enable get_response() after finish_item.
-
-The APB transaction class and interface are defined for you.`}
-  initialCode={`// APB transaction
-class apb_txn extends uvm_sequence_item;
-\`uvm_object_utils(apb_txn)
-rand bit [31:0] addr;
-rand bit [31:0] data;
-rand bit write;
-function new(string n="apb_txn"); super.new(n); endfunction
-endclass
-
-// BROKEN driver — no response sent
-class apb_driver extends uvm_driver #(apb_txn);
-\`uvm_component_utils(apb_driver)
-virtual apb_if vif;
-
-    task run_phase(uvm_phase phase);
-        forever begin
-            apb_txn req;
-            seq_item_port.get_next_item(req);
-            @(posedge vif.clk);
-            vif.paddr  <= req.addr;
-            vif.pwrite <= req.write;
-            vif.psel   <= 1'b1;
-            vif.penable<= 1'b0;
-            @(posedge vif.clk iff vif.pready);
-            vif.psel   <= 1'b0;
-            vif.penable<= 1'b0;
-            seq_item_port.item_done();  // BUG: no response
-        end
-    endtask
-
-endclass
-
-// BROKEN sequence — tries to get response but never gets one
-class apb_read_seq extends uvm_sequence #(apb_txn);
-\`uvm_object_utils(apb_read_seq)
-bit [31:0] read_data;
-
-    task body();
-        apb_txn req;
-        req = apb_txn::type_id::create("req");
-        start_item(req);
-        req.addr  = 32'h1000;
-        req.write = 1'b0;
-        finish_item(req);
-        // TODO: get the response and store rsp.data in read_data
-    endtask
-
-endclass`}
-  solution={`// APB transaction
-class apb_txn extends uvm_sequence_item;
-\`uvm_object_utils(apb_txn)
-rand bit [31:0] addr;
-rand bit [31:0] data;
-rand bit write;
-function new(string n="apb_txn"); super.new(n); endfunction
-endclass
-
-// FIXED driver — captures PRDATA and sends response
-class apb_driver extends uvm_driver #(apb_txn);
-\`uvm_component_utils(apb_driver)
-virtual apb_if vif;
-
-    task run_phase(uvm_phase phase);
-        forever begin
-            apb_txn req, rsp;
-            seq_item_port.get_next_item(req);
-            @(posedge vif.clk);
-            vif.paddr  <= req.addr;
-            vif.pwrite <= req.write;
-            vif.psel   <= 1'b1;
-            vif.penable<= 1'b0;
-            @(posedge vif.clk iff vif.pready);
-            // Capture the read data for non-write transactions
-            rsp = apb_txn::type_id::create("rsp");
-            rsp.set_id_info(req);   // Route response to the right sequence
-            rsp.addr  = req.addr;
-            rsp.data  = (!req.write) ? vif.prdata : 32'h0;
-            rsp.write = req.write;
-            vif.psel   <= 1'b0;
-            vif.penable<= 1'b0;
-            seq_item_port.item_done(rsp);   // Send response
-        end
-    endtask
-
-endclass
-
-// FIXED sequence — collects the response
-class apb_read_seq extends uvm_sequence #(apb_txn);
-\`uvm_object_utils(apb_read_seq)
-bit [31:0] read_data;
-
-    task body();
-        apb_txn req, rsp;
-        req = apb_txn::type_id::create("req");
-        start_item(req);
-        req.addr  = 32'h1000;
-        req.write = 1'b0;
-        finish_item(req);
-        get_response(rsp);         // Receive the response from the driver
-        read_data = rsp.data;      // Store the returned data
-    endtask
-
-endclass`}
-testCases={[
-"Driver creates a response transaction rsp after the transaction completes",
-"Driver calls rsp.set_id_info(req) to copy the sequence ID",
-"Driver calls item_done(rsp) or put_response(rsp) + item_done()",
-"Sequence calls get_response(rsp) after finish_item",
-"Sequence stores rsp.data in read_data"
-]}
-/>
 
 ## What's next
 
 Lesson H5-04 covers the virtual sequencer pattern in depth — how to structure the virtual sequencer class, pass sequencer handles via `uvm_config_db`, and coordinate complex multi-agent scenarios cleanly using `p_sequencer`.
+
+## Guided practice
+
+Before writing the full solution, use one worked example above to identify its input, the state or timing assumption it relies on, and the observation that would reveal a failure. Predict the result before running any external tool.
+
+<details>
+<summary>Review the controlling assumption</summary>
+
+Sequence responses need correct sequence and transaction identification, bounded queues, and consumption by the intended requester. Check the example against that contract: a plausible output is insufficient if the access, timing, or verification assumptions do not hold. State which part can be checked from the example and which requires the named tool or target.
+
+</details>
+
+## Check your understanding
+
+<WrittenExercise
+ title="Implementation and evidence review"
+ instructions={"Write a solution applying the lesson contract. A simple APB read driver and sequence are shown. The driver drives the APB read but NEVER sends a response back to the sequence. The sequence tries to call get_response() but gets nothing.\n\nTask:\n\n1. Fix the driver: after capturing PRDATA from the interface, create a response transaction, call set_id_info(req), and send it back with item_done(rsp).\n2. Fix the sequence: enable get_response() after finish_item.\n\nThe APB transaction class and interface are defined for you. This page provides offline writing and self-review, not a C/Rust/SystemVerilog compiler, hardware runner, or formal prover. Use the stated external toolchain for execution and record which results were actually observed."}
+ starterText={"// APB transaction\nclass apb_txn extends uvm_sequence_item;\n`uvm_object_utils(apb_txn)\nrand bit [31:0] addr;\nrand bit [31:0] data;\nrand bit write;\nfunction new(string n=\"apb_txn\"); super.new(n); endfunction\nendclass\n\n// BROKEN driver — no response sent\nclass apb_driver extends uvm_driver #(apb_txn);\n`uvm_component_utils(apb_driver)\nvirtual apb_if vif;\n\n  task run_phase(uvm_phase phase);\n      forever begin\n          apb_txn req;\n          seq_item_port.get_next_item(req);\n          @(posedge vif.clk);\n          vif.paddr  <= req.addr;\n          vif.pwrite <= req.write;\n          vif.psel   <= 1'b1;\n          vif.penable<= 1'b0;\n          @(posedge vif.clk iff vif.pready);\n          vif.psel   <= 1'b0;\n          vif.penable<= 1'b0;\n          seq_item_port.item_done();  // BUG: no response\n      end\n  endtask\n\nendclass\n\n// BROKEN sequence — tries to get response but never gets one\nclass apb_read_seq extends uvm_sequence #(apb_txn);\n`uvm_object_utils(apb_read_seq)\nbit [31:0] read_data;\n\n  task body();\n      apb_txn req;\n      req = apb_txn::type_id::create(\"req\");\n      start_item(req);\n      req.addr  = 32'h1000;\n      req.write = 1'b0;\n      finish_item(req);\n      // TODO: get the response and store rsp.data in read_data\n  endtask\n\nendclass"}
+ rubric={["Satisfies the stated inputs, outputs, and timing or protocol contract","Explains a normal case and a boundary or failure case","Separates reasoned predictions from tool or hardware evidence"]}
+ modelAnswer={"// APB transaction\nclass apb_txn extends uvm_sequence_item;\n`uvm_object_utils(apb_txn)\nrand bit [31:0] addr;\nrand bit [31:0] data;\nrand bit write;\nfunction new(string n=\"apb_txn\"); super.new(n); endfunction\nendclass\n\n// FIXED driver — captures PRDATA and sends response\nclass apb_driver extends uvm_driver #(apb_txn);\n`uvm_component_utils(apb_driver)\nvirtual apb_if vif;\n\n  task run_phase(uvm_phase phase);\n      forever begin\n          apb_txn req, rsp;\n          seq_item_port.get_next_item(req);\n          @(posedge vif.clk);\n          vif.paddr  <= req.addr;\n          vif.pwrite <= req.write;\n          vif.psel   <= 1'b1;\n          vif.penable<= 1'b0;\n          @(posedge vif.clk iff vif.pready);\n          // Capture the read data for non-write transactions\n          rsp = apb_txn::type_id::create(\"rsp\");\n          rsp.set_id_info(req);   // Route response to the right sequence\n          rsp.addr  = req.addr;\n          rsp.data  = (!req.write) ? vif.prdata : 32'h0;\n          rsp.write = req.write;\n          vif.psel   <= 1'b0;\n          vif.penable<= 1'b0;\n          seq_item_port.item_done(rsp);   // Send response\n      end\n  endtask\n\nendclass\n\n// FIXED sequence — collects the response\nclass apb_read_seq extends uvm_sequence #(apb_txn);\n`uvm_object_utils(apb_read_seq)\nbit [31:0] read_data;\n\n  task body();\n      apb_txn req, rsp;\n      req = apb_txn::type_id::create(\"req\");\n      start_item(req);\n      req.addr  = 32'h1000;\n      req.write = 1'b0;\n      finish_item(req);\n      get_response(rsp);         // Receive the response from the driver\n      read_data = rsp.data;      // Store the returned data\n  endtask\n\nendclass"}
+/>
+
+
+
+## What you learned
+
+- Write a driver that sends a response transaction back to the sequence
+- Write a sequence that calls get_response() and processes the returned transaction
+- Explain why response IDs prevent responses from routing to the wrong sequence
+- Choose between in-body get_response() and a response handler callback

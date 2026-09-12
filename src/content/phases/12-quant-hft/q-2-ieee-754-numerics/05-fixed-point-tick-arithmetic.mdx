@@ -6,42 +6,29 @@ module: "q-2-ieee-754-numerics"
 order: 5
 estimatedMinutes: 40
 difficulty: 4
-prerequisites:
-  - "q-2-ieee-754-numerics/04-rounding-modes-and-determinism"
-standards:
-  primaryAnchor: "IEEE 754-2019"
-  cs2023: []
-  swebok: []
-  bloom: "apply"
-  sfia: 4
-  dreyfus: "proficient"
-vocabulary:
-  - fixed-point
-  - tick-size
-  - ticks
-  - integer-price
-  - implied-decimal
-  - overflow-check
-  - saturating-arithmetic
-  - price-scale
-  - raw-price
-  - nominal-price
-learningOutcomes:
-  - "After this lesson you can convert a nominal dollar price to an integer tick representation given a tick size, and recover the nominal price without floating-point error"
-  - "After this lesson you can implement addition, comparison, and spread computation on integer prices without any floating-point operations"
-  - "After this lesson you can identify the overflow boundary for a given tick scale and write a checked conversion that detects it"
-  - "After this lesson you can state three concrete advantages of integer tick representation over binary64 for prices in an HFT order book"
-professionalContext: "Every serious HFT order book stores prices as integers. ITCH delivers them as integers. The matching engine compares them as integers. The risk system accumulates P&L using integer arithmetic scaled to ticks. Moving to binary64 mid-stream — to display prices, to compute Greeks, to feed a model — is a deliberate conversion at a known boundary, never an accident. Engineers who do not understand why prices are integers introduce float-tick round-trip bugs that lose money silently: the order book stores 18350000 (meaning $183.50 with 4 decimal places), the code prints it as a double, the double rounds to 183.4999999..., and the strategy sends a limit order at the wrong price. This lesson makes that bug class impossible to introduce."
+prerequisites: ["12/12-2/02"]
+standards: {"primaryAnchor":"IEEE 754-2019","cs2023":[],"swebok":[],"bloom":"apply","sfia":4,"dreyfus":"proficient"}
+vocabulary: ["fixed-point","tick-size","ticks","integer-price","implied-decimal","overflow-check","saturating-arithmetic","price-scale","raw-price","nominal-price"]
+learningOutcomes: ["Parse the decimal amounts without floating-point conversion","Validate the tick grid and calculate the notional","State range and overflow conditions"]
+professionalContext: "Apply a tick size of 0.05 to decimal text prices 12.30 and 12.32 without first converting them to binary floating point. Produce integer-cent parsing steps, validate the grid, and calculate the notional for 7 units of the valid price. State an overflow check for nonnegative integer price times quantity."
 thresholdConcept: false
 ---
 
 ## Why this matters
 
-You write `double price = 183.50`. You store it. You read it back. You print it. It says `183.4999999999`. You multiply by 100 to convert cents and round: you get `18349`. You just sent a limit order to the exchange at `$183.49`. The exchange accepted it. Your strategy now has an open position at a price you never intended, and the only symptom is a fill confirmation that says `$183.49`.
+Decimal price input can be corrupted by an imprecise conversion or an unchecked rounding policy. For example, truncating a scaled inexact value can choose a neighboring grid value. The safer contract is to parse decimal text into checked integer units and validate the permitted grid explicitly.
 
-This is not a rare edge case. `183.50` in binary64 is `183.4999999999999715782905695...` at full precision. The representable double nearest to `183.50` is slightly below it. Multiply by 100 and floor: wrong. This is the number one source of silent price errors in trading systems written by people who treat `double` as a decimal.
+The value 183.50 is exactly representable in binary64: it equals 367/2. It is not an example of representation error. Values such as 0.1 repeat in binary; representation error and later arithmetic rounding must be examined for the actual value and conversion, not inferred from the presence of a decimal point.
 
 The fix is to never use `double` for prices. This lesson shows the replacement.
+
+## Start with something familiar
+
+Counting identical tokens makes amounts exact, provided every ledger uses the same token size and the counter cannot overflow.
+
+## The mental model
+
+> Fixed-point prices combine an integer value with an explicit scale or tick rule. Parsing, grid validation, multiplication, and rounding still require checked contracts.
 
 ## The fundamental observation
 
@@ -123,7 +110,7 @@ The choice of `int64_t` is deliberate. Let's verify the headroom:
 ```cpp
 // int64_t max: 9,223,372,036,854,775,807
 // PRICE_SCALE:                       10,000
-// Max representable dollar price: 922,337,203,685 dollars
+// Maximum whole-dollar price at scale 10,000: 922,337,203,685,477 dollars
 // (922 trillion dollars — far above any instrument price)
 
 // Overflow can still occur in intermediate calculations.
@@ -140,46 +127,47 @@ int64_t notional_ticks = shares * price;  // = 1,835,000,000,000 ticks
 // Always check before multiplying large values.
 ```
 
-For P&L accumulation where you sum notional values across many positions, prefer `__int128` or keep the sum in double after the tick→dollar conversion is done. The accumulation is a model concern, not an order-entry concern; error at the P&L sum level is acceptable. Error at the price level is not.
+P&L and notional accumulation require their own accuracy, scale, rounding, and overflow contracts. A wider integer extension can increase headroom where supported, but neither it nor conversion to double automatically makes reconciliation error acceptable. Match the representation to the stated accounting or model requirement.
 
 ## Round-trip safety
 
 The one place you might convert from a human-readable decimal string to a tick price is config parsing or order input. Do it correctly:
 
 ```cpp
-#include <charconv>
-#include <system_error>
+#include <cstdint>
+#include <limits>
 #include <optional>
-
-// Parse "$183.5000" → tick price 1835000.
-// Avoids double entirely. Assumes exactly 4 decimal places for the fractional part.
-std::optional<Price> parse_price(std::string_view s) {
-    // Find the decimal point.
-    auto dot = s.find('.');
-    if (dot == std::string_view::npos) {
-        // Integer price (e.g. "183") — treat as dollars, no cents.
-        int64_t dollars{};
-        if (std::from_chars(s.data(), s.data() + s.size(), dollars).ec != std::errc{})
-            return std::nullopt;
-        return dollars * PRICE_SCALE;
+#include <string_view>
+using Price = std::int64_t;
+constexpr Price PRICE_SCALE = 10000;
+// Nonnegative decimal text only: no sign, currency prefix, or whitespace.
+std::optional<Price> parse_price(std::string_view text) {
+    if (text.empty()) return std::nullopt;
+    const auto dot = text.find('.');
+    const auto whole = text.substr(0, dot);
+    if (whole.empty()) return std::nullopt;
+    const Price maximum = std::numeric_limits<Price>::max();
+    const Price whole_limit = maximum / PRICE_SCALE;
+    Price dollars = 0;
+    for (char digit : whole) {
+        if (digit < '0' || digit > '9') return std::nullopt;
+        const Price value = digit - '0';
+        if (dollars > (whole_limit - value) / 10) return std::nullopt;
+        dollars = dollars * 10 + value;
     }
-
-    int64_t dollars{};
-    if (std::from_chars(s.data(), s.data() + dot, dollars).ec != std::errc{})
-        return std::nullopt;
-
-    // Fractional part: read up to 4 digits, right-pad with zeros.
-    std::string_view frac = s.substr(dot + 1);
-    if (frac.size() > 4) return std::nullopt;  // sub-tick precision not representable
-
-    int64_t frac_val{};
-    if (std::from_chars(frac.data(), frac.data() + frac.size(), frac_val).ec != std::errc{})
-        return std::nullopt;
-
-    // Scale to 4 decimal places.
-    for (size_t i = frac.size(); i < 4; ++i) frac_val *= 10;
-
-    return dollars * PRICE_SCALE + frac_val;
+    Price fraction = 0;
+    if (dot != std::string_view::npos) {
+        const auto tail = text.substr(dot + 1);
+        if (tail.empty() || tail.size() > 4) return std::nullopt;
+        for (char digit : tail) {
+            if (digit < '0' || digit > '9') return std::nullopt;
+            fraction = fraction * 10 + (digit - '0');
+        }
+        for (std::size_t index = tail.size(); index < 4; ++index) fraction *= 10;
+    }
+    const Price scaled = dollars * PRICE_SCALE;
+    if (fraction > maximum - scaled) return std::nullopt;
+    return scaled + fraction;
 }
 ```
 
@@ -195,60 +183,35 @@ Knowing why the industry standardized on integer prices lets you defend the deci
 
 **3. No floating-point unit required.** Integer arithmetic runs on the integer execution units. In an ITCH parsing loop that fills the order book, never touching the FPU means the FPU stays cold and available for the model that runs downstream. Integer units on modern CPUs have higher throughput than the FPU for simple operations.
 
-<SandboxExercise
-  title="Integer Price Arithmetic"
-  description="Implement the functions below and verify they produce correct results without ever using floating-point arithmetic for intermediate storage."
-  language="cpp"
-  starterCode={`#include <cstdint>
-#include <string>
-#include <format>
-#include <iostream>
 
-using Price = int64_t;
-constexpr int64_t PRICE_SCALE = 10'000;
-
-// Convert a price in ten-thousandths to a human-readable string.
-// Example: 1835000 → "183.5000"
-std::string price_to_string(Price p) {
-// TODO: implement without using double
-}
-
-// Compute the spread in ticks.
-Price spread(Price bid, Price ask) {
-// TODO
-}
-
-// Compute the mid-price in ticks, truncating if the sum is odd.
-Price mid_price(Price bid, Price ask) {
-// TODO
-}
-
-int main() {
-Price bid = 1835000; // $183.5000
-Price ask = 1835100; // $183.5100
-
-    std::cout << "bid:    " << price_to_string(bid) << "\\n";
-    std::cout << "ask:    " << price_to_string(ask) << "\\n";
-    std::cout << "spread: " << spread(bid, ask) << " ticks\\n";  // should be 100
-    std::cout << "mid:    " << price_to_string(mid_price(bid, ask)) << "\\n"; // $183.5050
-
-}
-`}
-  solution={`std::string price_to_string(Price p) {
-int64_t dollars = p / PRICE_SCALE;
-int64_t fraction = p % PRICE_SCALE;
-return std::format("{}.{:04d}", dollars, fraction);
-}
-
-Price spread(Price bid, Price ask) { return ask - bid; }
-Price mid_price(Price bid, Price ask) { return (bid + ask) / 2; }
-`}
-tests={[
-{ input: "bid=1835000, ask=1835100", expected: "spread=100, mid=1835050" },
-{ input: "bid=100, ask=101", expected: "spread=1, mid=100" }
-]}
-/>
 
 ## What's next
 
 With prices safely in integer form, the next lesson examines what happens to the floating-point values your models _do_ use: how accumulated error — measured in units in the last place — grows through long summation chains, and how to recognize catastrophic cancellation before it corrupts a P&L calculation.
+
+## Guided practice
+
+Is 12.32 valid merely because it has two decimal places when the tick size is 0.05?
+
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
+
+No. Its cent value is not divisible by five.
+
+</details>
+
+## Check your understanding
+
+<WrittenExercise
+ instructions={"Apply a tick size of 0.05 to decimal text prices 12.30 and 12.32 without first converting them to binary floating point. Produce integer-cent parsing steps, validate the grid, and calculate the notional for 7 units of the valid price. State an overflow check for nonnegative integer price times quantity."}
+ rubric={["Parse the decimal amounts without floating-point conversion","Validate the tick grid and calculate the notional","State range and overflow conditions"]}
+ modelAnswer={"Parse the textual whole and fractional parts into cents: 12.30 becomes 1230 and 12.32 becomes 1232. The tick is 5 cents, so 1230 modulo 5 is zero and 1232 modulo 5 is two; accept the former and reject the latter under this exact-grid contract. The valid price is 246 ticks; seven units cost 8610 cents, or 86.10. Before multiplying nonnegative price by quantity, require quantity zero or price no greater than MAX divided by quantity. Also validate textual range, scale, sign policy, and fractional digits before constructing cents."}
+/>
+
+<Quiz question={"At a tick size of 0.05, which quoted price lies on the exact grid?"} options={["12.30","12.32","Both because they have two decimal digits"]} answer={0} explanation={"1230 cents is divisible by5;1232 is not. Decimal formatting alone does not validate the tick grid."} />
+
+## What you learned
+
+- Parse the decimal amounts without floating-point conversion
+- Validate the tick grid and calculate the notional
+- State range and overflow conditions

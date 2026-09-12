@@ -6,51 +6,29 @@ module: "q-6-market-data-itch-ouch"
 order: 6
 estimatedMinutes: 90
 difficulty: 3
-prerequisites:
-  - "q-1-modern-cpp-for-hft"
-standards:
-  primaryAnchor: "Nasdaq TotalView-ITCH 5.0"
-  cs2023: []
-  swebok: []
-  bloom: "apply"
-  sfia: 4
-  dreyfus: "competent"
-vocabulary:
-  - itch
-  - ouch
-  - soupbintcp
-  - market-data-feed
-  - order-entry
-  - big-endian
-  - fixed-width-binary
-  - implied-decimal
-  - sequence-number
-  - message-type
-  - system-event-message
-  - add-order-message
-  - order-executed-message
-  - order-cancel-message
-  - trade-message
-  - order-reference-number
-  - timestamp-since-midnight
-  - struct-packing
-learningOutcomes:
-  - "Decode a Nasdaq ITCH 5.0 message header by hand: message type byte, stock locate, tracking number, and the 6-byte timestamp"
-  - "Convert an ITCH Price field (4-byte unsigned integer, 4 implied decimal places) to a human-readable dollar value and explain why ITCH never sends a float"
-  - "Write a correct, packed C++ struct for the ITCH Add Order message and a parser that byte-swaps every multi-byte field from big-endian"
-  - "Explain how SoupBinTCP frames a variable-length ITCH payload with a 2-byte length prefix and a packet-type byte, and how sequence numbers let a client detect and recover from a gap"
-  - "Distinguish ITCH (inbound market data, exchange→you) from OUCH (outbound order entry, you→exchange) and name the three core OUCH client messages"
-professionalContext: "Every equities trading system in the US touches these wire formats. A market-data handler that decodes Nasdaq ITCH is the front door of any strategy that trades Nasdaq-listed names, and OUCH is how that strategy sends orders back. These are not academic protocols — they are the published, in-production formats Nasdaq ships to members, and a handler that mis-parses a single field (wrong endianness, wrong decimal scale, a struct the compiler padded) prints wrong prices into your book and loses money silently. Quant and HFT firms test new hires on exactly this: 'here are the bytes, what's the price?' Getting the byte layout, the endianness, and the framing right — and knowing where the sequence number lives so you can detect a dropped packet — is table-stakes competence for a market-data or execution engineer."
+prerequisites: ["12/12-2/05","5/5-2/02"]
+standards: {"primaryAnchor":"Nasdaq TotalView-ITCH 5.0","cs2023":[],"swebok":[],"bloom":"apply","sfia":4,"dreyfus":"competent"}
+vocabulary: ["itch","ouch","soupbintcp","market-data-feed","order-entry","big-endian","fixed-width-binary","implied-decimal","sequence-number","message-type","system-event-message","add-order-message","order-executed-message","order-cancel-message","trade-message","order-reference-number","timestamp-since-midnight","struct-packing"]
+learningOutcomes: ["Decode the bounded big-endian field and scale correctly","Separate wire format from local object layout","Distinguish market data, order entry, and transport sequencing"]
+professionalContext: "Write pseudocode decoding a four-byte unsigned big-endian price from bytes 00 00 30 39 with an explicitly supplied scale of 10000. Validate the buffer length before reading, produce the integer and decimal value, and explain why ITCH message parsing alone does not define SoupBinTCP gap detection or send an OUCH order."
 thresholdConcept: false
 ---
 
-## Why this lesson matters
+## Why this matters
 
 A trading strategy is only as good as the prices it sees. Before any model runs, before any order goes out, something has to turn a stream of bytes off a network socket into "AAPL just traded 100 shares at \$184.52." That something is a market-data handler, and on Nasdaq it speaks a protocol called <VocabTooltip slug="itch">ITCH</VocabTooltip>.
 
 Here is the part that surprises people coming from web development: there is no JSON, no XML, no text at all. ITCH is raw binary — fixed-width fields, big-endian integers, prices encoded as integers with the decimal point implied. A single wrong assumption (you read a field as little-endian, or you let the C++ compiler insert padding into your struct) and every price you decode is garbage. The feed does not tell you that you are wrong. Your book just fills with nonsense and your strategy trades on it.
 
 This lesson teaches you to read those bytes correctly, and to write the parser that does it at the speed an HFT system needs.
+
+## Start with something familiar
+
+Reading a fixed-format shipping label requires the right field boundaries and units; casting the label into a local form does not make the formats match.
+
+## The mental model
+
+> A wire parser validates framing and decodes bytes according to a specified protocol version. Transport sequence state and application message fields are distinct, and market-data reception is separate from order entry.
 
 ## First principles: why a binary protocol at all
 
@@ -219,116 +197,7 @@ A few deliberate choices worth calling out:
 
 The same logic is small enough to run in your browser in TypeScript, where a `DataView` over an `ArrayBuffer` is the JavaScript equivalent of laying a struct over bytes. Decode a real-looking Add Order and confirm you get the price you expect.
 
-<SandboxExercise
-  language="typescript"
-  instructions="A Nasdaq ITCH 5.0 Add Order ('A') message is 36 bytes, big-endian. The bytes below encode an order for AAPL. Implement parseAddOrder so it returns the messageType, the symbol (trailing spaces trimmed), the raw integer price, and the price in dollars (priceRaw / 10000). DataView reads big-endian by default when you DON'T pass the littleEndian flag, which matches ITCH. The Price field is a uint32 at byte offset 32. The Stock symbol is 8 ASCII bytes at offset 24. The Buy/Sell byte is at offset 19. Expected: symbol 'AAPL', priceRaw 1855704, priceDollars 185.5704, side 'B'."
-  initialCode={`// One ITCH 5.0 Add Order message: 36 big-endian bytes.
-// Offsets: type@0, stockLocate@1(u16), tracking@3(u16), timestamp@5(6B),
-// orderRef@11(u64), side@19, shares@20(u32), stock@24(8B), price@32(u32).
-const message = new Uint8Array([
-  0x41, // 'A'
-  0x00,
-  0x07, // stock locate = 7
-  0x00,
-  0x00, // tracking number = 0
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x01, // timestamp = 1 ns
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x10,
-  0x2a, // order ref = 4138
-  0x42, // 'B' (buy)
-  0x00,
-  0x00,
-  0x00,
-  0x64, // shares = 100
-  0x41,
-  0x41,
-  0x50,
-  0x4c,
-  0x20,
-  0x20,
-  0x20,
-  0x20, // "AAPL    "
-  0x00,
-  0x1c,
-  0x50,
-  0xd8, // price = 1855704 -> $185.5704
-]);
 
-interface ParsedAddOrder {
-  messageType: string;
-  symbol: string;
-  side: string;
-  shares: number;
-  priceRaw: number;
-  priceDollars: number;
-}
-
-function parseAddOrder(bytes: Uint8Array): ParsedAddOrder {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  // TODO: read messageType (offset 0), side (offset 19),
-  // shares (uint32 @ 20), the 8-byte symbol (@ 24, trim trailing spaces),
-  // and price (uint32 @ 32). Then compute priceDollars.
-  return {
-    messageType: "",
-    symbol: "",
-    side: "",
-    shares: 0,
-    priceRaw: 0,
-    priceDollars: 0,
-  };
-}
-
-console.log(parseAddOrder(message));`}
-  solution={`const message = new Uint8Array([
-  0x41, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x00, 0x10, 0x2a, 0x42, 0x00, 0x00, 0x00, 0x64, 0x41, 0x41, 0x50, 0x4c, 0x20, 0x20, 0x20, 0x20,
-  0x00, 0x1c, 0x50, 0xd8,
-]);
-
-interface ParsedAddOrder {
-  messageType: string;
-  symbol: string;
-  side: string;
-  shares: number;
-  priceRaw: number;
-  priceDollars: number;
-}
-
-function parseAddOrder(bytes: Uint8Array): ParsedAddOrder {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  // DataView.getUintXX defaults to big-endian (no littleEndian flag) — exactly ITCH.
-  const messageType = String.fromCharCode(view.getUint8(0));
-  const side = String.fromCharCode(view.getUint8(19));
-  const shares = view.getUint32(20);
-
-  let symbol = "";
-  for (let i = 24; i < 32; i++) symbol += String.fromCharCode(view.getUint8(i));
-  symbol = symbol.replace(/ +$/, ""); // trim the space padding
-
-  const priceRaw = view.getUint32(32);
-  const priceDollars = priceRaw / 10000; // 4 implied decimal places
-
-  return { messageType, symbol, side, shares, priceRaw, priceDollars };
-}
-
-console.log(parseAddOrder(message));`}
-testCases={[
-"parseAddOrder returns messageType 'A' for a byte starting with 0x41",
-"the symbol field is decoded as 'AAPL' with trailing spaces trimmed",
-"priceRaw is the big-endian uint32 1855704 and priceDollars is 185.5704",
-"side is 'B' and shares is 100",
-]}
-/>
 
 ## The framing layer: SoupBinTCP
 
@@ -372,72 +241,34 @@ The exchange replies with its own OUCH messages — `'A'` Order Accepted, `'E'` 
 
 The symmetry is the whole point: **ITCH in, OUCH out, SoupBinTCP framing both.** Decode the world with one, act on it with the other.
 
+## Guided practice
+
+Can memcpy into an unpacked native struct prove all network field offsets and byte orders are correct?
+
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
+
+No. Native padding, alignment, and endianness can differ; validate and decode the specified wire representation.
+
+</details>
+
 ## Check your understanding
 
-<Quiz
-  questions={[
-    {
-      question:
-        "An ITCH 5.0 Add Order message has its Price field as the 4 bytes 0x00 0x1C 0x50 0xD8. Your parser is running on an x86-64 (little-endian) machine. What is the price in dollars, and what two operations must your parser perform to get there?",
-      options: [
-        "$0.00 — the bytes are zero-padded and represent no price",
-        "$185.5704 — interpret the 4 bytes as a big-endian unsigned integer (1,855,704), then divide by 10,000 because ITCH prices carry 4 implied decimal places; on a little-endian host the big-endian read is a byte swap",
-        "$1,855,704.00 — the integer value is already in dollars; ITCH prices are whole-dollar integers",
-        "$18.555 — interpret as little-endian and divide by 100,000",
-      ],
-      correct: 1,
-      explanation:
-        "Two operations, both mandatory. First, endianness: ITCH is big-endian, so 0x00 0x1C 0x50 0xD8 is the integer 0x001C50D8 = 1,855,704. On a little-endian CPU you must byte-swap to read it correctly (read it raw and you'd get 0xD84E1C00, a wildly wrong number). Second, the implied decimal: the ITCH Price field is an integer with 4 implied decimal places, so you divide by 10,000 to get $185.5704. Skip either step and the price is garbage. ITCH never sends a float precisely so this conversion is exact and identical on every machine.",
-    },
-    {
-      question:
-        "You define your C++ ITCH Add Order struct without #pragma pack(1), then memcpy 36 wire bytes into it and read the fields. On x86-64 the symbol and price come out wrong even though message_type is correct. Why?",
-      options: [
-        "x86-64 cannot memcpy into a struct; you must read each field with a separate function call",
-        "The compiler inserted alignment padding between members (e.g. before the uint64_t order_reference_number), so the struct is larger than 36 bytes and every field after the first padding gap is read from the wrong offset; #pragma pack(1) removes the padding so the struct layout matches the wire 1:1",
-        "memcpy reverses byte order, so all multi-byte fields are corrupted",
-        "The char fields must be wchar_t on x86-64 for ASCII to decode",
-      ],
-      correct: 1,
-      explanation:
-        "Without packing, the compiler aligns each member to its natural boundary — it will insert padding so the uint64_t lands on an 8-byte boundary, the uint32_t fields on 4-byte boundaries, and so on. That makes sizeof(struct) larger than 36 and shifts every field past the first inserted gap. message_type is at offset 0 either way, which is why only it looks right. #pragma pack(push, 1) forces zero padding so the in-memory layout exactly matches the wire bytes — and the static_assert(sizeof == 36) catches it at compile time if you forget. memcpy does not reorder bytes (that's the separate endianness problem, handled by byteswap).",
-    },
-    {
-      question:
-        "Your SoupBinTCP client is reading a Nasdaq feed and is tracking that the next sequenced-data packet it expects is sequence number 5,001. It receives a sequenced packet, processes it, and the next sequenced packet it receives would be number 5,003 by its count. What has happened and what does the sequence number let you do?",
-      options: [
-        "Nothing is wrong — sequence numbers are allowed to skip even numbers",
-        "A packet (sequence 5,002) was lost; because SoupBinTCP numbers sequenced data packets consecutively with no gaps, the client can detect the missing number, and on reconnect it can request a replay starting at 5,002 so the order book is not silently corrupted",
-        "The connection is fine but the server reset its clock; you should ignore the gap",
-        "You received a duplicate; sequence 5,002 will arrive twice to compensate",
-      ],
-      correct: 1,
-      explanation:
-        "SoupBinTCP guarantees sequenced data packets are numbered consecutively (1, 2, 3, …) within a session, with no gaps and no duplicates. The client counts: it expected 5,001, processed it, and the next one its counter would assign is 5,002 — but the packet it sees corresponds to 5,003, meaning 5,002 never arrived. That is the entire value of the sequence number: a gap is detectable. The recovery path is to reconnect and request replay from the missing sequence number forward. Without sequence numbers a dropped packet would leave the order book wrong with no signal that anything was lost — the worst kind of bug in a trading system because it loses money quietly.",
-    },
-    {
-      question:
-        "A teammate says: 'Let's use ITCH to send our orders to Nasdaq.' What is wrong with this, and what is the correct protocol?",
-      options: [
-        "Nothing is wrong; ITCH is bidirectional and handles both market data and order entry",
-        "ITCH is an inbound market-data feed (exchange→you, broadcast read-only to all members) — it has no message for submitting an order. Order entry to Nasdaq uses OUCH (you→exchange, a private session), whose core client messages are Enter Order ('O'), Replace Order ('U'), and Cancel Order ('X'). Both ride the same SoupBinTCP framing.",
-        "ITCH works but is too slow for order entry; you should use FIX instead",
-        "You can use ITCH but must first send a Login packet to switch it into write mode",
-      ],
-      correct: 1,
-      explanation:
-        "ITCH and OUCH are two halves of one system but flow in opposite directions. ITCH is the market-data firehose — the same stream broadcast to every member, read-only; it literally has no Enter Order message because no member sends data on it. OUCH is the order-entry protocol: a private, authenticated session where you send Enter Order ('O'), Replace Order ('U'), and Cancel Order ('X'), and the exchange acknowledges with Accepted/Executed/Canceled/Rejected. They share the SoupBinTCP framing layer (length prefix + packet type + sequencing), which is why they feel similar, but you cannot send orders on ITCH. (FIX is a different order-entry protocol — covered in the next lesson — but it is not 'the fix for ITCH being slow'; OUCH is Nasdaq's native binary order entry.)",
-    },
-  ]}
+<WrittenExercise
+ instructions={"Write pseudocode decoding a four-byte unsigned big-endian price from bytes 00 00 30 39 with an explicitly supplied scale of 10000. Validate the buffer length before reading, produce the integer and decimal value, and explain why ITCH message parsing alone does not define SoupBinTCP gap detection or send an OUCH order."}
+ rubric={["Decode the bounded big-endian field and scale correctly","Separate wire format from local object layout","Distinguish market data, order entry, and transport sequencing"]}
+ modelAnswer={"Require at least four bytes at the stated field offset. Compute value = b0*16777216 + b1*65536 + b2*256 + b3 using a sufficiently wide unsigned type. The value is 12345, representing 1.2345 at scale 10000. Retain the integer and scale rather than depend on binary floating-point equality. Validate the complete enclosing message using its chosen version and transport framing. ITCH carries market data; OUCH is a separate order-entry protocol. SoupBinTCP tracks session sequencing through its defined session state, not an invented sequence field in every ITCH payload."}
 />
+
+
+
+<Quiz question={"What unsigned integer is encoded by big-endian bytes00 00 30 39?"} options={["1234","12345","14640"]} answer={1} explanation={"0x3039 equals12345. The protocol field's separately specified scale determines its decimal meaning."} />
 
 ## What you learned
 
-- **ITCH is fixed-width big-endian binary, decoded by laying a struct over the bytes.** Each message starts with a one-byte type (`'S'` system event, `'A'` add order, `'E'` executed, `'X'` cancel, `'P'` trade), and every field sits at a fixed offset with a fixed width — no delimiters, no parsing, just reads.
-- **Prices are integers with 4 implied decimal places**, divided by 10,000 only at the display boundary. The feed never sends a float, so the value is exact and identical on every machine — and the order reference number, not the symbol, is the key that ties follow-up Execute/Cancel/Delete messages back to a resting order.
-- **A correct C++ parser needs two things the compiler won't give you for free:** `#pragma pack(1)` so no alignment padding shifts your field offsets (guard it with `static_assert(sizeof == 36)`), and a big-endian-to-host byte swap (`std::byteswap`, C++23) on every multi-byte integer. Use `std::memcpy` into the packed struct, never a `reinterpret_cast`.
-- **SoupBinTCP frames the variable-length payload:** a 2-byte big-endian length prefix delimits each packet, a 1-byte packet type discriminates it (`'S'` = sequenced data carrying one ITCH message), and consecutive sequence numbers let you detect a dropped packet and request a replay — the difference between a recoverable gap and a silently-corrupted book.
-- **ITCH flows in (market data, read-only), OUCH flows out (order entry, private session).** OUCH's core client messages are Enter Order (`'O'`), Replace Order (`'U'`), and Cancel Order (`'X'`), carrying an order token the exchange echoes on every acknowledgment. Both protocols ride the same SoupBinTCP framing.
+- Decode the bounded big-endian field and scale correctly
+- Separate wire format from local object layout
+- Distinguish market data, order entry, and transport sequencing
 
 ## What's next
 

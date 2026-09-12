@@ -4,22 +4,29 @@ description: "Understand how databases serve thousands of simultaneous readers a
 phase: 5
 module: "5-3-database-internals"
 order: 4
-difficulty: "advanced"
+difficulty: 3
 bloom: "analyze"
-vocabulary: ["mvcc", "row-version", "optimistic-lock", "pessimistic-lock", "isolation"]
-standards:
-  cs2023: ["IM-1"]
-  swebok: ["Software Design"]
-  bloom: "analyze"
-  sfia: 5
-  dreyfus: "proficient"
+vocabulary: ["mvcc","row-version","optimistic-lock","pessimistic-lock","isolation"]
+standards: {"cs2023":["IM-1"],"swebok":["Software Design"],"bloom":"analyze","sfia":5,"dreyfus":"proficient"}
+estimatedMinutes: 15
+prerequisites: ["5/5-3/03"]
+thresholdConcept: false
+learningOutcomes: ["Trace the two snapshots and distinct writes","Distinguish write skew from a lost update","Compare concrete invariant-protection strategies"]
 ---
 
-## The concurrency problem
+## Why this matters
 
 At any given moment a production database might be handling thousands of concurrent transactions. Two users update the same account balance. A report reads millions of rows while new orders are being inserted. Without coordination, these concurrent operations corrupt data in subtle, hard-to-detect ways. Concurrency control is the set of mechanisms databases use to make concurrent transactions behave as if they ran one at a time.
 
 The naive solution — one global lock that serializes all transactions — is correct but catastrophically slow. Modern databases use far more sophisticated approaches that allow high concurrency while maintaining correctness guarantees.
+
+## Start with something familiar
+
+Two people can read the same old duty roster and independently remove their own names, leaving nobody assigned.
+
+## The mental model
+
+> Snapshot visibility prevents some read anomalies but does not by itself enforce every cross-row invariant. Write skew can occur when transactions read overlapping facts and update different rows.
 
 ## MVCC: the key insight
 
@@ -66,152 +73,26 @@ SQL defines four isolation levels that trade correctness guarantees for concurre
 
 The right isolation level depends on your application. Most OLTP applications work correctly at Read Committed. Financial applications handling account transfers often need Repeatable Read or Serializable.
 
-<SandboxExercise
-  title="Simulate MVCC Row Versioning"
-  instructions="Implement a simplified MVCC store. Each row has a version history. `readRow(txId, rowId)` should return the most recent version committed before the given transaction started. `writeRow(txId, rowId, data)` creates a new version. `commitTx(txId)` marks the transaction as committed. `startTx()` returns a new transaction ID based on the current committed snapshot."
-  starterCode={`// Simplified MVCC simulation
-// Each row version: { xmin, xmax, data }
-// xmin = transaction that created this version
-// xmax = transaction that deleted/superseded this version (null if current)
 
-class MVCCStore {
-constructor() {
-this.nextTxId = 1;
-this.committedTxIds = new Set();
-// rows: Map<rowId, Array<{ xmin, xmax, data }>>
-this.rows = new Map();
-// pendingTx: Map<txId, { startSnapshot: Set<number> }>
-this.pendingTx = new Map();
-}
 
-startTx() {
-const txId = this.nextTxId++;
-// Snapshot = set of committed transactions at this moment
-this.pendingTx.set(txId, { startSnapshot: new Set(this.committedTxIds) });
-return txId;
-}
+## Guided practice
 
-commitTx(txId) {
-this.committedTxIds.add(txId);
-this.pendingTx.delete(txId);
-console.log(\`TX \${txId} committed\`);
-}
+Would merely checking the count again inside the same unchanged snapshot necessarily detect the other transaction?
 
-writeRow(txId, rowId, data) {
-if (!this.rows.has(rowId)) this.rows.set(rowId, []);
-const versions = this.rows.get(rowId);
-// Supersede the currently visible version for this writer
-const current = versions.find(v => v.xmax === null && v.xmin !== txId);
-if (current) current.xmax = txId;
-versions.push({ xmin: txId, xmax: null, data });
-console.log(\`TX \${txId} wrote row \${rowId}:, data\`);
-}
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-readRow(txId, rowId) {
-const tx = this.pendingTx.get(txId);
-if (!tx) throw new Error(\`Unknown transaction \${txId}\`);
-const { startSnapshot } = tx;
+No. The snapshot can still show the original state; isolation and synchronization must protect the decision.
 
-    const versions = this.rows.get(rowId) || [];
-    // Find the most recent version visible to this transaction
-    // Visible if: xmin was committed before we started AND xmax is null or committed after we started
-    const visible = versions.filter(v => {
-      const xminCommitted = startSnapshot.has(v.xmin);
-      const xmaxOk = v.xmax === null || !startSnapshot.has(v.xmax);
-      return xminCommitted && xmaxOk;
-    });
-
-    if (visible.length === 0) return null;
-    // Return the version with the highest xmin (most recent visible)
-    visible.sort((a, b) => b.xmin - a.xmin);
-    return visible[0].data;
-
-}
-}
-
-// Demonstrate MVCC: reader sees snapshot from before writer committed
-const db = new MVCCStore();
-
-// Bootstrap: tx1 writes initial data and commits
-const tx1 = db.startTx();
-db.writeRow(tx1, 'account:alice', { balance: 1000 });
-db.commitTx(tx1);
-
-// tx2 starts a long-running read
-const tx2 = db.startTx();
-
-// tx3 modifies alice's balance and commits
-const tx3 = db.startTx();
-db.writeRow(tx3, 'account:alice', { balance: 500 });
-db.commitTx(tx3);
-
-// tx4 reads after tx3 commits — sees new balance
-const tx4 = db.startTx();
-
-console.log('\\ntx2 reads alice (started before tx3):', db.readRow(tx2, 'account:alice')); // 1000
-console.log('tx4 reads alice (started after tx3):', db.readRow(tx4, 'account:alice')); // 500
-`}
-  solution={`// The starter code demonstrates the core MVCC pattern correctly.
-// The critical insight: tx2 reads 1000 even though tx3 has already committed 500,
-// because tx2's snapshot was taken before tx3 committed.
-// This is how long-running reports see consistent data during live writes.
-
-class MVCCStore {
-constructor() {
-this.nextTxId = 1;
-this.committedTxIds = new Set();
-this.rows = new Map();
-this.pendingTx = new Map();
-}
-
-startTx() {
-const txId = this.nextTxId++;
-this.pendingTx.set(txId, { startSnapshot: new Set(this.committedTxIds) });
-return txId;
-}
-
-commitTx(txId) {
-this.committedTxIds.add(txId);
-this.pendingTx.delete(txId);
-}
-
-writeRow(txId, rowId, data) {
-if (!this.rows.has(rowId)) this.rows.set(rowId, []);
-const versions = this.rows.get(rowId);
-const current = versions.find(v => v.xmax === null && v.xmin !== txId);
-if (current) current.xmax = txId;
-versions.push({ xmin: txId, xmax: null, data });
-}
-
-readRow(txId, rowId) {
-const { startSnapshot } = this.pendingTx.get(txId);
-const versions = this.rows.get(rowId) || [];
-const visible = versions.filter(v =>
-startSnapshot.has(v.xmin) && (v.xmax === null || !startSnapshot.has(v.xmax))
-);
-if (!visible.length) return null;
-visible.sort((a, b) => b.xmin - a.xmin);
-return visible[0].data;
-}
-}
-
-const db = new MVCCStore();
-const tx1 = db.startTx();
-db.writeRow(tx1, 'account:alice', { balance: 1000 });
-db.commitTx(tx1);
-
-const tx2 = db.startTx();
-const tx3 = db.startTx();
-db.writeRow(tx3, 'account:alice', { balance: 500 });
-db.commitTx(tx3);
-
-const tx4 = db.startTx();
-console.log('tx2 sees:', db.readRow(tx2, 'account:alice')); // { balance: 1000 }
-console.log('tx4 sees:', db.readRow(tx4, 'account:alice')); // { balance: 500 }
-`}
-/>
+</details>
 
 ## Check your understanding
+
+<WrittenExercise
+ instructions={"Analyze two doctors initially on call. Each transaction reads a snapshot showing both on call and then removes its own doctor. Trace the resulting write skew under snapshot isolation, distinguish it from overwriting the same row, and compare serializable isolation with explicitly locking the invariant's relevant rows."}
+ rubric={["Traces the two snapshots and distinct writes","Distinguishes write skew from a lost update","Compares concrete invariant-protection strategies"]}
+ modelAnswer={"Both transactions see two doctors and independently conclude one can leave. They update different rows, so a same-row write conflict need not occur; both commits can leave zero doctors. This is write skew. Serializable execution with appropriate retry handling prevents an outcome inconsistent with a serial order. Explicitly locking and rechecking all rows that protect the invariant can also serialize the decision, but the lock design must cover every relevant change. Snapshot isolation alone is insufficient evidence that the invariant holds."}
+/>
 
 <Quiz
   question="In an MVCC database, when a transaction updates a row:"
@@ -250,16 +131,13 @@ console.log('tx4 sees:', db.readRow(tx4, 'account:alice')); // { balance: 500 }
 />
 
 <FillBlank
-  sentence="In PostgreSQL's MVCC implementation, each row version is stamped with the ___ of the transaction that created it."
+  question="In PostgreSQL's MVCC implementation, each row version is stamped with the ___ of the transaction that created it."
   answer="transaction ID"
-  hint="Every transaction gets a unique sequential number, stored as xmin on each row version"
+  hints={["Every transaction gets a unique sequential number, stored as xmin on each row version"]}
 />
 
 ## What you learned
 
-- MVCC stores multiple versions of each row, letting readers see a consistent snapshot without blocking writers
-- Each row version is stamped with the creating transaction's ID (xmin) and the superseding transaction's ID (xmax)
-- Visibility rules determine which version a transaction sees based on its start-time snapshot
-- Pessimistic locking acquires locks before access; optimistic locking detects conflicts at commit time
-- Isolation levels trade correctness guarantees for concurrency — Read Committed is the default; Serializable is the safest
-- Long-running transactions prevent MVCC cleanup (VACUUM), causing table bloat
+- Trace the two snapshots and distinct writes
+- Distinguish write skew from a lost update
+- Compare concrete invariant-protection strategies

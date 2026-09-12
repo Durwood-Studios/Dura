@@ -6,8 +6,14 @@ import { compile } from "@mdx-js/mdx";
 import { describe, expect, it, vi } from "vitest";
 import { PHASES, CONTENT_COUNTS } from "@/content/phases";
 import { ALL_QUESTIONS, getQuestionsByModule } from "@/content/questions";
-import { PHASE_STANDARDS, getStandardsForModule } from "@/content/standards-map";
+import {
+  HISTORICAL_AP_MAPPINGS,
+  PHASE_STANDARDS,
+  getStandardsForModule,
+  getModulesByAPTopic,
+} from "@/content/standards-map";
 import { canonicalModuleId } from "@/lib/curriculum-ids";
+import { getTerm } from "@/lib/dictionary";
 import { TOTAL_LESSONS } from "@/lib/curriculum-stats";
 
 vi.mock("server-only", (): object => ({}));
@@ -99,21 +105,39 @@ describe("curriculum reachability", (): void => {
     }
   });
 
-  it("resolves every foundation prerequisite and lesson link", async (): Promise<void> => {
+  it("resolves every authored lesson prerequisite", async (): Promise<void> => {
     try {
       const params = await listAllLessonParams();
       const known = new Set(
         params.map((entry): string => `${entry.phaseId}/${entry.moduleId}/${entry.lessonId}`)
       );
-      for (const curriculumModule of PHASES[0].modules) {
-        for (const lesson of await listLessons("0", curriculumModule.id)) {
-          for (const prerequisite of lesson.prerequisites ?? [])
-            expect(known.has(prerequisite), prerequisite).toBe(true);
+      for (const phase of PHASES) {
+        for (const curriculumModule of phase.modules) {
+          for (const lesson of await listLessons(phase.id, curriculumModule.id)) {
+            for (const prerequisite of lesson.prerequisites ?? [])
+              expect(
+                known.has(prerequisite) || getTerm(prerequisite) !== undefined,
+                prerequisite
+              ).toBe(true);
+          }
         }
       }
     } catch (error) {
       console.error(error);
       throw error;
+    }
+  });
+
+  it("withholds unverified historical AP taxonomies from current learner claims", (): void => {
+    expect(HISTORICAL_AP_MAPPINGS.length).toBeGreaterThan(0);
+    for (const alignment of PHASE_STANDARDS) {
+      expect(alignment.apCSP).toEqual([]);
+      expect(alignment.apCSA).toEqual([]);
+    }
+    for (const historical of HISTORICAL_AP_MAPPINGS) {
+      for (const topic of [...historical.apCSP, ...historical.apCSA]) {
+        expect(getModulesByAPTopic(topic)).toEqual([]);
+      }
     }
   });
 

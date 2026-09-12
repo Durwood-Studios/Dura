@@ -4,24 +4,32 @@ description: "Learn how the write-ahead log guarantees durability, enables crash
 phase: 5
 module: "5-3-database-internals"
 order: 5
-difficulty: "advanced"
+difficulty: 3
 bloom: "evaluate"
-vocabulary: ["wal", "crash-recovery", "checkpoint", "log-sequence-number", "durability"]
-standards:
-  cs2023: ["IM-1"]
-  swebok: ["Software Design"]
-  bloom: "evaluate"
-  sfia: 5
-  dreyfus: "proficient"
+vocabulary: ["wal","crash-recovery","checkpoint","log-sequence-number","durability"]
+standards: {"cs2023":["IM-1"],"swebok":["Software Design"],"bloom":"evaluate","sfia":5,"dreyfus":"proficient"}
+estimatedMinutes: 15
+prerequisites: ["5/5-3/04"]
+thresholdConcept: false
+learningOutcomes: ["Distinguish memory updates from durable page flushes","Compare the crash windows using log ordering","Justify the acknowledgment boundary without claiming universal recovery algorithms"]
+professionalContext: "Evaluate a storage sequence that changes a page in memory, flushes that page, and only afterward flushes its log record. Compare it with flushing the required log first. Explain the crash window and justify which durable boundary must precede a successful durable commit acknowledgment."
 ---
 
-## The durability problem
+## Why this matters
 
 When your application calls `COMMIT`, you expect that data to be safe — on disk, permanent, survivable even if the server loses power one millisecond after the commit returns. Achieving this with good performance is harder than it sounds.
 
 The naive approach: write every change directly to its final location in the data file, then flush the file to disk before returning success. This is safe but brutally slow. A B-tree page update might touch several pages (the modified leaf, possibly a split sibling, and a parent). Flushing all of them on every transaction creates an I/O storm that makes transactional throughput collapse on spinning disks.
 
-The **write-ahead log** (WAL) is the solution used by virtually every serious relational database. The rule is simple: before modifying any data page, first write a description of the change to a sequential log file. Because the log is append-only, writing to it is sequential I/O — the fastest kind. Only the log needs to be flushed to disk at commit time; the data pages can be written lazily in the background.
+The **write-ahead log** (WAL) records changes for crash recovery. The durability rule is that the required log records must reach durable storage before corresponding changed data pages are flushed. A page can change in memory before that flush. Durable local commit can rely on the required log being flushed while data pages are written later. See the [PostgreSQL WAL explanation](https://www.postgresql.org/docs/current/wal-intro.html).
+
+## Start with something familiar
+
+A durable change journal must be safely stored before its corresponding rewritten archive pages can become the only surviving evidence.
+
+## The mental model
+
+> Write-ahead logging orders durable log records ahead of corresponding data-page flushes. Recovery procedures depend on the engine; PostgreSQL-style recovery should not be described as universally undoing every uncommitted row change.
 
 ## How WAL works
 
@@ -39,19 +47,19 @@ This is why the rule is "write _ahead_" — the log is always ahead of the data 
 
 ## Crash recovery: replaying the log
 
-If the database crashes — power loss, OS kill, hardware failure — and then restarts, it uses the WAL to recover. The recovery algorithm (ARIES in most implementations) has three passes:
+Crash recovery uses retained durable log records and a valid recovery starting point to reconstruct consistent storage. ARIES is an influential recovery design, but the following concepts must not be mistaken for the exact algorithm of every database.
 
 **Analysis pass:** Scan the WAL from the last checkpoint forward to determine which transactions were committed and which were in progress at crash time.
 
-**Redo pass:** Starting from the last checkpoint, replay every change in the log, even if it was already applied to the data files. This brings the data files up to date with everything that was committed. (Replaying changes that were already written is idempotent — it does no harm.)
+**Redo:** Replay the records required by the engine from its recovery starting point, using log sequence information to avoid incorrectly repeating already applied changes. The engine determines which operations must be redone; blindly running every application command again is not safe recovery.
 
-**Undo pass:** Roll back all transactions that were in progress at the time of the crash but never committed. Their partial changes are present in the data files from the redo pass; the undo pass reverses them.
+**Transaction visibility:** Recovery details depend on the engine. PostgreSQL redoes logged physical changes and uses transaction status and MVCC visibility to keep uncommitted effects invisible; do not assume it performs a universal second undo pass over every uncommitted row. Other recovery designs use explicit undo records.
 
-After recovery, the database is in a consistent state as of the last committed transaction — exactly as if the crash never happened.
+After recovery, the engine exposes transactions according to its durable commit and visibility rules. A client disconnected during commit may not know whether its transaction committed, so retry protocols still need a way to resolve uncertain outcomes.
 
 ## Checkpoints: bounding recovery time
 
-Without checkpoints, recovery would have to replay the entire WAL from the beginning of time — potentially hours of log records. A **checkpoint** is a periodic snapshot that tells the recovery algorithm: "everything before this LSN is guaranteed to be in the data files." Recovery only needs to replay from the most recent checkpoint forward.
+A **checkpoint** records recovery information and coordinates flushing so recovery need not scan all historical log records. Its redo starting point and treatment of ongoing transactions are engine-specific; it is not necessarily an instantaneous snapshot or a claim that every byte before one visible marker was already flushed at that instant.
 
 During a checkpoint, PostgreSQL:
 
@@ -73,129 +81,26 @@ Some cloud databases (notably Amazon Aurora) avoid `fsync` on WAL writes by usin
 
 Setting PostgreSQL's `synchronous_commit = off` skips the WAL fsync on individual commits. Throughput improves dramatically, but you risk losing the last few transactions on a crash. For some workloads (analytics ingestion, non-critical event logging), this is an acceptable tradeoff. For financial data, never.
 
-<SandboxExercise
-  title="Simulate a Write-Ahead Log and Crash Recovery"
-  instructions="Implement a simplified WAL-based storage engine. `writeWAL(txId, change)` appends a record to the log. `commitTx(txId)` writes a COMMIT record. `checkpoint()` saves all committed data to 'disk' and records the checkpoint LSN. `crashAndRecover()` replays the WAL from the last checkpoint and rolls back uncommitted transactions."
-  starterCode={`// Simplified WAL simulation
-// WAL record: { lsn, txId, type: 'write'|'commit'|'abort'|'checkpoint', data?, pageid? }
 
-class WALDatabase {
-constructor() {
-this.lsn = 0; // Log sequence number counter
-this.wal = []; // The write-ahead log
-this.dataPages = {}; // "On-disk" data pages (written at checkpoint)
-this.memPages = {}; // In-memory dirty pages (not yet checkpointed)
-this.lastCheckpointLSN = -1;
-this.activeTx = new Set();
-this.committedTx = new Set();
-}
 
-_nextLSN() { return this.lsn++; }
+## Guided practice
 
-beginTx(txId) {
-this.activeTx.add(txId);
-this.wal.push({ lsn: this._nextLSN(), txId, type: 'begin' });
-console.log(\`[WAL] TX \${txId}: BEGIN\`);
-}
+Does WAL require every changed data page to be flushed before acknowledging a durable local commit?
 
-write(txId, pageId, data) {
-// WAL FIRST, then update memory
-const lsn = this._nextLSN();
-this.wal.push({ lsn, txId, type: 'write', pageId, data });
-this.memPages[pageId] = { data, writtenByLSN: lsn, txId };
-console.log(\`[WAL] TX \${txId}: WRITE page=\${pageId} lsn=\${lsn}\`);
-}
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-commitTx(txId) {
-const lsn = this._nextLSN();
-this.wal.push({ lsn, txId, type: 'commit' });
-this.committedTx.add(txId);
-this.activeTx.delete(txId);
-console.log(\`[WAL] TX \${txId}: COMMIT lsn=\${lsn} ← fsync happens here\`);
-}
+No. Durable required log records can support later recovery while data pages are flushed afterward.
 
-checkpoint() {
-// Flush all dirty pages to "disk" (dataPages)
-for (const [pageId, page] of Object.entries(this.memPages)) {
-if (this.committedTx.has(page.txId)) {
-this.dataPages[pageId] = page.data;
-}
-}
-this.memPages = {};
-const lsn = this._nextLSN();
-this.lastCheckpointLSN = lsn;
-this.wal.push({ lsn, type: 'checkpoint', checkpointLSN: lsn });
-console.log(\`[WAL] CHECKPOINT at LSN \${lsn} — data pages flushed to disk\`);
-}
-
-crashAndRecover() {
-console.log('\\n=== CRASH DETECTED — STARTING RECOVERY ===');
-// Reset in-memory state (simulates losing RAM on crash)
-this.memPages = {};
-this.activeTx = new Set();
-const recoveredCommits = new Set(this.committedTx); // WAL survives crash
-
-    // Find last checkpoint in WAL
-    let replayFrom = 0;
-    for (const record of this.wal) {
-      if (record.type === 'checkpoint') replayFrom = record.lsn + 1;
-    }
-
-    console.log(\`Recovery: replaying WAL from LSN \${replayFrom}\`);
-    const inProgressAtCrash = new Set();
-
-    // REDO pass: replay all records from checkpoint
-    for (const record of this.wal.filter(r => r.lsn >= replayFrom)) {
-      if (record.type === 'begin') inProgressAtCrash.add(record.txId);
-      if (record.type === 'commit') { inProgressAtCrash.delete(record.txId); recoveredCommits.add(record.txId); }
-      if (record.type === 'write' && recoveredCommits.has(record.txId)) {
-        this.dataPages[record.pageId] = record.data;
-        console.log(\`  REDO: page=\${record.pageId} from TX \${record.txId}\`);
-      }
-    }
-
-    // UNDO pass: roll back transactions in progress at crash
-    for (const txId of inProgressAtCrash) {
-      console.log(\`  UNDO: rolling back uncommitted TX \${txId}\`);
-    }
-
-    console.log('Recovery complete. Data pages:', this.dataPages);
-    console.log('=== RECOVERY DONE ===\\n');
-
-}
-}
-
-// Simulate a crash scenario
-const db = new WALDatabase();
-
-db.beginTx(1);
-db.write(1, 'users/alice', { name: 'Alice', balance: 1000 });
-db.commitTx(1);
-
-db.checkpoint(); // Flush tx1 to disk
-
-db.beginTx(2);
-db.write(2, 'users/alice', { name: 'Alice', balance: 500 });
-// TX 2 commits after checkpoint — must be replayed during recovery
-db.commitTx(2);
-
-db.beginTx(3);
-db.write(3, 'users/bob', { name: 'Bob', balance: 200 });
-// TX 3 never commits — simulate a crash before commit
-
-// CRASH!
-db.crashAndRecover();
-// Expected: alice balance = 500 (tx2 replayed), bob page absent (tx3 rolled back)
-`}
-  solution={`// The starter code is a complete implementation.
-// Key points to verify in the output:
-// 1. After crash, alice's balance is 500 (tx2 committed after checkpoint, replayed via REDO)
-// 2. bob's page is absent (tx3 never committed, UNDO rolls it back)
-// This demonstrates the WAL guarantee: committed data survives crashes; uncommitted data does not.
-`}
-/>
+</details>
 
 ## Check your understanding
+
+<WrittenExercise
+ instructions={"Evaluate a storage sequence that changes a page in memory, flushes that page, and only afterward flushes its log record. Compare it with flushing the required log first. Explain the crash window and justify which durable boundary must precede a successful durable commit acknowledgment."}
+ rubric={["Distinguishes memory updates from durable page flushes","Compares the crash windows using log ordering","Justifies the acknowledgment boundary without claiming universal recovery algorithms"]}
+ modelAnswer={"Changing a buffered page before flushing the log is not itself the violation. Flushing that changed page to durable storage before its required log can leave an unrecoverable state after a crash. The log must become durable before the corresponding data page is flushed. For a commit promising local durability, the required commit log must be durably flushed before success is acknowledged; data pages can be flushed later. Replication acknowledgment and configured durability settings add separate conditions. Recovery details such as redo and transaction visibility are engine-specific."}
+/>
 
 <Quiz
   question="Why must the WAL record be flushed to disk before a COMMIT returns success?"
@@ -222,16 +127,13 @@ db.crashAndRecover();
 />
 
 <FillBlank
-  sentence="In WAL-based databases, each log record is assigned a monotonically increasing ___ that uniquely identifies its position in the log."
+  question="In WAL-based databases, each log record is assigned a monotonically increasing ___ that uniquely identifies its position in the log."
   answer="log sequence number"
-  hint="Often abbreviated LSN — used to determine replay order and checkpoint boundaries"
+  hints={["Often abbreviated LSN \u2014 used to determine replay order and checkpoint boundaries"]}
 />
 
 ## What you learned
 
-- The WAL rule: write the log record before modifying any data page — "write ahead"
-- Only the WAL needs to be fsynced at commit time; data pages can be flushed lazily, improving throughput
-- Crash recovery uses Analysis, Redo, and Undo passes to bring the database to a consistent post-crash state
-- Checkpoints flush dirty pages and mark a WAL position, bounding recovery replay time
-- Log sequence numbers (LSNs) provide a total order over all changes, enabling deterministic recovery and replication
-- `synchronous_commit = off` skips the WAL fsync for higher throughput at the cost of potential data loss on crash
+- Distinguish memory updates from durable page flushes
+- Compare the crash windows using log ordering
+- Justify the acknowledgment boundary without claiming universal recovery algorithms

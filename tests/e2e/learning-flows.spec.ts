@@ -2,6 +2,22 @@ import { expect, test, type Page } from "@playwright/test";
 
 const LESSON = "/paths/0/0-1/01";
 
+test("written lesson response survives reload and exposes its worked answer", async ({ page }) => {
+  await page.goto("/paths/9/9-1/01");
+  await page.getByRole("button", { name: "No thanks", exact: true }).click();
+  const exercise = page.getByRole("region", { name: "Decision exercise", exact: true });
+  const response = exercise.getByRole("textbox", { name: "Your response", exact: true });
+  await response.fill(
+    "I would delegate the implementation, agree on outcomes, and schedule a review of the risks."
+  );
+  await page.reload();
+  await expect(response).toHaveValue(
+    "I would delegate the implementation, agree on outcomes, and schedule a review of the risks."
+  );
+  await exercise.getByText("Compare with a worked response", { exact: true }).click();
+  await expect(exercise.locator("details")).toHaveAttribute("open", "");
+});
+
 /** Read durable browser state to distinguish rendered success from an actual save. */
 async function readStore(page: Page, store: string): Promise<unknown[]> {
   return page.evaluate(async (storeName): Promise<unknown[]> => {

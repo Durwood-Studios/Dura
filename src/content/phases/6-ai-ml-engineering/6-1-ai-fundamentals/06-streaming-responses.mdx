@@ -4,21 +4,26 @@ description: "SSE, chunked responses, and building UIs that show tokens as they 
 phase: 6
 module: "6-1-ai-fundamentals"
 order: 6
-estimatedMinutes: 9
-difficulty: "intermediate"
-standards:
-  cs2023: ["AI-1"]
-  swebok: ["Software Design"]
-  bloom: "apply"
-  sfia: 4
-  dreyfus: "competent"
-vocabulary:
-  - llm
+estimatedMinutes: 15
+difficulty: 3
+standards: {"cs2023":["AI-1"],"swebok":["Software Design"],"bloom":"apply","sfia":4,"dreyfus":"competent"}
+vocabulary: ["llm"]
+learningOutcomes: ["Parse complete SSE event data into text deltas", "Explain why network chunks do not align with events", "Describe how to show interrupted partial output honestly"]
+prerequisites: ["6/6-1/05"]
+thresholdConcept: false
 ---
 
 ## Why this matters
 
-A non-streaming AI response makes the user stare at a spinner for 5-15 seconds. A streaming response shows the first word in under a second. Same total time, completely different experience. Time-to-first-token is the UX metric that matters most.
+Streaming can show useful output before generation finishes. It does not guarantee a sub-second start or shorten total generation time. Measure time to first useful output, completion time, and interruption behavior for your workload.
+
+## Start with something familiar
+
+Hearing a radio sentence as it arrives feels faster than waiting for a recording, even if both finish at the same time.
+
+## The mental model
+
+> Streaming reduces time to visible output; transport chunks are arbitrary byte boundaries, so preserve decoder and event-parser state.
 
 ## How streaming works
 
@@ -31,12 +36,14 @@ data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"is "}}
 data: {"type":"message_stop"}
 ```
 
-Each `data:` line is one event. You read them as they arrive and append text to the UI.
+An SSE event ends with a blank line and can contain multiple `data:` lines. The simplified display above omits those blank separators; a real parser must preserve partial events across network chunks. This example handles Anthropic text deltas; other providers use different event schemas.
 
 ## Consuming a stream in JavaScript
 
 ```javascript
-async function streamResponse(url, body, apiKey) {
+// Server-side example: keep the provider key out of the browser.
+// The caller receives errors and can keep any text already displayed.
+async function streamResponse(url, body, apiKey, onText) {
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -45,36 +52,46 @@ async function streamResponse(url, body, apiKey) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({ ...body, stream: true }),
+    signal: AbortSignal.timeout(30000),
   });
-
+  if (!response.ok || !response.body) {
+    throw new Error(`Streaming request failed: ${response.status}`);
+  }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  let pending = "";
   let fullText = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    const chunk = decoder.decode(value, { stream: true });
-    // Parse SSE events from chunk
-    const lines = chunk.split("\n");
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      const json = line.slice(6);
-      if (json === "[DONE]") break;
-      try {
-        const event = JSON.parse(json);
-        if (event.delta?.text) {
+  let hasStopped = false;
+  try {
+    while (!hasStopped) {
+      const { done, value } = await reader.read();
+      pending += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      // SSE ends an event with a blank line, not a network-chunk boundary.
+      let boundary;
+      while ((boundary = /\r?\n\r?\n/.exec(pending))) {
+        const frame = pending.slice(0, boundary.index);
+        pending = pending.slice(boundary.index + boundary[0].length);
+        const data = frame.split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).replace(/^ /, ""))
+          .join("\n");
+        if (!data) continue;
+        const event = JSON.parse(data);
+        if (event.type === "error") throw new Error("Provider interrupted the stream");
+        if (event.type === "message_stop") { hasStopped = true; break; }
+        if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
           fullText += event.delta.text;
-          // Update UI here — append to a DOM element
+          onText(fullText);
         }
-      } catch {
-        /* skip non-JSON lines */
       }
+      if (done) break;
     }
+    if (!hasStopped) throw new Error("Stream ended before completion");
+    return fullText;
+  } finally {
+    await reader.cancel();
+    reader.releaseLock();
   }
-
-  return fullText;
 }
 ```
 
@@ -97,7 +114,15 @@ Streams can break partway through — network errors, API timeouts, context over
 - Save partial output so the user sees what was generated.
 - Show a clear "generation interrupted" message.
 
-## Try it
+## Guided recall
+
+<FillBlank
+  prompt="Streaming uses ___ Events (SSE). The key UX metric is time-to-___-token."
+  answers={["Server-Sent", "first"]}
+  hints={["Three words.", "The very first one."]}
+/>
+
+## Check your understanding
 
 <SandboxExercise
   language="javascript"
@@ -138,8 +163,6 @@ console.log(parseSSEEvents(raw));`}
 testCases={["parseSSEEvents returns combined text"]}
 />
 
-## Check your understanding
-
 <Quiz
   questions={[
     {
@@ -161,14 +184,14 @@ testCases={["parseSSEEvents returns combined text"]}
   ]}
 />
 
-<FillBlank
-  prompt="Streaming uses ___ Events (SSE). The key UX metric is time-to-___-token."
-  answers={["Server-Sent", "first"]}
-  hints={["Three words.", "The very first one."]}
-/>
+
 
 ## What you learned
 
 - Streaming shows tokens as they arrive, reducing perceived latency. Time-to-first-token is the key metric.
 - SSE delivers `data:` lines with JSON deltas. Parse with ReadableStream + TextDecoder.
 - Always handle mid-stream errors: save partial output and show a clear interruption message.
+
+## Protocol reference
+
+Consult the [Anthropic streaming contract](https://platform.claude.com/docs/en/build-with-claude/streaming) for this event shape and the [OpenAI Responses streaming reference](https://platform.openai.com/docs/api-reference/responses-streaming) for a different provider contract. The exercise parses an already complete fixture; it is not a general network stream parser.

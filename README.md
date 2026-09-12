@@ -85,7 +85,7 @@ Next.js 15 (App Router) · TypeScript strict · Tailwind v4 · Supabase (19 tabl
 
 **Total: 15 phases · 668 lessons**
 
-Phase 0 includes an eight-lesson reading and testing bridge with offline guided practice and competency quizzes. Legacy LP-1.0 migration is tracked in [the curriculum conformance inventory](standards/pedagogy/CONFORMANCE.md).
+Phase 0 includes an eight-lesson reading and testing bridge with offline guided practice and competency quizzes. All 668 lessons now pass the current structural LP audit and compile as MDX. Technical corrections, executable-example checks, and standards-claim boundaries are tracked in [the curriculum conformance inventory](standards/pedagogy/CONFORMANCE.md).
 
 Standards: ACM CS2023 · SWEBOK v4 · SFIA 9 · CSTA K-12 · AP CS Principles · AP CS A · ISTE
 

@@ -6,54 +6,27 @@ module: "q-8-capstone-order-book"
 order: 8
 estimatedMinutes: 180
 difficulty: 5
-prerequisites:
-  - "q-2-ieee-754-numerics"
-  - "q-4-lock-free-data-structures"
-  - "q-6-market-data-itch-ouch"
-standards:
-  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
-  cs2023: []
-  swebok: []
-  bloom: "create"
-  sfia: 5
-  dreyfus: "proficient"
-vocabulary:
-  - limit-order-book
-  - price-level
-  - best-bid
-  - best-ask
-  - top-of-book
-  - mid-price
-  - spread
-  - tick-size
-  - integer-price
-  - book-update-event
-  - add-order-message
-  - order-executed-message
-  - order-cancel-message
-  - order-id-map
-  - array-of-levels
-  - hot-path
-  - tail-latency
-  - rdtsc
-  - tsc-frequency
-  - latency-percentile
-  - hash-anchored-artifact
-learningOutcomes:
-  - "Build a limit order book in C++23 that ingests ITCH Add/Execute/Cancel messages and maintains bid and ask price levels"
-  - "Implement O(1) best-bid and best-ask retrieval and compute mid-price and spread in integer ticks"
-  - "Emit book-update events into the SPSC lock-free ring from q-4 without taking a lock on the hot path"
-  - "Profile per-message handling latency with rdtsc and report p50/p99/p99.9 percentiles"
-  - "Produce a single bundle (source + build output + latency report), hash it with SHA-256, and anchor it via DURA /verify"
-professionalContext: "The order book is the single most-rewritten data structure in low-latency trading. Every market-making and arbitrage desk maintains one, and a candidate who can build one — correctly handling partial fills, cancels, and the integer-price representation real venues use — is demonstrating the exact skill the desk hires for. The capstone forces you to integrate the whole phase: IEEE 754 reasoning about why prices are integers, not doubles (q-2); cache-aware layout so the hot path stays in L1 (q-3); the SPSC ring and memory orderings that hand events to a downstream strategy thread without a lock (q-4); and the ITCH wire format the book consumes (q-6). The hash-anchored artifact lets an interviewer download your source, recompute the hash, confirm it is the bytes you committed, and read a latency report you can defend line by line."
+prerequisites: ["12/12-7/07","12/12-4/04","12/12-1/09"]
+standards: {"primaryAnchor":"ISO/IEC 14882:2024 (C++23)","cs2023":[],"swebok":[],"bloom":"create","sfia":5,"dreyfus":"proficient"}
+vocabulary: ["limit-order-book","price-level","best-bid","best-ask","top-of-book","mid-price","spread","tick-size","integer-price","book-update-event","add-order-message","order-executed-message","order-cancel-message","order-id-map","array-of-levels","hot-path","tail-latency","rdtsc","tsc-frequency","latency-percentile","hash-anchored-artifact"]
+learningOutcomes: ["Design identity and aggregate invariants with the correct trace","Explain invalid-event and gap handling","Propose differential replay tests before performance claims"]
+professionalContext: "Design a single-symbol educational book for add(id, side, priceTicks, quantity), execute(id, quantity), and cancel(id). Trace add A bid100 qty5, add B bid100 qty3, execute A qty2, cancel B. Explain invariants, invalid-event handling, gap behavior, and a replay-based extension that compares an optimized implementation with a simple reference before benchmarking."
 thresholdConcept: false
 ---
 
-## Why this lesson exists
+## Why this matters
 
 A trading strategy is only as good as its picture of the market. That picture is the order book: at every instant, which prices buyers are bidding, which prices sellers are asking, and how much size sits at each. The strategy reads the top of that book — the highest bid and lowest ask — thousands of times a second and decides whether to send an order. If your book is wrong by one message, or slow by one microsecond, the strategy trades on stale truth and loses money.
 
 This is the capstone of Phase Q. Across q-1 through q-7 you built the parts: the C++ subset HFT teams write in, integer numerics, cache-aware layout, the lock-free SPSC ring, kernel-bypass networking, and the ITCH/OUCH and FIX wire formats. Here you assemble them into one program that does real work — consume a stream of ITCH messages, maintain a correct book, and hand book-update events to a downstream thread through the lock-free ring, all on a measured hot path. You will profile it, bundle it, hash it, and anchor it via DURA `/verify` so the artifact is auditable.
+
+## Start with something familiar
+
+A live inventory ledger needs each adjustment applied once, in order, and against the item it actually refers to.
+
+## The mental model
+
+> An order book combines per-order identity with aggregated price levels and an explicit feed-consistency state. Correctness under cancellation, execution, duplicates, and gaps comes before a latency claim.
 
 ## The first-principles picture
 
@@ -395,165 +368,32 @@ Two measurement disciplines that separate a credible report from a misleading on
 
 Before you build the C++ version, prove you have the book invariant right. The logic is identical in any language; here you implement it in TypeScript so you can run it in the browser and watch the top of book react to each event. Integer prices, three handlers, O(1) top-of-book via remembered cursors — the same mental model, no toolchain required.
 
-<SandboxExercise
-  language="typescript"
-  instructions="Implement a minimal integer-price order book. Prices are integers (cents). You maintain bidQty and askQty as Maps from price to total resting quantity, plus an orders Map from id to {price, qty, isBuy}. Implement add(id, isBuy, price, qty), cancel(id) (remove all of that order's remaining qty from its level), and bestBid()/bestAsk() (highest key with non-zero bid qty / lowest key with non-zero ask qty, or null if that side is empty). Then mid() returns (bestBid + bestAsk) / 2 or null. The provided test sequence adds three bids and two asks, cancels one bid, and checks the top of book updates correctly."
-  initialCode={`type Resting = { price: number; qty: number; isBuy: boolean };
 
-class OrderBook {
-  private bidQty = new Map<number, number>();
-  private askQty = new Map<number, number>();
-  private orders = new Map<number, Resting>();
-
-  add(id: number, isBuy: boolean, price: number, qty: number): void {
-    // TODO: record the order in this.orders, then add qty to the
-    // correct side's level map (create the entry if absent).
-  }
-
-  cancel(id: number): void {
-    // TODO: look up the order; subtract its remaining qty from its
-    // level; delete the order from this.orders. If the level hits 0,
-    // delete the level entry so it stops counting as a best candidate.
-  }
-
-  bestBid(): number | null {
-    // TODO: highest price among bidQty entries with qty > 0, else null.
-    return null;
-  }
-
-  bestAsk(): number | null {
-    // TODO: lowest price among askQty entries with qty > 0, else null.
-    return null;
-  }
-
-  mid(): number | null {
-    const b = this.bestBid();
-    const a = this.bestAsk();
-    return b === null || a === null ? null : (b + a) / 2;
-  }
-}
-
-const book = new OrderBook();
-book.add(1, true, 4210, 100);
-book.add(2, true, 4209, 200);
-book.add(3, true, 4208, 50);
-book.add(4, false, 4212, 100);
-book.add(5, false, 4213, 75);
-console.log("best bid", book.bestBid(), "best ask", book.bestAsk(), "mid", book.mid());
-book.cancel(1); // remove the top bid
-console.log("after cancel: best bid", book.bestBid(), "mid", book.mid());`}
-  solution={`type Resting = { price: number; qty: number; isBuy: boolean };
-
-class OrderBook {
-  private bidQty = new Map<number, number>();
-  private askQty = new Map<number, number>();
-  private orders = new Map<number, Resting>();
-
-  add(id: number, isBuy: boolean, price: number, qty: number): void {
-    this.orders.set(id, { price, qty, isBuy });
-    const side = isBuy ? this.bidQty : this.askQty;
-    side.set(price, (side.get(price) ?? 0) + qty);
-  }
-
-  cancel(id: number): void {
-    const o = this.orders.get(id);
-    if (!o) return;
-    const side = o.isBuy ? this.bidQty : this.askQty;
-    const remaining = (side.get(o.price) ?? 0) - o.qty;
-    if (remaining <= 0) side.delete(o.price);
-    else side.set(o.price, remaining);
-    this.orders.delete(id);
-  }
-
-  bestBid(): number | null {
-    let best: number | null = null;
-    for (const [price, qty] of this.bidQty) {
-      if (qty > 0 && (best === null || price > best)) best = price;
-    }
-    return best;
-  }
-
-  bestAsk(): number | null {
-    let best: number | null = null;
-    for (const [price, qty] of this.askQty) {
-      if (qty > 0 && (best === null || price < best)) best = price;
-    }
-    return best;
-  }
-
-  mid(): number | null {
-    const b = this.bestBid();
-    const a = this.bestAsk();
-    return b === null || a === null ? null : (b + a) / 2;
-  }
-}
-
-const book = new OrderBook();
-book.add(1, true, 4210, 100);
-book.add(2, true, 4209, 200);
-book.add(3, true, 4208, 50);
-book.add(4, false, 4212, 100);
-book.add(5, false, 4213, 75);
-console.log("best bid", book.bestBid(), "best ask", book.bestAsk(), "mid", book.mid());
-book.cancel(1); // remove the top bid
-console.log("after cancel: best bid", book.bestBid(), "mid", book.mid());`}
-testCases={[
-"After five adds, best bid is 4210, best ask is 4212, mid is 4211",
-"After cancelling order 1 (the 4210 bid), best bid drops to 4209 and mid becomes 4210.5",
-"bestBid and bestAsk return null when their side has no resting quantity",
-"Cancelling an unknown order id is a no-op, not a crash",
-]}
-/>
 
 ## Checkpoint — reason about the design before you build
 
 These three questions check that you can defend the design decisions the build encodes. Answer them before you write the C++ — they are the reasoning the competency check below asks you to put into practice.
 
-<Quiz
-  questions={[
-    {
-      question:
-        "Your book stores prices as `double`. Two ITCH Add messages arrive for what a trader reads as the same price, $42.10. One was computed as 4210 ticks × 0.01, the other parsed directly. They end up in different price-level slots and the book reports a one-cent-wide phantom level. What is the root cause and the fix?",
-      options: [
-        "The ITCH feed is corrupt; request a retransmission",
-        "binary64 cannot represent 0.01 or 42.10 exactly (q-2), so 4210 × 0.01 and a directly-parsed 42.10 can differ in their low bits and compare unequal; the fix is to never use double for price — keep the venue's integer tick representation (ITCH already delivers price as a 4-byte integer in 1/10000-dollar units) and store Price as a uint32_t so equality and ordering are exact",
-        "Increase the floating-point comparison epsilon to 0.005 so near-equal prices merge",
-        "Switch the levels container from std::map to std::unordered_map",
-      ],
-      correct: 1,
-      explanation:
-        "This is the q-2 numerics lesson applied directly. 0.01 and 42.10 have no exact binary64 representation, so arithmetic that 'should' produce the same price can produce two distinct doubles whose bits differ — and a map keyed on double then files them as two levels. Epsilon comparison (option 2) papers over it and breaks the total ordering a sorted book needs. The container choice (option 3) is irrelevant to the equality bug. The feed is fine (option 1) — it sent integers; the bug is the program converting them to double. The fix is structural: prices are integers end to end, which is exactly why the capstone types Price as uint32_t.",
-    },
-    {
-      question:
-        "After handling each ITCH message, the feed thread pushes a BookUpdate into the SPSC ring for the strategy thread. A reviewer asks why you used the lock-free ring from q-4 instead of a std::mutex-guarded std::queue, given the mutex version is simpler. What is the strongest answer?",
-      options: [
-        "The mutex version is wrong and would corrupt data",
-        "A mutex on the hot path adds an unbounded tail: under contention a lock acquire can block the feed thread on the strategy thread's scheduling, and a single blocked push stalls feed processing — the exact tail-latency failure trading systems cannot tolerate; the SPSC ring's push is wait-free (a release store to the write index, no kernel call, no allocation), so the feed thread's per-message cost stays bounded, and the acquire/release pairing guarantees the consumer reads a complete BookUpdate or none, never a torn struct",
-        "Lock-free is always faster than locks in every case",
-        "std::queue cannot store trivially-copyable structs",
-      ],
-      correct: 1,
-      explanation:
-        "The mutex version is correct (option 1 is wrong) and std::queue holds POD fine (option 4 is wrong). 'Lock-free is always faster' (option 3) is false in general — uncontended mutexes are cheap. The real argument is about the tail: a mutex introduces a path where the feed thread can block on the strategy thread, and in HFT the cost is not the average lock time but the worst case when it does contend, which is unbounded with respect to your code. The SPSC ring's push is wait-free and allocation-free, bounding the per-message cost, and the q-4 acquire/release contract prevents torn reads. Bounded tail latency is the whole reason the ring exists.",
-    },
-    {
-      question:
-        "Your latency report says 'p50 = 38 cycles, p99 = 41 cycles, p99.9 = 9,800 cycles.' A reviewer flags the p99.9. What is the most likely real-world cause, and does it invalidate the book design?",
-      options: [
-        "The book is fundamentally broken; redesign the data structure",
-        "The p99.9 spike is almost certainly a reseat_best scan that ran when an edit emptied the current best level and had to walk to the next non-empty slot, or an L1/L2 cache miss / page fault when an edit touched a cold part of the price band; it does not invalidate the array-of-levels design — it identifies the design's known slow path; you'd document it, and could bound it further by capping scan distance or keeping a secondary index of populated levels, but a rare bounded scan amortizing to near-O(1) is the expected, defensible behavior",
-        "rdtsc is unreliable above p99 and the number should be discarded",
-        "The percentile calculation is wrong; p99.9 cannot exceed p99 by that much",
-      ],
-      correct: 1,
-      explanation:
-        "A two-order-of-magnitude jump from p99 to p99.9 is the signature of a rare slow path, not a broken design (option 1) or a measurement artifact (option 3 — rdtsc is fine; __rdtscp orders against prior instructions and, paired with LFENCE as in the harness, brackets the timed span cleanly). p99.9 CAN exceed p99 by orders of magnitude — that is exactly what tail latency means, so option 4 misunderstands percentiles. In this book the rare slow path is reseat_best (scanning for the next best level after the current one empties) and cold-cache touches when an edit lands outside the hot price band. The honest move is to name the cause in the report and, if needed, bound it — capping scan distance or maintaining a side index of non-empty levels. Knowing and documenting your own tail is the proficiency the capstone certifies.",
-    },
-  ]}
-/>
+
+
+## Guided practice
+
+After the stated execute and cancel, should bid100 contain quantity 3 or quantity 6?
+
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
+
+Quantity3. The execution reduces A from 5 to 3, and canceling B removes its remaining3.
+
+</details>
 
 ## Check your understanding
+
+<WrittenExercise
+ instructions={"Design a single-symbol educational book for add(id, side, priceTicks, quantity), execute(id, quantity), and cancel(id). Trace add A bid100 qty5, add B bid100 qty3, execute A qty2, cancel B. Explain invariants, invalid-event handling, gap behavior, and a replay-based extension that compares an optimized implementation with a simple reference before benchmarking."}
+ rubric={["Design identity and aggregate invariants with the correct trace","Explain invalid-event and gap handling","Propose differential replay tests before performance claims"]}
+ modelAnswer={"After the two adds, bid100 has quantity 8. Executing2 from A leaves A quantity 3 and level quantity 6; canceling B leaves level quantity 3. Store each live ID once, require positive add quantities, reject execution above remaining quantity, and remove zero-size orders and empty levels. Define duplicate and unknown-ID behavior explicitly rather than silently corrupt totals. A detected feed gap marks the book untrusted and triggers the specified recovery process before publishing trusted decisions. Replay identical deterministic traces into a simple reference and optimized version, compare every state transition, then benchmark representative traces with correctness checks and declared timing boundaries. This teaching model does not claim full venue protocol coverage."}
+/>
 
 This is a `create`-level capstone: the competency check is that you **build** the artifact, not that you recognize facts about it. Work through the checklist, then do the open-ended extension. You have demonstrated competency when every box is checked and your bundle verifies.
 
@@ -576,22 +416,21 @@ A <VocabTooltip slug="hash-anchored-artifact">hash-anchored artifact</VocabToolt
 - **Add the consumer.** Write the strategy-thread side that drains the SPSC ring with `pop()`, detects sequence gaps via `BookUpdate::seq`, and prints mid/spread — turning the producer-only capstone into an end-to-end two-thread pipeline.
 - **Order-by-order book.** Extend the aggregated price levels into FIFO queues per level so you can model queue position, and show that top-of-book reads stay O(1).
 
+<Quiz question={"After add A qty5, add B qty3 at bid100, execute A qty2, cancel B, what remains at bid100?"} options={["Quantity3","Quantity6","Quantity8"]} answer={0} explanation={"A retains3 and B is removed. Aggregate state must agree with the remaining live orders."} />
+
 ## What you learned
 
-- An order book is two sorted price-to-quantity structures plus an order-id table; every ITCH Add/Execute/Cancel message is a bounded edit to those three structures, and the top of book is read off remembered best-price cursors in O(1).
-- Prices are integers (the venue's tick units), never doubles — the q-2 reason made concrete: binary64 cannot represent decimal prices exactly, so integer ticks are the only representation with exact equality and total ordering.
-- The array-of-levels layout keeps the hot price band contiguous in cache (q-3), and `reseat_best` is the single bounded scan that runs only when an edit empties the current best level.
-- Book-update events leave the feed thread for the strategy thread through the q-4 SPSC ring's wait-free `push`, with the acquire/release pairing guaranteeing no torn reads and no lock on the hot path.
-- You profile per-message cost with `rdtscp`, report p50/p99/p99.9 in cycles and nanoseconds (after measuring the TSC frequency), and judge the system by its tail — not its average.
-- The deliverable is a bundle (source + build output + latency report + correctness note) whose SHA-256 you anchor via DURA `/verify`, a generic certificate lookup that proves authenticity and integrity, not quality.
+- Design identity and aggregate invariants with the correct trace
+- Explain invalid-event and gap handling
+- Propose differential replay tests before performance claims
 
 ## What's next — beyond Phase Q
 
-You have a working, measured, hash-anchored order book — the artifact a low-latency desk hires for. The skills compound outward:
+The exercise can produce a reviewable educational book and a measurement report. The artifact still needs protocol coverage, operational controls, and independent validation before it could serve a production purpose. Possible extensions include:
 
 - **Strategy layer**: the BookUpdate stream you produce is the input to a market-making or statistical-arbitrage strategy; the next natural build is the consumer that reads the ring and decides when to quote.
 - **Multi-symbol and order-by-order books**: extend from aggregated price levels to a full order-by-order book (FIFO queues per level) when you need queue-position modeling.
-- **Kernel-bypass ingest**: wire the q-5 DPDK/io_uring path in front of the ITCH parser so packets reach the book without the kernel network stack.
+- **Kernel-bypass ingest**: wire the q-5 DPDK/io_uring path in front of the ITCH parser and measure its actual kernel participation and end-to-end behavior; io_uring is not full kernel-stack bypass.
 - **Determinism for risk and compliance**: the q-2 deterministic-FP discipline matters again when the same feed must replay bit-identically for post-trade reconstruction.
 
-Phase Q taught you the substrate the whole industry rewrites. This capstone is the proof you can assemble it.
+These exercises connect numeric representation, memory layout, concurrency, and protocol correctness. They provide evidence about the tested model, not certification for live trading.

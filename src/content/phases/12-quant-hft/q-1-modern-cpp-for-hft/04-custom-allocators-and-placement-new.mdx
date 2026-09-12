@@ -6,32 +6,11 @@ module: "q-1-modern-cpp-for-hft"
 order: 4
 estimatedMinutes: 40
 difficulty: 5
-prerequisites:
-  - "q-1-modern-cpp-for-hft/02-crtp-and-policy-classes"
-standards:
-  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
-  cs2023: []
-  swebok: []
-  bloom: "apply"
-  sfia: 4
-  dreyfus: "proficient"
-vocabulary:
-  - arena-allocator
-  - slab-allocator
-  - object-pool
-  - placement-new
-  - memory-resource
-  - pmr-allocator
-  - stack-allocator
-  - heap-allocation
-  - free-store
-  - allocation-latency
-learningOutcomes:
-  - "After this lesson you can implement a bump-pointer arena allocator and explain why it is faster than malloc on a hot path"
-  - "After this lesson you can use placement new to construct objects in pre-allocated storage without invoking the global allocator"
-  - "After this lesson you can implement a fixed-size slab pool for order objects and return objects to the pool in O(1)"
-  - "After this lesson you can plug a custom memory resource into std::pmr containers without rewriting the container"
-professionalContext: "The global allocator (malloc/new) is a shared resource protected by a lock. In a multi-threaded trading system, every `new Order` on the hot path is a potential lock contention, a potential kernel entry, a potential TLB miss, and hundreds of nanoseconds of variance. HFT systems sidestep this entirely: every object that can appear on the hot path is allocated from a pre-allocated pool at startup. The runtime cost of getting an object from a pool is a pointer bump and a comparison — under 5 nanoseconds, zero kernel involvement, deterministic. This is the memory-management strategy behind every production order book and market-data handler the industry ships."
+prerequisites: ["12/12-1/03"]
+standards: {"primaryAnchor":"ISO/IEC 14882:2024 (C++23)","cs2023":[],"swebok":[],"bloom":"apply","sfia":4,"dreyfus":"proficient"}
+vocabulary: ["arena-allocator","slab-allocator","object-pool","placement-new","memory-resource","pmr-allocator","stack-allocator","heap-allocation","free-store","allocation-latency"]
+learningOutcomes: ["Provide size and alignment suitable for Order","Separate construction and destruction from storage allocation","Explain why general object copying requires lifetime-aware operations"]
+professionalContext: "Write a C++17 fragment that constructs an Order containing ID 7 in properly aligned local raw storage, reads its ID, and destroys the object exactly once. State why copying the raw bytes is not a general substitute for copying arbitrary C++ objects."
 thresholdConcept: false
 ---
 
@@ -40,6 +19,14 @@ thresholdConcept: false
 An order arrives. Your strategy decides to trade. It constructs an `Order` object: `Order* o = new Order(price, qty);`. That one line can take anywhere from 50 nanoseconds (heap in fast path, thread-local cache) to several microseconds (allocation under pressure, TLB miss, lock contention). The exact cost is non-deterministic — it depends on fragmentation history, other threads' allocation patterns, and the allocator's internal state.
 
 Non-determinism on the hot path is the enemy. An allocator that is usually fast but occasionally slow produces exactly the tail latency that loses races. The solution is to never call the global allocator on the hot path at all.
+
+## Start with something familiar
+
+Reserving a correctly sized workbench does not assemble the object on it, and taking the object apart does not dispose of the workbench.
+
+## The mental model
+
+> Raw storage, object construction, destruction, and storage release are separate lifetime operations. Placement construction needs sufficient size and alignment and does not itself allocate the backing storage.
 
 ## First principles: why malloc is slow
 
@@ -57,33 +44,28 @@ An <VocabTooltip slug="arena-allocator">arena allocator</VocabTooltip> is a sing
 
 ```cpp
 #include <cstddef>
-#include <cassert>
-#include <cstdint>
-#include <new>       // std::align, placement new
-
-// A non-thread-safe arena for one thread's hot-path allocations.
-// Backed by a fixed char array: no system call, no lock, no fragmentation.
+#include <memory>
+#include <new>
+// Single-threaded raw storage; destroy live objects before reset.
 template <std::size_t N>
 class Arena {
+    static_assert(N > 0);
 public:
-    // Allocate `n` bytes aligned to `align`. Returns nullptr on overflow.
-    [[nodiscard]] void* allocate(std::size_t n,
-                                  std::size_t align = alignof(std::max_align_t)) noexcept {
-        // Compute how many bytes of padding are needed for alignment.
-        const std::size_t pad = (align - (cursor_ % align)) % align;
-        if (cursor_ + pad + n > N) return nullptr; // overflow — caller must handle
-        void* ptr = buf_ + cursor_ + pad;
-        cursor_ += pad + n;
-        return ptr;
+    [[nodiscard]] void* allocate(std::size_t size,
+        std::size_t alignment = alignof(std::max_align_t)) noexcept {
+        if (size == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0)
+            return nullptr;
+        if (size > N - cursor_) return nullptr;
+        void* candidate = buffer_ + cursor_;
+        std::size_t space = N - cursor_;
+        if (!std::align(alignment, size, candidate, space)) return nullptr;
+        cursor_ = static_cast<std::byte*>(candidate) - buffer_ + size;
+        return candidate;
     }
-
-    // Reset all allocations in O(1). Call at a safe epoch boundary, not mid-burst.
     void reset() noexcept { cursor_ = 0; }
-
     std::size_t used() const noexcept { return cursor_; }
-
 private:
-    alignas(64) char buf_[N];  // cache-line aligned; lives in BSS/data, not heap
+    alignas(std::max_align_t) std::byte buffer_[N];
     std::size_t cursor_ = 0;
 };
 ```
@@ -208,117 +190,37 @@ The PMR design keeps the container code unchanged — `std::pmr::vector<T>` is t
 
 ## Apply it
 
-<SandboxExercise
-  language="javascript"
-  instructions="Implement a SlabPool class in JavaScript. It manages a fixed array of pre-allocated slots (represented as objects with a 'slot' property). acquire() returns the next free slot (or null if exhausted). release(slot) returns a slot to the pool. Pool has a fixed capacity set at construction. Model the free stack with a simple array and a top counter."
-  initialCode={`class SlabPool {
-  constructor(capacity) {
-    this.capacity = capacity;
-    // TODO: create the slots array and free stack
-  }
 
-acquire() {
-// TODO: return next free slot or null if exhausted
-}
 
-release(slot) {
-// TODO: return slot to the pool
-}
+## Guided practice
 
-freeCount() {
-return 0; // TODO
-}
-}
+Should this placement-constructed stack object be released with delete order?
 
-const pool = new SlabPool(3);
-console.log(pool.freeCount()); // 3
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-const a = pool.acquire();
-const b = pool.acquire();
-console.log(pool.freeCount()); // 1
+No. That would attempt to deallocate storage that was not obtained by the matching allocating new expression.
 
-pool.release(a);
-console.log(pool.freeCount()); // 2
-
-const c = pool.acquire();
-const d = pool.acquire();
-const e = pool.acquire();
-console.log(e); // null — pool exhausted`}
-  solution={`class SlabPool {
-constructor(capacity) {
-this.capacity = capacity;
-this.slots = Array.from({ length: capacity }, (_, i) => ({ slot: i }));
-this.free = [...this.slots];
-this.top = capacity;
-}
-
-acquire() {
-if (this.top === 0) return null;
-return this.free[--this.top];
-}
-
-release(slot) {
-if (!slot) return;
-this.free[this.top++] = slot;
-}
-
-freeCount() {
-return this.top;
-}
-}
-
-const pool = new SlabPool(3);
-console.log(pool.freeCount());
-const a = pool.acquire();
-const b = pool.acquire();
-console.log(pool.freeCount());
-pool.release(a);
-console.log(pool.freeCount());
-const c = pool.acquire();
-const d = pool.acquire();
-const e = pool.acquire();
-console.log(e);`}
-testCases={[
-"freeCount() returns capacity before any acquire",
-"acquire() returns a non-null slot and decrements freeCount",
-"release() returns a slot to the pool and increments freeCount",
-"acquire() returns null when the pool is exhausted",
-]}
-/>
+</details>
 
 ## Check your understanding
 
-<Quiz
-  questions={[
-    {
-      question:
-        "A SlabPool's acquire() calls placement new to construct T in a pre-allocated slot. A colleague says placement new is unnecessary — you could just cast the raw storage to T* and use it directly. What breaks?",
-      options: [
-        "Nothing breaks — a cast is equivalent to placement new for POD types",
-        "The cast is undefined behaviour: it reads T's value before T has been constructed, violating the object lifetime rules; placement new begins T's lifetime in that storage, which is what makes subsequent member accesses well-defined in C++; skipping it means the object's lifetime never starts and any access to its members is UB, even for trivially-constructible types",
-        "The cast would call T's constructor twice",
-        "Placement new is required for alignment reasons; the cast ignores alignment",
-      ],
-      correct: 1,
-      explanation:
-        "C++ has strict object lifetime rules: an object's lifetime begins when storage is allocated AND its constructor completes (or, for trivial types, when storage is obtained with suitable alignment). Without placement new, the storage holds indeterminate bytes and no T object has been created — accessing it through a T* is undefined behaviour. In practice, compilers and modern CPUs often make it appear to work for trivially-constructible types, but the C++ standard does not guarantee it and optimisers can and do break code that relies on it. Placement new is the correct tool: it starts the object's lifetime in already-allocated storage. Alignment is a separate (real) concern handled by alignas on the storage, not by placement new itself.",
-    },
-    {
-      question:
-        "After an arena's `reset()` call, you use placement new to construct a new object at the same address where an object with a non-trivial destructor previously lived. What must you do before the reset?",
-      options: [
-        "Nothing — reset() handles cleanup automatically",
-        "Call the old object's destructor explicitly (`old_ptr->~T()`) before reset(); the arena's reset() is a pointer move only — it does not invoke any destructors, so a non-trivial destructor (e.g. one that releases file handles, sends a cancel message, or updates a reference count) will never run unless called explicitly",
-        "Use `delete old_ptr` to trigger the destructor before reset",
-        "Switch to a slab pool, which calls destructors automatically",
-      ],
-      correct: 1,
-      explanation:
-        "An arena's reset() is a single integer assignment (`cursor_ = 0`); it knows nothing about the types of objects it contains and calls no destructors. For types with non-trivial destructors (those that release resources, update external state, etc.), you must call the destructor manually before the memory is repurposed: `old_ptr->~T()`. Using `delete old_ptr` would be wrong — delete expects the pointer to have been obtained from `::operator new`, which arena memory was not; calling delete on arena memory is undefined behaviour. A slab pool's release() calls the destructor (because it is a typed template and can do `p->~T()`), but an arena is untyped and has no way to do the same.",
-    },
-  ]}
+<WrittenExercise
+ instructions={"Write a C++17 fragment that constructs an Order containing ID 7 in properly aligned local raw storage, reads its ID, and destroys the object exactly once. State why copying the raw bytes is not a general substitute for copying arbitrary C++ objects."}
+ rubric={["Provide size and alignment suitable for Order","Separate construction and destruction from storage allocation","Explain why general object copying requires lifetime-aware operations"]}
+ modelAnswer={"#include <cstddef>\n#include <new>\nstruct Order { explicit Order(int value) : id(value) {} int id; };\nint inspect_order() {\n  alignas(Order) std::byte storage[sizeof(Order)];\n  Order* order = ::new (static_cast<void*>(storage)) Order(7);\n  const int id = order->id;\n  order->~Order();\n  return id;\n}\nThe local storage already exists and placement new starts the Order lifetime there. The explicit destructor ends that lifetime; no delete is used on stack storage. Byte copying does not generally invoke constructors or maintain ownership invariants of non-trivially-copyable objects."}
 />
+
+
 
 ## What's next
 
 The next lesson rounds out the C++ dialect with the `consteval` and `std::expected` tools — how to make compile-time computation mandatory and how to return errors as values without exceptions on the hot path, the two remaining building blocks of the HFT C++ subset.
+
+<Quiz question={"An Order is placement-constructed in aligned local byte storage. How is its lifetime ended?"} options={["Call its destructor exactly once, without deleting the local storage","Call delete on its address","Copy zeros over the storage instead of destruction"]} answer={0} explanation={"Construction, destruction, and storage ownership are separate. Local backing storage must not be passed to delete."} />
+
+## What you learned
+
+- Provide size and alignment suitable for Order
+- Separate construction and destruction from storage allocation
+- Explain why general object copying requires lifetime-aware operations

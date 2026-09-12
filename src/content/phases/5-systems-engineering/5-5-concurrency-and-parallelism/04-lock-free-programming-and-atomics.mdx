@@ -5,33 +5,12 @@ phase: 5
 module: "5-5"
 order: 4
 estimatedMinutes: 20
-difficulty: "advanced"
-standards:
-  cs2023: ["OS-2", "OS-3", "PD-2", "AR-1"]
-  swebok: ["Computing Fundamentals", "Software Construction"]
-  bloom: "analyze"
-  sfia: 3
-  dreyfus: "proficient"
-vocabulary:
-  - atomic-operation
-  - compare-and-swap
-  - memory-ordering
-  - memory-barrier
-  - ABA-problem
-  - lock-free
-  - wait-free
-  - false-sharing
-learningOutcomes:
-  - "Explain why a mutex-protected counter is slower than an atomic counter under high thread contention"
-  - "Describe what a compare-and-swap (CAS) operation does and why it can fail spuriously on some architectures"
-  - "Analyze a CAS retry loop and identify the ABA problem it is susceptible to"
-  - "Distinguish between the five C++ memory orderings and explain which is correct for a simple atomic counter vs. a lock-free queue"
-  - "Identify false sharing in a multi-threaded data structure and explain the cache-line alignment fix"
-prerequisites:
-  - "Understanding of threads and shared memory (Lesson 1 of this module)"
-  - "Understanding of race conditions and mutexes (Lesson 2 of this module)"
-  - "Basic familiarity with C, C++, Go, or Rust syntax"
-  - "Conceptual understanding of CPU caches and cache lines (5-1 Operating Systems)"
+difficulty: 3
+standards: {"cs2023":["OS-2","OS-3","PD-2","AR-1"],"swebok":["Computing Fundamentals","Software Construction"],"bloom":"analyze","sfia":3,"dreyfus":"proficient"}
+vocabulary: ["atomic-operation","compare-and-swap","memory-ordering","memory-barrier","ABA-problem","lock-free","wait-free","false-sharing"]
+learningOutcomes: ["Trace the failed comparison and retry","Distinguish ABA from an ordinary changed-value failure","Compare system-wide and per-operation progress guarantees"]
+prerequisites: ["5/5-5/03"]
+thresholdConcept: false
 ---
 
 ## Why this matters
@@ -39,6 +18,14 @@ prerequisites:
 Mutexes work. But at high thread counts — dozens of threads hammering a shared counter, a cache, or a work queue — mutexes become a bottleneck. Only one thread runs the critical section at a time, and every other thread is parked waiting. For hot paths in databases, operating system kernels, game engines, and high-frequency trading systems, that serialization is unacceptable.
 
 The alternative is building synchronization directly out of operations the CPU guarantees are atomic — indivisible at the hardware level. Lock-free and wait-free data structures can sustain throughput under contention that would saturate a mutex-based design. They also eliminate the deadlock risk entirely, because you never hold a lock. But the tradeoffs are real: lock-free code is harder to reason about, the correctness proofs are subtle, and the memory model introduces hazards that don't exist in mutex-based code. This lesson gives you the mental model to read, analyze, and write lock-free primitives correctly.
+
+## Start with something familiar
+
+A numbered seal lets a worker replace a value only if the seal still matches, but an identical-looking value can hide intervening changes.
+
+## The mental model
+
+> Compare-and-swap conditionally updates shared state. Repeated retries and memory-order requirements complicate lock-free algorithms; lock-free progress does not guarantee that each particular participant completes promptly.
 
 ## A voting machine that never blocks
 
@@ -311,91 +298,24 @@ These terms have precise formal definitions, and conflating them is a common mis
 
 Most production "lock-free" code (including `java.util.concurrent` and `std::atomic`) is lock-free, not wait-free.
 
-## Practice
+## Guided practice
 
-<SandboxExercise language="javascript">
-{`// Simulate CAS semantics in JavaScript to build intuition.
-// JS doesn't have real atomics for this demo, but we can model
-// the CAS retry loop pattern using closures.
+Can one thread repeatedly lose a CAS race while other threads continue completing operations?
 
-// Simulated shared integer (normally this would be a SharedArrayBuffer + Atomics)
-let sharedValue = 0;
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-// Simulated CAS: returns true if swap succeeded, false if value changed
-function compareAndSwap(expectedRef, desired) {
-// In real hardware: this entire function executes as one indivisible instruction
-if (sharedValue === expectedRef.value) {
-sharedValue = desired;
-return true;
-}
-// On failure, update the expected ref to the actual current value
-// so the caller can retry with fresh data
-expectedRef.value = sharedValue;
-return false;
-}
+Yes. System-wide progress does not itself prevent starvation of a particular participant.
 
-// Lock-free increment using CAS retry loop
-function lockFreeIncrement() {
-const expected = { value: sharedValue }; // read current value
-while (true) {
-const desired = expected.value + 1;
-if (compareAndSwap(expected, desired)) {
-return; // Won the race — update committed
-}
-// Lost the race — expected.value was updated to actual value by CAS
-// Retry with the fresh value (desired will be recomputed next iteration)
-}
-}
-
-// Run 1000 "concurrent" increments sequentially (JS is single-threaded,
-// so no real concurrency, but the pattern is identical)
-for (let i = 0; i < 1000; i++) {
-lockFreeIncrement();
-}
-console.log("Final value:", sharedValue); // Should be 1000
-
-// Now model the ABA problem:
-// Reset and simulate a scenario where CAS incorrectly succeeds
-
-sharedValue = 100;
-const myExpected = { value: sharedValue }; // Thread 1 reads 100
-
-// "Thread 2" runs between Thread 1's read and CAS:
-sharedValue = 200; // Thread 2 changes to 200
-sharedValue = 100; // Thread 2 changes back to 100
-
-// Thread 1 resumes — CAS sees 100 and succeeds, even though the value changed!
-const abaResult = compareAndSwap(myExpected, 150);
-console.log("ABA CAS succeeded:", abaResult); // true — but the intermediate change was invisible
-console.log("Final after ABA:", sharedValue); // 150
-
-// The fix: add a version counter
-let versionedValue = { value: 100, version: 0 };
-
-function versionedCAS(expectedVal, expectedVer, desired) {
-if (versionedValue.value === expectedVal && versionedValue.version === expectedVer) {
-versionedValue = { value: desired, version: expectedVer + 1 };
-return true;
-}
-return false;
-}
-
-// Read value AND version atomically
-const readVal = versionedValue.value;
-const readVer = versionedValue.version;
-
-// "Thread 2" changes value A→B→A
-versionedValue = { value: 200, version: 1 };
-versionedValue = { value: 100, version: 2 };
-
-// Thread 1 CAS now fails — version mismatch catches the ABA
-const fixedABAResult = versionedCAS(readVal, readVer, 150);
-console.log("Versioned CAS after ABA:", fixedABAResult); // false — correctly rejected
-`}
-
-</SandboxExercise>
+</details>
 
 ## Check your understanding
+
+<WrittenExercise
+ instructions={"Analyze a compare-and-swap loop where A reads 4, B changes the value to 5, and A attempts CAS(4,5). Then compare a sequence where a pointer changes A to B and back to A before a stale CAS. Explain failed retries, the ABA problem, and the difference between lock-free and wait-free progress."}
+ rubric={["Traces the failed comparison and retry","Distinguishes ABA from an ordinary changed-value failure","Compares system-wide and per-operation progress guarantees"]}
+ modelAnswer={"In the counter sequence, A's CAS fails because the current value is 5 rather than the expected 4; A must reread and recompute. In the pointer sequence, equality with A can hide intervening changes, especially if associated memory has been reclaimed or repurposed. Version tagging and safe reclamation protocols address different aspects and require careful design. Lock-free guarantees system-wide progress under its assumptions, while wait-free requires each operation to finish within a bounded number of its steps. Neither label alone supplies a correct memory-reclamation or memory-ordering implementation."}
+/>
 
 <Quiz
   question="An atomic fetch-and-add operation on an x86 CPU uses the LOCK prefix. What does the LOCK prefix guarantee?"
@@ -443,15 +363,11 @@ console.log("Versioned CAS after ABA:", fixedABAResult); // false — correctly 
 />
 <FillBlank
   question="A data structure where at least one thread always makes progress is called ___ ___, while one where every thread completes in a bounded number of steps regardless of other threads is called ___ ___."
-  answer="lock free, wait free"
+  answers={["lock", "free", "wait", "free"]}
 />
 
 ## What you learned
 
-- CPU atomic instructions (`LOCK XADD`, `CMPXCHG`, ARM's `LDREX`/`STREX`) provide indivisible read-modify-write operations that eliminate the lock acquisition cost under high thread contention
-- Compare-and-swap enables lock-free CAS retry loops: read the current value, compute the new value, attempt to swap — retry if another thread changed the value first
-- The **ABA problem** causes CAS to succeed incorrectly when a value changes A → B → A; versioned (stamped) references fix it by pairing a value with a monotonically-increasing version counter
-- Memory orderings (`relaxed`, `acquire`, `release`, `acq_rel`, `seq_cst`) control CPU and compiler reordering; using `relaxed` where `release`/`acquire` is required causes subtle data visibility bugs that only appear on weakly-ordered architectures like ARM
-- **False sharing** occurs when logically-independent variables share a cache line, causing unnecessary cache coherence traffic; padding fields to cache-line size (64 bytes) eliminates it
-
-The next lesson moves from individual primitives to architectural patterns — actors, communicating sequential processes, and work queues — that let you compose lock-free and locking primitives into correct concurrent systems at scale.
+- Trace the failed comparison and retry
+- Distinguish ABA from an ordinary changed-value failure
+- Compare system-wide and per-operation progress guarantees

@@ -99,11 +99,11 @@ These features are present in source. This inventory does not certify the curren
 
 Work that is actively running now.
 
-### Curriculum pedagogy migration
+### Curriculum review and validation
 
 The previously listed gap-fill modules are authored, including TypeScript, OOP, discrete mathematics, queues, concurrency, classical ML, vision, formal methods/GPU, system design, incident management, due diligence, governance, and specialty expansions. Phase 0 now has 24 lessons, including eight lessons on tracing and testing code.
 
-The 16 original Phase 0 lessons now have explicit prerequisites, measurable outcomes, guided practice suited to beginners, and assessment-aligned Bloom tags. A per-lesson LP-1.0 baseline blocks new structural regressions. **403 legacy lessons still need explicit prerequisites and outcomes**; full semantic pedagogy review is incremental. Sixty-five module standards mappings await semantic review and are withheld from learner-facing alignment claims. See [the conformance inventory](standards/pedagogy/CONFORMANCE.md).
+All 668 lessons now pass the current structural LP audit and compile as MDX, with explicit prerequisites, topic-specific outcomes, guided practice, and aligned assessment tasks. Actual MDX execution tests and targeted native checks cover repaired reference programs. The original baseline remains historical evidence; structural success does not certify every technical claim or replace specialist review. The 65 pending module mappings have scope decisions, while unverified obsolete AP taxonomies are withheld from current claims. See [the conformance inventory](standards/pedagogy/CONFORMANCE.md) for review boundaries.
 
 ### Supabase go-live
 

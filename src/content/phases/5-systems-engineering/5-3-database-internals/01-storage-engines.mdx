@@ -4,30 +4,37 @@ description: "Understand how databases physically organize data on disk, and why
 phase: 5
 module: "5-3-database-internals"
 order: 1
-difficulty: "intermediate"
+difficulty: 3
 bloom: "analyze"
-vocabulary: ["b-tree", "lsm-tree", "storage-engine", "compaction", "write-amplification"]
-standards:
-  cs2023: ["IM-1"]
-  swebok: ["Software Design"]
-  bloom: "analyze"
-  sfia: 5
-  dreyfus: "proficient"
+vocabulary: ["b-tree","lsm-tree","storage-engine","compaction","write-amplification"]
+standards: {"cs2023":["IM-1"],"swebok":["Software Design"],"bloom":"analyze","sfia":5,"dreyfus":"proficient"}
+estimatedMinutes: 15
+prerequisites: ["4/4-3/07", "3/3-4/04"]
+thresholdConcept: false
+learningOutcomes: ["Compare the actual write paths","Distinguish logical ordering from physical layout","Identify measurements that test the recommendation"]
 ---
 
-## Why storage engines matter
+## Why this matters
 
 When you write `INSERT INTO users (name) VALUES ('Alice')`, you probably assume that row lands somewhere on disk. But _how_ it lands — in what data structure, in what order, with what overhead — is entirely the storage engine's job. The choice of storage engine determines whether your database is fast at reads, fast at writes, or somewhere in between. It is one of the most consequential decisions in database design.
 
 Two families of storage engines dominate the industry: **B-trees** (used by PostgreSQL, MySQL InnoDB, SQLite) and **LSM-trees** (used by RocksDB, Cassandra, LevelDB, and increasingly by newer systems like CockroachDB). They make radically different tradeoffs.
 
+## Start with something familiar
+
+A sorted filing cabinet updates individual drawers; a notebook records new entries quickly and periodically merges them into an ordered archive.
+
+## The mental model
+
+> B-tree and LSM designs make different read, write, and space tradeoffs. Logical key order does not guarantee physically contiguous storage, and compaction shifts rather than eliminates work.
+
 ## B-trees: the read-optimized classic
 
-A B-tree is a self-balancing tree where each node holds multiple keys and pointers to child nodes. The "B" does not stand for binary — a B-tree node can have hundreds of children. This wide branching factor means a B-tree with millions of rows is only 3–4 levels deep. Finding any record requires at most 3–4 disk seeks, which is why B-trees have dominated relational databases for fifty years.
+A B-tree is a balanced ordered search structure with multiple keys and child pointers per node. High fan-out can keep tree height small, but the number of page accesses depends on the tree, record representation, and cache state. Logical key order does not ensure physically adjacent pages.
 
 B-tree nodes correspond to fixed-size disk pages (typically 4KB or 8KB). When you insert a row, the engine finds the correct leaf page and writes the new key in sorted position. If the page is full, it splits into two pages and updates the parent node to point to both. This split can cascade up the tree, but it is rare in practice.
 
-**The write penalty:** Every update to a B-tree is an in-place modification of an existing page. If you update a single byte in a row, the engine still rewrites the entire 4KB page. More importantly, if one logical write requires modifying multiple pages (a split, or a cascade of splits), you need to ensure all those pages are written atomically. This is why B-tree databases require a **write-ahead log** (WAL) — if the system crashes mid-split, the WAL lets the database recover to a consistent state. That means every write actually involves at least two disk writes: one to the WAL, one to the data page.
+**The write tradeoff:** Updates can dirty pages and splits can affect several nodes. Page sizes and update strategies vary by engine; buffered writes need not cause a separate immediate physical write for each logical change. WAL is a common crash-recovery design, while other storage architectures use different durability protocols.
 
 **The read advantage:** Because B-tree pages are always in sorted order and stored in a stable location on disk, range scans are highly efficient. Reading all users with IDs between 1000 and 2000 means finding the leaf page for ID 1000 and then scanning forward — the pages are physically adjacent (or nearly so) on disk.
 
@@ -54,88 +61,26 @@ The choice depends on your workload:
 
 Modern databases blur these lines. PostgreSQL's heap storage is a B-tree variant, but it borrows LSM ideas (like the WAL). RocksDB allows tunable compaction strategies. Understanding the tradeoffs means you can make informed decisions when picking a database and tuning its configuration.
 
-<SandboxExercise
-  title="Simulate a B-Tree Node Search"
-  instructions="A simplified B-tree node stores sorted keys and pointers to children. Implement `btreeSearch(node, targetKey)` that searches a B-tree recursively. The node structure is provided — each node has a `keys` array and a `children` array. Leaf nodes have no children. Return the value if found, or null if not found."
-  starterCode={`// B-tree node structure:
-// { keys: number[], values: any[], children: BTreeNode[] }
-// Leaf nodes: children is empty []
-// Internal nodes: children.length === keys.length + 1
 
-function createLeaf(keys, values) {
-return { keys, values, children: [] };
-}
 
-function createInternal(keys, values, children) {
-return { keys, values, children };
-}
+## Guided practice
 
-// TODO: implement recursive B-tree search
-function btreeSearch(node, targetKey) {
-// 1. Find the index i where node.keys[i] >= targetKey
-// 2. If node.keys[i] === targetKey, return node.values[i]
-// 3. If this is a leaf (no children), return null
-// 4. Otherwise recurse into the appropriate child
-}
+Does an LSM tree eliminate the cost of rewriting stored data?
 
-// Build a small 2-level B-tree manually
-// [20, 40]
-// / | \\
-// [10,15] [25,30] [45,50]
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-const leaf1 = createLeaf([10, 15], ['user10', 'user15']);
-const leaf2 = createLeaf([25, 30], ['user25', 'user30']);
-const leaf3 = createLeaf([45, 50], ['user45', 'user50']);
-const root = createInternal([20, 40], ['user20', 'user40'], [leaf1, leaf2, leaf3]);
+No. Compaction merges and rewrites runs; batching changes when and how that cost occurs.
 
-// Test searches
-console.log(btreeSearch(root, 15)); // should find 'user15'
-console.log(btreeSearch(root, 30)); // should find 'user30'
-console.log(btreeSearch(root, 99)); // should return null
-console.log(btreeSearch(root, 20)); // should find 'user20'
-`}
-  solution={`function createLeaf(keys, values) {
-return { keys, values, children: [] };
-}
-
-function createInternal(keys, values, children) {
-return { keys, values, children };
-}
-
-function btreeSearch(node, targetKey) {
-// Find the first index where keys[i] >= targetKey
-let i = 0;
-while (i < node.keys.length && targetKey > node.keys[i]) {
-i++;
-}
-
-// Exact match found at this node
-if (i < node.keys.length && node.keys[i] === targetKey) {
-return node.values[i];
-}
-
-// If leaf, key doesn't exist
-if (node.children.length === 0) {
-return null;
-}
-
-// Recurse into the appropriate child
-return btreeSearch(node.children[i], targetKey);
-}
-
-const leaf1 = createLeaf([10, 15], ['user10', 'user15']);
-const leaf2 = createLeaf([25, 30], ['user25', 'user30']);
-const leaf3 = createLeaf([45, 50], ['user45', 'user50']);
-const root = createInternal([20, 40], ['user20', 'user40'], [leaf1, leaf2, leaf3]);
-
-console.log(btreeSearch(root, 15)); // 'user15'
-console.log(btreeSearch(root, 30)); // 'user30'
-console.log(btreeSearch(root, 99)); // null
-console.log(btreeSearch(root, 20)); // 'user20'
-`}
-/>
+</details>
 
 ## Check your understanding
+
+<WrittenExercise
+ instructions={"Compare storage designs for a service with sustained writes and occasional key lookups versus a service dominated by short range scans. Analyze memtable flushes, compaction, read amplification, and page updates. State which measurements could overturn your initial choice."}
+ rubric={["Compares the actual write paths","Distinguishes logical ordering from physical layout","Identifies measurements that test the recommendation"]}
+ modelAnswer={"An LSM design is a candidate for sustained writes because it buffers and batches sorted runs, but compaction consumes I/O and multiple runs can increase read work. A B-tree is a candidate for range-heavy reads because its ordered search structure supports locating and traversing keys, though physical placement, cache behavior, and fragmentation affect actual I/O. Neither choice follows from the label alone. Benchmark representative key distributions, tail latency, write amplification, storage use, and compaction or page-split behavior under realistic load."}
+/>
 
 <Quiz
   question="Why do B-tree databases require a write-ahead log (WAL)?"
@@ -174,16 +119,13 @@ console.log(btreeSearch(root, 20)); // 'user20'
 />
 
 <FillBlank
-  sentence="The background process in an LSM-tree database that merges older SSTables together to keep read performance bounded is called ___."
+  question="The background process in an LSM-tree database that merges older SSTables together to keep read performance bounded is called ___."
   answer="compaction"
-  hint="It 'compacts' multiple sorted files into fewer, larger ones"
+  hints={["It 'compacts' multiple sorted files into fewer, larger ones"]}
 />
 
 ## What you learned
 
-- B-trees organize data in sorted, fixed-size pages on disk; reads are fast because range scans are physically sequential
-- B-tree writes modify pages in-place and require a WAL for crash safety, adding write overhead
-- LSM-trees append all writes sequentially to memory then flush to immutable sorted files (SSTables), making writes extremely fast
-- Compaction merges SSTables in the background, but introduces write amplification
-- Write amplification is the ratio of actual disk I/O to logical application writes
-- B-trees win for read-heavy workloads; LSM-trees win for write-heavy workloads like event streams and time-series data
+- Compare the actual write paths
+- Distinguish logical ordering from physical layout
+- Identify measurements that test the recommendation

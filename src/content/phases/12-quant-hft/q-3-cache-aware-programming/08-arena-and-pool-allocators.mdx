@@ -1,47 +1,32 @@
 ---
 title: "Arena and Pool Allocators — Cache-Friendly Allocation Without malloc"
-description: "Why malloc's general-purpose allocator fragments memory and pollutes cache, how arena and pool allocators guarantee contiguous layout and zero runtime allocation overhead, and how to write them in C++23."
+description: "Build bounded single-threaded arenas and lifetime-aware object pools, then test alignment, exhaustion, and stale handles."
 phase: 12
 module: "q-3-cache-aware-programming"
 order: 8
 estimatedMinutes: 50
 difficulty: 4
-prerequisites:
-  - "q-3-cache-aware-programming/07-perf-stat-and-cache-profiling"
-  - "q-1-modern-cpp-for-hft/04-custom-allocators-and-placement-new"
-standards:
-  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
-  cs2023: []
-  swebok: []
-  bloom: "create"
-  sfia: 4
-  dreyfus: "proficient"
-vocabulary:
-  - arena-allocator
-  - pool-allocator
-  - slab-allocator
-  - bump-pointer
-  - memory-fragmentation
-  - std-pmr-memory-resource
-  - monotonic-buffer-resource
-  - unsynchronized-pool-resource
-  - placement-new
-  - free-list
-  - object-pool
-learningOutcomes:
-  - "After this lesson you can implement a bump-pointer arena allocator and explain why deallocation is O(1) for the entire arena"
-  - "After this lesson you can implement a typed object pool with a free-list and allocate/deallocate Order objects without calling malloc on the hot path"
-  - "After this lesson you can wire a pool allocator into a std::pmr-aware container using std::pmr::memory_resource"
-  - "After this lesson you can state the invariants that make arena allocation safe — and the failure modes when those invariants are violated"
-professionalContext: "On the order-management hot path, calling malloc for each new order object is not just slow — it is unpredictably slow. malloc acquires a lock, searches its free-list, potentially calls sbrk or mmap, and returns memory that may be scattered across virtual pages, causing TLB misses on every access. HFT firms pre-allocate all order objects at startup into a typed object pool. The hot path calls pool.alloc() — a single pointer comparison and pointer bump — and returns to work in under 5 nanoseconds. Zero kernel calls, zero lock contention, guaranteed contiguous layout."
+prerequisites: ["12/12-1/04","12/12-3/04"]
+standards: {"primaryAnchor":"ISO/IEC 14882:2024 (C++23)","cs2023":[],"swebok":[],"bloom":"create","sfia":4,"dreyfus":"proficient"}
+vocabulary: ["arena-allocator","pool-allocator","slab-allocator","bump-pointer","memory-fragmentation","std-pmr-memory-resource","monotonic-buffer-resource","unsynchronized-pool-resource","placement-new","free-list","object-pool"]
+learningOutcomes: ["Design explicit ownership, construction, and exhaustion rules","Explain stale-handle and double-release protection","Define lifecycle tests and generation-wrap limitations"]
+professionalContext: "Design a single-threaded fixed-capacity pool for four Order objects. Specify allocation, construction, release, double-release detection, and exhaustion behavior using slot indices plus generation counters. Explain a test sequence showing why a stale handle cannot release a newly allocated object in the same slot."
 thresholdConcept: false
 ---
 
 ## Why this matters
 
-Your order-management system creates and destroys Order objects on every fill, cancel, and new order arrival. Each `new Order(...)` calls `malloc`, which — even in a fast implementation — costs 20–100 ns and may acquire a lock. On a busy book with 500,000 order events per second, those allocations alone consume 10–50 ms of CPU time per second. Worse, the objects returned by malloc are scattered across virtual memory, so the order-ID lookup table incurs TLB misses on every access.
+An order-management system can create many objects under load. General-purpose allocation cost depends on the allocator, thread behavior, object sizes, and memory state. A bounded pool can make storage policy explicit, but it needs correct lifetime handling and measured performance.
 
-The industry solution is to never call malloc on the hot path at all. Allocate everything at startup into a pool. Reuse objects without returning memory to the OS.
+One design option is to reserve bounded storage during initialization and reuse it. Define exhaustion and reclamation instead of assuming unlimited capacity or zero runtime work.
+
+## Start with something familiar
+
+A numbered set of reusable workstations needs a checkout ledger so nobody reuses a station while its previous worker still owns it.
+
+## The mental model
+
+> A bounded object pool combines storage with an ownership and lifetime protocol. Reusing an address does not make stale handles valid, and exhaustion must have an explicit result.
 
 ## The arena allocator
 
@@ -49,142 +34,103 @@ The simplest correct allocator is a bump-pointer arena: a large contiguous block
 
 ```cpp
 #include <cstddef>
-#include <cstdlib>
-#include <cassert>
+#include <memory>
 #include <new>
-#include <span>
-
-// Bump-pointer arena: O(1) alloc, O(1) reset, no per-object free.
-// Invariant: all objects in the arena have the same lifetime as the arena.
+#include <utility>
+// Single-threaded raw storage; all live objects must end before reset.
 class Arena {
 public:
     explicit Arena(std::size_t capacity)
-        : _base{static_cast<std::byte*>(std::aligned_alloc(64, capacity))}
-        , _cursor{_base}
-        , _end{_base + capacity} {
-        if (!_base) throw std::bad_alloc{};
-    }
-
-    ~Arena() { std::free(_base); }
-
-    // Allocate sz bytes aligned to align. Returns nullptr if out of space.
-    [[nodiscard]] void* alloc(std::size_t sz, std::size_t align = alignof(std::max_align_t)) noexcept {
-        // Align _cursor up to the requested alignment
-        std::uintptr_t cur = reinterpret_cast<std::uintptr_t>(_cursor);
-        std::uintptr_t aligned = (cur + align - 1) & ~(align - 1);
-        std::byte* new_cursor = reinterpret_cast<std::byte*>(aligned) + sz;
-        if (new_cursor > _end) [[unlikely]] return nullptr;
-        _cursor = new_cursor;
-        return reinterpret_cast<void*>(aligned);
-    }
-
-    // Reset: all memory is reclaimed in O(1). No destructors called.
-    // Only safe when all objects' destructors are trivial or already called.
-    void reset() noexcept { _cursor = _base; }
-
-    std::size_t used()      const noexcept { return static_cast<std::size_t>(_cursor - _base); }
-    std::size_t remaining() const noexcept { return static_cast<std::size_t>(_end - _cursor); }
-
-    // Disable copy/move — arena owns its memory
+        : storage_(std::make_unique<std::byte[]>(capacity)), capacity_(capacity) {}
     Arena(const Arena&) = delete;
     Arena& operator=(const Arena&) = delete;
-
+    [[nodiscard]] void* alloc(std::size_t size,
+        std::size_t alignment = alignof(std::max_align_t)) noexcept {
+        if (size == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0)
+            return nullptr;
+        if (size > capacity_ - cursor_) return nullptr;
+        void* candidate = storage_.get() + cursor_;
+        std::size_t space = capacity_ - cursor_;
+        if (!std::align(alignment, size, candidate, space)) return nullptr;
+        cursor_ = static_cast<std::byte*>(candidate) - storage_.get() + size;
+        return candidate;
+    }
+    void reset() noexcept { cursor_ = 0; }
+    std::size_t used() const noexcept { return cursor_; }
+    std::size_t remaining() const noexcept { return capacity_ - cursor_; }
 private:
-    std::byte* const _base;
-    std::byte*       _cursor;
-    std::byte* const _end;
+    std::unique_ptr<std::byte[]> storage_;
+    std::size_t capacity_;
+    std::size_t cursor_ = 0;
 };
-
-// Construct a T in-place in the arena
-template <typename T, typename... Args>
-T* arena_new(Arena& a, Args&&... args) {
-    void* p = a.alloc(sizeof(T), alignof(T));
-    if (!p) [[unlikely]] throw std::bad_alloc{};
-    return ::new (p) T{std::forward<Args>(args)...};
+template<class T, class... Args>
+T* arena_new(Arena& arena, Args&&... args) {
+    void* storage = arena.alloc(sizeof(T), alignof(T));
+    if (!storage) throw std::bad_alloc{};
+    return ::new (storage) T(std::forward<Args>(args)...);
 }
 ```
 
-The arena is the workhorse for read-side-heavy data: market data handlers allocate parsed message structs into a per-tick arena, process them, then reset the entire arena at the end of each tick. Zero fragmentation, guaranteed contiguous layout, excellent TLB behavior.
+Arenas are useful when objects share a clear lifetime boundary. Reset only after required destructors have run and no outstanding users remain. Alignment padding and reserved but unused storage still consume capacity, and contiguous allocation does not guarantee ideal cache or TLB behavior.
 
 ## The typed object pool
+
+This single-threaded bounded pool returns a slot-and-generation handle. Access through get(handle), then release through free(handle). A generation mismatch rejects stale releases. Slot bookkeeping is constant time; constructing or destroying T has its own cost, and a T that allocates internally can still use the heap.
 
 When objects have non-trivial lifetimes — orders that arrive and are cancelled at different times — a bump-pointer arena does not suffice. You need a pool that supports individual deallocation while keeping objects contiguous and avoiding malloc:
 
 ```cpp
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
-
-struct Order {
-    uint64_t order_id;
-    int64_t  price;        // ticks × 10000
-    int32_t  qty;
-    int32_t  filled;
-    uint8_t  side;         // 0 = bid, 1 = ask
-    uint8_t  status;       // 0 = new, 1 = partial, 2 = filled, 3 = cancelled
-    uint16_t _pad;
-};
-
-// Fixed-capacity typed object pool using a free-list.
-// All Order objects live in a contiguous array — cache-friendly.
-template <typename T, std::size_t Capacity>
+#include <optional>
+#include <utility>
+// Single-threaded pool: handles identify lifetimes, not merely addresses.
+template<class T, std::size_t Capacity>
 class ObjectPool {
+    static_assert(Capacity > 0);
 public:
+    struct Handle { std::size_t slot; std::uint64_t generation; };
     ObjectPool() {
-        // Initialize free list: each slot points to the next free slot
-        for (std::size_t i = 0; i < Capacity - 1; ++i)
-            _free_next[i] = static_cast<uint32_t>(i + 1);
-        _free_next[Capacity - 1] = NONE;
-        _free_head = 0;
+        for (std::size_t index = 0; index < Capacity; ++index) next_[index] = index + 1;
     }
-
-    // Allocate one T, construct it with args. Returns nullptr if pool is full.
-    template <typename... Args>
-    T* alloc(Args&&... args) noexcept {
-        if (_free_head == NONE) [[unlikely]] return nullptr;
-        uint32_t slot = _free_head;
-        _free_head = _free_next[slot];
-        return ::new (&_slots[slot]) T{std::forward<Args>(args)...};
+    ObjectPool(const ObjectPool&) = delete;
+    ObjectPool& operator=(const ObjectPool&) = delete;
+    template<class... Args>
+    std::optional<Handle> alloc(Args&&... args) {
+        if (head_ == Capacity) return std::nullopt;
+        const auto slot = head_;
+        values_[slot].emplace(std::forward<Args>(args)...);
+        // If construction throws, the free list is still unchanged.
+        head_ = next_[slot];
+        return Handle{slot, generations_[slot]};
     }
-
-    // Return T to the pool. Calls destructor.
-    void free(T* p) noexcept {
-        p->~T();
-        uint32_t slot = static_cast<uint32_t>(
-            reinterpret_cast<std::aligned_storage_t<sizeof(T), alignof(T)>*>(p) - _slots);
-        _free_next[slot] = _free_head;
-        _free_head = slot;
+    T* get(Handle handle) noexcept {
+        if (handle.slot >= Capacity || !values_[handle.slot] ||
+            generations_[handle.slot] != handle.generation) return nullptr;
+        return &*values_[handle.slot];
     }
-
-    bool empty() const noexcept { return _free_head == NONE; }
-
+    bool free(Handle handle) noexcept {
+        if (!get(handle)) return false;
+        values_[handle.slot].reset();
+        if (generations_[handle.slot] == std::numeric_limits<std::uint64_t>::max())
+            return true; // Retire this slot rather than wrap and accept an ancient handle.
+        ++generations_[handle.slot];
+        next_[handle.slot] = head_;
+        head_ = handle.slot;
+        return true;
+    }
+    bool empty() const noexcept { return head_ == Capacity; }
 private:
-    static constexpr uint32_t NONE = std::numeric_limits<uint32_t>::max();
-
-    // All T objects live in this contiguous array — guaranteed cache locality
-    alignas(64) std::aligned_storage_t<sizeof(T), alignof(T)> _slots[Capacity];
-
-    // Free-list: _free_next[i] = index of next free slot after slot i
-    uint32_t _free_next[Capacity];
-    uint32_t _free_head;
+    std::array<std::optional<T>, Capacity> values_{};
+    std::array<std::uint64_t, Capacity> generations_{};
+    std::array<std::size_t, Capacity> next_{};
+    std::size_t head_ = 0;
 };
-
-// Usage: pre-allocate at startup, use on the hot path
-ObjectPool<Order, 1'000'000> order_pool;
-
-void on_new_order(uint64_t id, int64_t price, int32_t qty, uint8_t side) {
-    Order* o = order_pool.alloc(id, price, qty, 0, side, 0);
-    if (!o) [[unlikely]] { /* pool exhausted — log and reject */ return; }
-    // Register in order-ID map, insert into book...
-}
-
-void on_cancel(Order* o) {
-    // Remove from book...
-    order_pool.free(o);  // O(1) — just updates the free-list pointer
-}
 ```
 
-The key property: `_slots` is a contiguous array. Every Order object lives within this block. When the order-ID hash table points to an Order, the pointer is always within a known memory region, so the TLB needs only enough entries to cover `Capacity × sizeof(Order)` bytes — a predictable, pre-allocatable footprint.
+The optional values and bookkeeping occupy bounded arrays inside the pool. Their footprint includes alignment, occupancy state, generations, and free-list entries; it is larger than Capacity times sizeof(T). Stale handles are rejected, while a returned pointer must not be retained past a release.
 
 ## std::pmr: wiring pool allocators into standard containers
 
@@ -194,96 +140,58 @@ C++17's `std::pmr` (polymorphic memory resources) lets you plug custom allocator
 #include <memory_resource>
 #include <vector>
 #include <array>
+#include <cstdint>
 
 // Pre-allocated 8 MB backing buffer — no malloc at all
 alignas(64) std::array<std::byte, 8 * 1024 * 1024> buf;
 
 // monotonic_buffer_resource is the std::pmr equivalent of Arena
-std::pmr::monotonic_buffer_resource mono_res{buf.data(), buf.size()};
+std::pmr::monotonic_buffer_resource mono_res{buf.data(), buf.size(),
+    std::pmr::null_memory_resource()}; // exhaustion throws instead of using an upstream heap
 
 // Use it with a standard container
 std::pmr::vector<int64_t> prices{&mono_res};  // uses buf, not the global heap
 prices.reserve(65536);                          // no malloc — allocates from buf
 
-// For a pool of same-size objects, unsynchronized_pool_resource is faster:
+// A single-threaded pool resource can reuse allocations by size:
 std::pmr::unsynchronized_pool_resource pool_res{&mono_res};
 // unsynchronized = single-threaded; pool_res does not lock
-std::pmr::vector<Order*> active_orders{&pool_res};
+std::pmr::vector<void*> active_orders{&pool_res}; // illustrative pointer slots
 ```
 
-`monotonic_buffer_resource` wraps a fixed buffer and is the fastest possible allocator: a bump pointer with no thread synchronization and no free. `unsynchronized_pool_resource` adds a per-size free-list on top of a backing resource, enabling deallocation without the OS.
+`monotonic_buffer_resource` can obtain more storage from its upstream resource when its initial buffer fills. This example supplies null_memory_resource to reject that growth. Its allocations and the pool resource still have bookkeeping costs; measure rather than claim a fastest possible allocator.
 
-<SandboxExercise
-  title="Implement a Ring-Scoped Arena"
-  description="The market-data tick handler in this exercise allocates ParsedMessage objects on every tick, processes them, then discards them. Implement a ring-scoped arena that uses two alternating buffers: the 'live' buffer for the current tick and the 'previous' buffer for the just-processed tick. Swap them after each tick. Show that zero mallocs occur during processing."
-  language="cpp"
-  starterCode={`#include <cstddef>
-#include <cstdint>
-#include <cstdlib>
-#include <new>
 
-struct ParsedMessage {
-    uint64_t timestamp_ns;
-    uint32_t symbol_id;
-    int64_t  price;
-    int32_t  size;
-    uint8_t  msg_type;  // 'A'=add, 'E'=execute, 'X'=cancel
-    char     _pad[3];
-};
 
-// TODO: implement DoubleArena with two 1MB backing buffers.
-// Interface:
-//   ParsedMessage* alloc()   — allocate one ParsedMessage from the live buffer
-//   void tick_done()         — swap live/previous; reset the new live buffer
-//   std::size_t live_used()  — bytes used in live buffer
+## Guided practice
 
-struct DoubleArena {
-    // Your implementation here
-};
+Is an address alone enough to identify which lifetime of a reused pool slot a caller owns?
 
-// Simulate a tick handler
-void process_tick(DoubleArena& arena) {
-    // Allocate 100 messages for this tick
-    for (int i = 0; i < 100; ++i) {
-        ParsedMessage* msg = arena.alloc();
-        if (!msg) break;
-        msg->timestamp_ns = 1'700'000'000'000ULL + i;
-        msg->price = 184'5200 + i;
-        msg->size = 100;
-        msg->msg_type = 'A';
-    }
-    // End of tick: flip to previous
-    arena.tick_done();
-}
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-int main() {
-    DoubleArena arena;
-    for (int tick = 0; tick < 10; ++tick) {
-        process_tick(arena);
-    }
-    // Expected: zero malloc calls during process_tick
-}
-`}
+No. The same address can hold a later object; use a validated lifetime identity or ownership mechanism.
+
+</details>
+
+## Check your understanding
+
+<WrittenExercise
+ instructions={"Design a single-threaded fixed-capacity pool for four Order objects. Specify allocation, construction, release, double-release detection, and exhaustion behavior using slot indices plus generation counters. Explain a test sequence showing why a stale handle cannot release a newly allocated object in the same slot."}
+ rubric={["Design explicit ownership, construction, and exhaustion rules","Explain stale-handle and double-release protection","Define lifecycle tests and generation-wrap limitations"]}
+ modelAnswer={"Each slot tracks occupied state and a generation; a handle contains both slot index and generation. Allocation selects a free slot, constructs Order, marks it occupied, and returns its current handle, or reports full without overwriting a live object. Release verifies bounds, occupancy, and generation before destruction, marks the slot free, and advances its generation under a defined wraparound policy. Test allocating A, releasing A, allocating B into that slot, then releasing A's old handle: reject it and leave B live. Test full capacity and duplicate release too. This design is single-threaded; cross-thread use needs a separately verified synchronization and reclamation protocol."}
 />
 
-<Quiz
-  questions={[
-    {
-      question:
-        "An order pool is implemented as a free-list over a contiguous array of Order structs. An order is cancelled and returned to the pool. The next incoming order is allocated. Which statement correctly describes the cache behavior versus a malloc-based design?",
-      options: [
-        "The pool performs worse because the free-list traversal causes an extra cache miss before allocation",
-        "The pool performs the same — cache behavior depends on how the Order is accessed, not how it was allocated",
-        "The pool performs better because the returned Order's cache line is likely still warm in L1/L2, and the next alloc reuses it",
-        "The pool performs worse because the contiguous array causes false sharing between adjacent Orders",
-      ],
-      correct: 2,
-      explanation:
-        "With the free-list pool, the newly cancelled Order's slot goes to the front of the free-list. The next alloc() returns that same slot — the CPU's L1/L2 cache likely still holds the cache line containing this Order from the cancel operation, so the next write (initializing the new order) is a cache hit rather than a cold miss. A malloc-based design returns the memory to the OS-level allocator, which may give out an address from a cold region. The free-list traversal is one pointer load (the free_next[head] read), which is essentially free if pool allocs are frequent. False sharing is a concern when two threads access adjacent Order slots, but within a single-threaded hot path adjacent slots are sequentially allocated and never concurrently accessed.",
-    },
-  ]}
-/>
+
 
 ## What's next
 
 This closes the cache-aware programming module. You have the full picture: layout (AoS/SoA), placement (NUMA), TLB management (huge pages), measurement (perf/cachegrind), and allocation (arenas/pools). The next module takes these foundations into the concurrency layer — how to move data between threads without locks, and what the C++ memory model guarantees about the orderings that make it correct.
+
+<Quiz question={"Why attach a generation to a reusable pool-slot handle?"} options={["To make the address globally unique forever","To detect a stale handle referring to an earlier lifetime, subject to a wrap policy","To avoid running destructors"]} answer={1} explanation={"An address can be reused for another live object. Validate both slot state and lifetime identity."} />
+
+## What you learned
+
+- Design explicit ownership, construction, and exhaustion rules
+- Explain stale-handle and double-release protection
+- Define lifecycle tests and generation-wrap limitations

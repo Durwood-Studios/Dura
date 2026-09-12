@@ -5,42 +5,12 @@ phase: 4
 module: "4-6"
 order: 5
 estimatedMinutes: 20
-difficulty: "intermediate"
-standards:
-  cs2023: ["SE-4", "SE-7", "SF-3", "OS-5"]
-  swebok: ["Software Design", "Software Architecture", "Software Quality"]
-  bloom: "analyze"
-  sfia: 3
-  dreyfus: "competent"
-vocabulary:
-  - synchronous-communication
-  - asynchronous-communication
-  - service-mesh
-  - api-gateway
-  - saga-pattern
-  - choreography
-  - orchestration
-  - idempotency
-  - circuit-breaker
-  - distributed-transaction
-learningOutcomes:
-  - "Classify a given inter-service interaction as synchronous or asynchronous and justify the choice based on latency and consistency requirements"
-  - "Implement the Saga pattern using both choreography and orchestration styles to manage a distributed transaction across three or more services"
-  - "Write an idempotent message handler that safely processes duplicate messages without corrupting state"
-  - "Identify the failure modes in a direct HTTP call chain between microservices and apply a circuit-breaker to prevent cascading failures"
-  - "Compare API gateway, service mesh, and event bus as communication infrastructure, and select the appropriate layer for a given concern"
-prerequisites:
-  - message-queue
-  - producer
-  - consumer
-  - kafka-topic
-  - at-least-once-delivery
-  - amqp
-  - event-sourcing
-  - cqrs
-  - http-request-response
-  - api-basics
-  - async-await
+difficulty: 3
+standards: {"cs2023":["SE-4","SE-7","SF-3","OS-5"],"swebok":["Software Design","Software Architecture","Software Quality"],"bloom":"analyze","sfia":3,"dreyfus":"competent"}
+vocabulary: ["synchronous-communication","asynchronous-communication","service-mesh","api-gateway","saga-pattern","choreography","orchestration","idempotency","circuit-breaker","distributed-transaction"]
+learningOutcomes: ["Bounds attempts and time within an end-to-end budget","Recognize retry multiplication and idempotency requirements","Distinguish circuit recovery from load admission control"]
+prerequisites: ["4/4-6/04"]
+thresholdConcept: false
 ---
 
 ## Why this matters
@@ -48,6 +18,14 @@ prerequisites:
 Splitting a monolith into microservices solves real problems — independent deployability, team autonomy, targeted scaling. But it immediately introduces a harder problem: how do those services talk to each other? Every choice you make about communication carries trade-offs in latency, consistency, operational complexity, and failure behavior. Get it wrong and you end up with a distributed monolith: all the operational overhead of many services with none of the isolation benefits. Get it right and each service can fail, scale, and evolve independently.
 
 This lesson brings together everything you have learned about queues, Kafka, RabbitMQ, and event sourcing and shows you how they fit into the broader map of microservice communication strategies. You will learn when a synchronous HTTP call is correct, when an event on a queue is the right path, how to manage a business transaction that spans multiple services without a distributed database lock, and how to protect your system when any service in the chain is having a bad day. These are the decisions that separate an architecture that holds up in production from one that collapses under its own weight.
+
+## Start with something familiar
+
+An overloaded service desk benefits from limiting new requests and giving failed work time to recover, rather than having every caller repeatedly knock faster.
+
+## The mental model
+
+> Timeouts, retries, circuit breakers, and backpressure address different failure paths. Their combined behavior must bound load rather than amplify an outage.
 
 ## The fundamental choice: synchronous vs. asynchronous
 
@@ -391,142 +369,28 @@ Three layers of infrastructure govern how microservices communicate. They are no
 
 An API gateway (Kong, AWS API Gateway, Nginx) is not for internal service-to-service calls — it is for traffic arriving from outside your cluster. A service mesh (Istio, Linkerd) handles the cross-cutting concerns (mTLS encryption, automatic retries, distributed tracing) for internal synchronous calls without you wiring them into application code. The event bus handles asynchronous work. Each layer adds operational complexity; only adopt what your system's reliability requirements justify.
 
-## Practice
+## Guided practice
 
-<SandboxExercise
-  title="Implement a Choreography-Based Order Saga"
-  description="You have three services connected by an in-process event bus. Implement event handlers so that: (1) OrderService publishes 'order.placed' when an order is created; (2) PaymentService listens and publishes 'payment.succeeded' or 'payment.failed'; (3) FulfillmentService listens to 'payment.succeeded' and publishes 'order.fulfilled'; (4) OrderService listens to both 'payment.failed' and 'order.fulfilled' to update order status. All handlers must be idempotent."
-  starterCode={`// Simple in-process event bus — same interface as Kafka/RabbitMQ consumers
-const eventBus = {
-  handlers: new Map<string, Array<(event: unknown) => Promise<void>>>(),
+If three layers each make up to three attempts for every failure, can one user request cause more than three downstream attempts?
 
-subscribe(event: string, handler: (event: unknown) => Promise<void>) {
-if (!this.handlers.has(event)) this.handlers.set(event, [])
-this.handlers.get(event)!.push(handler)
-},
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-async publish(event: string, payload: unknown) {
-const handlers = this.handlers.get(event) ?? []
-await Promise.all(handlers.map((h) => h(payload)))
-},
-}
+Yes. Nested retry policies can multiply attempts, potentially to 27 at the deepest layer. Coordinate retries across the request path.
 
-// Idempotency store (in-memory for this exercise)
-const processedEvents = new Set<string>()
-
-// --- ORDER SERVICE ---
-async function createOrder(orderId: string, userId: string, total: number) {
-console.log(\`Order \${orderId} created\`)
-// TODO: publish 'order.placed' event
-}
-
-// TODO: subscribe to 'payment.failed' and 'order.fulfilled'
-// to update order status. Must be idempotent.
-
-// --- PAYMENT SERVICE ---
-// TODO: subscribe to 'order.placed'
-// Charge payment (call simulatePayment below) and publish result.
-// Must be idempotent — use processedEvents to guard against duplicates.
-
-// --- FULFILLMENT SERVICE ---
-// TODO: subscribe to 'payment.succeeded'
-// Schedule pickup (call simulateFulfillment below) and publish 'order.fulfilled'.
-
-// Simulated external services
-async function simulatePayment(orderId: string, amount: number) {
-return amount < 500 ? { success: true, chargeId: \`ch_\${orderId}\` } : { success: false }
-}
-
-async function simulateFulfillment(orderId: string) {
-return { trackingId: \`track_\${orderId}\` }
-}
-
-// Test it
-await createOrder('ord_001', 'user_42', 99.99) // Should succeed
-await createOrder('ord_002', 'user_43', 999.99) // Should fail payment
-`}
-  solution={`const eventBus = {
-handlers: new Map<string, Array<(event: unknown) => Promise<void>>>(),
-subscribe(event: string, handler: (event: unknown) => Promise<void>) {
-if (!this.handlers.has(event)) this.handlers.set(event, [])
-this.handlers.get(event)!.push(handler)
-},
-async publish(event: string, payload: unknown) {
-const handlers = this.handlers.get(event) ?? []
-await Promise.all(handlers.map((h) => h(payload)))
-},
-}
-
-const processedEvents = new Set<string>()
-const orderStatuses = new Map<string, string>()
-
-// ORDER SERVICE
-async function createOrder(orderId: string, userId: string, total: number) {
-orderStatuses.set(orderId, 'pending')
-console.log(\`Order \${orderId} created (status: pending)\`)
-await eventBus.publish('order.placed', { orderId, userId, total })
-}
-
-eventBus.subscribe('payment.failed', async (event: unknown) => {
-const { orderId, eventId } = event as { orderId: string; eventId: string }
-if (processedEvents.has(eventId)) return
-processedEvents.add(eventId)
-orderStatuses.set(orderId, 'payment_failed')
-console.log(\`Order \${orderId} status: payment_failed\`)
-})
-
-eventBus.subscribe('order.fulfilled', async (event: unknown) => {
-const { orderId, eventId } = event as { orderId: string; eventId: string }
-if (processedEvents.has(eventId)) return
-processedEvents.add(eventId)
-orderStatuses.set(orderId, 'fulfilled')
-console.log(\`Order \${orderId} status: fulfilled\`)
-})
-
-// PAYMENT SERVICE
-eventBus.subscribe('order.placed', async (event: unknown) => {
-const { orderId, userId, total } = event as { orderId: string; userId: string; total: number }
-const eventId = \`payment-\${orderId}\`
-if (processedEvents.has(eventId)) return
-processedEvents.add(eventId)
-
-const result = await simulatePayment(orderId, total)
-if (result.success) {
-await eventBus.publish('payment.succeeded', { orderId, chargeId: result.chargeId, eventId: \`ps-\${orderId}\` })
-} else {
-await eventBus.publish('payment.failed', { orderId, eventId: \`pf-\${orderId}\` })
-}
-})
-
-// FULFILLMENT SERVICE
-eventBus.subscribe('payment.succeeded', async (event: unknown) => {
-const { orderId } = event as { orderId: string }
-const eventId = \`fulfillment-\${orderId}\`
-if (processedEvents.has(eventId)) return
-processedEvents.add(eventId)
-
-const { trackingId } = await simulateFulfillment(orderId)
-console.log(\`Order \${orderId} pickup scheduled, tracking: \${trackingId}\`)
-await eventBus.publish('order.fulfilled', { orderId, trackingId, eventId: \`of-\${orderId}\` })
-})
-
-async function simulatePayment(orderId: string, amount: number) {
-return amount < 500 ? { success: true, chargeId: \`ch_\${orderId}\` } : { success: false }
-}
-async function simulateFulfillment(orderId: string) {
-return { trackingId: \`track_\${orderId}\` }
-}
-
-await createOrder('ord_001', 'user_42', 99.99)
-await createOrder('ord_002', 'user_43', 999.99)
-`}
-/>
+</details>
 
 ## Check your understanding
 
+<WrittenExercise
+ instructions={"Analyze an API whose downstream service takes two seconds and often fails. Every layer retries three times with no delay. Propose a bounded timeout/retry policy, circuit-breaker behavior, and an idempotency condition; explain how nested retries can multiply work."}
+ rubric={["Bounds attempts and time within an end-to-end budget","Recognizes retry multiplication and idempotency requirements","Distinguishes circuit recovery from load admission control"]}
+ modelAnswer={"Assign an end-to-end deadline and fit per-attempt timeouts within it. Retry only eligible transient failures and idempotent operations, with a small bounded attempt count, exponential backoff, and jitter. Choose one appropriate retry layer rather than multiplying retries throughout the call chain. A circuit breaker opens after the configured failure evidence, fails fast during recovery time, and permits limited probes in half-open state. Backpressure or concurrency limits bound admitted work; the breaker is not a substitute for those limits."}
+/>
+
 <Quiz
   question="A checkout service calls an inventory service synchronously over HTTP. The inventory service is experiencing high load and responds in 8 seconds instead of the usual 200ms. What happens to the checkout service under this failure mode, and what pattern addresses it?"
-  choices={[
+  options={[
     "The checkout service returns immediately because HTTP calls are non-blocking by default",
     "The checkout service accumulates in-flight requests waiting for inventory responses, exhausting its thread pool or connection pool, causing it to fail too — a circuit breaker prevents this by failing fast once the failure rate exceeds a threshold",
     "The checkout service retries automatically and the inventory service recovers on its own",
@@ -538,7 +402,7 @@ await createOrder('ord_002', 'user_43', 999.99)
 
 <Quiz
   question="An order service publishes an 'order.placed' event. Due to a consumer restart, the payment service processes this event twice. The payment handler calls the payment gateway each time it receives the event, resulting in two charges. Which change fixes this?"
-  choices={[
+  options={[
     "Switch from at-least-once to at-most-once delivery so duplicates never occur",
     "Add an idempotency key derived from the event ID to the gateway call, and check a local store before processing so duplicate events return the cached result without re-charging",
     "Use a distributed lock so only one consumer processes any given event at a time",
@@ -550,10 +414,6 @@ await createOrder('ord_002', 'user_43', 999.99)
 
 ## What you learned
 
-- Synchronous calls (HTTP, gRPC) are correct when the caller needs the result to continue; asynchronous messaging is correct when work can happen after the response — defaulting to synchronous when async is sufficient creates unnecessary coupling
-- The circuit breaker pattern protects a service from cascading failures by failing fast when a downstream service's error rate exceeds a threshold, giving both the caller and the downstream service time to recover
-- Choreography lets services react to events independently (high autonomy, complex observability); orchestration puts workflow logic in one coordinator (explicit, testable, single point of failure) — the right choice depends on team structure and workflow complexity
-- The Saga pattern manages distributed transactions by executing a sequence of local transactions paired with compensating transactions that undo completed steps if any later step fails
-- Idempotent handlers are not optional in any messaging system — at-least-once delivery guarantees mean duplicate messages will arrive, and handlers that are not idempotent will corrupt state in production
-
-With message queues, event sourcing, CQRS, and communication patterns now in your toolkit, you are equipped to design backend systems that stay resilient, observable, and independently deployable as they grow.
+- Bounds attempts and time within an end-to-end budget
+- Recognize retry multiplication and idempotency requirements
+- Distinguish circuit recovery from load admission control

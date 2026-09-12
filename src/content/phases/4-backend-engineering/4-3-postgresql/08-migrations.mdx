@@ -4,29 +4,30 @@ description: "Version-control your schema with up/down migration files — deplo
 phase: 4
 module: "4-3-postgresql"
 order: 8
-estimatedMinutes: 10
-difficulty: "intermediate"
-standards:
-  cs2023: ["IM-1", "IM-2"]
-  swebok: ["Software Construction"]
-  bloom: "apply"
-  sfia: 3
-  dreyfus: "competent"
-vocabulary:
-  - migration
-  - schema-versioning
-  - up-migration
-  - down-migration
-  - zero-downtime
+estimatedMinutes: 15
+difficulty: 3
+standards: {"cs2023":["IM-1","IM-2"],"swebok":["Software Construction"],"bloom":"apply","sfia":3,"dreyfus":"competent"}
+vocabulary: ["migration","schema-versioning","up-migration","down-migration","zero-downtime"]
+prerequisites: ["4/4-3/07"]
+thresholdConcept: false
+learningOutcomes: ["Preserve compatibility with old rows and writers","Validate the backfill before enforcing constraints","Separate schema reversal from data recovery"]
 ---
 
 ## Why this matters
 
 Your schema will change. Users are added, features require new columns, a bad design decision gets corrected. Without a migration system, schema changes are ad-hoc: someone SSHes into production, runs a SQL command, and nobody else knows the schema changed. This breaks deployments, causes bugs, and makes onboarding new developers painful. Migrations solve this by treating schema changes as code: version-controlled, reviewed, tested, and reproducible.
 
+## Start with something familiar
+
+Replacing a bridge while traffic continues requires a sequence that keeps old and new routes compatible during the transition.
+
+## The mental model
+
+> A migration changes a shared data contract across time. Expansion, backfill, validation, and later cleanup can preserve compatibility while versions overlap.
+
 ## The migration pattern
 
-A migration is a file that describes exactly one schema change. Each file has two sections:
+A migration describes an ordered schema or data change. Some migration tools support both directions:
 
 - **UP** — apply the change (run when deploying forward)
 - **DOWN** — reverse the change (run when rolling back)
@@ -96,9 +97,9 @@ DROP INDEX CONCURRENTLY idx_users_email;
 
 **1. Never edit a migration that has run in production.** Once a migration is in production's `_migrations` table, it exists. Editing it won't re-run it, and the file on disk will no longer match what the database actually reflects. Instead, create a new migration.
 
-**2. Always write a DOWN migration.** You may never use it, but the one time you need to roll back a deploy at 2am, you'll be grateful.
+**2. Define a recovery strategy.** Use a reverse migration only when it is safe and supported. Destructive data loss is not reversed by recreating an empty column; forward repair and tested backups may be necessary.
 
-**3. Test DOWN migrations.** Most teams test UP migrations thoroughly and discover the DOWN is broken when they need it most.
+**3. Test the recovery path.** Verify rollback or forward repair against representative data and both old and new application versions. Do not assume a syntactically valid DOWN file restores lost information.
 
 **4. One change per migration.** A migration that creates a table, adds three indexes, and backfills data is impossible to roll back cleanly. Keep them focused.
 
@@ -152,148 +153,24 @@ ALTER TABLE users DROP COLUMN full_name;
 
 For DURA's stack (Next.js + PostgreSQL + Supabase), Drizzle Kit or Supabase's built-in migration system are the natural choices.
 
-## Try it
+## Guided practice
 
-<SandboxExercise language="javascript">
-{`// Implement a migration runner in pure JavaScript
-// Tracks applied migrations, supports forward migration and rollback
+Why can adding NOT NULL immediately fail on a new column in a populated table?
 
-function createMigrationRunner(db, migrations) {
-// db: a plain object representing database state (our in-memory DB)
-// migrations: [{ version, name, up(db), down(db) }]
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-// Ensure the _migrations tracking table exists
-if (!db._migrations) db._migrations = [];
+Existing rows may have no value for the new column. Establish and validate valid values before enforcing the requirement, while accounting for concurrent writers.
 
-function getApplied() {
-return new Set(db._migrations.map(m => m.version));
-}
-
-function status() {
-const applied = getApplied();
-return {
-applied: migrations
-.filter(m => applied.has(m.version))
-.map(m => ({ version: m.version, name: m.name })),
-pending: migrations
-.filter(m => !applied.has(m.version))
-.map(m => ({ version: m.version, name: m.name })),
-};
-}
-
-function migrate() {
-const applied = getApplied();
-const pending = migrations
-.filter(m => !applied.has(m.version))
-.sort((a, b) => a.version - b.version);
-
-    if (pending.length === 0) {
-      console.log('Already up to date — no pending migrations.');
-      return;
-    }
-
-    for (const migration of pending) {
-      console.log(\`Applying migration \${migration.version}: \${migration.name}\`);
-      try {
-        migration.up(db);
-        db._migrations.push({
-          version:    migration.version,
-          name:       migration.name,
-          applied_at: new Date().toISOString(),
-        });
-        console.log(\`  ✓ Applied\`);
-      } catch (err) {
-        console.error(\`  ✗ Failed: \${err.message}\`);
-        throw err;
-      }
-    }
-
-}
-
-function rollback(n = 1) {
-const applied = getApplied();
-const toRollback = migrations
-.filter(m => applied.has(m.version))
-.sort((a, b) => b.version - a.version) // Reverse order
-.slice(0, n);
-
-    if (toRollback.length === 0) {
-      console.log('Nothing to rollback.');
-      return;
-    }
-
-    for (const migration of toRollback) {
-      console.log(\`Rolling back migration \${migration.version}: \${migration.name}\`);
-      try {
-        migration.down(db);
-        db._migrations = db._migrations.filter(m => m.version !== migration.version);
-        console.log(\`  ✓ Rolled back\`);
-      } catch (err) {
-        console.error(\`  ✗ Rollback failed: \${err.message}\`);
-        throw err;
-      }
-    }
-
-}
-
-return { migrate, rollback, status };
-}
-
-// --- Define migrations ---
-const db = {}; // Our in-memory "database"
-
-const migrations = [
-{
-version: 1,
-name: 'create_users',
-up(db) { db.users = []; },
-down(db) { delete db.users; },
-},
-{
-version: 2,
-name: 'create_posts',
-up(db) { db.posts = []; },
-down(db) { delete db.posts; },
-},
-{
-version: 3,
-name: 'add_users_avatar_url',
-up(db) {
-// Simulate adding a nullable column to existing rows
-(db.users || []).forEach(u => { u.avatar_url = null; });
-db._schema = db._schema || {};
-db._schema.users_avatar_url = true;
-},
-down(db) {
-(db.users || []).forEach(u => { delete u.avatar_url; });
-delete (db._schema || {}).users_avatar_url;
-},
-},
-];
-
-const runner = createMigrationRunner(db, migrations);
-
-console.log('=== Initial status ===');
-console.log(runner.status());
-
-console.log('\\n=== Running all migrations ===');
-runner.migrate();
-
-console.log('\\n=== Status after migrate ===');
-console.log(runner.status());
-
-console.log('\\n=== Rolling back 1 migration ===');
-runner.rollback(1);
-
-console.log('\\n=== Status after rollback ===');
-console.log(runner.status());
-
-console.log('\\n=== DB state ===');
-console.log('Tables:', Object.keys(db).filter(k => !k.startsWith('_')));`}
-
-</SandboxExercise>
+</details>
 
 ## Check your understanding
+
+<WrittenExercise
+ instructions={"Write a safe migration sequence adding a required slug column to a populated posts table while old application instances may still write rows. Include backfill, uniqueness checking, application rollout, and the point when NOT NULL can be enforced. Explain why a DOWN script cannot be assumed to restore lost data."}
+ rubric={["Preserves compatibility with old rows and writers","Validates the backfill before enforcing constraints","Separates schema reversal from data recovery"]}
+ modelAnswer={"First add slug in a compatible form and deploy a write path that populates it while tolerating old rows. Backfill existing rows using a collision-aware rule, coordinate or retire old writers, and verify no missing or duplicate values remain. Add/validate the required uniqueness and non-null constraints using a plan suited to table size and locking impact. Only then rely on the stronger contract and later remove compatibility code. A reverse schema change cannot reconstruct discarded values; backup and recovery requirements must be planned separately."}
+/>
 
 <Quiz
   question="What should you do if you need to change a migration that has already run in production?"
@@ -315,7 +192,7 @@ console.log('Tables:', Object.keys(db).filter(k => !k.startsWith('_')));`}
     "It documents what the migration does",
   ]}
   answer={1}
-  explanation="The DOWN migration reverses the changes made by the UP migration. It's run when you need to roll back a deployment — for example, after discovering a bug in production that requires reverting to the previous schema."
+  explanation="A DOWN migration attempts a defined reverse schema change when the tool supports it. It does not automatically restore deleted data or make older application code compatible. Review and test the actual recovery strategy."
 />
 <Quiz
   question="CREATE INDEX CONCURRENTLY builds the index without locking the table for writes."
@@ -330,9 +207,6 @@ console.log('Tables:', Object.keys(db).filter(k => !k.startsWith('_')));`}
 
 ## What you learned
 
-- Migrations are numbered files with UP (apply) and DOWN (rollback) sections, tracked in a database table
-- Never edit a migration that has run in production — create a new one instead
-- Always write and test DOWN migrations before you need them
-- Zero-downtime migrations apply additive changes first: add nullable column, backfill, then add constraint
-- CREATE INDEX CONCURRENTLY builds indexes without table locks — use it in production
-- Migration tools like Drizzle Kit, Prisma Migrate, and Flyway automate running and tracking migrations
+- Preserve compatibility with old rows and writers
+- Validate the backfill before enforcing constraints
+- Separate schema reversal from data recovery

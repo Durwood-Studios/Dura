@@ -5,35 +5,13 @@ phase: 8
 module: "8-6"
 order: 2
 estimatedMinutes: 20
-difficulty: "advanced"
-standards:
-  cs2023: ["SE-2", "SF-3"]
-  swebok: ["Software Design", "Software Maintenance"]
-  bloom: "analyze"
-  sfia: 5
-  dreyfus: "proficient"
-vocabulary:
-  - cache-aside
-  - write-through-cache
-  - cache-invalidation
-  - read-replica
-  - replication-lag
-  - horizontal-sharding
-  - shard-key
-  - consistent-hashing
-  - hot-shard
-learningOutcomes:
-  - "Distinguish cache-aside from write-through caching and state one trade-off of each"
-  - "Explain why replication lag exists and identify one scenario where it causes a user-visible bug"
-  - "Choose an appropriate shard key for a given access pattern and explain why a poor shard key creates a hot shard"
-  - "Describe how consistent hashing reduces data movement when a shard node is added or removed"
-  - "Analyze a given read or write bottleneck and recommend whether caching, replication, or sharding best addresses it"
-prerequisites:
-  - "SQL databases and indexes"
-  - "What a cache is (key-value lookup)"
-  - "Client-server model"
-  - "Back-of-envelope capacity estimation (lesson 1)"
-  - "TCP/IP networking basics"
+difficulty: 4
+standards: {"cs2023":["SE-2","SF-3"],"swebok":["Software Design","Software Maintenance"],"bloom":"analyze","sfia":5,"dreyfus":"proficient"}
+vocabulary: ["cache-aside","write-through-cache","cache-invalidation","read-replica","replication-lag","horizontal-sharding","shard-key","consistent-hashing","hot-shard"]
+learningOutcomes: ["Distinguish cache, replica, and shard responsibilities","Trace a read and write through a scaled design","Explain a failure or stale-read tradeoff"]
+prerequisites: ["8/8-6/01"]
+thresholdConcept: false
+professionalContext: "Apply the lesson to an operational design or review with explicit evidence and limitations."
 ---
 
 ## Why this matters
@@ -41,6 +19,14 @@ prerequisites:
 Every database you have ever used has a ceiling — a point where concurrent connections, disk I/O, or CPU saturate and response times collapse. For a toy project that ceiling is invisible. For a system with a million users it arrives fast, and when it does, you have three tools available: caching (answer queries without touching the database), replication (spread reads across multiple database copies), and sharding (spread data across multiple database instances).
 
 Understanding when to reach for each tool — and the failure modes each introduces — separates engineers who "made it fast" from engineers who understand why it is fast and what will break next. This lesson dissects all three mechanisms at a level where you can apply them in a design interview or a real architecture review.
+
+## Start with something familiar
+
+A warehouse may add pickup desks, duplicate stock, or divide inventory among buildings; each changes different bottlenecks.
+
+## The mental model
+
+> Caching, replication, and sharding scale different parts of a workload and introduce freshness, consistency, and coordination costs.
 
 ## Part 1 — Caching
 
@@ -336,104 +322,26 @@ Is the bottleneck WRITES?
        before jumping to cross-node sharding (operational complexity)
 ```
 
-<SandboxExercise
-  language="python"
-  instructions="The get_leaderboard function below queries the database on every call. It is being called 5,000 times per second and the database is saturating. Implement a cache-aside pattern using the provided mock Redis client. The leaderboard updates every 60 seconds, so a 60-second TTL is acceptable."
-  initialCode={`import json
-import time
 
-# Mock Redis client — behaves like redis-py
-class MockRedis:
-    def __init__(self):
-        self._store = {}
-        self._expiry = {}
 
-    def get(self, key):
-        if key in self._expiry and time.time() > self._expiry[key]:
-            del self._store[key]
-            del self._expiry[key]
-        return self._store.get(key)
+## Guided practice
 
-    def setex(self, key, ttl_seconds, value):
-        self._store[key] = value
-        self._expiry[key] = time.time() + ttl_seconds
+Before writing the full response, identify the requirement that constrains this scenario most strongly: Compare a cache, read replica, and sharded database for a catalog with frequent product reads and occasional stock updates. State one assumption you would verify before choosing an implementation.
 
-r = MockRedis()
+<details>
+<summary>Compare the first design step</summary>
 
-# Mock database — simulates an expensive query (200ms)
-def db_query_leaderboard(game_id: int) -> list[dict]:
-    time.sleep(0.2)  # Simulate DB latency
-    return [
-        {"rank": 1, "user": "alice", "score": 9800},
-        {"rank": 2, "user": "bob", "score": 9400},
-        {"rank": 3, "user": "carol", "score": 8900},
-    ]
+A cache can serve descriptions with an explicit expiry but cannot authorize stock consumption from a stale value. Read replicas add read capacity while replication lag may hide recent writes. The full response must also address the remaining failure and verification requirements.
 
-# TODO: Implement cache-aside caching for this function.
-# The leaderboard changes every 60 seconds, so stale data is acceptable
-# within that window. Use "leaderboard:{game_id}" as the cache key.
-def get_leaderboard(game_id: int) -> list[dict]:
-    # Currently always hits the database — fix this
-    return db_query_leaderboard(game_id)
-
-# Test: first call should miss, second should hit cache
-start = time.time()
-result1 = get_leaderboard(42)
-print(f"First call (cache miss):  {(time.time()-start)*1000:.0f}ms — {result1[0]}")
-
-start = time.time()
-result2 = get_leaderboard(42)
-print(f"Second call (cache hit?): {(time.time()-start)*1000:.0f}ms — {result2[0]}")`}
-  solution={`import json
-import time
-
-class MockRedis:
-    def __init__(self):
-        self._store = {}
-        self._expiry = {}
-
-    def get(self, key):
-        if key in self._expiry and time.time() > self._expiry[key]:
-            del self._store[key]
-            del self._expiry[key]
-        return self._store.get(key)
-
-    def setex(self, key, ttl_seconds, value):
-        self._store[key] = value
-        self._expiry[key] = time.time() + ttl_seconds
-
-r = MockRedis()
-
-def db_query_leaderboard(game_id: int) -> list[dict]:
-    time.sleep(0.2)
-    return [
-        {"rank": 1, "user": "alice", "score": 9800},
-        {"rank": 2, "user": "bob", "score": 9400},
-        {"rank": 3, "user": "carol", "score": 8900},
-    ]
-
-def get_leaderboard(game_id: int) -> list[dict]:
-    cache_key = f"leaderboard:{game_id}"
-
-    cached = r.get(cache_key)
-    if cached:
-        return json.loads(cached)
-
-    leaderboard = db_query_leaderboard(game_id)
-    r.setex(cache_key, 60, json.dumps(leaderboard))
-    return leaderboard
-
-start = time.time()
-result1 = get_leaderboard(42)
-print(f"First call (cache miss):  {(time.time()-start)*1000:.0f}ms")
-
-start = time.time()
-result2 = get_leaderboard(42)
-print(f"Second call (cache hit): {(time.time()-start)*1000:.0f}ms")`}
-testCases={["Second call completes in <10ms", "Cache key is leaderboard:42", "TTL is 60 seconds"]}
-/>
+</details>
 
 ## Check your understanding
+
+<WrittenExercise
+ instructions="Analyze the scenario and compare the relevant choices. Compare a cache, read replica, and sharded database for a catalog with frequent product reads and occasional stock updates. Trace a purchase that immediately reads remaining stock. Justify where a stale read is acceptable and where authoritative coordination is required."
+ rubric={["Distinguishes all three scaling mechanisms","Traces read-after-write behavior","Protects the stock invariant at an authoritative boundary","Uses measurements to justify additional complexity"]}
+ modelAnswer={"A cache can serve descriptions with an explicit expiry but cannot authorize stock consumption from a stale value. Read replicas add read capacity while replication lag may hide recent writes. Sharding divides ownership and write load but requires routing and complicates cross-shard operations. Use an authoritative transactional stock check for purchase, then either read from that authority or carry the confirmed result for immediate display. Other catalog views may tolerate documented staleness. Compare measured read load, hot keys, lag, and write contention before adopting sharding."}
+/>
 
 <Quiz
   questions={[
@@ -484,10 +392,6 @@ testCases={["Second call completes in <10ms", "Cache key is leaderboard:42", "TT
 
 ## What you learned
 
-- Cache-aside reads from cache first, falling back to the database on miss; write-through updates the cache on every write — each trades consistency for different performance properties.
-- Cache invalidation requires explicit invalidation strategies; version counters are more robust than key-pattern deletes at scale.
-- Read replicas reduce load on the primary by routing reads elsewhere, but async replication creates lag that produces stale reads — the "read your own writes" pattern is a common victim.
-- Sharding distributes writes across multiple database instances; shard key selection determines whether load is even or skewed toward hot shards.
-- Consistent hashing minimizes data movement when the cluster topology changes, making it the standard approach for production sharding rings.
-
-In the next lesson, you will apply all three of these techniques in a complete case study: designing a URL shortener from scratch.
+- Distinguish cache, replica, and shard responsibilities
+- Trace a read and write through a scaled design
+- Explain a failure or stale-read tradeoff

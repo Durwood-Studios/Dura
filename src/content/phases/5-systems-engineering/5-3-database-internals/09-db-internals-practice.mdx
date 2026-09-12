@@ -4,22 +4,30 @@ description: "Apply your internals knowledge: read EXPLAIN plans, identify slow 
 phase: 5
 module: "5-3-database-internals"
 order: 9
-difficulty: "advanced"
+difficulty: 3
 bloom: "evaluate"
-vocabulary: ["explain-plan", "query-cost", "schema-design", "normalization", "denormalization"]
-standards:
-  cs2023: ["IM-1"]
-  swebok: ["Software Design"]
-  bloom: "evaluate"
-  sfia: 5
-  dreyfus: "proficient"
+vocabulary: ["explain-plan","query-cost","schema-design","normalization","denormalization"]
+standards: {"cs2023":["IM-1"],"swebok":["Software Design"],"bloom":"evaluate","sfia":5,"dreyfus":"proficient"}
+estimatedMinutes: 15
+prerequisites: ["5/5-3/08"]
+thresholdConcept: false
+learningOutcomes: ["Quantify the row-estimation discrepancy","Compare scan suitability with selectivity","Justify a diagnostic procedure that accounts for execution effects"]
+professionalContext: "Evaluate a plan estimating 10 matching rows but returning 10000, alongside a sequential scan returning 80 percent of another table. Compare the evidence, prioritize investigation, and justify a safe procedure for collecting actual-plan evidence for an UPDATE."
 ---
 
-## Connecting theory to practice
+## Why this matters
 
 You have learned how storage engines work, how indexes are structured, how the optimizer chooses plans, how MVCC handles concurrency, and how replication and partitioning scale databases beyond a single machine. Now you put it together. Real database performance work is a cycle of measurement, explanation, and change.
 
 The most valuable tool in that cycle is `EXPLAIN ANALYZE` (in PostgreSQL, MySQL's `EXPLAIN FORMAT=JSON`, or equivalent in any production database). It bridges theory and reality: the optimizer's cost model tells you what it _planned_ to do; the actual execution statistics tell you what actually happened and where time was spent.
+
+## Start with something familiar
+
+A forecast that predicts ten visitors but receives ten thousand needs its assumptions checked before replacing the building.
+
+## The mental model
+
+> Execution plans are evidence about estimates and actual work. A scan label alone is not a diagnosis, and EXPLAIN ANALYZE actually executes the statement.
 
 ## Reading an EXPLAIN plan
 
@@ -35,7 +43,7 @@ For each node, you see:
 
 **The most important diagnostic:** compare estimated rows to actual rows. When these are far apart (orders of magnitude), the optimizer was working with wrong statistics and made a bad plan choice. Running `ANALYZE` on the table updates the statistics the optimizer uses and often fixes the plan.
 
-**Identifying the slow node:** total cost flows through the tree. Look for operators with actual time that is disproportionately high compared to their cost estimate. A `Seq Scan` on a large table when an index exists means the index is missing or the query isn't using it. A `Sort` operator touching millions of rows suggests adding an index to avoid the sort. Nested loops over large sets suggest the planner should use a hash join instead.
+**Identifying expensive work:** Inspect actual time, loops, rows, and buffer usage while avoiding double-counting nested work. A sequential scan can be appropriate even when an index exists. Large sorts and nested loops suggest hypotheses to test, not automatic index or join-type prescriptions.
 
 ## Schema design principles
 
@@ -43,7 +51,7 @@ Good schema design is not just normalization theory — it is the intersection o
 
 **Normalization** eliminates data redundancy by storing each fact once. A user's address stored in the `addresses` table and referenced by foreign key in the `users` table is normalized. This ensures consistency — update the address once and it's updated everywhere. The cost: reading user-with-address requires a join.
 
-**Denormalization** intentionally duplicates data to avoid joins on the hot path. An e-commerce site might store the product name on each order line item even though it's already in the products table. This violates third normal form but means displaying order history never requires joining to products — faster for the read-heavy order history page.
+**Denormalization** deliberately duplicates facts to improve a measured access path and requires a consistency strategy. An order-line product name may instead be a historical snapshot with different meaning from the current catalog name; that is not automatically a normalization violation. Define the fact and its functional dependencies before classifying the schema.
 
 **The right answer** depends on your read/write ratio and consistency requirements. Normalize first. Denormalize only where you have measured a join performance problem and can afford the consistency complexity.
 
@@ -63,136 +71,26 @@ Production databases can log slow queries — any query taking longer than a con
 - **Missing index:** a frequently-slow query whose EXPLAIN shows a Seq Scan on a large table with high selectivity
 - **Lock waits:** queries slow because they're waiting for locks held by other transactions — a concurrency design problem, not an index problem
 
-<SandboxExercise
-  title="Simulate EXPLAIN Plans and Identify Slow Queries"
-  instructions="A query log object contains executed queries with cost estimates and actual execution times. Implement `analyzeQueryLog(log)` that identifies slow queries, detects row estimate mismatches (plan quality issues), and flags sequential scans on large tables. Also implement `explainPlan(plan)` that prints a readable tree representation of a plan object."
-  starterCode={`// Simulated EXPLAIN plan structure and query log analyzer
 
-// A plan node: { op, table?, estimatedRows, actualRows, actualMs, children: [] }
-function explainPlan(node, depth = 0) {
-const indent = ' '.repeat(depth);
-const rowsMatch = node.estimatedRows && node.actualRows
-? (Math.max(node.estimatedRows, node.actualRows) / Math.min(node.estimatedRows, node.actualRows)).toFixed(1) + 'x off'
-: '';
-const slow = node.actualMs > 100 ? ' **_ SLOW _**' : '';
-const seqScanWarning = node.op === 'Seq Scan' && (node.estimatedRows || 0) > 10000 ? ' [consider index]' : '';
 
-console.log(\`\${indent}\${node.op}\${node.table ? ' on ' + node.table : ''}\` + \` | est:\${node.estimatedRows ?? '?'} rows | actual:\${node.actualRows ?? '?'} rows\${rowsMatch ? ' (' + rowsMatch + ')' : ''}\` + \` | \${node.actualMs?.toFixed(1) ?? '?'}ms\${slow}\${seqScanWarning}\`
-);
+## Guided practice
 
-for (const child of (node.children || [])) {
-explainPlan(child, depth + 1);
-}
-}
+Does EXPLAIN ANALYZE merely predict an UPDATE without performing it?
 
-function analyzeQueryLog(queryLog) {
-// queryLog: [{ sql, durationMs, plan: plan node, executedAt }]
-const issues = [];
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
 
-for (const entry of queryLog) {
-const entryIssues = [];
+No. It executes the statement to collect actual execution information.
 
-    if (entry.durationMs > 500) {
-      entryIssues.push(\`SLOW: took \${entry.durationMs}ms (threshold 500ms)\`);
-    }
-
-    // Walk the plan tree looking for problems
-    function walkPlan(node) {
-      if (!node) return;
-      const ratio = node.estimatedRows && node.actualRows
-        ? Math.max(node.estimatedRows, node.actualRows) / Math.min(node.estimatedRows, node.actualRows)
-        : 1;
-
-      if (ratio > 10) {
-        entryIssues.push(\`STALE STATS: \${node.op}\${node.table ? ' on ' + node.table : ''} — estimated \${node.estimatedRows} rows but got \${node.actualRows} (run ANALYZE)\`);
-      }
-      if (node.op === 'Seq Scan' && (node.actualRows || 0) > 50000) {
-        entryIssues.push(\`MISSING INDEX: Seq Scan on \${node.table} returned \${node.actualRows} rows — check for missing index\`);
-      }
-      for (const child of (node.children || [])) walkPlan(child);
-    }
-
-    walkPlan(entry.plan);
-
-    if (entryIssues.length > 0) {
-      issues.push({ sql: entry.sql.slice(0, 80), issues: entryIssues });
-    }
-
-}
-
-return issues;
-}
-
-// Sample query log with mixed good and bad plans
-const queryLog = [
-{
-sql: 'SELECT * FROM orders WHERE user_id = 42',
-durationMs: 2,
-executedAt: '2024-01-15T10:00:00Z',
-plan: {
-op: 'Index Scan', table: 'orders', estimatedRows: 15, actualRows: 12, actualMs: 1.2, children: []
-}
-},
-{
-sql: 'SELECT * FROM events WHERE event_type = ? AND created_at > ?',
-durationMs: 4800,
-executedAt: '2024-01-15T10:00:05Z',
-plan: {
-op: 'Seq Scan', table: 'events', estimatedRows: 100, actualRows: 2_800_000, actualMs: 4750, children: []
-}
-},
-{
-sql: 'SELECT u.name, COUNT(o.id) FROM users u JOIN orders o ON o.user_id = u.id GROUP BY u.id',
-durationMs: 320,
-executedAt: '2024-01-15T10:00:10Z',
-plan: {
-op: 'HashAggregate', estimatedRows: 50000, actualRows: 48200, actualMs: 315,
-children: [{
-op: 'Hash Join', estimatedRows: 500000, actualRows: 490000, actualMs: 280,
-children: [
-{ op: 'Seq Scan', table: 'users', estimatedRows: 50000, actualRows: 48200, actualMs: 45, children: [] },
-{ op: 'Hash', estimatedRows: 500000, actualRows: 490000, actualMs: 180,
-children: [{ op: 'Seq Scan', table: 'orders', estimatedRows: 500000, actualRows: 490000, actualMs: 95, children: [] }]
-}
-]
-}]
-}
-}
-];
-
-console.log('=== EXPLAIN Plan for query 2 (slow event scan) ===');
-explainPlan(queryLog[1].plan);
-
-console.log('\\n=== EXPLAIN Plan for query 3 (aggregation join) ===');
-explainPlan(queryLog[2].plan);
-
-console.log('\\n=== Query Log Analysis ===');
-const issues = analyzeQueryLog(queryLog);
-if (issues.length === 0) {
-console.log('No issues found.');
-} else {
-for (const { sql, issues: issueList } of issues) {
-console.log(\`\\nQuery: \${sql}...\`);
-issueList.forEach(i => console.log(' >', i));
-}
-}
-`}
-  solution={`// The starter code is a complete working solution.
-// Key findings from the analysis:
-// Query 2: Stale stats (estimated 100 rows, got 2.8M) + Seq Scan on large table + SLOW (4800ms)
-// Fix: run ANALYZE on events table; add index on (event_type, created_at)
-// Query 3: Seq Scans on large tables, but estimates match actuals — plan is appropriate
-// The sequential scans are correct here because the query reads most rows anyway (GROUP BY all users)
-// Query 1: Index scan, fast, no issues — this is the ideal plan
-
-// The row estimate mismatch (100 estimated vs 2.8M actual) is the smoking gun:
-// the optimizer chose a bad plan because its statistics were wildly wrong.
-// After running ANALYZE, the optimizer would see the true row count and likely
-// choose an index scan, reducing a 4.8s query to sub-10ms.
-`}
-/>
+</details>
 
 ## Check your understanding
+
+<WrittenExercise
+ instructions={"Evaluate a plan estimating 10 matching rows but returning 10000, alongside a sequential scan returning 80 percent of another table. Compare the evidence, prioritize investigation, and justify a safe procedure for collecting actual-plan evidence for an UPDATE."}
+ rubric={["Quantifies the row-estimation discrepancy","Compares scan suitability with selectivity","Justifies a diagnostic procedure that accounts for execution effects"]}
+ modelAnswer={"The thousandfold row underestimate deserves investigation of statistics, parameter distribution, and predicate relationships because it can distort plan choices. The scan returning most rows may be appropriate; an index is not automatically cheaper. Compare actual timing, loops, and buffer evidence with representative data. EXPLAIN ANALYZE executes UPDATE, so use an authorized isolated test dataset and account for triggers or external effects; a transaction rollback does not reverse every possible external side effect. Do not run a mutating production diagnostic casually."}
+/>
 
 <Quiz
   question="An EXPLAIN ANALYZE shows estimated rows = 50 but actual rows = 500,000 for a Seq Scan node. What is the most likely cause and fix?"
@@ -203,7 +101,7 @@ issueList.forEach(i => console.log(' >', i));
     "The database needs more memory to execute the query efficiently",
   ]}
   answer={1}
-  explanation="A large discrepancy between estimated and actual rows almost always means stale statistics. The optimizer believes the table has ~50 rows but it actually has hundreds of thousands. Running ANALYZE refreshes the column histograms and row counts the optimizer uses, allowing it to choose a better plan — likely an index scan if an appropriate index exists."
+  explanation="A large estimate mismatch makes statistics and value distribution useful first checks. ANALYZE can refresh statistics, but correlated predicates, parameter-sensitive plans, and model limitations can also cause mismatches. Compare actual plans rather than promising a particular replacement scan."
 />
 
 <Quiz
@@ -231,16 +129,13 @@ issueList.forEach(i => console.log(' >', i));
 />
 
 <FillBlank
-  sentence="The PostgreSQL command that updates the column statistics used by the query optimizer — fixing row estimate mismatches — is ___."
+  question="The PostgreSQL command that updates the column statistics used by the query optimizer — fixing row estimate mismatches — is ___."
   answer="ANALYZE"
-  hint="It 'analyzes' table contents to build fresh statistics for the planner"
+  hints={["It 'analyzes' table contents to build fresh statistics for the planner"]}
 />
 
 ## What you learned
 
-- EXPLAIN ANALYZE bridges theory and reality: compare estimated rows to actual rows to diagnose stale statistics and bad plans
-- Sequential scans are not always wrong — they are correct when a query reads most of the table
-- Stale statistics (estimated rows far from actual rows) cause the optimizer to make bad plan choices — fix with ANALYZE
-- Slow query log analysis reveals patterns: N+1 queries, missing indexes, lock waits, and parameter-sensitive plans
-- Normalize schemas first for correctness; denormalize only after measuring a specific, proven performance problem
-- The full internals stack — storage engines, indexes, query optimizer, MVCC, WAL, replication, and partitioning — works together: understanding each layer lets you diagnose problems at the right level
+- Quantify the row-estimation discrepancy
+- Compare scan suitability with selectivity
+- Justify a diagnostic procedure that accounts for execution effects

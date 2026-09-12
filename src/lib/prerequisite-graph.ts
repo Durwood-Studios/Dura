@@ -2,9 +2,10 @@ import "server-only";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import matter from "gray-matter";
+import { canonicalModuleId } from "@/lib/curriculum-ids";
 
 interface LessonNode {
-  /** Composite lesson identifier, e.g. "4-3-05" */
+  /** Canonical route identity, e.g. "4/4-3/05" */
   id: string;
   phaseId: string;
   moduleId: string;
@@ -48,7 +49,8 @@ export function buildPrerequisiteGraph(): Map<string, LessonNode> {
       .map((d) => d.name);
 
     for (const modDir of moduleDirs) {
-      const moduleId = modDir.match(/^(\d+-\d+)/)?.[1] ?? modDir.split("-")[0];
+      const moduleId = canonicalModuleId(modDir);
+      if (!moduleId) continue;
       const modPath = join(phasePath, modDir);
 
       const files = readdirSync(modPath).filter((f) => f.endsWith(".mdx"));
@@ -59,7 +61,7 @@ export function buildPrerequisiteGraph(): Map<string, LessonNode> {
         const { data } = matter(raw);
 
         const node: LessonNode = {
-          id: lessonId,
+          id: `${phaseId}/${moduleId}/${lessonId}`,
           phaseId,
           moduleId,
           title: (data.title as string) ?? file,
@@ -67,9 +69,22 @@ export function buildPrerequisiteGraph(): Map<string, LessonNode> {
           unlocks: [], // computed below
         };
 
-        graph.set(lessonId, node);
+        graph.set(node.id, node);
       }
     }
+  }
+
+  // Resolve historical composite IDs without guessing ambiguous bare lesson numbers.
+  for (const node of graph.values()) {
+    node.prerequisites = node.prerequisites.map((id: string): string => {
+      if (graph.has(id)) return id;
+      const composite = /^(\d+|[ehqrm])-(\d+)-(\d+)$/.exec(id);
+      if (!composite) return id; // Vocabulary slugs are valid prerequisites, not graph nodes.
+      const moduleId = canonicalModuleId(`${composite[1]}-${composite[2]}`);
+      if (!moduleId) return id;
+      const candidate = `${moduleId.split("-")[0]}/${moduleId}/${composite[3]}`;
+      return graph.has(candidate) ? candidate : id;
+    });
   }
 
   // Invert: for each prerequisite edge A → B, add B to A.unlocks
@@ -122,7 +137,7 @@ export function findGaps(targetLessonId: string, completedLessonIds: string[]): 
     if (!node) return;
 
     for (const prereqId of node.prerequisites) {
-      if (!completed.has(prereqId)) {
+      if (graph.has(prereqId) && !completed.has(prereqId)) {
         gaps.push(prereqId);
       }
       walk(prereqId);

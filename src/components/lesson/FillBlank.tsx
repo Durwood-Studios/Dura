@@ -44,7 +44,7 @@ export function FillBlank(props: FillBlankProps): React.ReactElement {
     return [];
   })();
   const hints = props.hints ?? [];
-  const segments = useMemo(() => safePrompt.split("___"), [safePrompt]);
+  const segments = useMemo(() => safePrompt.split(/_{3,}/), [safePrompt]);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const [values, setValues] = useState<string[]>(() => safeAnswers.map(() => ""));
   const [blanks, setBlanks] = useState<BlankState[]>(() =>

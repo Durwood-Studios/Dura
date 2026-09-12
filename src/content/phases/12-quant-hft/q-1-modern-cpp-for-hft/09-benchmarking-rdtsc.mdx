@@ -6,34 +6,11 @@ module: "q-1-modern-cpp-for-hft"
 order: 9
 estimatedMinutes: 35
 difficulty: 4
-prerequisites:
-  - "q-1-modern-cpp-for-hft/03-branch-prediction-and-branchless-patterns"
-standards:
-  primaryAnchor: "ISO/IEC 14882:2023 (C++23)"
-  cs2023: []
-  swebok: []
-  bloom: "evaluate"
-  sfia: 4
-  dreyfus: "proficient"
-vocabulary:
-  - rdtsc
-  - tsc
-  - invariant-tsc
-  - cpuid-serializing
-  - lfence
-  - benchmark-dead-code-elimination
-  - benchmark-clobber
-  - benchmark-escape
-  - percentile-latency
-  - p99-latency
-  - warm-up-phase
-  - outlier-trimming
-learningOutcomes:
-  - "After this lesson you can write a correct rdtsc-based latency measurement that prevents CPU reordering from contaminating the sample"
-  - "After this lesson you can use benchmark::DoNotOptimize and benchmark::ClobberMemory in Google Benchmark to prevent dead-code elimination"
-  - "After this lesson you can record a latency histogram and report p50, p99, and p99.9 percentiles instead of mean latency"
-  - "After this lesson you can explain why microbenchmarks run in isolation can differ from production measurements by 3–10x"
-professionalContext: "The hardest part of HFT optimization is measurement. A microbenchmark that says 50 ns often means the compiler compiled the measured code away entirely — you are timing an empty loop. A benchmark that says 200 ns on your laptop and 80 ns in the colo box is not wrong; it is measuring different inputs. And a benchmark that reports a mean latency of 120 ns while the real system's p99 tail is 800 ns is correct and useless. At every HFT firm the interview question is not 'is your code fast' — it is 'how do you prove your code is fast, and fast on which percentile.' This lesson answers that question with tools you can use immediately."
+prerequisites: ["12/12-1/08"]
+standards: {"primaryAnchor":"ISO/IEC 14882:2024 (C++23)","cs2023":[],"swebok":[],"bloom":"evaluate","sfia":4,"dreyfus":"proficient"}
+vocabulary: ["rdtsc","tsc","invariant-tsc","cpuid-serializing","lfence","benchmark-dead-code-elimination","benchmark-clobber","benchmark-escape","percentile-latency","p99-latency","warm-up-phase","outlier-trimming"]
+learningOutcomes: ["Identify dead-work and timing-calibration defects","Compare a representative controlled experiment","Justify distribution and repeatability evidence"]
+professionalContext: "Evaluate a benchmark that repeatedly calls compute(5), ignores the result, divides TSC ticks by the current turbo GHz, and reports only the minimum. Compare it with a corrected experiment and justify how you would test whether a 20 ns claimed improvement survives realistic input and tail behavior."
 thresholdConcept: false
 ---
 
@@ -43,11 +20,19 @@ You optimize an order-book update function and your benchmark says it dropped fr
 
 One of three things: (a) the compiler noticed the function's output was unused and eliminated the loop body — you measured `nop`; (b) the benchmark ran on a hot cache that production never has, so the 60 ns is the L1-cached case and production hits L3 or DRAM half the time; or (c) the mean went down but the p99 went up — the optimization moved fast cases faster and slow cases slower, and the strategy cares about the slow cases. All three are real bugs. This lesson is how you catch them before they waste a trading day.
 
+## Start with something familiar
+
+A stopwatch reading of zero may mean the runner never started, so the measurement procedure must prove that the intended work occurred.
+
+## The mental model
+
+> Microbenchmarks measure a particular workload and timing apparatus. Observable results, ordering, calibration, and a recorded latency distribution are prerequisites for interpreting very small timing differences.
+
 ## The right way to time in C++
 
-The system clock (`std::chrono::high_resolution_clock`) is fine for millisecond measurements. For nanoseconds on a hot path, you need the CPU's **Time Stamp Counter** — the <VocabTooltip slug="rdtsc">rdtsc</VocabTooltip> instruction on x86. It returns a monotonically increasing 64-bit tick count that increments at a fixed frequency on modern CPUs (the <VocabTooltip slug="invariant-tsc">invariant TSC</VocabTooltip>, exposed since Intel Nehalem). The tick frequency is the CPU's base clock — ~3 GHz on typical HFT hardware — so one tick ≈ 0.33 ns.
+Choose a monotonic timing method with adequate resolution and characterize its overhead. On suitable x86 systems the TSC can provide fine-grained timestamps, but its rate, cross-core behavior, ordering, and virtualization assumptions need verification. Its invariant rate is not generally the current turbo core frequency; high_resolution_clock is not universally a steady clock.
 
-The tricky part: the CPU is allowed to reorder instructions, including your `rdtsc` calls, relative to the code under test. A bare `rdtsc` can be measured before the preceding code finishes, producing a spuriously short sample. The fix is a <VocabTooltip slug="lfence">lfence</VocabTooltip> memory fence before each `rdtsc`, which serializes all prior instructions before the counter is read.
+The tricky part: the CPU is allowed to reorder instructions, including your `rdtsc` calls, relative to the code under test. A bare `rdtsc` can be measured before the preceding code finishes, producing a spuriously short sample. The fix is a <VocabTooltip slug="lfence">lfence</VocabTooltip>-based timing sequence, whose load/store and compiler-ordering requirements depend on what the measurement includes.
 
 ```cpp
 #include <cstdint>
@@ -68,11 +53,12 @@ inline uint64_t rdtsc_start() noexcept {
 }
 
 // Read the TSC at the end of an interval. rdtscp writes the CPU id to
-// ecx and is itself serializing — no lfence needed after it.
+// ecx. The trailing LFENCE prevents later execution from crossing this boundary.
 inline uint64_t rdtsc_end() noexcept {
     uint32_t lo, hi;
     __asm__ volatile (
-        "rdtscp\n\t"        // serializing read (waits for prior instructions)
+        "rdtscp\n\t"
+        "lfence\n\t"
         : "=a"(lo), "=d"(hi)
         :
         : "ecx", "memory"
@@ -87,7 +73,7 @@ inline double ticks_to_ns(uint64_t ticks, double ticks_per_ns) {
 }
 ```
 
-`rdtscp` (with trailing `p`) is a serializing variant of `rdtsc` that waits for all preceding instructions to retire before reading the counter. Used at the end of a timed region, it measures everything up to the point you call it. The pair `lfence + rdtsc` at the start and `rdtscp` at the end is the canonical HFT latency measurement idiom.
+RDTSCP waits for specified prior execution conditions but is not a fully serializing instruction and does not by itself order all subsequent work or guarantee prior stores are globally visible. Use a timing sequence appropriate to the processor and measurement boundary, including compiler barriers and any necessary fences; consult the processor documentation rather than calling one sequence universally canonical.
 
 ## Preventing dead-code elimination
 
@@ -217,50 +203,35 @@ The discipline: **measure on the machine where you trade, with the cores isolate
 
 ## Competency check
 
-<Quiz
-  questions={[
-    {
-      question:
-        "You measure a function's latency with rdtsc_start/rdtsc_end and get 8 ticks. The TSC frequency is 3.2 GHz (3.2 × 10^9 ticks/s). What is the latency in nanoseconds?",
-      options: [
-        "8 ns (one tick per nanosecond at 1 GHz)",
-        "2.5 ns (8 ticks ÷ 3.2 ticks/ns = 2.5 ns)",
-        "25.6 ns",
-        "0.8 ns",
-      ],
-      correct: 1,
-      explanation:
-        "The TSC increments at 3.2 GHz = 3.2 ticks per nanosecond. Latency in nanoseconds = ticks / (ticks per nanosecond) = 8 / 3.2 = 2.5 ns. This is the arithmetic you need to convert raw TSC deltas to nanoseconds. Most HFT measurement harnesses calibrate once at startup by comparing a known duration between rdtsc and std::chrono, then apply the ratio to all subsequent rdtsc samples.",
-    },
-    {
-      question:
-        "A Google Benchmark loop contains: `int result = compute(x); benchmark::DoNotOptimize(result);`. A reviewer says the DoNotOptimize is unnecessary because the result is stored in a local variable. Is the reviewer right?",
-      options: [
-        "Yes — the compiler cannot remove a computation whose result is stored in a named local variable",
-        "No — if `result` is never read after the assignment, the compiler may eliminate the entire `compute(x)` call as dead code; DoNotOptimize prevents this by making the compiler treat `result` as observable to an external entity",
-        "Yes, but only when -O0 is used; at -O2 DoNotOptimize is needed",
-        "No — but ClobberMemory() is the correct tool here, not DoNotOptimize",
-      ],
-      correct: 1,
-      explanation:
-        "A local variable that is never read after assignment is dead — the compiler is permitted to eliminate both the assignment and the computation that produced the value. This is exactly the bug in naive benchmarks: you call compute(x), never read the result, and the optimizer deletes the call. DoNotOptimize(result) inserts an inline asm constraint that treats result as if it were read and written by an external entity the optimizer cannot see, forcing the computation to remain. ClobberMemory() is the complementary tool for functions that write to memory rather than returning a value — it tells the compiler all memory may have changed.",
-    },
-    {
-      question:
-        "Your benchmark reports mean latency of 80 ns with a standard deviation of 5 ns. A production incident shows the strategy missed 3 fills in one minute because the order arrived 2 µs late. Is the benchmark evidence that the code path was fast enough?",
-      options: [
-        "Yes — mean 80 ns with 5 ns std dev implies p99 < 100 ns, which is well below 2 µs",
-        "No — mean and standard deviation do not bound the tail; a distribution with mean 80 ns and std dev 5 ns can still have outliers at 2 µs or higher if the distribution is heavy-tailed or bimodal; you need to measure and report p99 and p99.9 to know whether the 2 µs tail exists",
-        "Yes — standard deviation of 5 ns means no sample was more than a few multiples of 5 ns from the mean",
-        "No — but only because the benchmark did not run on the production machine",
-      ],
-      correct: 1,
-      explanation:
-        "Mean and standard deviation fully characterize a normal distribution, but latency distributions are almost never normal — they are typically right-skewed or bimodal (fast path + occasional slow path). A mean of 80 ns with a std dev of 5 ns says nothing about the 99th or 99.9th percentile; those could be 200 ns (fine) or 2000 ns (production breaking). The 3 fills missed at 2 µs is evidence of a high-percentile tail that the mean/std-dev summary hid. The correct tool is a percentile histogram: collect at least 10,000 samples, sort, and report p50/p99/p99.9/max. If p99.9 is 2 µs, you have a 1-in-1000 spike that the mean concealed.",
-    },
-  ]}
+## Guided practice
+
+Does storing compute(5) in an unused local variable force the compiler to perform it at runtime?
+
+<details>
+<summary>Reveal the reasoning checkpoint</summary>
+
+No. If it has no observable effects, the compiler can eliminate or precompute the work.
+
+</details>
+
+## Check your understanding
+
+<WrittenExercise
+ instructions={"Evaluate a benchmark that repeatedly calls compute(5), ignores the result, divides TSC ticks by the current turbo GHz, and reports only the minimum. Compare it with a corrected experiment and justify how you would test whether a 20 ns claimed improvement survives realistic input and tail behavior."}
+ rubric={["Identify dead-work and timing-calibration defects","Compare a representative controlled experiment","Justify distribution and repeatability evidence"]}
+ modelAnswer={"The optimizer may eliminate or precompute constant work. Consume results appropriately, vary representative runtime inputs, and inspect generated code; DoNotOptimize alone does not prohibit every optimization of the producing expression. Calibrate or verify the TSC frequency instead of substituting a changing core clock, and use a documented ordering/timing method with overhead characterization. Record enough samples and distributions, including high percentiles and outliers, under stated hardware, affinity, cache, and compiler conditions. Compare repeated runs with a baseline and preserve correctness; the minimum describes a favorable observation, not production tail latency."}
 />
+
+
 
 ## What's next
 
 Module q-1 is complete. Module q-2 takes the numerics of prices deeper: after understanding IEEE 754 representation, you will apply Kahan summation to accurate P&L accumulation, learn the NaN propagation rules that create silent pricing bugs, and build a safe floating-point comparison toolkit that is both correct and fast.
+
+<Quiz question={"Which frequency converts invariant TSC ticks to elapsed time?"} options={["Always the current turbo core frequency","Always exactly one GHz","The verified or calibrated TSC frequency"]} answer={2} explanation={"TSC rate is not generally the instantaneous core clock. Timing boundaries and overhead must also be characterized."} />
+
+## What you learned
+
+- Identify dead-work and timing-calibration defects
+- Compare a representative controlled experiment
+- Justify distribution and repeatability evidence
