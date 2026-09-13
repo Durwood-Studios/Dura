@@ -29,9 +29,28 @@ end $$;
 set role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
 select set_config('request.jwt.claims', '{"app_metadata":{},"user_metadata":{"is_admin":true}}', false);
-insert into public.tutorial_progress(id,user_id,slug,type,current_step,total_steps,started_at,last_active_at)
-values ('tutorial-a',auth.uid(),'first-app','tutorial',1,3,1000,2000)
-on conflict (user_id,id) do update set current_step=excluded.current_step;
+-- Mutable tutorial records use the conflict-aware RPC after migration 022.
+select public.sync_learner_records('tutorial_progress', jsonb_build_array(jsonb_build_object(
+  'id','tutorial-a','user_id',auth.uid(),'slug','first-app','type','tutorial',
+  'current_step',1,'total_steps',3,'started_at',1000,'last_active_at',2000)));
+do $$ begin
+  if not exists(select 1 from public.tutorial_progress where id='tutorial-a' and current_step=1) then
+    raise exception 'Own tutorial RPC write failed';
+  end if;
+  begin
+    insert into public.tutorial_progress(id,user_id,slug,type,current_step,total_steps,started_at,last_active_at)
+    values ('legacy-write',auth.uid(),'first-app','tutorial',1,3,1000,2000);
+    raise exception 'Legacy direct tutorial insert was allowed';
+  exception when insufficient_privilege then null; end;
+  begin
+    update public.tutorial_progress set current_step=2 where id='tutorial-a';
+    raise exception 'Legacy direct tutorial update was allowed';
+  exception when insufficient_privilege then null; end;
+  begin
+    delete from public.tutorial_progress where id='tutorial-a';
+    raise exception 'Legacy direct tutorial deletion was allowed';
+  exception when insufficient_privilege then null; end;
+end $$;
 insert into public.dojo_sessions(id,user_id,started_at,completed_at,tier,avg_score)
 values ('dojo-a',auth.uid(),1000,2000,'T3',7);
 insert into public.analytics_events(id,user_id,name,timestamp)
@@ -67,6 +86,16 @@ do $$ begin
     values ('foreign', '11111111-1111-4111-8111-111111111111',1000,2000,'T3',7);
     raise exception 'Cross-account write allowed';
   exception when insufficient_privilege then null; end;
+end $$;
+-- The new SECURITY DEFINER path must reject a foreign owner, independently of RLS.
+do $$ begin
+  begin
+    perform public.sync_learner_records('tutorial_progress',
+      '[{"id":"tutorial-a","user_id":"11111111-1111-4111-8111-111111111111","slug":"first-app","type":"tutorial","current_step":3,"total_steps":3,"started_at":1000,"last_active_at":3000}]'::jsonb);
+    raise exception 'Foreign tutorial RPC write was allowed';
+  exception when raise_exception then
+    if SQLERRM <> 'Owner mismatch' then raise; end if;
+  end;
 end $$;
 -- The progress RPC must obey the same ownership policy as table writes.
 do $$ begin

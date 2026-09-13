@@ -11,6 +11,7 @@ for migration in supabase/migrations/00[1-6]-*.sql supabase/migrations/013-*.sql
   psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
 done
 psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/staged-behavior.sql
+psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/conflict-safe-sync.sql
 
 psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/credential-storage.sql
 

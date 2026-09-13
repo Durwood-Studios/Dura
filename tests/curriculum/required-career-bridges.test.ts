@@ -6,7 +6,7 @@ import matter from "gray-matter";
 import { describe, expect, it } from "vitest";
 import { getSkill } from "@/content/skills";
 import { ALL_QUESTIONS } from "@/content/questions";
-import classification from "../../xDocs/active/promise-closure-2026-09/career-gap-classification.json";
+import classification from "./fixtures/career-gap-classification.json";
 
 const pythonFile =
   "src/content/phases/1-programming-fundamentals/1-6-first-projects/46-python-data-bridge.mdx";

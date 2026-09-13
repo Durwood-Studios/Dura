@@ -1,5 +1,5 @@
 -- Disposable test database only.
-INSERT INTO auth.users(id) VALUES('22222222-2222-4222-8222-222222222222');
+INSERT INTO auth.users(id) VALUES('22222222-2222-4222-8222-222222222222') ON CONFLICT(id) DO NOTHING;
 SET ROLE authenticated;
 SELECT set_config('request.jwt.claim.sub','22222222-2222-4222-8222-222222222222',false);
 SELECT public.sync_learner_records('sandbox_saves','[{"user_id":"22222222-2222-4222-8222-222222222222","id":"sandbox-test","title":"New","language":"javascript","code":"new code","created_at":100,"updated_at":200}]');
@@ -41,5 +41,19 @@ DO $$ BEGIN
   PERFORM public.delete_learner_record('33333333-3333-4333-8333-333333333333','goals','goal-test',300);
   RAISE EXCEPTION 'Mismatched deletion accepted';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM='Mismatched deletion accepted' THEN RAISE; END IF; END;
+END $$;
+RESET ROLE;
+
+-- All four mutable tables must reject old clients bypassing merge/tombstone semantics.
+SET ROLE authenticated;
+DO $$ DECLARE table_name text; privilege text; BEGIN
+ FOREACH table_name IN ARRAY ARRAY['flashcards','goals','sandbox_saves','tutorial_progress'] LOOP
+  FOREACH privilege IN ARRAY ARRAY['INSERT','UPDATE','DELETE'] LOOP
+   IF has_table_privilege('authenticated','public.'||table_name,privilege)
+      OR has_table_privilege('anon','public.'||table_name,privilege) THEN
+    RAISE EXCEPTION 'Legacy % privilege retained for %',privilege,table_name;
+   END IF;
+  END LOOP;
+ END LOOP;
 END $$;
 RESET ROLE;

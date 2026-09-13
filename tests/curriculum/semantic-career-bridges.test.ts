@@ -4,7 +4,7 @@ import vm from "node:vm";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PathDetail } from "@/components/paths/PathDetail";
-import classification from "../../xDocs/active/promise-closure-2026-09/career-gap-classification.json";
+import classification from "./fixtures/career-gap-classification.json";
 import { describe, expect, it } from "vitest";
 import { PATHS } from "@/lib/paths";
 import { getRoleBySlug } from "@/content/roles";
