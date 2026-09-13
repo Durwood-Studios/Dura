@@ -1,0 +1,85 @@
+---
+title: "ETL: Make a Retried Batch Reconcile"
+description: "Write a recovery record for a two-row batch whose acknowledgement is lost after commit."
+phase: 4
+module: "4-3-postgresql"
+order: 10
+estimatedMinutes: 18
+difficulty: 3
+prerequisites: ["1/1-6/47", "4/4-3/06"]
+standards: {"cs2023": [], "swebok": ["Software Quality"], "bloom": "apply", "dreyfus": "advanced-beginner", "sfia": 3}
+vocabulary: ["ETL", "idempotency", "watermark", "upsert"]
+learningOutcomes: ["Trace ETL stage and batch contracts.", "Verify idempotent retry behavior locally.", "Specify watermark and update-ordering recovery rules."]
+thresholdConcept: false
+---
+
+## Why this matters
+
+A batch loader commits ten records, loses its acknowledgement and retries. If the retry adds another ten copies, an operational interruption has changed the business data. An ETL pipeline needs explicit identity and recovery semantics.
+
+## Start with something familiar
+
+A warehouse clerk can receive the same delivery notice twice without receiving two trucks. The notice’s identity lets the clerk recognize a repeat; counting every message as a new delivery inflates inventory.
+
+## The mental model
+
+> Extraction, transformation and loading have separate contracts. Stable source identity plus transactional loading can make retries idempotent; transport retries alone do not create exactly-once business results.
+
+## The mechanism
+
+Extract reads source records. Transform validates and converts them to the destination schema. Load commits the accepted data. Specify which source version or event ID each row represents and whether updates replace prior values, append immutable events or require reconciliation.
+
+The following complete standard-library SQLite fixture demonstrates transaction and uniqueness behavior locally; it is not a PostgreSQL performance or concurrency benchmark. The destination stores one reading per source_id. Repeating the same batch updates the same identities instead of adding duplicates. Validate the whole batch before beginning the write transaction.
+
+```python
+import sqlite3
+
+def load_batch(db, rows):
+    for source_id, rpm in rows:
+        if not source_id or type(rpm) is not int or rpm < 0:
+            raise ValueError("invalid reading")
+    with db:
+        db.executemany(
+            "INSERT INTO readings(source_id,rpm) VALUES (?,?) "
+            "ON CONFLICT(source_id) DO UPDATE SET rpm=excluded.rpm",
+            rows,
+        )
+
+db = sqlite3.connect(":memory:")
+db.execute("CREATE TABLE readings(source_id TEXT PRIMARY KEY, rpm INTEGER NOT NULL)")
+load_batch(db, [("r1", 10), ("r2", 20)])
+load_batch(db, [("r1", 10), ("r2", 20)])
+assert db.execute("SELECT COUNT(*) FROM readings").fetchone()[0] == 2
+try:
+    load_batch(db, [("r3", 30), ("r4", -1)])
+except ValueError:
+    pass
+else:
+    raise AssertionError("invalid batch accepted")
+assert db.execute("SELECT COUNT(*) FROM readings").fetchone()[0] == 2
+print("ETL checks passed")
+```
+
+An acknowledgement lost after commit leaves the caller uncertain, even though the database is correct. Retry the same stable identities, then reconcile destination state. Record batch identity, accepted/rejected counts and status. A watermark marking extraction progress must not advance before the corresponding load is durable; otherwise a crash can skip records permanently.
+
+The upsert policy is a deliberate choice: a later value for r1 replaces its earlier value. It is wrong for a financial event log that must preserve immutable history, and out-of-order older data could overwrite newer data without a version rule. A periodic scheduler merely decides when to start work. Dependencies, bounded retries, overlap prevention and failure observability require an orchestration contract beyond a cron expression.
+
+Compare this fixture with tutorial45’s larger API/PostgreSQL pipeline before adding external services. The local exercise verifies idempotency and validation behavior; remote API pagination, authentication, rate limits and durable production scheduling require separate tests.
+
+## Practice
+
+The first transaction commits but the caller receives no acknowledgement. What should a retry preserve, and why should a watermark not be moved before loading?
+
+<details><summary>Compare the reasoning</summary><p>Preserve source IDs and the same intended batch semantics so repetition does not duplicate records. Advancing progress before durable loading can make a restarted extractor skip records that never reached the destination.</p></details>
+
+## Check your understanding
+
+<WrittenExercise title="ETL: Make a Retried Batch Reconcile practice" instructions="Write a recovery record for a two-row batch whose acknowledgement is lost after commit. Include stable IDs, expected row count after retry, watermark ordering, validation failure behavior and a policy for an older update arriving after a newer value. Explain why the shown upsert is unsuitable for an immutable ledger." rubric={["Keeps stable identities and expects two rows after retry.", "Advances extraction progress only after durable loading/reconciliation.", "Does not partially accept the invalid batch.", "Defines update ordering and separates mutable state from immutable events."]} modelAnswer={"Retry r1/r2 without inventing new IDs; the table remains two rows. Reconcile the committed state before advancing a persisted extraction watermark. The invalid batch is rejected before writes. For mutable records, retain a source version and reject or quarantine an older version instead of overwriting the newest value. An immutable ledger should preserve unique events and corrections rather than replace prior entries. The fixture does not establish distributed exactly-once processing."} />
+
+## What you learned
+
+- Trace ETL stage and batch contracts.
+- Verify idempotent retry behavior locally.
+- Specify watermark and update-ordering recovery rules.
+
+Reference: [Python sqlite3 transaction documentation](https://docs.python.org/3/library/sqlite3.html)

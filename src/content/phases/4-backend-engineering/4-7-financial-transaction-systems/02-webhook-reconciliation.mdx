@@ -1,0 +1,82 @@
+---
+title: "Payment Webhooks: Authenticate, Deduplicate and Reconcile"
+description: "Write the processing and recovery record for E2, duplicateE2 and delayedE1."
+phase: 4
+module: "4-7-financial-transaction-systems"
+order: 2
+estimatedMinutes: 18
+difficulty: 3
+prerequisites: ["4/4-7/01", "8/8-4/05"]
+standards: {"cs2023": [], "swebok": ["Software Quality"], "bloom": "apply", "dreyfus": "advanced-beginner", "sfia": 3}
+vocabulary: ["signature verification", "event identity", "reconciliation"]
+learningOutcomes: ["Design authenticated durable webhook handling.", "Handle duplicate and out-of-order events.", "Reconcile local state beyond callback delivery."]
+thresholdConcept: false
+---
+
+## Why this matters
+
+A payment callback arrives twice or out of order. Treating every delivery as a fresh financial instruction can duplicate an entitlement or regress a completed transaction to an older state.
+
+## Start with something familiar
+
+A courier may deliver two copies of the same signed notice. Verify the notice, recognize its identity and compare it with the current record before changing the books.
+
+## The mental model
+
+> A webhook is an authenticated event delivery, not automatically a unique business action or the newest state. Verify the provider’s exact signature protocol, persist receipt identity and reconcile authoritative transaction state.
+
+## The mechanism
+
+Providers define their own signature format, timestamp tolerance, endpoint secrets and retry behavior. Stripe, for example, requires signature verification against the unmodified raw request body. Do not invent a generic HMAC format and call it compatible with a provider. Use the documented verifier for the configured endpoint/version and reject unverifiable requests before business processing.
+
+After verification, validate event shape, account/environment ownership and supported event type. Atomically record the event ID and intended local effect, or durably enqueue it before acknowledging receipt. Returning success before durable acceptance can lose work; performing a side effect before recording its identity can duplicate work after a crash.
+
+The synthetic sequence is eventE2 saying transactionT is succeeded, duplicateE2, then delayedE1 saying T is processing. The local record should not downgrade solely because E1 arrived later. Retrieve or reconcile the authoritative current transaction state under the provider’s documented semantics. Distinct event IDs can sometimes concern the same business object, so event deduplication is necessary but not a complete business idempotency policy.
+
+This complete offline reducer assumes signature and account validation already succeeded. Its supplied authoritative state models reconciliation; it does not verify a real provider signature or call a payment API.
+
+```python
+seen_events = set()
+local = {"status": "processing", "entitlement_count": 0}
+
+def accept_verified_event(event_id, authoritative_status):
+    if event_id in seen_events:
+        return
+    if authoritative_status not in ("processing", "succeeded"):
+        raise ValueError("unsupported fixture state")
+    if authoritative_status == "succeeded" and local["status"] != "succeeded":
+        local["status"] = "succeeded"
+        local["entitlement_count"] += 1
+    seen_events.add(event_id)
+
+accept_verified_event("E2", "succeeded")
+accept_verified_event("E2", "succeeded")
+accept_verified_event("E1", "succeeded")
+assert local == {"status": "succeeded", "entitlement_count": 1}
+assert seen_events == {"E1", "E2"}
+print("webhook reducer passed")
+```
+
+The delayed E1 is reconciled against current succeeded state, not its old processing payload. This single-threaded in-memory reducer does not implement durable crash recovery, transaction reversal or arbitrary provider states.
+
+Maintain a reconciliation job comparing local ledger/entitlement state with authoritative provider records. A webhook can be delayed, missed or temporarily rejected. Record actionable failure status without logging secrets, raw sensitive payloads or payment authentication data. Keep test and live environments separate.
+
+This lesson uses a state sequence and a design record. It does not receive a real provider webhook or move funds. Provider-specific signature and retry behavior must be verified in its test environment before deployment.
+
+## Practice
+
+If delayed E1 arrives after succeeded E2, should arrival order alone set the transaction back to processing? What happens to duplicate E2?
+
+<details><summary>Compare the reasoning</summary><p>No. Reconcile current authoritative state instead of treating delivery order as business chronology. Duplicate E2 should not repeat the local effect.</p></details>
+
+## Check your understanding
+
+<WrittenExercise title="Payment Webhooks: Authenticate, Deduplicate and Reconcile practice" instructions="Write the processing and recovery record for E2, duplicateE2 and delayedE1. Include raw-body signature verification, durable acceptance, event/business identity, out-of-order handling and reconciliation after a missed callback. State what provider-specific evidence remains necessary." rubric={["Verifies the provider protocol before processing.", "Makes acceptance/effect identity durable and duplicate-safe.", "Does not regress state from delivery order alone.", "Defines reconciliation and test/live separation."]} modelAnswer={"Verify the exact raw-body signature and endpoint context, validate shape and persist E2 with its local effect or durable queue entry before acknowledgement. Duplicate E2 does not repeat the effect. Delayed E1 triggers a current-state check rather than downgrading succeeded. Reconciliation finds missed callbacks by comparing provider and local records. Test bad signatures, duplicates, delayed delivery and crash recovery against the configured provider test environment; this written sequence is not that runtime evidence."} />
+
+## What you learned
+
+- Design authenticated durable webhook handling.
+- Handle duplicate and out-of-order events.
+- Reconcile local state beyond callback delivery.
+
+Reference: [Stripe webhook documentation](https://docs.stripe.com/webhooks)

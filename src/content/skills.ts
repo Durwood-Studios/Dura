@@ -1,6 +1,10 @@
+import { ROLE_STUDY_TOPICS } from "@/content/role-study-topics";
+import { SKILL_ALIASES } from "@/content/skill-aliases";
+import { SKILL_LESSONS } from "@/content/skill-lessons";
 import type { Skill } from "@/types/career-track";
 
 export const SKILLS: Skill[] = [
+  ...ROLE_STUDY_TOPICS,
   // ─── Phase 0-1 Foundations (15 skills) ─────────────────────────────
   {
     id: "file-system-nav",
@@ -8,7 +12,7 @@ export const SKILLS: Skill[] = [
     description:
       "Navigate directories, manage files, and understand file system structure from the terminal.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["file-system-nav"] ?? [],
     tutorialSlugs: ["cli-tool"],
     prerequisites: [],
     roles: [
@@ -25,7 +29,7 @@ export const SKILLS: Skill[] = [
     name: "Command Line Proficiency",
     description: "Use shell commands, pipes, redirects, and scripting to automate tasks.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["command-line"] ?? [],
     tutorialSlugs: ["cli-tool", "cli-dashboard"],
     prerequisites: ["file-system-nav"],
     roles: [
@@ -42,7 +46,7 @@ export const SKILLS: Skill[] = [
     name: "Git & Version Control",
     description: "Track changes, branch, merge, and collaborate using Git workflows.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["git-version-control"] ?? [],
     tutorialSlugs: ["git-visualizer", "git-hooks-toolkit"],
     prerequisites: ["command-line"],
     roles: [
@@ -60,7 +64,7 @@ export const SKILLS: Skill[] = [
     description:
       "Declare variables, understand primitive and reference types, and use type annotations.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["variables-types"] ?? [],
     tutorialSlugs: ["cli-tool"],
     prerequisites: [],
     roles: [
@@ -76,7 +80,7 @@ export const SKILLS: Skill[] = [
     name: "Control Flow",
     description: "Use conditionals, loops, and pattern matching to direct program execution.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["control-flow"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["variables-types"],
     roles: [
@@ -92,7 +96,7 @@ export const SKILLS: Skill[] = [
     name: "Functions & Scope",
     description: "Define functions, understand closures, and manage variable scope and hoisting.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["functions-scope"] ?? [],
     tutorialSlugs: ["cli-tool", "algorithm-visualizer"],
     prerequisites: ["variables-types", "control-flow"],
     roles: [
@@ -108,7 +112,7 @@ export const SKILLS: Skill[] = [
     name: "Basic Data Structures",
     description: "Work with arrays, objects, maps, and sets to organize and access data.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["data-structures-basic"] ?? [],
     tutorialSlugs: ["algorithm-visualizer", "finance-tracker"],
     prerequisites: ["variables-types", "control-flow"],
     roles: [
@@ -126,7 +130,7 @@ export const SKILLS: Skill[] = [
     description:
       "Read error messages, use debuggers, and write code that handles failures gracefully.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["debugging-errors"] ?? [],
     tutorialSlugs: ["cli-tool"],
     prerequisites: ["variables-types", "functions-scope"],
     roles: [
@@ -143,7 +147,7 @@ export const SKILLS: Skill[] = [
     name: "Asynchronous Programming",
     description: "Handle promises, async/await, and callbacks to manage non-blocking operations.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["async-programming"] ?? [],
     tutorialSlugs: ["chat-app", "rest-api"],
     prerequisites: ["functions-scope"],
     roles: [
@@ -160,7 +164,7 @@ export const SKILLS: Skill[] = [
     description:
       "Access and modify HTML elements programmatically using the Document Object Model.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["dom-basics"] ?? [],
     tutorialSlugs: ["first-website", "browser-game"],
     prerequisites: ["variables-types", "html-css-fundamentals"],
     roles: [
@@ -175,7 +179,7 @@ export const SKILLS: Skill[] = [
     name: "HTML & CSS Fundamentals",
     description: "Structure web pages with semantic HTML and style them with CSS.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["html-css-fundamentals"] ?? [],
     tutorialSlugs: ["first-website", "portfolio-site"],
     prerequisites: [],
     roles: [
@@ -191,7 +195,7 @@ export const SKILLS: Skill[] = [
     name: "Testing Basics",
     description: "Write unit tests, understand test runners, and practice test-driven development.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["testing-basics"] ?? [],
     tutorialSlugs: ["test-suite", "api-testing-framework"],
     prerequisites: ["functions-scope"],
     roles: [
@@ -208,7 +212,7 @@ export const SKILLS: Skill[] = [
     name: "Package Management",
     description: "Install, update, and manage project dependencies using npm or similar tools.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["package-management"] ?? [],
     tutorialSlugs: ["npm-package", "cli-tool"],
     prerequisites: ["command-line"],
     roles: [
@@ -225,7 +229,7 @@ export const SKILLS: Skill[] = [
     description:
       "Read and comprehend unfamiliar codebases to understand logic, intent, and patterns.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["code-reading"] ?? [],
     tutorialSlugs: ["diff-tool"],
     prerequisites: ["variables-types", "functions-scope"],
     roles: [
@@ -243,7 +247,7 @@ export const SKILLS: Skill[] = [
     description:
       "Break down complex problems, design solutions, and translate requirements into code.",
     category: "foundations",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["problem-solving"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["control-flow", "functions-scope"],
     roles: [
@@ -262,7 +266,7 @@ export const SKILLS: Skill[] = [
     name: "Semantic HTML",
     description: "Use meaningful HTML elements to improve accessibility, SEO, and code clarity.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["semantic-html"] ?? [],
     tutorialSlugs: ["first-website", "accessible-components"],
     prerequisites: ["html-css-fundamentals"],
     roles: [
@@ -278,7 +282,7 @@ export const SKILLS: Skill[] = [
     description:
       "Use flexbox to create one-dimensional layouts that adapt to content and screen size.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["css-layout-flexbox"] ?? [],
     tutorialSlugs: ["portfolio-site", "design-system"],
     prerequisites: ["html-css-fundamentals"],
     roles: [
@@ -294,7 +298,7 @@ export const SKILLS: Skill[] = [
     description:
       "Use CSS Grid for two-dimensional layouts with precise control over rows and columns.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["css-layout-grid"] ?? [],
     tutorialSlugs: ["portfolio-site", "data-dashboard"],
     prerequisites: ["html-css-fundamentals"],
     roles: [
@@ -310,7 +314,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build layouts that work across all screen sizes using media queries and fluid techniques.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["responsive-design"] ?? [],
     tutorialSlugs: ["portfolio-site", "kanban-mobile"],
     prerequisites: ["css-layout-flexbox", "css-layout-grid"],
     roles: [
@@ -327,7 +331,7 @@ export const SKILLS: Skill[] = [
     description:
       "Use custom properties to build theme systems with dark mode and user preferences.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["css-variables-theming"] ?? [],
     tutorialSlugs: ["design-system", "css-framework"],
     prerequisites: ["html-css-fundamentals"],
     roles: [
@@ -342,7 +346,7 @@ export const SKILLS: Skill[] = [
     name: "DOM Manipulation",
     description: "Create, modify, and remove DOM elements dynamically in response to user actions.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["dom-manipulation"] ?? [],
     tutorialSlugs: ["browser-game", "markdown-editor"],
     prerequisites: ["dom-basics"],
     roles: [
@@ -358,7 +362,7 @@ export const SKILLS: Skill[] = [
     description:
       "Handle clicks, keyboard input, scrolling, and custom events with proper delegation.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["browser-events"] ?? [],
     tutorialSlugs: ["browser-game", "form-wizard"],
     prerequisites: ["dom-basics"],
     roles: [
@@ -374,7 +378,7 @@ export const SKILLS: Skill[] = [
     description:
       "Make HTTP requests with fetch, handle responses, and work with REST APIs from the client.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["fetch-http"] ?? [],
     tutorialSlugs: ["rest-api", "chat-app"],
     prerequisites: ["async-programming"],
     roles: [
@@ -390,7 +394,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build reusable UI components with props, composition, and the component lifecycle.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["react-components"] ?? [],
     tutorialSlugs: ["react-dashboard", "accessible-components"],
     prerequisites: ["html-css-fundamentals", "functions-scope"],
     roles: [
@@ -406,7 +410,7 @@ export const SKILLS: Skill[] = [
     name: "React Hooks",
     description: "Use useState, useEffect, useRef, and custom hooks to manage component logic.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["react-hooks"] ?? [],
     tutorialSlugs: ["react-dashboard", "finance-tracker"],
     prerequisites: ["react-components"],
     roles: [
@@ -422,7 +426,7 @@ export const SKILLS: Skill[] = [
     description:
       "Manage complex state across components using context, reducers, and external stores.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["react-state-mgmt"] ?? [],
     tutorialSlugs: ["task-board", "ecommerce-checkout"],
     prerequisites: ["react-hooks"],
     roles: [
@@ -438,7 +442,7 @@ export const SKILLS: Skill[] = [
     description:
       "Synchronize components with external systems using effects and data fetching patterns.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["react-effects"] ?? [],
     tutorialSlugs: ["react-dashboard", "chat-app"],
     prerequisites: ["react-hooks", "async-programming"],
     roles: [
@@ -454,7 +458,7 @@ export const SKILLS: Skill[] = [
     description:
       "Share state across the component tree without prop drilling using context providers.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["react-context"] ?? [],
     tutorialSlugs: ["ecommerce-checkout", "design-system"],
     prerequisites: ["react-components", "react-hooks"],
     roles: [
@@ -470,7 +474,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build multi-page applications with file-based routing, dynamic segments, and layouts.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["nextjs-routing"] ?? [],
     tutorialSlugs: ["blog-engine", "documentation-site"],
     prerequisites: ["react-components"],
     roles: [
@@ -485,7 +489,7 @@ export const SKILLS: Skill[] = [
     name: "Next.js Server Components",
     description: "Render components on the server for better performance and direct data access.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["nextjs-server-components"] ?? [],
     tutorialSlugs: ["blog-engine", "cms-headless"],
     prerequisites: ["nextjs-routing", "react-components"],
     roles: [
@@ -501,7 +505,7 @@ export const SKILLS: Skill[] = [
     description:
       "Fetch data in server components, use caching strategies, and handle loading states.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["nextjs-data-fetching"] ?? [],
     tutorialSlugs: ["blog-engine", "data-dashboard"],
     prerequisites: ["nextjs-server-components", "fetch-http"],
     roles: [
@@ -517,7 +521,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build inclusive interfaces with ARIA attributes, keyboard navigation, and screen reader support.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["web-accessibility"] ?? [],
     tutorialSlugs: ["accessible-components", "design-system"],
     prerequisites: ["semantic-html", "react-components"],
     roles: [
@@ -537,7 +541,7 @@ export const SKILLS: Skill[] = [
     description:
       "Inspect elements, debug JavaScript, profile performance, and analyze network requests.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["browser-devtools"] ?? [],
     tutorialSlugs: ["react-dashboard"],
     prerequisites: ["dom-basics"],
     roles: [
@@ -553,7 +557,7 @@ export const SKILLS: Skill[] = [
     name: "Form Handling",
     description: "Build forms with validation, error states, and accessible input patterns.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["form-handling"] ?? [],
     tutorialSlugs: ["form-wizard", "job-tracker"],
     prerequisites: ["react-hooks", "browser-events"],
     roles: [
@@ -568,7 +572,7 @@ export const SKILLS: Skill[] = [
     name: "Web Performance",
     description: "Optimize load times, reduce bundle size, and improve Core Web Vitals scores.",
     category: "web",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["web-performance"] ?? [],
     tutorialSlugs: ["image-optimizer", "static-site-gen"],
     prerequisites: ["react-components", "browser-devtools"],
     roles: [
@@ -586,7 +590,7 @@ export const SKILLS: Skill[] = [
     name: "Big-O Analysis",
     description: "Analyze time and space complexity to evaluate algorithm efficiency.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["big-o-analysis"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["functions-scope", "data-structures-basic"],
     roles: [
@@ -603,7 +607,7 @@ export const SKILLS: Skill[] = [
     description:
       "Solve problems involving iteration, searching, and manipulation of arrays and strings.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["arrays-strings-algo"] ?? [],
     tutorialSlugs: ["algorithm-visualizer", "regex-tester"],
     prerequisites: ["data-structures-basic", "big-o-analysis"],
     roles: [
@@ -619,7 +623,7 @@ export const SKILLS: Skill[] = [
     name: "Linked Lists",
     description: "Implement and traverse singly and doubly linked lists for dynamic data storage.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["linked-lists"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["data-structures-basic"],
     roles: [
@@ -635,7 +639,7 @@ export const SKILLS: Skill[] = [
     description:
       "Use LIFO and FIFO structures for parsing, scheduling, and breadth-first traversal.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["stacks-queues"] ?? [],
     tutorialSlugs: ["algorithm-visualizer", "task-queue"],
     prerequisites: ["data-structures-basic"],
     roles: [
@@ -650,7 +654,7 @@ export const SKILLS: Skill[] = [
     name: "Hash Maps",
     description: "Use hash-based structures for constant-time lookups and frequency counting.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["hash-maps"] ?? [],
     tutorialSlugs: ["key-value-store", "algorithm-visualizer"],
     prerequisites: ["data-structures-basic"],
     roles: [
@@ -666,7 +670,7 @@ export const SKILLS: Skill[] = [
     name: "Trees & Traversal",
     description: "Build and traverse binary trees, BSTs, and n-ary trees using DFS and BFS.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["trees-traversal"] ?? [],
     tutorialSlugs: ["algorithm-visualizer", "dependency-graph"],
     prerequisites: ["stacks-queues", "recursion"],
     roles: [
@@ -683,7 +687,7 @@ export const SKILLS: Skill[] = [
     description:
       "Model relationships with graphs and solve problems using BFS, DFS, and shortest-path algorithms.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["graph-algorithms"] ?? [],
     tutorialSlugs: ["dependency-graph", "algorithm-visualizer"],
     prerequisites: ["trees-traversal", "hash-maps"],
     roles: [
@@ -700,7 +704,7 @@ export const SKILLS: Skill[] = [
     description:
       "Implement and compare sorting strategies from bubble sort to merge sort and quicksort.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["sorting-algorithms"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["arrays-strings-algo", "big-o-analysis"],
     roles: [
@@ -716,7 +720,7 @@ export const SKILLS: Skill[] = [
     description:
       "Apply binary search to sorted data and adapt it for search-space reduction problems.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["binary-search"] ?? [],
     tutorialSlugs: ["algorithm-visualizer", "search-engine"],
     prerequisites: ["arrays-strings-algo", "big-o-analysis"],
     roles: [
@@ -732,7 +736,7 @@ export const SKILLS: Skill[] = [
     name: "Recursion",
     description: "Solve problems by breaking them into self-similar sub-problems with base cases.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["recursion"] ?? [],
     tutorialSlugs: ["algorithm-visualizer", "static-site-gen"],
     prerequisites: ["functions-scope"],
     roles: [
@@ -749,7 +753,7 @@ export const SKILLS: Skill[] = [
     description:
       "Optimize recursive solutions using memoization and tabulation for overlapping sub-problems.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["dynamic-programming-skill"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["recursion", "big-o-analysis"],
     roles: [
@@ -764,7 +768,7 @@ export const SKILLS: Skill[] = [
     name: "Greedy Algorithms",
     description: "Make locally optimal choices at each step to find globally optimal solutions.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["greedy-algorithms"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["big-o-analysis", "sorting-algorithms"],
     roles: [
@@ -780,7 +784,7 @@ export const SKILLS: Skill[] = [
     description:
       "Use converging or parallel pointers to solve array and string problems efficiently.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["two-pointer-technique"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["arrays-strings-algo"],
     roles: [
@@ -796,7 +800,7 @@ export const SKILLS: Skill[] = [
     description:
       "Maintain a dynamic window over sequential data to solve subarray and substring problems.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["sliding-window"] ?? [],
     tutorialSlugs: ["algorithm-visualizer", "streaming-processor"],
     prerequisites: ["arrays-strings-algo"],
     roles: [
@@ -812,7 +816,7 @@ export const SKILLS: Skill[] = [
     description:
       "Explore all possible solutions by building candidates incrementally and pruning invalid paths.",
     category: "cs",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["backtracking"] ?? [],
     tutorialSlugs: ["algorithm-visualizer"],
     prerequisites: ["recursion", "trees-traversal"],
     roles: [
@@ -830,7 +834,7 @@ export const SKILLS: Skill[] = [
     description:
       "Understand the event loop, module system, and built-in APIs for server-side JavaScript.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["nodejs-runtime"] ?? [],
     tutorialSlugs: ["http-server", "cli-tool"],
     prerequisites: ["async-programming", "command-line"],
     roles: [
@@ -847,7 +851,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build HTTP servers with Express, chain middleware for logging, auth, and error handling.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["express-middleware"] ?? [],
     tutorialSlugs: ["rest-api", "http-server"],
     prerequisites: ["nodejs-runtime", "fetch-http"],
     roles: [
@@ -863,7 +867,7 @@ export const SKILLS: Skill[] = [
     description:
       "Design resource-oriented APIs with proper HTTP methods, status codes, and versioning.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["rest-api-design"] ?? [],
     tutorialSlugs: ["rest-api", "graphql-api"],
     prerequisites: ["express-middleware", "fetch-http"],
     roles: [
@@ -879,7 +883,7 @@ export const SKILLS: Skill[] = [
     name: "SQL Queries",
     description: "Write SELECT, JOIN, GROUP BY, and subqueries to retrieve and aggregate data.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["sql-queries"] ?? [],
     tutorialSlugs: ["rest-api", "analytics-dashboard"],
     prerequisites: ["data-structures-basic"],
     roles: [
@@ -896,7 +900,7 @@ export const SKILLS: Skill[] = [
     description:
       "Design normalized schemas with proper relationships, constraints, and data types.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["schema-design"] ?? [],
     tutorialSlugs: ["rest-api", "inventory-system"],
     prerequisites: ["sql-queries"],
     roles: [
@@ -913,7 +917,7 @@ export const SKILLS: Skill[] = [
     name: "Database Indexing",
     description: "Create and optimize indexes to speed up queries while managing write overhead.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["database-indexing"] ?? [],
     tutorialSlugs: ["search-engine", "analytics-dashboard"],
     prerequisites: ["sql-queries", "schema-design"],
     roles: [
@@ -930,7 +934,7 @@ export const SKILLS: Skill[] = [
     description:
       "Use transactions to ensure atomicity, consistency, isolation, and durability of data operations.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["transactions-acid"] ?? [],
     tutorialSlugs: ["ecommerce-checkout", "finance-tracker"],
     prerequisites: ["sql-queries"],
     roles: [
@@ -945,7 +949,7 @@ export const SKILLS: Skill[] = [
     name: "Database Migrations",
     description: "Evolve database schemas safely over time with versioned migration scripts.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["database-migrations"] ?? [],
     tutorialSlugs: ["migration-tool", "rest-api"],
     prerequisites: ["schema-design"],
     roles: [
@@ -962,7 +966,7 @@ export const SKILLS: Skill[] = [
     description:
       "Implement stateless authentication with JSON Web Tokens for API and session management.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["jwt-authentication"] ?? [],
     tutorialSlugs: ["auth-system", "oauth-provider"],
     prerequisites: ["rest-api-design"],
     roles: [
@@ -979,7 +983,7 @@ export const SKILLS: Skill[] = [
     description:
       "Securely store passwords using bcrypt or argon2 with proper salting and iteration counts.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["password-hashing"] ?? [],
     tutorialSlugs: ["auth-system", "password-manager"],
     prerequisites: [],
     roles: [
@@ -995,7 +999,7 @@ export const SKILLS: Skill[] = [
     name: "Docker Containers",
     description: "Package applications into containers with Dockerfiles for consistent deployment.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["docker-containers"] ?? [],
     tutorialSlugs: ["docker-deploy", "kubernetes-deployer"],
     prerequisites: ["command-line", "nodejs-runtime"],
     roles: [
@@ -1013,7 +1017,7 @@ export const SKILLS: Skill[] = [
     description:
       "Orchestrate multi-container applications with Docker Compose for local development.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["docker-compose"] ?? [],
     tutorialSlugs: ["docker-deploy", "saas-starter"],
     prerequisites: ["docker-containers"],
     roles: [
@@ -1030,7 +1034,7 @@ export const SKILLS: Skill[] = [
     description:
       "Automate testing, building, and deploying code with continuous integration and delivery.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["ci-cd-pipelines"] ?? [],
     tutorialSlugs: ["ci-cd-pipeline", "docker-deploy"],
     prerequisites: ["git-version-control", "testing-basics"],
     roles: [
@@ -1048,7 +1052,7 @@ export const SKILLS: Skill[] = [
     description:
       "Manage configuration across environments with env variables, secrets, and config files.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["environment-config"] ?? [],
     tutorialSlugs: ["secrets-manager", "docker-deploy"],
     prerequisites: ["command-line"],
     roles: [
@@ -1065,7 +1069,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build robust error handling with structured errors, retries, and graceful degradation.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["error-handling-backend"] ?? [],
     tutorialSlugs: ["rest-api", "webhook-relay"],
     prerequisites: ["debugging-errors", "express-middleware"],
     roles: [
@@ -1082,7 +1086,7 @@ export const SKILLS: Skill[] = [
     description:
       "Implement structured logging and monitoring to track application health and debug issues.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["logging-monitoring"] ?? [],
     tutorialSlugs: ["log-aggregator", "monitoring-dashboard"],
     prerequisites: ["error-handling-backend"],
     roles: [
@@ -1098,7 +1102,7 @@ export const SKILLS: Skill[] = [
     name: "API Documentation",
     description: "Document APIs with OpenAPI/Swagger specs, examples, and interactive explorers.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["api-documentation"] ?? [],
     tutorialSlugs: ["documentation-site", "rest-api"],
     prerequisites: ["rest-api-design"],
     roles: [
@@ -1115,7 +1119,7 @@ export const SKILLS: Skill[] = [
     description:
       "Protect APIs from abuse with token buckets, sliding windows, and distributed rate limiting.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["rate-limiting"] ?? [],
     tutorialSlugs: ["rate-limiter", "api-gateway"],
     prerequisites: ["rest-api-design"],
     roles: [
@@ -1131,7 +1135,7 @@ export const SKILLS: Skill[] = [
     name: "Caching Strategies",
     description: "Use in-memory, CDN, and database caching to reduce latency and server load.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["caching-strategies"] ?? [],
     tutorialSlugs: ["key-value-store", "api-gateway"],
     prerequisites: ["rest-api-design"],
     roles: [
@@ -1148,7 +1152,7 @@ export const SKILLS: Skill[] = [
     description:
       "Deploy applications to production with zero-downtime strategies, rollbacks, and health checks.",
     category: "backend",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["deployment"] ?? [],
     tutorialSlugs: ["docker-deploy", "kubernetes-deployer"],
     prerequisites: ["docker-containers", "ci-cd-pipelines"],
     roles: [
@@ -1168,7 +1172,7 @@ export const SKILLS: Skill[] = [
     description:
       "Understand network layers, TCP handshakes, ports, and packet flow for debugging connectivity.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["tcp-ip-networking"] ?? [],
     tutorialSlugs: ["http-server", "load-balancer"],
     prerequisites: ["nodejs-runtime"],
     roles: [
@@ -1186,7 +1190,7 @@ export const SKILLS: Skill[] = [
     description:
       "Understand DNS resolution, HTTP/2, TLS handshakes, and request lifecycle in depth.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["dns-http-deep"] ?? [],
     tutorialSlugs: ["http-server", "url-health-checker"],
     prerequisites: ["tcp-ip-networking", "fetch-http"],
     roles: [
@@ -1203,7 +1207,7 @@ export const SKILLS: Skill[] = [
     description:
       "Understand processes, memory management, file systems, and scheduling at the OS level.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["operating-system-concepts"] ?? [],
     tutorialSlugs: ["cli-dashboard"],
     prerequisites: ["command-line"],
     roles: [
@@ -1220,7 +1224,7 @@ export const SKILLS: Skill[] = [
     description:
       "Manage concurrent execution with threads, locks, and message passing to avoid race conditions.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["concurrency-threads"] ?? [],
     tutorialSlugs: ["streaming-processor", "task-queue"],
     prerequisites: ["operating-system-concepts", "async-programming"],
     roles: [
@@ -1235,7 +1239,7 @@ export const SKILLS: Skill[] = [
     name: "Database Internals",
     description: "Understand B-trees, write-ahead logs, query planners, and storage engines.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["database-internals"] ?? [],
     tutorialSlugs: ["key-value-store", "orm-from-scratch"],
     prerequisites: ["sql-queries", "database-indexing"],
     roles: [
@@ -1252,7 +1256,7 @@ export const SKILLS: Skill[] = [
     description:
       "Understand CAP theorem, consensus, replication, and failure modes in distributed architectures.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["distributed-systems-basics"] ?? [],
     tutorialSlugs: ["event-sourcing", "load-balancer"],
     prerequisites: ["tcp-ip-networking", "caching-strategies"],
     roles: [
@@ -1269,7 +1273,7 @@ export const SKILLS: Skill[] = [
     description:
       "Provision and manage cloud resources including compute, storage, and networking services.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["cloud-infrastructure"] ?? [],
     tutorialSlugs: ["kubernetes-deployer", "docker-deploy"],
     prerequisites: ["docker-containers", "deployment"],
     roles: [
@@ -1286,7 +1290,7 @@ export const SKILLS: Skill[] = [
     description:
       "Instrument applications with metrics, traces, and logs for full-stack observability.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["observability-metrics"] ?? [],
     tutorialSlugs: ["monitoring-dashboard", "log-aggregator"],
     prerequisites: ["logging-monitoring"],
     roles: [
@@ -1303,7 +1307,7 @@ export const SKILLS: Skill[] = [
     description:
       "Design effective prompts for LLMs using techniques like few-shot, chain-of-thought, and system prompts.",
     category: "ai-ml",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["prompt-engineering-skill"] ?? [],
     tutorialSlugs: ["ai-code-reviewer", "rag-chatbot"],
     prerequisites: [],
     roles: [
@@ -1319,7 +1323,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build retrieval-augmented generation systems that ground LLM responses in domain data.",
     category: "ai-ml",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["rag-pipelines"] ?? [],
     tutorialSlugs: ["rag-chatbot", "embeddings-search"],
     prerequisites: ["prompt-engineering-skill", "rest-api-design"],
     roles: [
@@ -1335,7 +1339,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build autonomous agents that use tools, plan multi-step tasks, and interact with external systems.",
     category: "ai-ml",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["ai-agents"] ?? [],
     tutorialSlugs: ["ai-agent", "chat-bot-framework"],
     prerequisites: ["prompt-engineering-skill", "async-programming"],
     roles: [
@@ -1350,7 +1354,7 @@ export const SKILLS: Skill[] = [
     name: "LLM Evaluation",
     description: "Evaluate LLM outputs with metrics, human feedback, and automated benchmarks.",
     category: "ai-ml",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["llm-evaluation"] ?? [],
     tutorialSlugs: ["a-b-testing", "ai-code-reviewer"],
     prerequisites: ["prompt-engineering-skill"],
     roles: [
@@ -1366,7 +1370,7 @@ export const SKILLS: Skill[] = [
     description:
       "Customize pre-trained models on domain-specific data to improve task performance.",
     category: "ai-ml",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["fine-tuning-skill"] ?? [],
     tutorialSlugs: ["fine-tuning"],
     prerequisites: ["llm-evaluation", "rag-pipelines"],
     roles: [
@@ -1382,7 +1386,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build Model Context Protocol servers that expose tools and resources to AI assistants.",
     category: "ai-ml",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["mcp-development"] ?? [],
     tutorialSlugs: ["mcp-server-tutorial"],
     prerequisites: ["ai-agents", "rest-api-design"],
     roles: [
@@ -1398,7 +1402,7 @@ export const SKILLS: Skill[] = [
     description:
       "Apply ethical frameworks, detect bias, and build safeguards into AI-powered applications.",
     category: "ai-ml",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["responsible-ai"] ?? [],
     tutorialSlugs: ["ai-agent", "ai-code-reviewer"],
     prerequisites: ["prompt-engineering-skill"],
     roles: [
@@ -1416,7 +1420,7 @@ export const SKILLS: Skill[] = [
     description:
       "Build lexers, parsers, and code generators to understand how programming languages work.",
     category: "systems",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["compiler-design"] ?? [],
     tutorialSlugs: ["tiny-compiler", "type-checker"],
     prerequisites: ["recursion", "trees-traversal"],
     roles: [
@@ -1432,7 +1436,7 @@ export const SKILLS: Skill[] = [
     description:
       "Identify attack surfaces, model threats, and prioritize security mitigations systematically.",
     category: "security",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["security-threat-modeling"] ?? [],
     tutorialSlugs: ["rbac-system", "password-manager"],
     prerequisites: ["jwt-authentication", "rest-api-design"],
     roles: [
@@ -1448,7 +1452,7 @@ export const SKILLS: Skill[] = [
     name: "Cryptography Basics",
     description: "Understand hashing, symmetric and asymmetric encryption, and digital signatures.",
     category: "security",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["cryptography-basics"] ?? [],
     tutorialSlugs: ["password-manager", "auth-system"],
     prerequisites: ["password-hashing"],
     roles: [
@@ -1464,7 +1468,7 @@ export const SKILLS: Skill[] = [
     description:
       "Design scalable architectures by combining databases, caches, queues, and services.",
     category: "professional",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["system-design-skill"] ?? [],
     tutorialSlugs: ["saas-starter", "capstone-platform"],
     prerequisites: ["distributed-systems-basics", "caching-strategies", "schema-design"],
     roles: [
@@ -1482,7 +1486,7 @@ export const SKILLS: Skill[] = [
     description:
       "Apply patterns like microservices, event sourcing, CQRS, and hexagonal architecture.",
     category: "professional",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["architecture-patterns"] ?? [],
     tutorialSlugs: ["event-sourcing", "plugin-system"],
     prerequisites: ["system-design-skill"],
     roles: [
@@ -1499,7 +1503,7 @@ export const SKILLS: Skill[] = [
     description:
       "Give and receive constructive code review feedback focused on correctness, clarity, and maintainability.",
     category: "professional",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["code-review-skill"] ?? [],
     tutorialSlugs: ["ai-code-reviewer", "git-hooks-toolkit"],
     prerequisites: ["code-reading", "git-version-control"],
     roles: [
@@ -1517,7 +1521,7 @@ export const SKILLS: Skill[] = [
     description:
       "Write clear documentation, RFCs, ADRs, and tutorials that communicate complex ideas simply.",
     category: "professional",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["technical-writing"] ?? [],
     tutorialSlugs: ["documentation-site", "npm-package"],
     prerequisites: ["code-reading"],
     roles: [
@@ -1534,7 +1538,7 @@ export const SKILLS: Skill[] = [
     description:
       "Lead engineering teams with clear communication, delegation, and technical mentorship.",
     category: "leadership",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["team-leadership"] ?? [],
     tutorialSlugs: ["sprint-tracker"],
     prerequisites: ["code-review-skill", "technical-writing"],
     roles: [
@@ -1550,7 +1554,7 @@ export const SKILLS: Skill[] = [
     description:
       "Design fair interview processes, evaluate candidates, and build diverse engineering teams.",
     category: "leadership",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["hiring-interviewing"] ?? [],
     tutorialSlugs: ["sprint-tracker"],
     prerequisites: ["team-leadership"],
     roles: [{ roleId: "engineering-manager", importance: "core" }],
@@ -1563,7 +1567,7 @@ export const SKILLS: Skill[] = [
     description:
       "Align engineering work with business goals through roadmapping, prioritization, and user research.",
     category: "leadership",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["product-strategy"] ?? [],
     tutorialSlugs: ["sprint-tracker", "a-b-testing"],
     prerequisites: ["team-leadership"],
     roles: [
@@ -1579,7 +1583,7 @@ export const SKILLS: Skill[] = [
     description:
       "Respond to production incidents with structured triage, communication, and blameless postmortems.",
     category: "professional",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["incident-management"] ?? [],
     tutorialSlugs: ["incident-timeline", "monitoring-dashboard"],
     prerequisites: ["logging-monitoring", "observability-metrics"],
     roles: [
@@ -1596,7 +1600,7 @@ export const SKILLS: Skill[] = [
     description:
       "Forecast resource needs, plan for traffic growth, and optimize infrastructure costs.",
     category: "professional",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["capacity-planning"] ?? [],
     tutorialSlugs: ["load-balancer", "monitoring-dashboard"],
     prerequisites: ["cloud-infrastructure", "observability-metrics"],
     roles: [
@@ -1613,7 +1617,7 @@ export const SKILLS: Skill[] = [
     description:
       "Assess third-party tools and services on cost, reliability, lock-in risk, and team fit.",
     category: "leadership",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["vendor-evaluation"] ?? [],
     tutorialSlugs: ["saas-starter"],
     prerequisites: ["system-design-skill"],
     roles: [
@@ -1629,7 +1633,7 @@ export const SKILLS: Skill[] = [
     description:
       "Translate technical decisions into business context for non-technical stakeholders.",
     category: "leadership",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["stakeholder-communication"] ?? [],
     tutorialSlugs: ["sprint-tracker"],
     prerequisites: ["technical-writing"],
     roles: [
@@ -1645,7 +1649,7 @@ export const SKILLS: Skill[] = [
     description:
       "Design and improve development workflows including sprint planning, retrospectives, and delivery metrics.",
     category: "professional",
-    lessonIds: [],
+    lessonIds: SKILL_LESSONS["engineering-process"] ?? [],
     tutorialSlugs: ["sprint-tracker", "feature-flags"],
     prerequisites: ["team-leadership"],
     roles: [
@@ -1659,7 +1663,7 @@ export const SKILLS: Skill[] = [
 
 /** Look up a single skill by its unique ID. */
 export function getSkill(id: string): Skill | undefined {
-  return SKILLS.find((s) => s.id === id);
+  return SKILLS.find((s) => s.id === (SKILL_ALIASES[id] ?? id));
 }
 
 /** Return all skills that list the given role ID in their roles array. */

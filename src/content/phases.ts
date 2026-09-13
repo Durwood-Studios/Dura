@@ -92,7 +92,7 @@ export const PHASES: Phase[] = [
     color: "#93c5fd",
     estimatedHours: 260,
     moduleCount: 7,
-    lessonCount: 50,
+    lessonCount: 52,
     order: 1,
     modules: [
       mod(
@@ -108,7 +108,15 @@ export const PHASES: Phase[] = [
       mod("1", 3, "functions", "Functions", "Parameters, return values, scope, closures.", 40, 8),
       mod("1", 4, "data-structures", "Data Structures", "Arrays, objects, maps, sets.", 40, 8),
       mod("1", 5, "debugging", "Debugging", "Reading errors, stack traces, breakpoints.", 35, 7),
-      mod("1", 6, "first-projects", "First Projects", "Build something real, end to end.", 40, 8),
+      mod(
+        "1",
+        6,
+        "first-projects",
+        "First Projects",
+        "Build something real, end to end, including a Python data bridge.",
+        40.2,
+        10
+      ),
       mod(
         "1",
         7,
@@ -130,7 +138,7 @@ export const PHASES: Phase[] = [
     color: "#c4b5fd",
     estimatedHours: 365,
     moduleCount: 7,
-    lessonCount: 60,
+    lessonCount: 80,
     order: 2,
     modules: [
       mod(
@@ -140,16 +148,16 @@ export const PHASES: Phase[] = [
         "HTML Foundations",
         "Semantic markup, forms, accessibility.",
         55,
-        10
+        12
       ),
       mod(
         "2",
         2,
         "css-fundamentals",
         "CSS Fundamentals",
-        "Box model, flexbox, grid, responsive design.",
-        55,
-        10
+        "Box model, flexbox, grid, responsive design, CSS architecture and design-system contracts.",
+        55.4,
+        14
       ),
       mod(
         "2",
@@ -158,7 +166,7 @@ export const PHASES: Phase[] = [
         "JavaScript in the Browser",
         "DOM, events, fetch, async.",
         55,
-        10
+        19
       ),
       mod("2", 4, "react", "React Fundamentals", "Components, hooks, state, effects.", 60, 10),
       mod("2", 5, "nextjs", "Next.js 15", "App router, server components, data fetching.", 50, 10),
@@ -169,7 +177,7 @@ export const PHASES: Phase[] = [
         "TypeScript",
         "Type annotations, generics, tsconfig, TypeScript in React.",
         50,
-        6
+        11
       ),
       mod(
         "2",
@@ -260,8 +268,8 @@ export const PHASES: Phase[] = [
       "APIs, databases, auth, queues, caching, deployment. The work that keeps applications running for millions of users.",
     color: "#fdba74",
     estimatedHours: 325,
-    moduleCount: 6,
-    lessonCount: 50,
+    moduleCount: 7,
+    lessonCount: 70,
     order: 4,
     modules: [
       mod(
@@ -280,7 +288,7 @@ export const PHASES: Phase[] = [
         "REST APIs with Express",
         "Routing, middleware, auth, validation, docs.",
         60,
-        9
+        10
       ),
       mod(
         "4",
@@ -289,7 +297,7 @@ export const PHASES: Phase[] = [
         "PostgreSQL",
         "SQL, joins, schema design, transactions, indexing.",
         55,
-        9
+        16
       ),
       mod(
         "4",
@@ -318,6 +326,15 @@ export const PHASES: Phase[] = [
         50,
         5
       ),
+      mod(
+        "4",
+        7,
+        "financial-transaction-systems",
+        "Financial Transaction Systems",
+        "Synthetic ledgers, payment state, reconciliation, reporting controls and consent; introductory engineering evidence, not regulatory approval.",
+        4,
+        12
+      ),
     ],
   },
   {
@@ -330,7 +347,7 @@ export const PHASES: Phase[] = [
     color: "#f0abfc",
     estimatedHours: 395,
     moduleCount: 5,
-    lessonCount: 40,
+    lessonCount: 46,
     order: 5,
     modules: [
       mod(
@@ -367,7 +384,7 @@ export const PHASES: Phase[] = [
         "Cloud Infrastructure",
         "Compute, storage, networking, IAM, IaC across the major clouds.",
         85,
-        8
+        14
       ),
       mod(
         "5",
@@ -390,7 +407,7 @@ export const PHASES: Phase[] = [
     color: "#67e8f9",
     estimatedHours: 550,
     moduleCount: 9,
-    lessonCount: 71,
+    lessonCount: 75,
     order: 6,
     modules: [
       mod(
@@ -400,7 +417,7 @@ export const PHASES: Phase[] = [
         "AI Fundamentals",
         "How modern models work: transformers, tokens, context windows, sampling.",
         70,
-        8
+        12
       ),
       mod(
         "6",
@@ -486,7 +503,7 @@ export const PHASES: Phase[] = [
     color: "#fcd34d",
     estimatedHours: 360,
     moduleCount: 5,
-    lessonCount: 35,
+    lessonCount: 37,
     order: 7,
     modules: [
       mod(
@@ -505,7 +522,7 @@ export const PHASES: Phase[] = [
         "Distributed Systems",
         "CAP, consensus, replication, time, failure modes.",
         90,
-        8
+        9
       ),
       mod(
         "7",
@@ -523,7 +540,7 @@ export const PHASES: Phase[] = [
         "Performance Engineering",
         "Profiling, hot paths, allocations, cache lines, microbenchmarks.",
         40,
-        6
+        7
       ),
       mod(
         "7",
@@ -546,7 +563,7 @@ export const PHASES: Phase[] = [
     color: "#a3e635",
     estimatedHours: 270,
     moduleCount: 7,
-    lessonCount: 44,
+    lessonCount: 52,
     order: 8,
     modules: [
       mod(
@@ -556,7 +573,7 @@ export const PHASES: Phase[] = [
         "Testing",
         "Unit, integration, e2e, TDD, property-based, mocking discipline.",
         40,
-        7
+        9
       ),
       mod(
         "8",
@@ -574,7 +591,7 @@ export const PHASES: Phase[] = [
         "Architecture Patterns",
         "Layering, hexagonal, event-driven, CQRS, modular monoliths vs microservices.",
         40,
-        7
+        9
       ),
       mod(
         "8",
@@ -583,7 +600,7 @@ export const PHASES: Phase[] = [
         "Security",
         "Threat modeling, OWASP, authn/authz, secrets, supply chain.",
         40,
-        7
+        11
       ),
       mod(
         "8",
@@ -624,7 +641,7 @@ export const PHASES: Phase[] = [
     color: "#f472b6",
     estimatedHours: 600,
     moduleCount: 10,
-    lessonCount: 68,
+    lessonCount: 72,
     order: 9,
     modules: [
       mod(
@@ -634,7 +651,7 @@ export const PHASES: Phase[] = [
         "The Engineering Manager Transition",
         "1:1s, performance reviews, hiring, delegation, the IC-to-manager shift.",
         60,
-        8
+        10
       ),
       mod(
         "9",
@@ -661,7 +678,7 @@ export const PHASES: Phase[] = [
         "Product Strategy",
         "Roadmapping, prioritization, tech-debt economics, sequencing.",
         50,
-        7
+        8
       ),
       mod(
         "9",
@@ -670,7 +687,7 @@ export const PHASES: Phase[] = [
         "Business Fundamentals for CTOs",
         "Unit economics, budgeting, fundraising vocabulary, board reporting.",
         60,
-        8
+        9
       ),
       mod(
         "9",
@@ -734,7 +751,7 @@ export const PHASES: Phase[] = [
     color: "#fb923c",
     estimatedHours: 18.5,
     moduleCount: 10,
-    lessonCount: 47,
+    lessonCount: 56,
     order: 12,
     modules: [
       mod(
@@ -744,7 +761,7 @@ export const PHASES: Phase[] = [
         "C Toolchain for ARM Cortex-M",
         "GCC arm-none-eabi, linker scripts, startup code, and the build flow that produces a flashable binary.",
         1.5,
-        6
+        7
       ),
       mod(
         "10",
@@ -771,7 +788,7 @@ export const PHASES: Phase[] = [
         "RTOS Fundamentals — Tasks, Queues, Priority Inversion",
         "FreeRTOS / Zephyr as references. Schedulers, queues, mutexes, and the priority-inversion failure mode that bit Mars Pathfinder.",
         2,
-        5
+        6
       ),
       mod(
         "10",
@@ -780,7 +797,7 @@ export const PHASES: Phase[] = [
         "Drivers — UART, SPI, I2C, ADC",
         "The four buses every embedded engineer writes against. Polled, interrupt-driven, and DMA-driven implementations with the choice criteria documented.",
         2,
-        5
+        6
       ),
       mod(
         "10",
@@ -789,7 +806,7 @@ export const PHASES: Phase[] = [
         "Rust on Cortex-M — embedded-hal + RTIC",
         "Rust's embedded-hal trait ecosystem and RTIC's task model. The memory-safety argument made concrete.",
         2,
-        5
+        6
       ),
       mod(
         "10",
@@ -798,7 +815,7 @@ export const PHASES: Phase[] = [
         "MISRA-C:2023 — When Style Is a Safety Requirement",
         "Why specific MISRA rules exist, what bugs they prevent, and how the deviation-policy mechanism works. Practical, not bureaucratic.",
         1.25,
-        4
+        9
       ),
       mod(
         "10",
@@ -1054,7 +1071,7 @@ export const PHASES: Phase[] = [
     color: "#818cf8",
     estimatedHours: 13,
     moduleCount: 9,
-    lessonCount: 37,
+    lessonCount: 41,
     order: 10,
     modules: [
       mod(
@@ -1109,7 +1126,7 @@ export const PHASES: Phase[] = [
         "ROS 2 + ROS-Industrial",
         "Hands-on against URsim following the ROS-Industrial public curriculum. No vendor-issued ROS 2 cert exists — Open Robotics + Apex.Grace are the paths.",
         2,
-        6
+        10
       ),
       mod(
         "13",
@@ -1156,7 +1173,7 @@ export const PHASES: Phase[] = [
     color: "#2dd4bf",
     estimatedHours: 19.5,
     moduleCount: 14,
-    lessonCount: 35,
+    lessonCount: 37,
     order: 11,
     modules: [
       mod(
@@ -1193,7 +1210,7 @@ export const PHASES: Phase[] = [
         "Lean / Toyota Production System",
         "Two pillars: JIT + Jidoka. PDCA underneath. Practitioner tools: 5S, SMED, Kaizen, A3, Andon, Heijunka, Kanban.",
         1,
-        6
+        7
       ),
       mod(
         "14",
@@ -1247,7 +1264,7 @@ export const PHASES: Phase[] = [
         "ISA-95 Pyramid + ISA-88 Batch",
         "ISA-95 five-level pyramid (L0 process → L4 ERP) as a CONTROL HIERARCHY. ISA-88 adds batch structure.",
         1,
-        1
+        2
       ),
       mod(
         "14",
@@ -1310,5 +1327,5 @@ export const CONTENT_COUNTS = {
   /** Total dictionary terms across all batches. */
   dictionaryTerms: 500,
   /** Total assessment questions across all phases. */
-  assessmentQuestions: 860,
+  assessmentQuestions: 1806,
 } as const;

@@ -21,7 +21,7 @@ function q(
 ): AssessmentQuestion {
   return {
     id,
-    phaseId: "r",
+    phaseId: "13",
     moduleId: canonicalModuleId(moduleId) ?? moduleId,
     type,
     question,
@@ -290,49 +290,49 @@ export const PHASE_13_QUESTIONS: AssessmentQuestion[] = [
     "r-3-q1",
     "r-3",
     "multiple-choice",
-    "ISO 13849-1 defines Performance Level (PL) using five discrete levels (a through e). Which combination of Category, MTTFd, and DC achieves PL d?",
+    "A design review is asked to accept a claimed Performance Level from only Category and MTTFd labels. What evidence is missing?",
     [
-      "Category 2, MTTFd = low, DC = none",
-      "Category 3, MTTFd = high, DC = medium (DC_avg ≥ 60% < 90%)",
-      "Category 1, MTTFd = medium, DC = none",
-      "Category 4, MTTFd = high, DC = none",
+      "Nothing: two labels establish the complete safety function",
+      "Diagnostic coverage, common-cause measures, systematic requirements, architecture assumptions, and validation evidence",
+      "Only the robot color",
+      "Only the application name",
     ],
     1,
-    "PL d per ISO 13849-1 Table K.1 is achievable with Category 3, MTTFd = high (>30 years per channel), DC_avg = medium (60–90%). Category 3 means single fault does not lead to loss of safety function. This is the most common PL for collaborative robot safety functions.",
-    "hard",
-    ["iso-13849", "pl-d", "category-3", "mttfd", "dc"]
+    "A safety-function claim needs the applicable deterministic and probabilistic requirements and validation. Isolated component or architecture labels do not establish the complete result.",
+    "medium",
+    ["reviewed-safety-reasoning"]
   ),
   q(
     "r-3-q2",
     "r-3",
     "multiple-choice",
-    "In IEC 62061, what does 'SILCL' (SIL Claim Limit) represent for a subsystem?",
+    "A subsystem datasheet states a SIL capability limit. What can an integrator infer?",
     [
-      "The maximum SIL that a subsystem can achieve, based on its architecture and PFH regardless of how many identical channels are added.",
-      "The minimum SIL required by the application specification.",
-      "The SIL certified by the notified body for a safety device.",
-      "The SIL of the entire safety function when multiple subsystems are combined.",
+      "The subsystem has a bounded capability under stated conditions; the complete function still needs evaluation",
+      "Every system using it automatically reaches that SIL",
+      "Any number of copies automatically increases its certified capability",
+      "The limit is the application risk target",
     ],
     0,
-    "SILCL is an architectural constraint — the highest SIL a subsystem can contribute to a safety function, regardless of redundancy or diagnostic coverage. Adding redundant channels of a SILCL 2 subsystem cannot achieve SIL 3. This prevents over-claiming safety based on redundancy alone.",
-    "hard",
-    ["iec-62061", "silcl", "sil", "architecture"]
+    "Capability evidence is scoped to stated conditions. The complete safety function must account for integration, failure behavior, architecture, systematic measures, and validation.",
+    "medium",
+    ["reviewed-safety-reasoning"]
   ),
   q(
     "r-3-q3",
     "r-3",
     "multiple-choice",
-    "What is the key mapping caveat when converting between PL (ISO 13849-1) and SIL (IEC 62061/IEC 61508)?",
+    "Why is matching a PL and SIL numerical failure-rate band insufficient to transfer a complete safety claim?",
     [
-      "PL and SIL are perfectly equivalent: PL a = SIL 1, PL b = SIL 2, PL c = SIL 2, PL d = SIL 3, PL e = SIL 3.",
-      "PL e maps uniquely to SIL 3; PL d maps to SIL 2 or SIL 3 depending on the PFH value; PL c maps to SIL 1 or SIL 2. The mapping is not 1:1 — PL captures architectural requirements that SIL alone does not.",
-      "PL and SIL are mutually exclusive — a system must be assessed under one standard only.",
-      "PL is used only for hardware; SIL applies to software, so direct comparison is meaningless.",
+      "All standards have identical engineering requirements",
+      "Architecture, systematic measures, use conditions, and validation obligations also need to be satisfied",
+      "PL and SIL can never be discussed together",
+      "Only the product label matters",
     ],
     1,
-    "ISO TR 62061 and ISO 13849-1 Table 9 provide a mapping, but it is approximate. PL d corresponds to SIL 2 (PFH 10^-7 to 10^-6) but also includes structural requirements (Category, DC, CCF) that pure PFH-based SIL assessment may not capture. Using both standards for cross-validation is best practice.",
-    "hard",
-    ["pl", "sil", "iso-13849", "iec-62061", "mapping"]
+    "An overlapping numerical band is not proof that the full requirements of another assessment method have been met. Review the complete safety-function evidence under the applicable standard.",
+    "medium",
+    ["reviewed-safety-reasoning"]
   ),
   q(
     "r-3-q4",
@@ -368,7 +368,7 @@ export const PHASE_13_QUESTIONS: AssessmentQuestion[] = [
     "What does CCF (Common Cause Failure) mean in the context of ISO 13849-1, and how does it affect redundant safety architectures?",
     [
       "CCF is a failure that affects only one channel of a safety system.",
-      "CCF is a single event or shared root cause that defeats multiple redundant channels simultaneously — such as both channels using the same component type with a design flaw, or both being damaged by the same environmental event. CCF is estimated using the β-factor method.",
+      "CCF is a single event or shared root cause that defeats multiple redundant channels simultaneously — such as both channels using the same component type with a design flaw, or both being damaged by the same environmental event.",
       "CCF is only relevant for software-based safety functions, not hardware.",
       "CCF refers to failures caused by incorrect calibration of the safety function.",
     ],
@@ -381,30 +381,34 @@ export const PHASE_13_QUESTIONS: AssessmentQuestion[] = [
     "r-3-q7",
     "r-3",
     "multiple-choice",
-    "A collaborative robot safety function must achieve PL d. The designer uses a single safety relay with SILCL 2 and MTTFd = high. What is the problem?",
+    "A reviewer is given only a relay SIL capability label and an MTTFd value to justify the application’s required PL. What should happen next?",
     [
-      "There is no problem — SILCL 2 is sufficient for PL d.",
-      "A single-channel (Category 1 or 2) architecture cannot achieve PL d regardless of MTTFd, because PL d requires Category 3 or 4 (redundant channels that tolerate a single fault without loss of safety function).",
-      "MTTFd = high is too high for PL d — a lower MTTFd device must be used.",
-      "The safety relay must be certified specifically under ISO 13849, not IEC 62061.",
+      "Accept the claim without inspecting the circuit",
+      "Review the complete safety function and its architecture, diagnostics, assumptions, and validation against the required PL",
+      "Require a worse MTTFd value",
+      "Assume no relay can be used in a PL assessment",
     ],
     1,
-    "PL d requires Category 3 or 4 architecture. Category 1 and 2 are single-channel designs where one fault can lead to loss of the safety function. No amount of high MTTFd or diagnostic coverage on a single channel achieves PL d — architectural redundancy is a structural requirement, not a probabilistic one.",
-    "hard",
-    ["iso-13849", "pl-d", "category", "single-channel", "architecture"]
+    "Device capability and reliability data are inputs, not a completed application assessment. Avoid categorical conclusions about permissible architectures without the applicable conditions and full validation.",
+    "medium",
+    ["reviewed-safety-reasoning"]
   ),
   q(
     "r-3-q8",
     "r-3",
     "multiple-choice",
-    "IEC 62061 defines SIL 3 by a target PFH (Probability of dangerous Failure per Hour) range. What is that range?",
-    ["PFH ≥ 10^-5 to < 10^-4", "PFH ≥ 10^-8 to < 10^-7", "PFH ≥ 10^-7 to < 10^-6", "PFH < 10^-8"],
+    "A safety-function calculation meets its numerical dangerous-failure-rate target. What remains necessary?",
+    [
+      "Nothing: the numerical result proves complete functional safety",
+      "Evidence for the applicable architecture, systematic requirements, operating assumptions, and validation",
+      "Only a certificate logo",
+      "Changing the safety requirement to match the result",
+    ],
     1,
-    "IEC 62061 Table 3: SIL 1 = 10^-6 to 10^-5, SIL 2 = 10^-7 to 10^-6, SIL 3 = 10^-8 to 10^-7. SIL 4 (not used in machinery) = <10^-8. The lower the PFH, the higher the SIL and the more reliable the safety function.",
+    "A numerical target is only part of the safety claim. Requirements, design assumptions, integration, systematic measures, and validation remain necessary.",
     "medium",
-    ["iec-62061", "sil-3", "pfh", "target-failure-rate"]
+    ["reviewed-safety-reasoning"]
   ),
-
   // ── Module r-4: Collaborative Modes (SMS/HG/SSM/PFL) ─────────────────────
   q(
     "r-4-q1",
@@ -450,7 +454,7 @@ export const PHASE_13_QUESTIONS: AssessmentQuestion[] = [
       "Switch to PFL mode automatically.",
     ],
     1,
-    "SSM uses a sensing system (laser scanner, camera) to measure the distance between human and robot. As distance decreases, robot speed decreases proportionally. At the minimum protective distance (where stopping distance equals actual separation), the robot must have already achieved a safety-rated monitored stop.",
+    "SSM uses a sensing system (laser scanner, camera) to measure the distance between human and robot. The safety strategy must maintain the required separation; it need not use a proportional speed law. At the minimum protective distance (where stopping distance equals actual separation), the robot must have already achieved a safety-rated monitored stop.",
     "hard",
     ["iso-10218-1", "ssm", "protective-distance", "speed-monitoring"]
   ),
@@ -485,17 +489,17 @@ export const PHASE_13_QUESTIONS: AssessmentQuestion[] = [
     "r-4-q6",
     "r-4",
     "multiple-choice",
-    "For Speed and Separation Monitoring, what factors determine the minimum protective distance between robot and human?",
+    "Which time interval must human approach cover in a protective-separation calculation?",
     [
-      "Only the robot's current TCP speed divided by its maximum deceleration.",
-      "The sum of: robot stopping distance at current speed, human approach speed × system reaction time, and any measurement uncertainty of the sensing system.",
-      "The robot's rated payload and the operator's mass.",
-      "A fixed value of 500mm specified by ISO 10218-1 for all SSM applications.",
+      "Only the sensor’s detection interval",
+      "The relevant system reaction and robot stopping intervals, together with the other specified distance and uncertainty terms",
+      "No time interval when a camera is used",
+      "A universal constant distance for every robot",
     ],
     1,
-    "The protective distance formula (from ISO/TS 15066 and ISO 10218-1:2025) accounts for: human approach speed (≥1600 mm/s per ISO 13855 for walking), system reaction time, robot stopping time at current speed, position/measurement uncertainty, and intrusion depth of the sensing zone boundary. All must be summed.",
-    "hard",
-    ["ssm", "protective-distance", "calculation", "iso-15066"]
+    "A person can continue approaching during reaction and stopping. Use the applicable method with verified stopping behavior, intrusion/reach allowances and uncertainties; do not mix times and distances or omit intervals.",
+    "medium",
+    ["reviewed-safety-reasoning"]
   ),
   q(
     "r-4-q7",
@@ -525,7 +529,7 @@ export const PHASE_13_QUESTIONS: AssessmentQuestion[] = [
       "Physical barriers must be installed around the full robot workspace.",
     ],
     [0, 2],
-    "PFL requires: (a) a risk assessment validating that contact forces/pressures meet ISO/TS 15066 Annex A thresholds, and (b) the PFL safety function must meet a required PL (typically PL d per the risk assessment). The 250 mm/s limit is specifically for SSM, not PFL. Physical barriers defeat the purpose of PFL collaborative mode.",
+    "PFL requires: (a) a risk assessment validating that contact forces/pressures meet ISO/TS 15066 Annex A thresholds, and (b) the PFL safety function must meet a required PL (typically PL d per the risk assessment). There is no universal speed limit that establishes PFL safety. Other safeguards may be necessary for hazards and operating modes that PFL does not control.",
     "hard",
     ["pfl", "iso-10218-1", "risk-assessment", "performance-level"]
   ),
@@ -594,33 +598,33 @@ export const PHASE_13_QUESTIONS: AssessmentQuestion[] = [
     "r-5-q5",
     "r-5",
     "multiple-choice",
-    "ISO/TS 15066 Annex A provides biomechanical limits for body regions. For the skull (top of head), why are the force and pressure limits notably different from those of the hand?",
+    "A layout allows foreseeable robot contact with a person’s head. A designer finds a biomechanical data table. What is the appropriate next step?",
     [
-      "The skull has lower limits because it is more frequently in the robot's path.",
-      "The skull is more sensitive to impact — its tissue is thinner over bone, so pain threshold is reached at lower force/pressure. However, skull limits are actually higher than hand limits in some categories because the skull bone provides rigid backing.",
-      "The skull limits are undefined — ISO/TS 15066 excludes head contact from PFL applications.",
-      "Skull limits are identical to hand limits since they are both bony prominences.",
+      "Use a convenient hand limit instead",
+      "Redesign the layout to prevent the hazardous head contact; a pain-threshold table does not authorize it",
+      "Treat any value below the table as proof that head impact is safe",
+      "Accept the contact if the operator signs a form",
     ],
     1,
-    "ISO/TS 15066 Annex A provides separate limits for each body region based on biomechanical research (pain threshold, injury threshold). Skull has a bony rigid backing, so pressure limits consider the rigidity. Some regions with soft tissue over bone (like the sternum) have stricter limits. The values are body-region-specific — not intuitive without consulting the table.",
-    "hard",
-    ["iso-ts-15066", "biomechanical-limits", "skull", "body-region"]
+    "DGUV FB HM-080 states that head contact is to be excluded by system layout, including foreseeable misuse. A reported research threshold is not permission to create that contact. Apply the current governing requirements and a reviewed application risk assessment.",
+    "medium",
+    ["reviewed-safety-reasoning"]
   ),
   q(
     "r-5-q6",
     "r-5",
     "multiple-choice",
-    "In a PFL validation per R15.806, the measurement device records a peak transient force of 148 N at the operator's forearm. ISO/TS 15066 Annex A lists the forearm transient limit as 160 N and quasi-static limit as 75 N. Is this measurement compliant?",
+    "A teaching test specifies an upper acceptance limit of160 N and a decision rule requiring measured force plus expanded uncertainty not to exceed it. A result is148 N with uncertainty15 N. What follows?",
     [
-      "Yes — 148 N is below the 160 N transient limit.",
-      "Only if the contact duration was less than 0.5 seconds.",
-      "Yes for transient, but the measurement alone is insufficient — the quasi-static force must also be verified separately to ensure it is below 75 N.",
-      "No — any reading above 100 N is non-compliant under R15.806.",
+      "Accept because148 is below160",
+      "The stated acceptance rule is not met because148+15=163 N",
+      "Reduce the uncertainty on the report without evidence",
+      "Compare only the nominal robot payload",
     ],
-    2,
-    "R15.806 requires compliance with BOTH transient (impact) AND quasi-static (clamping) limits. A 148 N reading that is purely transient passes the 160 N limit — but if the robot can clamp the forearm at 148 N, the quasi-static 75 N limit is violated. Both contact types must be assessed and measured.",
-    "hard",
-    ["r15-806", "iso-ts-15066", "transient", "quasi-static", "compliance"]
+    1,
+    "Using the explicitly supplied teaching decision rule, the upper bound is163 N and exceeds160 N. These illustrative values are not asserted to be ISO biomechanical limits; real acceptance also requires the applicable pressure and contact conditions.",
+    "medium",
+    ["reviewed-safety-reasoning"]
   ),
   q(
     "r-5-q7",

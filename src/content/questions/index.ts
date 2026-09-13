@@ -1,3 +1,7 @@
+import { ADJACENT_CAREER_QUESTIONS } from "@/content/questions/adjacent-career-expansion";
+import { SPECIALTY_EXPANSION_QUESTIONS } from "@/content/questions/specialty-expansion";
+import { CORE_EXPANSION_QUESTIONS } from "@/content/questions/core-expansion";
+import { LESSON_CHECKPOINT_QUESTIONS } from "@/content/questions/lesson-checkpoints";
 import type { AssessmentQuestion } from "@/types/assessment";
 import { PHASE_0_QUESTIONS } from "@/content/questions/phase-0";
 import { PHASE_1_QUESTIONS } from "@/content/questions/phase-1";
@@ -21,6 +25,10 @@ import { PHASE_14_QUESTIONS } from "@/content/questions/phase-14";
  * adding an import and spreading into ALL_QUESTIONS.
  */
 export const ALL_QUESTIONS: AssessmentQuestion[] = [
+  ...ADJACENT_CAREER_QUESTIONS,
+  ...SPECIALTY_EXPANSION_QUESTIONS,
+  ...CORE_EXPANSION_QUESTIONS,
+  ...LESSON_CHECKPOINT_QUESTIONS,
   ...PHASE_0_QUESTIONS,
   ...PHASE_1_QUESTIONS,
   ...PHASE_2_QUESTIONS,
@@ -44,6 +52,10 @@ export const ALL_QUESTIONS: AssessmentQuestion[] = [
  * bundling the full question bank into client components.
  */
 export const QUESTION_COUNT: number =
+  ADJACENT_CAREER_QUESTIONS.length +
+  SPECIALTY_EXPANSION_QUESTIONS.length +
+  CORE_EXPANSION_QUESTIONS.length +
+  LESSON_CHECKPOINT_QUESTIONS.length +
   PHASE_0_QUESTIONS.length +
   PHASE_1_QUESTIONS.length +
   PHASE_2_QUESTIONS.length +

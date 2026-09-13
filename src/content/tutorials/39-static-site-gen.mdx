@@ -23,6 +23,17 @@ In this tutorial, you will build a complete static site generator from scratch. 
 - An asset pipeline for CSS and images
 - Watch mode with live-reloading dev server
 
+Create a new Node 22+ project and keep the named TypeScript snippets in their indicated files. Install the compiler with `npm install -D typescript @types/node`, and set `"type": "module"` in package.json. Use this configuration:
+
+```json
+{
+  "compilerOptions": {"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext","strict":true,"types":["node"],"rootDir":"src","outDir":"build"},
+  "include":["src/**/*.ts"]
+}
+```
+
+Create `content/` and `layouts/` before running. This educational parser supports a subset of Markdown and frontmatter, not arbitrary YAML or executable MDX. Templates and source documents must be trusted local author content; variable interpolation is not an HTML sanitizer. The development server binds to loopback and serves only files inside the output directory.
+
 ## Step 1: Project Structure and File Discovery
 
 Define the source directory convention and build a file scanner that discovers all content files recursively.
@@ -32,14 +43,14 @@ Define the source directory convention and build a file scanner that discovers a
 import { readdir, stat } from "fs/promises";
 import { join, extname, relative } from "path";
 
-interface SourceFile {
+export interface SourceFile {
   absolutePath: string;
   relativePath: string;
   extension: string;
   type: "content" | "template" | "asset";
 }
 
-async function scanDirectory(baseDir: string): Promise<SourceFile[]> {
+export async function scanDirectory(baseDir: string): Promise<SourceFile[]> {
   const files: SourceFile[] = [];
 
   async function walk(dir: string): Promise<void> {
@@ -75,13 +86,13 @@ Frontmatter is YAML metadata at the top of a Markdown file, delimited by `---`. 
 
 ```typescript
 // src/frontmatter.ts
-interface ParsedFile {
+export interface ParsedFile {
   metadata: Record<string, unknown>;
   content: string;
   rawFrontmatter: string;
 }
 
-function parseFrontmatter(raw: string): ParsedFile {
+export function parseFrontmatter(raw: string): ParsedFile {
   const fmRegex = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/;
   const match = raw.match(fmRegex);
 
@@ -138,7 +149,7 @@ Convert Markdown to HTML. Implement the core syntax: headings, paragraphs, bold,
 
 ````typescript
 // src/markdown.ts
-function markdownToHtml(markdown: string): string {
+export function markdownToHtml(markdown: string): string {
   let html = markdown;
 
   // Code blocks (must come before inline code to avoid conflicts)
@@ -200,11 +211,11 @@ Build a template engine that supports variable interpolation, conditionals, loop
 
 ```typescript
 // src/templates/engine.ts
-interface TemplateContext {
+export interface TemplateContext {
   [key: string]: unknown;
 }
 
-function renderTemplate(template: string, context: TemplateContext): string {
+export function renderTemplate(template: string, context: TemplateContext): string {
   let output = template;
 
   // Process loops: {% for item in items %} ... {% endfor %}
@@ -248,10 +259,11 @@ Layouts wrap page content in a common shell (header, footer, navigation). Pages 
 
 ```typescript
 // src/templates/layouts.ts
-import { readFileSync } from "fs";
+import { readFileSync, readdirSync } from "fs";
+import { renderTemplate, type TemplateContext } from "./engine.js";
 import { join } from "path";
 
-class LayoutManager {
+export class LayoutManager {
   private layouts: Map<string, string> = new Map();
 
   loadFromDirectory(dir: string): void {
@@ -288,7 +300,7 @@ A base layout looks like this:
   <body>
     <nav>
       {% for item in navigation %}
-      <a href="{{ item.url }}">{{ item.label }}</a>
+      <a href="{{ item.url }}">{{ item.title }}</a>
       {% endfor %}
     </nav>
     <main>{{ content }}</main>
@@ -303,32 +315,39 @@ Orchestrate the full build: scan source files, parse each content file, render M
 
 ```typescript
 // src/build.ts
+import { scanDirectory } from "./scanner.js";
+import { parseFrontmatter } from "./frontmatter.js";
+import { markdownToHtml } from "./markdown.js";
+import { LayoutManager } from "./templates/layouts.js";
+import type { TemplateContext } from "./templates/engine.js";
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync } from "fs";
 import { join, dirname } from "path";
 
-interface SiteConfig {
+export interface SiteConfig {
   sourceDir: string;
   outputDir: string;
   layoutsDir: string;
   siteName: string;
 }
 
-async function build(config: SiteConfig): Promise<void> {
+export async function build(config: SiteConfig): Promise<void> {
   const startTime = Date.now();
   const sourceFiles = await scanDirectory(config.sourceDir);
   const layouts = new LayoutManager();
   layouts.loadFromDirectory(config.layoutsDir);
 
   const contentFiles = sourceFiles.filter((f) => f.type === "content");
-  const pages: Array<{ slug: string; title: string; date: string; url: string }> = [];
+  const documents = contentFiles.map(file => ({file, ...parseFrontmatter(readFileSync(file.absolutePath, "utf8"))}));
+  const pages = documents.map(({file, metadata}) => {
+    const slug = file.relativePath.replace(/\\/g, "/").replace(/\.mdx?$/, "");
+    return {slug, title: String(metadata.title ?? slug), date: String(metadata.date ?? ""), url: `/${slug}/`};
+  });
   let filesWritten = 0;
 
-  for (const file of contentFiles) {
-    const raw = readFileSync(file.absolutePath, "utf-8");
-    const { metadata, content } = parseFrontmatter(raw);
+  for (const {file, metadata, content} of documents) {
 
     const htmlContent = markdownToHtml(content);
-    const slug = file.relativePath.replace(/\.mdx?$/, "");
+    const slug = file.relativePath.replace(/\\/g, "/").replace(/\.mdx?$/, "");
     const outputPath = join(config.outputDir, slug, "index.html");
     const url = `/${slug}/`;
 
@@ -347,12 +366,7 @@ async function build(config: SiteConfig): Promise<void> {
     writeFileSync(outputPath, finalHtml);
     filesWritten++;
 
-    pages.push({
-      slug,
-      title: (metadata.title as string) ?? slug,
-      date: (metadata.date as string) ?? "",
-      url,
-    });
+
   }
 
   // Copy assets
@@ -374,10 +388,10 @@ Generate an index page that lists all posts sorted by date. For large sites, spl
 
 ```typescript
 // src/pagination.ts
-interface PaginationResult {
+export interface PaginationResult {
   pages: Array<{
     pageNumber: number;
-    items: typeof pages;
+    items: Array<{ slug: string; title: string; date: string; url: string }>;
     isFirst: boolean;
     isLast: boolean;
     prevUrl: string | null;
@@ -385,10 +399,11 @@ interface PaginationResult {
   }>;
 }
 
-function paginate(
+export function paginate(
   items: Array<{ slug: string; title: string; date: string; url: string }>,
   perPage: number = 10
 ): PaginationResult {
+  if (!Number.isInteger(perPage) || perPage < 1) throw new Error("perPage must be a positive integer");
   const sorted = [...items].sort((a, b) => b.date.localeCompare(a.date));
   const totalPages = Math.ceil(sorted.length / perPage);
   const pages = [];
@@ -411,13 +426,13 @@ function paginate(
 
 ## Step 8: Watch Mode with File System Events
 
-Add a watch mode that rebuilds only changed files when source files are modified. Use the Node.js `fs.watch` API with debouncing to avoid redundant rebuilds.
+Add a watch mode that requests a full rebuild when source files are modified. Use the Node.js `fs.watch` API with debouncing to avoid redundant rebuilds.
 
 ```typescript
 // src/watch.ts
 import { watch } from "fs";
 
-function watchSource(sourceDir: string, onChanged: (path: string) => void): void {
+export function watchSource(sourceDir: string, onChanged: (path: string) => void): void {
   const timers: Map<string, NodeJS.Timeout> = new Map();
   const debounceMs = 100;
 
@@ -447,11 +462,12 @@ Serve the output directory over HTTP and inject a live-reload script that reconn
 ```typescript
 // src/server.ts
 import { createServer } from "http";
-import { readFileSync, existsSync } from "fs";
-import { join, extname } from "path";
+import { readFileSync, existsSync, realpathSync, statSync } from "fs";
+import { join, extname, resolve, relative, isAbsolute } from "path";
 
-function startDevServer(outputDir: string, port: number = 3000): void {
+export function startDevServer(outputDir: string, port: number = 3000): {notifyReload: () => void} {
   const clients: Set<import("http").ServerResponse> = new Set();
+  const root = realpathSync(outputDir);
 
   const mimeTypes: Record<string, string> = {
     ".html": "text/html",
@@ -481,14 +497,16 @@ function startDevServer(outputDir: string, port: number = 3000): void {
       return;
     }
 
-    let filePath = join(outputDir, req.url ?? "/");
-    if (filePath.endsWith("/")) filePath = join(filePath, "index.html");
-    if (!extname(filePath)) filePath = join(filePath, "index.html");
-
-    if (!existsSync(filePath)) {
-      res.writeHead(404);
-      res.end("Not found");
-      return;
+    let filePath: string;
+    try {
+      const pathname = decodeURIComponent(new URL(req.url ?? "/", "http://localhost").pathname);
+      filePath = resolve(root, `.${pathname}`);
+      if (!extname(filePath)) filePath = join(filePath, "index.html");
+      filePath = realpathSync(filePath);
+      const child = relative(root, filePath);
+      if (child.startsWith("..") || isAbsolute(child) || !statSync(filePath).isFile()) throw new Error("Outside output");
+    } catch {
+      res.writeHead(404); res.end("Not found"); return;
     }
 
     let content = readFileSync(filePath);
@@ -503,7 +521,7 @@ function startDevServer(outputDir: string, port: number = 3000): void {
     res.end(content);
   });
 
-  server.listen(port, () => {
+  server.listen(port, "127.0.0.1", () => {
     console.log(`Dev server running at http://localhost:${port}`);
   });
 
@@ -519,10 +537,14 @@ function startDevServer(outputDir: string, port: number = 3000): void {
 
 ## Step 10: CLI Interface and Configuration
 
-Wrap everything in a CLI that supports `build`, `serve`, and `watch` commands. Read configuration from a `site.config.json` file or command-line flags.
+Wrap everything in a CLI that supports `build`, `serve`, and `watch` commands. Read configuration from a `site.config.json` file. This example implements `build` and `serve`; serving includes full rebuilds when source files change.
 
 ```typescript
 // src/cli.ts
+import { readFileSync } from "node:fs";
+import { build, type SiteConfig } from "./build.js";
+import { startDevServer } from "./server.js";
+import { watchSource } from "./watch.js";
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "build";
   const config = loadConfig();
@@ -565,7 +587,7 @@ function loadConfig(): SiteConfig {
   }
 }
 
-main().catch(console.error);
+main().catch((error: unknown): void => { console.error(error); process.exitCode = 1; });
 ```
 
-Run `npx ts-node src/cli.ts serve` to start the development workflow. Create a Markdown file in the content directory and watch it appear in the browser immediately. The full pipeline — scan, parse, render, template, write, reload — completes in milliseconds for typical sites, making the feedback loop nearly instant.
+Run `npx tsc && node build/cli.js serve` to start the development workflow. Create a Markdown file in the content directory and watch it appear in the browser immediately. The full pipeline — scan, parse, render, template, write, reload — completes in milliseconds for typical sites, making the feedback loop nearly instant.

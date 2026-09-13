@@ -18,7 +18,7 @@ Database migration tools solve a critical problem: how do you evolve a database 
 - A CLI tool (`migrate up`, `migrate down`, `migrate status`, `migrate create`)
 - A migrations table that tracks applied versions
 - Timestamped migration files with `up` and `down` SQL
-- Rollback to any previous version
+- Rollback the most recently applied migration (repeat to move back further)
 - Dry-run mode that shows what would change without executing
 
 **What you'll learn:**
@@ -36,6 +36,8 @@ Create the project structure:
 ```bash
 mkdir db-migrate && cd db-migrate
 npm init -y
+npm install pg@8.23.0
+mkdir src migrations
 ```
 
 Create the directory layout:
@@ -69,9 +71,12 @@ The `DATABASE_URL` environment variable works identically on macOS, Windows (Pow
 
 ## Step 3: Migration Table
 
-Before running any migrations, ensure the tracking table exists:
+Create `src/migrator.js` with the following imports and tracking-table definition. Append the functions from Steps 4–8 to this same file:
 
 ```javascript
+const fs = require("node:fs");
+const path = require("node:path");
+
 const MIGRATIONS_TABLE = `
   CREATE TABLE IF NOT EXISTS _migrations (
     id SERIAL PRIMARY KEY,
@@ -89,10 +94,12 @@ The `create` command generates a timestamped migration file:
 
 ```javascript
 function createMigration(name) {
+  if (!/^[a-z][a-z0-9_]{0,79}$/.test(name)) throw new Error("Use a lowercase migration name containing letters, digits and underscores");
+  fs.mkdirSync("migrations", {recursive:true});
   const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
   const filename = `${timestamp}_${name}.sql`;
   const template = `-- Up\n\n-- Down\n`;
-  fs.writeFileSync(path.join("migrations", filename), template);
+  fs.writeFileSync(path.join("migrations", filename), template, {flag:"wx"});
   console.log(`Created: migrations/${filename}`);
 }
 ```
@@ -105,11 +112,34 @@ Split each migration file into its up and down SQL:
 
 ```javascript
 function parseMigration(content) {
+  const start = content.indexOf("-- Up");
   const upMatch = content.indexOf("-- Down");
-  if (upMatch === -1) throw new Error('Missing "-- Down" marker');
-  const up = content.slice(content.indexOf("-- Up") + 5, upMatch).trim();
+  if (start < 0 || upMatch <= start) throw new Error("Expected ordered -- Up and -- Down markers");
+  const up = content.slice(start + 5, upMatch).trim();
   const down = content.slice(upMatch + 7).trim();
+  if (!up || !down) throw new Error("Both migration directions must contain SQL");
   return { up, down };
+}
+```
+
+Add the filesystem and tracking helpers to `src/migrator.js`:
+
+```javascript
+function getAllMigrations() {
+  return fs.readdirSync("migrations").filter(name => /^\d{14}_[a-z][a-z0-9_]*\.sql$/.test(name)).sort().map(name => ({
+    name, content: fs.readFileSync(path.join("migrations", name), "utf8")
+  }));
+}
+function findMigration(name) {
+  const migration = getAllMigrations().find(item => item.name === name);
+  if (!migration) throw new Error(`Applied migration file is missing: ${name}`);
+  return migration;
+}
+async function getApplied(client) {
+  const exists = await client.query("SELECT to_regclass('public._migrations') AS relation");
+  if (!exists.rows[0].relation) return [];
+  const result = await client.query("SELECT name FROM _migrations ORDER BY id ASC");
+  return result.rows.map(row => row.name);
 }
 ```
 
@@ -195,11 +225,40 @@ async function status(client) {
 }
 ```
 
+Finish `src/migrator.js` by exporting its public functions:
+
+```javascript
+module.exports = {MIGRATIONS_TABLE,createMigration,parseMigration,getAllMigrations,findMigration,getApplied,migrateUp,migrateDown,status};
+```
+
 ## Step 9: CLI Entry Point
 
 Wire everything together with a simple argument parser:
 
 ```javascript
+// src/cli.js
+const {createClient} = require("./connection");
+const {MIGRATIONS_TABLE,createMigration,migrateUp,migrateDown,status} = require("./migrator");
+async function run(action, dryRun = false) {
+  const client = createClient();
+  let locked = false;
+  try {
+    await client.connect();
+    if (!dryRun && action !== status) {
+      await client.query("SELECT pg_advisory_lock($1)", [724021]);
+      locked = true;
+      await client.query(MIGRATIONS_TABLE);
+    }
+    await action(client, {dryRun});
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  } finally {
+    if (locked) await client.query("SELECT pg_advisory_unlock($1)", [724021]).catch(error => console.error(error.message));
+    await client.end();
+  }
+}
+
 const [, , command, ...args] = process.argv;
 
 switch (command) {
@@ -253,4 +312,4 @@ node src/cli.js down
 node src/cli.js status
 ```
 
-You now have a working migration tool. Extend it with features like: target version rollback (`down --to 20240101`), migration locking to prevent concurrent runs, and validation that ensures every `up` has a corresponding `down`.
+This implements single-step rollback, input validation and a session advisory lock for writes. Run it against a disposable PostgreSQL database first; it requires a real server and `DATABASE_URL`. The local helper tests do not establish behavior on your production schema. DDL that PostgreSQL forbids inside transactions, such as `CREATE INDEX CONCURRENTLY`, needs a separately designed migration mode. A down script may delete data; rollback is not a substitute for a backup. Target-version rollback remains an extension.

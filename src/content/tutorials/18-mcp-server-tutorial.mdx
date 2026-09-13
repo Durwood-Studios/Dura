@@ -1,6 +1,6 @@
 ---
 title: "Build an MCP Server for a Real Data Source"
-description: "Create a Model Context Protocol server that exposes PostgreSQL data to AI assistants through typed tool definitions, resources, and security controls."
+description: "Build and test a typed MCP product server with offline fixtures and an explicit, narrowly scoped PostgreSQL adapter."
 slug: "mcp-server-tutorial"
 difficulty: "advanced"
 estimatedMinutes: 210
@@ -11,663 +11,98 @@ tracks: ["ai-ml"]
 
 ## Overview
 
-The Model Context Protocol (MCP) is an open standard for connecting AI assistants to external data sources and tools. Instead of every AI app implementing custom integrations, MCP provides a universal interface: servers expose tools and resources, clients (like Claude Desktop or Cursor) consume them. In this tutorial, you'll build a production-quality MCP server that connects an AI assistant to a PostgreSQL database.
+Build a versioned MCP server that exposes public sample product data through two typed tools and two resources. Start with a deterministic fixture, then connect the same operations to a **disposable PostgreSQL lab database**. The project includes complete assembly, pinned packages and a real protocol-client test.
 
-**What you'll build:**
+This is a local teaching server, not a claim of production readiness. It exposes no arbitrary SQL or insert tool. Keyword filtering cannot establish a read-only SQL boundary: permissions and explicitly allowed operations must do that work.
 
-- An MCP server with tool definitions for querying, inserting, and analyzing data
-- Resource endpoints that expose database schema and table previews
-- Input validation and SQL injection prevention
-- Rate limiting and query complexity controls
-- A configuration system for connecting to any PostgreSQL database
+**Prerequisites:** Node.js 22+, JavaScript modules, parameterized SQL and client-server concepts. PostgreSQL is required only for the optional database mode. For a first MCP introduction, complete [the document MCP lab](/howto/mcp-server).
 
-**Prerequisites:** TypeScript, Node.js 20+, PostgreSQL, basic understanding of SQL and client-server architecture.
+## Step 1: Install the Complete Project
 
-## Step 1: Project Setup
-
-Initialize the project with the MCP SDK:
+[Download PostgreSQL MCP lab 1.0.0](/labs/mcp-postgres.zip), extract it and open its directory. The [README](/labs/mcp-postgres/README.md) lists the exact runtime and database setup.
 
 ```bash
-mkdir mcp-postgres && cd mcp-postgres
-npm init -y
-npm install @modelcontextprotocol/sdk pg zod
-npm install -D typescript @types/node @types/pg
+cd mcp-postgres
+npm ci
+npm test
+npm start
 ```
 
-Configure TypeScript:
+The lockfile pins `@modelcontextprotocol/sdk` 1.30.0, Zod 4.3.6 and `pg` 8.23.0. Fixture tests need no database, model, key or external service after installation. `npm start` waits for an MCP client on standard input; it does not open a web page.
 
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "Node16",
-    "moduleResolution": "Node16",
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true,
-    "esModuleInterop": true,
-    "declaration": true
-  },
-  "include": ["src"]
-}
+## Step 2: Understand the File Boundaries
+
+```text
+server.mjs       typed tools, resources, session budget and stdio startup
+data.mjs         public fixture plus fixed-query PostgreSQL adapter
+setup.sql        disposable table and narrow reader role
+server.test.mjs  official SDK client and boundary regressions
 ```
 
-Create the entry point structure:
+`createProductServer(repository)` is independent of data storage. Both repositories implement `search`, `preview`, `stats` and `close`. This lets protocol tests cover the actual server while keeping database permission checks a distinct integration responsibility.
 
-```
-src/
-  index.ts         # Server entry point
-  tools/           # Tool definitions
-    query.ts
-    insert.ts
-    analyze.ts
-  resources/       # Resource definitions
-    schema.ts
-    preview.ts
-  db.ts            # Database connection
-  validation.ts    # Query validation
-```
+## Step 3: Make Operations the Permission Boundary
 
-## Step 2: Database Connection
-
-Create a connection pool with proper error handling:
-
-```typescript
-// src/db.ts
-import pg from "pg";
-
-const { Pool } = pg;
-
-let pool: pg.Pool | null = null;
-
-export function getPool(): pg.Pool {
-  if (!pool) {
-    pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
-      statement_timeout: 10000, // Kill queries after 10s
-    });
-
-    pool.on("error", (err) => {
-      console.error("Unexpected pool error:", err);
-    });
-  }
-  return pool;
-}
-
-export async function query<T extends pg.QueryResultRow>(
-  text: string,
-  params?: unknown[]
-): Promise<pg.QueryResult<T>> {
-  const client = await getPool().connect();
-  try {
-    return await client.query<T>(text, params);
-  } finally {
-    client.release();
-  }
-}
-
-export async function shutdown(): Promise<void> {
-  if (pool) {
-    await pool.end();
-    pool = null;
-  }
-}
-```
-
-## Step 3: Query Validation
-
-Before executing any SQL from an AI, validate it rigorously. The AI should only run SELECT queries through the query tool — never DROP, DELETE, or ALTER:
-
-```typescript
-// src/validation.ts
-import { z } from "zod";
-
-const FORBIDDEN_KEYWORDS = [
-  "DROP",
-  "DELETE",
-  "TRUNCATE",
-  "ALTER",
-  "CREATE",
-  "INSERT",
-  "UPDATE",
-  "GRANT",
-  "REVOKE",
-  "COPY",
-  "EXEC",
-  "EXECUTE",
-];
-
-const FORBIDDEN_PATTERNS = [
-  /;\s*\w/i, // Multiple statements
-  /--/, // SQL comments (could hide injection)
-  /\/\*/, // Block comments
-  /pg_sleep/i, // Time-based attacks
-  /INTO\s+OUTFILE/i, // File writes
-  /LOAD_FILE/i, // File reads
-];
-
-export const queryInputSchema = z.object({
-  sql: z.string().min(1).max(5000),
-  params: z.array(z.unknown()).max(20).default([]),
-});
-
-export function validateReadOnlyQuery(sql: string): {
-  isValid: boolean;
-  error?: string;
-} {
-  const upper = sql.toUpperCase().trim();
-
-  // Must start with SELECT, WITH, or EXPLAIN
-  if (!/^(SELECT|WITH|EXPLAIN)\s/i.test(sql.trim())) {
-    return { isValid: false, error: "Only SELECT, WITH, and EXPLAIN queries are allowed" };
-  }
-
-  for (const keyword of FORBIDDEN_KEYWORDS) {
-    // Check for keyword as a whole word (not part of column names)
-    const regex = new RegExp(`\\b${keyword}\\b`, "i");
-    if (regex.test(upper)) {
-      return { isValid: false, error: `Forbidden keyword: ${keyword}` };
-    }
-  }
-
-  for (const pattern of FORBIDDEN_PATTERNS) {
-    if (pattern.test(sql)) {
-      return { isValid: false, error: "Query contains a forbidden pattern" };
-    }
-  }
-
-  return { isValid: true };
-}
-
-export function enforceRowLimit(sql: string, maxRows: number): string {
-  if (/\bLIMIT\b/i.test(sql)) {
-    return sql;
-  }
-  return `${sql.replace(/;\s*$/, "")} LIMIT ${maxRows}`;
-}
-```
-
-## Step 4: Define the Query Tool
-
-MCP tools are functions the AI can call. The query tool lets the AI run read-only SQL:
-
-```typescript
-// src/tools/query.ts
-import { z } from "zod";
-import { query as dbQuery } from "../db";
-import { validateReadOnlyQuery, enforceRowLimit } from "../validation";
-
-export const queryTool = {
-  name: "query_database",
-  description: `Execute a read-only SQL query against the PostgreSQL database. 
-Returns rows as JSON. Only SELECT, WITH, and EXPLAIN statements are allowed. 
-Results are limited to 100 rows. Use parameterized queries with $1, $2, etc.`,
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      sql: {
-        type: "string",
-        description: "The SQL query to execute. Use $1, $2 for parameters.",
-      },
-      params: {
-        type: "array",
-        items: { type: "string" },
-        description: "Parameter values for $1, $2, etc. in the query.",
-        default: [],
-      },
-    },
-    required: ["sql"],
-  },
-
-  async execute(args: { sql: string; params?: string[] }): Promise<{
-    content: Array<{ type: "text"; text: string }>;
-    isError?: boolean;
-  }> {
-    const validation = validateReadOnlyQuery(args.sql);
-    if (!validation.isValid) {
-      return {
-        content: [{ type: "text", text: `Query rejected: ${validation.error}` }],
-        isError: true,
-      };
-    }
-
-    const safeSql = enforceRowLimit(args.sql, 100);
-
-    try {
-      const result = await dbQuery(safeSql, args.params ?? []);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                rowCount: result.rowCount,
-                columns: result.fields.map((f) => f.name),
-                rows: result.rows,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Query failed";
-      return {
-        content: [{ type: "text", text: `Query error: ${message}` }],
-        isError: true,
-      };
-    }
-  },
-};
-```
-
-## Step 5: Schema Resource
-
-Resources in MCP are read-only data the AI can access for context. Expose the database schema so the AI knows what tables and columns exist:
-
-```typescript
-// src/resources/schema.ts
-import { query } from "../db";
-
-export const schemaResource = {
-  uri: "postgres://schema",
-  name: "Database Schema",
-  description: "Complete database schema including tables, columns, types, and relationships",
-  mimeType: "application/json",
-
-  async read(): Promise<{ contents: Array<{ uri: string; mimeType: string; text: string }> }> {
-    const result = await query(`
-      SELECT
-        t.table_name,
-        json_agg(json_build_object(
-          'column', c.column_name,
-          'type', c.data_type,
-          'nullable', c.is_nullable,
-          'default', c.column_default
-        ) ORDER BY c.ordinal_position) AS columns
-      FROM information_schema.tables t
-      JOIN information_schema.columns c
-        ON c.table_name = t.table_name
-        AND c.table_schema = t.table_schema
-      WHERE t.table_schema = 'public'
-        AND t.table_type = 'BASE TABLE'
-      GROUP BY t.table_name
-      ORDER BY t.table_name
-    `);
-
-    const schema = result.rows.map((row) => ({
-      table: row.table_name,
-      columns: row.columns,
-    }));
-
-    return {
-      contents: [
-        {
-          uri: "postgres://schema",
-          mimeType: "application/json",
-          text: JSON.stringify(schema, null, 2),
-        },
-      ],
-    };
-  },
-};
-```
-
-## Step 6: Table Preview Resource
-
-Let the AI peek at sample data from any table:
-
-```typescript
-// src/resources/preview.ts
-import { query } from "../db";
-
-export function createTablePreviewResource(tableName: string) {
-  return {
-    uri: `postgres://preview/${tableName}`,
-    name: `Preview: ${tableName}`,
-    description: `First 5 rows from the ${tableName} table`,
-    mimeType: "application/json",
-
-    async read(): Promise<{ contents: Array<{ uri: string; mimeType: string; text: string }> }> {
-      // Validate table name to prevent injection (only alphanumeric and underscores)
-      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
-        throw new Error("Invalid table name");
-      }
-
-      const result = await query(`SELECT * FROM "${tableName}" LIMIT 5`);
-
-      return {
-        contents: [
-          {
-            uri: `postgres://preview/${tableName}`,
-            mimeType: "application/json",
-            text: JSON.stringify(result.rows, null, 2),
-          },
-        ],
-      };
-    },
-  };
-}
-```
-
-## Step 7: Analyze Tool
-
-A higher-level tool that runs common analytical queries:
-
-```typescript
-// src/tools/analyze.ts
-import { query } from "../db";
-
-export const analyzeTool = {
-  name: "analyze_table",
-  description: `Get statistical analysis of a table: row count, column statistics (min, max, avg, null count, distinct count). Useful for understanding data distribution before writing queries.`,
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      table: {
-        type: "string",
-        description: "The table name to analyze",
-      },
-      columns: {
-        type: "array",
-        items: { type: "string" },
-        description: "Specific columns to analyze. If empty, analyzes all columns.",
-        default: [],
-      },
-    },
-    required: ["table"],
-  },
-
-  async execute(args: { table: string; columns?: string[] }): Promise<{
-    content: Array<{ type: "text"; text: string }>;
-    isError?: boolean;
-  }> {
-    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(args.table)) {
-      return {
-        content: [{ type: "text", text: "Invalid table name" }],
-        isError: true,
-      };
-    }
-
-    try {
-      const countResult = await query(`SELECT COUNT(*) as total FROM "${args.table}"`);
-      const total = countResult.rows[0].total;
-
-      // Get column info
-      const colResult = await query(
-        `SELECT column_name, data_type FROM information_schema.columns 
-         WHERE table_name = $1 AND table_schema = 'public'`,
-        [args.table]
-      );
-
-      const stats: Record<string, unknown> = { rowCount: total, columns: {} };
-
-      for (const col of colResult.rows) {
-        if (args.columns?.length && !args.columns.includes(col.column_name)) {
-          continue;
-        }
-
-        const colName = col.column_name;
-        const isNumeric = ["integer", "bigint", "numeric", "real", "double precision"].includes(
-          col.data_type
-        );
-
-        const nullCount = await query(
-          `SELECT COUNT(*) as c FROM "${args.table}" WHERE "${colName}" IS NULL`
-        );
-
-        const distinctCount = await query(
-          `SELECT COUNT(DISTINCT "${colName}") as c FROM "${args.table}"`
-        );
-
-        const colStats: Record<string, unknown> = {
-          type: col.data_type,
-          nullCount: nullCount.rows[0].c,
-          distinctCount: distinctCount.rows[0].c,
-        };
-
-        if (isNumeric) {
-          const numStats = await query(
-            `SELECT MIN("${colName}") as min, MAX("${colName}") as max, AVG("${colName}")::numeric(10,2) as avg FROM "${args.table}"`
-          );
-          colStats.min = numStats.rows[0].min;
-          colStats.max = numStats.rows[0].max;
-          colStats.avg = numStats.rows[0].avg;
-        }
-
-        (stats.columns as Record<string, unknown>)[colName] = colStats;
-      }
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(stats, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Analysis failed: ${(error as Error).message}` }],
-        isError: true,
-      };
-    }
-  },
-};
-```
-
-## Step 8: Server Assembly
-
-Wire everything together using the MCP SDK:
-
-```typescript
-// src/index.ts
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
-import { queryTool } from "./tools/query.js";
-import { analyzeTool } from "./tools/analyze.js";
-import { schemaResource } from "./resources/schema.js";
-import { query, shutdown } from "./db.js";
-
-const server = new Server(
-  { name: "postgres-mcp", version: "1.0.0" },
-  { capabilities: { tools: {}, resources: {} } }
-);
-
-// List available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: queryTool.name,
-      description: queryTool.description,
-      inputSchema: queryTool.inputSchema,
-    },
-    {
-      name: analyzeTool.name,
-      description: analyzeTool.description,
-      inputSchema: analyzeTool.inputSchema,
-    },
-  ],
-}));
-
-// Execute tools
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  switch (name) {
-    case "query_database":
-      return queryTool.execute(args as { sql: string; params?: string[] });
-    case "analyze_table":
-      return analyzeTool.execute(args as { table: string; columns?: string[] });
-    default:
-      return {
-        content: [{ type: "text", text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
-  }
-});
-
-// List resources
-server.setRequestHandler(ListResourcesRequestSchema, async () => {
-  const tables = await query(
-    `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
-  );
-
-  return {
-    resources: [
-      {
-        uri: schemaResource.uri,
-        name: schemaResource.name,
-        description: schemaResource.description,
-        mimeType: schemaResource.mimeType,
-      },
-      ...tables.rows.map((t) => ({
-        uri: `postgres://preview/${t.table_name}`,
-        name: `Preview: ${t.table_name}`,
-        description: `Sample data from ${t.table_name}`,
-        mimeType: "application/json",
-      })),
-    ],
-  };
-});
-
-// Read resources
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  const { uri } = request.params;
-
-  if (uri === "postgres://schema") {
-    return schemaResource.read();
-  }
-
-  const match = uri.match(/^postgres:\/\/preview\/(\w+)$/);
-  if (match) {
-    const tableName = match[1];
-    const result = await query(`SELECT * FROM "${tableName}" LIMIT 5`);
-    return {
-      contents: [
-        {
-          uri,
-          mimeType: "application/json",
-          text: JSON.stringify(result.rows, null, 2),
-        },
-      ],
-    };
-  }
-
-  throw new Error(`Unknown resource: ${uri}`);
-});
-
-// Start server
-async function main(): Promise<void> {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("MCP PostgreSQL server running on stdio");
-
-  process.on("SIGINT", async () => {
-    await shutdown();
-    process.exit(0);
-  });
-}
-
-main().catch((error) => {
-  console.error("Server failed to start:", error);
-  process.exit(1);
-});
-```
-
-## Step 9: Rate Limiting
-
-Prevent abuse by tracking query frequency:
-
-```typescript
-// src/rate-limit.ts
-interface RateLimitEntry {
-  count: number;
-  resetAt: number;
-}
-
-export class RateLimiter {
-  private window: number;
-  private maxRequests: number;
-  private entries = new Map<string, RateLimitEntry>();
-
-  constructor(windowMs: number, maxRequests: number) {
-    this.window = windowMs;
-    this.maxRequests = maxRequests;
-  }
-
-  check(key: string): { allowed: boolean; remaining: number; resetIn: number } {
-    const now = Date.now();
-    const entry = this.entries.get(key);
-
-    if (!entry || now > entry.resetAt) {
-      this.entries.set(key, { count: 1, resetAt: now + this.window });
-      return { allowed: true, remaining: this.maxRequests - 1, resetIn: this.window };
-    }
-
-    if (entry.count >= this.maxRequests) {
-      return { allowed: false, remaining: 0, resetIn: entry.resetAt - now };
-    }
-
-    entry.count++;
-    return {
-      allowed: true,
-      remaining: this.maxRequests - entry.count,
-      resetIn: entry.resetAt - now,
-    };
-  }
-}
-
-// 60 queries per minute
-export const queryLimiter = new RateLimiter(60_000, 60);
-```
-
-## Step 10: Configuration and Deployment
-
-Create a Claude Desktop configuration file so users can connect:
-
-```json
-{
-  "mcpServers": {
-    "postgres": {
-      "command": "node",
-      "args": ["dist/index.js"],
-      "env": {
-        "DATABASE_URL": "postgresql://user:pass@localhost:5432/mydb"
-      }
-    }
-  }
-}
-```
-
-Build and test:
-
-```bash
-npm run build
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | DATABASE_URL="postgresql://localhost/test" node dist/index.js
-```
-
-For production deployment, add these safety measures:
-
-1. **Read-only database user** — create a PostgreSQL role with only SELECT permissions
-2. **Connection pooling** — use PgBouncer for connection management at scale
-3. **Query timeout** — already set at 10 seconds in the pool config
-4. **Row limits** — enforced in the validation layer
-5. **Audit logging** — log every query with timestamp and requester
+The search tool accepts `term` and an integer `limit` from 1 to 20. It cannot accept a SQL string, column name or table name. Read the fixed search statement in `data.mjs`: the term is `$1`, the limit is `$2`, and the table is explicitly `public.lab_products`.
 
 ```sql
--- Create a read-only role for the MCP server
-CREATE ROLE mcp_reader WITH LOGIN PASSWORD 'secure_password';
-GRANT CONNECT ON DATABASE mydb TO mcp_reader;
-GRANT USAGE ON SCHEMA public TO mcp_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_reader;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO mcp_reader;
+SELECT id, name, category, price_cents
+FROM public.lab_products
+WHERE strpos(lower(name), lower($1)) > 0
+ORDER BY id
+LIMIT $2
 ```
 
-Your MCP server now provides AI assistants with safe, structured access to PostgreSQL. The query validation prevents destructive operations, rate limiting prevents abuse, and the resource system gives the AI context about your schema without requiring explicit queries. This same pattern extends to any data source — swap PostgreSQL for MongoDB, Redis, an API, or a file system.
+A search for `'; DROP TABLE lab_products;--` is ordinary text. The adapter test asserts that this text remains a bound parameter and never changes the SQL statement. This is a stronger and more inspectable contract than trying to recognize safe SQL with regular expressions.
+
+## Step 4: Register Typed Tools
+
+Read the two `registerTool` calls. Zod validates argument types and bounds before the callback runs. `search_products` returns approved fields; `product_price_summary` returns count and min/max prices in cents. Neither tool writes data.
+
+The MCP read-only annotation describes intent to a client; it is not an authorization mechanism. The fixed repository operations and database privileges enforce the boundary. Add an invalid-limit call to the SDK test and confirm `isError` is true.
+
+## Step 5: Expose Only Approved Resources
+
+`products://schema` describes four known columns. `products://preview` returns at most five public rows. Unknown resource URIs fail; the server does not enumerate every table in a connected database or allow a caller to choose arbitrary identifiers.
+
+Resources and tools share the same session operation budget. Reading a preview cannot bypass the control by using a different protocol method.
+
+## Step 6: Verify Protocol Assembly
+
+`server.test.mjs` spawns `server.mjs` with `StdioClientTransport`, connects an official SDK `Client`, lists tools/resources, calls valid and invalid tools, reads the preview and closes the session. This includes initialization negotiation.
+
+A single JSON `tools/list` line piped to stdin is not a complete protocol test. Keep logs on stderr so they cannot corrupt JSON-RPC on stdout. Configure your MCP client with `node` and an absolute server path; consult that client's documentation for its configuration location.
+
+## Step 7: Exercise the Shared Session Budget
+
+The server permits at most 60 data operations per minute and one operation at a time. It uses one bounded counter for the local session, not an unbounded map of caller-provided identities. The tests verify rejection, concurrent-operation exclusion and reset at the window boundary.
+
+This is not a distributed rate limiter or user authentication. If you later expose a network transport, define authentication, session ownership, origin handling and deployment limits before accepting remote clients.
+
+## Step 8: Prepare a Disposable PostgreSQL Source
+
+Create a new local lab database. Review `setup.sql` before running it as that database's owner. It creates the three-row `lab_products` table and `lab_reader` role, grants schema usage and SELECT only on that table, and sets the role's default transactions to read-only.
+
+Provision its login password separately using your database administration workflow. Do not run the setup against DURA's hosted database or another application's production schema. Do not reuse an application owner or superuser credential for the MCP server.
+
+## Step 9: Connect the Real Adapter
+
+Set `DATABASE_URL` in the server's environment using the dedicated reader credentials, then start:
+
+```bash
+MCP_DATA_MODE=postgres npm start
+```
+
+The adapter uses a one-connection pool, connection and query timeouts, read-only transaction defaults and a restricted search path. Fixed SQL is schema-qualified. For remote TLS, configure trusted certificates; disabling certificate verification is not a solution.
+
+Use the same MCP client calls and compare the fixture/database results. Then independently verify that the role cannot write or read unrelated tables. The offline suite tests the protocol and parameter contracts; a real deployment still needs its own authentication, TLS and permission evidence.
+
+## Step 10: Extend Without Expanding Authority Accidentally
+
+Add a category filter as a typed value parameter and update both repositories plus their tests. Define the expected ordering and limit behavior. An insert or arbitrary query tool is a separate capability decision, not a minor enhancement to a read-only server.
+
+Record separately what you executed: offline protocol tests, disposable SQL checks, and any real PostgreSQL client connection. Do not call those equivalent to a reviewed production deployment.
+
+<Checkpoint id="mcp-product-boundary" label="MCP data boundary" status="active" challenge="Should a caller's search text be a SQL fragment or a bound parameter?" answer="a bound parameter">
+  Typed tools describe allowed operations; narrow database privileges enforce their authority.
+</Checkpoint>

@@ -9,268 +9,52 @@ tags: ["mcp", "ai", "tools", "protocol"]
 tracks: ["ai-ml"]
 ---
 
-The Model Context Protocol (MCP) is an open standard that lets AI models interact with external tools and data sources through a structured interface. Instead of building custom integrations for every AI platform, you build one MCP server and any compliant client can use it. This guide walks through building a server from scratch.
+Build a complete, read-only document server using the official MCP SDK. The [downloadable lab](/labs/mcp-server/README.md) contains the entire implementation and a test that launches a real client and server process. It uses two public fixture documents so you can reproduce every result without API keys or an LLM.
 
-## Step 1: Understand the Protocol Architecture
+## Step 1: Understand the Client and Server
 
-MCP follows a client-server model with three core primitives:
+An MCP client connects to a server, negotiates capabilities, and discovers the features it supports. **Tools** perform named operations, **resources** expose URI-addressed content, and **prompts** provide reusable messages. The host application controls which capabilities reach its model and when approval is needed. A server does not independently cause a model to call tools.
 
-**Tools** — Functions the AI can invoke. Each tool has a name, description, and a JSON Schema for its parameters. The AI decides when to call a tool based on the description and the user's request. Example: a `search_documents` tool that queries a vector database.
+MCP uses JSON-RPC. Requests have IDs; notifications do not. Stdio transports messages through a child process's stdin and stdout. Reserve stdout for the protocol and log diagnostics to stderr.
 
-**Resources** — Data the AI can read. Resources have a URI and return content. Unlike tools, resources are passive — they do not perform actions. Example: a `config://app/settings` resource that returns the current application configuration.
+## Step 2: Download and Run the Complete Project
 
-**Prompts** — Reusable prompt templates that guide the AI's behavior. Example: a `code-review` prompt that provides a structured framework for analyzing code.
+Use Node 22 or later. Save these files together in an empty directory:
 
-The protocol uses JSON-RPC 2.0 for message framing. Every request has a method, params, and an ID. Every response has a result or an error.
-
-```json
-// Client → Server: Tool call
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "search_documents",
-    "arguments": { "query": "authentication best practices" }
-  }
-}
-
-// Server → Client: Result
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "content": [
-      { "type": "text", "text": "Found 3 relevant documents..." }
-    ]
-  }
-}
-```
-
-## Step 2: Set Up the Project
-
-The official MCP SDK handles protocol negotiation, message framing, and transport. Start with the TypeScript SDK:
+- [package.json](/labs/mcp-server/package.json)
+- [server.mjs](/labs/mcp-server/server.mjs)
+- [server.test.mjs](/labs/mcp-server/server.test.mjs)
 
 ```bash
-mkdir my-mcp-server && cd my-mcp-server
-npm init -y
-npm install @modelcontextprotocol/sdk
-npm install -D typescript @types/node
+npm install
+npm test
+npm start
 ```
 
-```json
-// tsconfig.json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "Node16",
-    "moduleResolution": "Node16",
-    "outDir": "./dist",
-    "strict": true,
-    "esModuleInterop": true
-  },
-  "include": ["src/**/*"]
-}
-```
+The manifest pins the tested SDK and Zod versions. After installation this fixture runs offline. `npm start` waits for protocol input; it does not open a webpage. Configure your MCP client to launch `node` with the absolute path to `server.mjs` as its argument.
 
-Create the entry point:
+## Step 3: Register a Bounded Tool
 
-```typescript
-// src/index.ts
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+Open `server.mjs`. `search_documents` accepts a trimmed string of 1–200 characters. The handler searches the in-memory document map and returns a JSON array inside a text content block. Searching `offline` returns the `welcome` document; searching `absent` returns an empty array. Invalid arguments return a tool error rather than executing an unbounded search.
 
-const server = new McpServer({
-  name: "my-mcp-server",
-  version: "1.0.0",
-});
+The read-only and idempotent annotations describe the tool to clients. They do not enforce access control. This example enforces its boundary by having no filesystem, network, or write operations in the handler.
 
-async function main(): Promise<void> {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("MCP server running on stdio");
-}
+## Step 4: Register a Real URI Template
 
-main().catch(console.error);
-```
+A dynamic resource uses `new ResourceTemplate("docs://document/{id}", ...)`. A plain string containing braces is not a dynamic registration. The list callback publishes the two concrete resource URIs; the read callback resolves the requested ID from the fixed map and returns the exact requested URI and document text.
 
-Note: log to `stderr`, not `stdout`. The stdio transport uses stdout for JSON-RPC messages. Logging to stdout corrupts the protocol stream.
+Read `docs://document/privacy` and expect `Analytics requires explicit consent.` Request `docs://document/missing` and expect an explicit unknown-ID protocol error. No path supplied by the client reaches a filesystem API.
 
-## Step 3: Define Tools
+## Step 5: Add a Prompt and Exercise the Transport
 
-Tools are the primary way AI models interact with your server. Each tool needs a name, description, input schema, and a handler function.
+The `summarize-document` prompt validates an ID, loads the same fixture, and returns a user message asking for a one-sentence summary. It does not call an LLM or pretend a summary was generated. Your host supplies the model if you choose to use one.
 
-```typescript
-import { z } from "zod";
+Run `npm test`. The test uses `StdioClientTransport` to spawn the server, negotiate MCP, discover tools/resources/templates, call the search tool, read a resource, and request the prompt. It also checks blank, oversized, and wrong-type search inputs plus unknown document IDs. The client closes in a `finally` block so the child process is cleaned up after failure.
 
-// Define a tool that searches a knowledge base
-server.tool(
-  "search_knowledge_base",
-  "Search the documentation knowledge base for relevant articles. Returns matched documents with relevance scores.",
-  {
-    query: z.string().describe("The search query"),
-    limit: z.number().optional().default(5).describe("Max results to return"),
-    category: z
-      .enum(["guides", "api", "tutorials"])
-      .optional()
-      .describe("Filter by content category"),
-  },
-  async ({ query, limit, category }) => {
-    try {
-      const results = await searchDocuments(query, { limit, category });
+## Step 6: Extend and Verify the Boundary
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(results, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Search failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
-```
+Add a third public document to the map and update the test to discover its URI, search a unique word in it, read its full text, and reject an unknown ID. Explain why a server that exposes private files needs authorization beyond tool annotations.
 
-Write tool descriptions for the AI, not for humans. The AI reads the description to decide whether and how to use the tool. Be specific about what the tool does, what inputs it expects, and what it returns. Vague descriptions lead to incorrect tool usage.
+Keep this exercise on stdio. A production HTTP deployment needs the SDK's Streamable HTTP lifecycle, Origin validation, authenticated authorization, and correct session isolation. Reusing one transport for unrelated clients or connecting a new server for every POST breaks that lifecycle. The lab makes no HTTP hosting or production-security claim.
 
-## Step 4: Expose Resources
-
-Resources let the AI read structured data from your system without performing actions.
-
-```typescript
-// Static resource — content is known at registration time
-server.resource(
-  "app-config",
-  "config://app/settings",
-  "Current application configuration and feature flags",
-  async () => ({
-    contents: [
-      {
-        uri: "config://app/settings",
-        mimeType: "application/json",
-        text: JSON.stringify({
-          features: { darkMode: true, betaSearch: false },
-          limits: { maxUploadSize: "10MB", rateLimit: 100 },
-        }),
-      },
-    ],
-  })
-);
-
-// Dynamic resource template — URI contains a parameter
-server.resource(
-  "user-profile",
-  "users://{userId}/profile",
-  "User profile data including preferences and history",
-  async (uri) => {
-    const userId = uri.pathname.split("/")[1];
-    const profile = await fetchUserProfile(userId);
-
-    return {
-      contents: [
-        {
-          uri: uri.toString(),
-          mimeType: "application/json",
-          text: JSON.stringify(profile),
-        },
-      ],
-    };
-  }
-);
-```
-
-Resources are identified by URIs. Use a consistent scheme: `config://` for configuration, `db://` for database records, `file://` for file system access. The URI scheme is arbitrary but should be meaningful to the consumer.
-
-## Step 5: Choose a Transport Layer
-
-MCP supports multiple transport mechanisms. The choice depends on your deployment model.
-
-**Stdio transport** — The server runs as a subprocess. The client spawns it and communicates over stdin/stdout. Best for local tools and IDE integrations.
-
-```typescript
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-
-const transport = new StdioServerTransport();
-await server.connect(transport);
-```
-
-**Streamable HTTP transport** — The server runs as an HTTP endpoint. Clients connect over the network. Best for shared services and remote deployments.
-
-```typescript
-import express from "express";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-
-const app = express();
-app.use(express.json());
-
-app.post("/mcp", async (req, res) => {
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => crypto.randomUUID(),
-  });
-  await server.connect(transport);
-  await transport.handleRequest(req, res);
-});
-
-app.listen(3001, () => {
-  console.error("MCP HTTP server on port 3001");
-});
-```
-
-For local development and testing, stdio is simpler. For production services that multiple clients share, use HTTP. You can support both — the server logic is transport-agnostic.
-
-## Step 6: Handle Security and Edge Cases
-
-MCP servers are attack surface. An AI model calling your tools means untrusted input flowing into your systems.
-
-**Validate all inputs.** The Zod schemas in tool definitions provide first-pass validation, but add business logic validation too:
-
-```typescript
-server.tool(
-  "delete_document",
-  "Permanently delete a document by ID",
-  { documentId: z.string().uuid() },
-  async ({ documentId }) => {
-    // Verify the document exists and the caller has permission
-    const doc = await db.documents.findById(documentId);
-    if (!doc) {
-      return {
-        content: [{ type: "text", text: "Document not found" }],
-        isError: true,
-      };
-    }
-
-    if (doc.isProtected) {
-      return {
-        content: [{ type: "text", text: "Cannot delete protected documents" }],
-        isError: true,
-      };
-    }
-
-    await db.documents.delete(documentId);
-    return {
-      content: [{ type: "text", text: `Deleted document ${documentId}` }],
-    };
-  }
-);
-```
-
-**Rate limit tool calls.** A misbehaving client could call your tools thousands of times. Implement per-client rate limiting, especially for tools that write data or call external APIs.
-
-**Limit resource exposure.** Do not expose your entire database through resources. Expose only what the AI needs. Apply the principle of least privilege — the same principle you apply to API keys.
-
-**Handle timeouts.** Tools that call external services can hang. Set timeouts on all network requests and return meaningful errors when they fire.
-
-**Log everything.** Every tool call, every resource read, every error. When an AI makes an unexpected decision, the logs tell you which tool returned which data that led to that decision. Debugging AI behavior without tool call logs is guesswork.
-
-Build your MCP server the same way you build any API: validate inputs, handle errors, limit access, and log operations. The only difference is your client is a language model instead of a frontend application — and language models are even less predictable than users.
+Reference: [official TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk/tree/v1.x), [MCP architecture](https://modelcontextprotocol.io/docs/learn/architecture).

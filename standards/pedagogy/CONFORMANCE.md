@@ -1,6 +1,6 @@
 # Curriculum conformance inventory
 
-Reviewed 2026-09-12 against the local content tree: **668 lessons, 119 modules, 15 phases**.
+Reviewed 2026-09-13 against the local content tree: **749 lessons, 120 modules, 15 phases**.
 
 ## Completed foundation work
 
@@ -10,7 +10,7 @@ Content repairs distinguish decimal and binary storage units, avoid claiming TCP
 
 ## Current review result
 
-All **668 lessons across phases 0–14** pass the current static LP audit and compile as MDX. The changes include explicit prerequisites, topic-specific outcomes, mental models, guided reasoning checkpoints, and assessment tasks aligned with their declared Bloom level. Native-language, engineering, and professional tasks use offline written activities with model responses and observable rubrics where browser execution would not verify the intended skill.
+All **749 lessons across phases 0–14** pass the current static LP audit and compile as MDX. The changes include explicit prerequisites, topic-specific outcomes, mental models, guided reasoning checkpoints, and assessment tasks aligned with their declared Bloom level. Native-language, engineering, and professional tasks use offline written activities with model responses and observable rubrics where browser execution would not verify the intended skill.
 
 The strict current LP test now requires zero findings for every lesson; the immutable legacy baseline cannot excuse a regression. Whole-curriculum MDX compilation is also retained as a test. Runtime assessment-property checks verify supported quiz options, answer indices, and reachable fill-in fields. Compilation alone would not catch those delivery errors.
 
@@ -53,3 +53,7 @@ The structural linter in `src/lib/lesson-conformance.ts` checks required metadat
 Reachability checks enumerate all authored content through the actual loader, reject duplicate route identities, compare phase/module totals, resolve all lesson prerequisites, compile all authored MDX, execute new JavaScript examples with fixed expected results, check assessment module references, and follow both sides of the new module boundary. These catch missing registration, silent empty specialty modules, incorrect examples, and completion flows with no assessment bank.
 
 These checks do **not** certify technical accuracy, the meaning of prerequisites, all vocabulary coverage, mastery-test sufficiency, accessibility of every rendered page, or full LP-1.0 conformance. Human pedagogical review remains necessary, especially for advanced and safety-sensitive specialty content. The baseline records the starting debt; it is not a standards badge.
+
+## Adjacent-career introductory extensions
+
+48 additional lessons and 56 checks bring the inventory to 749 lessons, 120 modules and 1,806 assessment items. All 106 historically unlinked role-topic IDs now have specific study entry points. These cover introductory tasks, not entire role levels or professional certification. The new financial module’s standards mapping is explicitly lesson-metadata-only; its exercises use synthetic data and do not establish regulatory conformance. See [the exact closure and runtime boundaries](CAREER-COVERAGE.md).

@@ -49,6 +49,16 @@ export interface StandardsAlignment {
 // See standards/pedagogy/CORE-MAPPING-REVIEW.md for sources and scope.
 
 const RECORDED_PHASE_STANDARDS: StandardsAlignment[] = [
+  // Introductory synthetic finance exercises; no formal regulatory or industry conformance claim.
+  {
+    phaseId: "4",
+    moduleId: "4-7",
+    alignmentStatus: "lesson-metadata-only",
+    csta: [],
+    apCSP: [],
+    apCSA: [],
+    iste: [],
+  },
   // Phase 0: Digital Literacy → CSTA Level 2 + AP CSP Big Ideas 5,6
   {
     phaseId: "0",

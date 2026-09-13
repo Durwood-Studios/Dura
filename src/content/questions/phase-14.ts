@@ -21,7 +21,7 @@ function q(
 ): AssessmentQuestion {
   return {
     id,
-    phaseId: "m",
+    phaseId: "14",
     moduleId: canonicalModuleId(moduleId) ?? moduleId,
     type,
     question,
@@ -656,13 +656,13 @@ export const PHASE_14_QUESTIONS: AssessmentQuestion[] = [
     "multiple-choice",
     "ASME Y14.41 defines the standard for Digital Product Definition Data Practices (Model-Based Definition). What is the PRIMARY intent of MBD as defined by this standard?",
     [
-      "To make the 3D CAD model with embedded PMI the authoritative source of product definition, replacing or supplementing traditional 2D engineering drawings",
+      "To define digital product data practices while the controlled contract determines model, drawing, or combined dataset authority",
       "To digitize paper drawings into PDF format for electronic storage and retrieval",
       "To establish requirements for CAD software interoperability between different vendors",
       "To define the format for exchanging bill-of-materials data between ERP and PLM systems",
     ],
     0,
-    "ASME Y14.41 establishes requirements for defining products digitally using 3D models with embedded Product and Manufacturing Information (PMI). The 3D annotated model becomes the authoritative definition, enabling downstream users (manufacturing, inspection, procurement) to work directly from the model without 2D drawing derivation.",
+    "Digital product definition practices do not automatically override contractual precedence. A model-only, drawing-only, or combined controlled dataset can define authority; downstream views must preserve the applicable definition.",
     "easy",
     ["mbd", "y14.41", "pmi", "product-definition"]
   ),
@@ -728,7 +728,7 @@ export const PHASE_14_QUESTIONS: AssessmentQuestion[] = [
       "Generating 2D detail drawings automatically from the 3D model for shop floor use",
     ],
     0,
-    "Automated inspection programming from PMI (CMM or optical measurement) represents high MBE maturity — the model drives the entire manufacturing and inspection process with minimal human intervention. Using the model for visual reference or generating 2D drawings as fallback are lower maturity states; generating 2D drawings defeats the purpose of MBD.",
+    "Among these examples, automated inspection uses machine-readable PMI directly. Derived drawings can still be legitimate controlled shop-floor views; automation does not remove validation, configuration control, or contractual precedence.",
     "hard",
     ["mbd", "mbe", "inspection", "cmm", "automation"]
   ),
@@ -773,15 +773,15 @@ export const PHASE_14_QUESTIONS: AssessmentQuestion[] = [
     "m-8-q2",
     "m-8",
     "multiple-choice",
-    "IPC-A-610 defines workmanship acceptance criteria for through-hole component solder joints. For a Class 3 through-hole solder joint, what is the minimum acceptable vertical solder fill in the plated through-hole?",
+    "An inspector must decide whether a through-hole solder joint is acceptable. What is needed before selecting a vertical-fill criterion?",
     [
-      "75% minimum vertical fill of the board thickness",
-      "50% minimum vertical fill of the board thickness",
-      "100% fill required — any void is a defect condition for Class 3",
-      "25% minimum vertical fill of the board thickness",
+      "The invoked revision, product class, joint type, applicable exceptions, and contractual requirements",
+      "A universal percentage used for every joint and every revision",
+      "The product marketing category alone",
+      "The operator’s preferred percentage regardless of the applicable standard",
     ],
     0,
-    "For through-hole solder joints per IPC-A-610 Class 3, the minimum acceptable vertical fill is 75% of the board thickness. Class 1 and 2 require minimum 50% fill. 100% fill is the target/desired condition but not the acceptance threshold for Class 3.",
+    "Acceptance is criterion-specific. Identify the invoked edition, class, joint geometry and any applicable exceptions or contract requirements, then consult the controlled requirement. A generic percentage is not a substitute for that decision.",
     "medium",
     ["ipc-a-610", "class-3", "through-hole", "solder-fill", "plated-through-hole"]
   ),

@@ -1,0 +1,84 @@
+---
+title: "Orchestration: Dependencies and Retries Are a Data Contract"
+description: "Write an execution review for the DAG: expected dependency order and result, the negative-RPM run\u2019s downstream behavior, a policy for transient extraction failure and a safe handoff for a dataset too large for task-return metadata."
+phase: 4
+module: "4-3-postgresql"
+order: 13
+estimatedMinutes: 18
+difficulty: 3
+prerequisites: ["4/4-3/10"]
+standards: {"cs2023": [], "swebok": ["Software Quality"], "bloom": "apply", "dreyfus": "advanced-beginner", "sfia": 3}
+vocabulary: ["DAG", "task state", "retry", "artifact reference"]
+learningOutcomes: ["Read a TaskFlow dependency graph.", "Design failure and retry semantics.", "Separate orchestration metadata from durable data artifacts."]
+thresholdConcept: false
+---
+
+## Why this matters
+
+A cron job starts a report before its input load finishes. Moving the timer later may reduce failures while hiding the dependency. An orchestrator makes task order, retry policy and status explicit.
+
+## Start with something familiar
+
+A kitchen sends dessert only after the table has finished its main course, not merely when the clock reaches a guessed time. Workflow dependencies similarly express readiness rather than relying on accidental timing.
+
+## The mental model
+
+> A directed acyclic graph describes task dependencies; the orchestrator manages runs and task states. Task retries repeat work, so side effects must remain correct when executed more than once.
+
+## The mechanism
+
+In Apache Airflow3’s TaskFlow API, decorated Python task calls construct dependencies and pass small return values through the orchestrator’s communication mechanism. They are not ordinary immediate function calls during DAG definition. The following complete DAG uses a small in-memory fixture and no external service. It targets the documented Airflow3 SDK; it requires a separately configured Airflow environment.
+
+```python
+from datetime import datetime, timezone
+from airflow.sdk import dag, task
+
+@dag(schedule=None, start_date=datetime(2026, 1, 1, tzinfo=timezone.utc), catchup=False)
+def reading_summary():
+    @task()
+    def extract():
+        return [{"id": "r1", "rpm": 10}, {"id": "r2", "rpm": 20}]
+
+    @task(retries=0)
+    def validate(rows):
+        if any(type(row["rpm"]) is not int or row["rpm"] < 0 for row in rows):
+            raise ValueError("invalid input")
+        return rows
+
+    @task()
+    def summarize(rows):
+        return {"count": len(rows), "total_rpm": sum(row["rpm"] for row in rows)}
+
+    @task()
+    def check(summary):
+        assert summary == {"count": 2, "total_rpm": 30}
+        print("summary checked")
+
+    check(summarize(validate(extract())))
+
+reading_summary()
+```
+
+The graph is extract→validate→summarize→check. Under the default success-based dependency behavior, invalid input prevents the downstream summary/check from succeeding. Deterministic malformed data is not repaired by waiting and retrying the same task. A transient network failure may justify a bounded retry policy, but the side effect must be idempotent and timeout/overlap rules must be explicit.
+
+To validate in an Airflow3 environment, place the DAG in the configured DAG discovery location, confirm its graph, trigger a manual run and inspect all four task states and the summary. Then change one fixture RPM to a negative value, trigger a separate run and confirm validation fails while downstream work does not publish a success result. Restore the fixture afterward. This authoring check does not claim the scheduler was executed locally.
+
+Do not pass a huge dataset through small task-return metadata merely because the tiny example does. Real pipelines commonly pass durable artifact references and checksums, with controlled access and cleanup. A run’s logical data interval, retry attempt and physical wall-clock start are distinct; use a stable batch identity when recovering prior work.
+
+## Practice
+
+Would retries=3 fix a consistently negative RPM in the same input batch? What kind of failure might justify retries instead?
+
+<details><summary>Compare the reasoning</summary><p>No. Repeating deterministic invalid input does not validate it. A temporary service interruption may justify bounded retries when the repeated operation has safe idempotent semantics.</p></details>
+
+## Check your understanding
+
+<WrittenExercise title="Orchestration: Dependencies and Retries Are a Data Contract practice" instructions="Write an execution review for the DAG: expected dependency order and result, the negative-RPM run\u2019s downstream behavior, a policy for transient extraction failure and a safe handoff for a dataset too large for task-return metadata. Distinguish graph construction from scheduler execution." rubric={["Traces extract\u2192validate\u2192summarize\u2192check and count2/total30.", "Blocks publication after deterministic validation failure.", "Bounds transient retries and protects repeated side effects.", "Uses durable artifact references for large data and states runtime evidence limits."]} modelAnswer={"Definition constructs four dependent tasks; a scheduler run must be observed separately. The valid fixture yields count2 and total_rpm30. A negative RPM fails validation and the success-dependent summary/check must not publish. Retry only classified transient extraction failures with a finite count, delay and timeout, preserving stable batch identity. Hand off a secured artifact URI plus checksum/schema/version for large data instead of the entire dataset. DAG parsing or Python syntax validation is not proof that the scheduler executed the workflow."} />
+
+## What you learned
+
+- Read a TaskFlow dependency graph.
+- Design failure and retry semantics.
+- Separate orchestration metadata from durable data artifacts.
+
+Reference: [Apache Airflow TaskFlow tutorial](https://airflow.apache.org/docs/apache-airflow/stable/tutorial/taskflow.html)

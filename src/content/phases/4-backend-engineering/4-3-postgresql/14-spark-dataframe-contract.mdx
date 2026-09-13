@@ -1,0 +1,77 @@
+---
+title: "Spark: Follow a Lazy DataFrame Plan to Its Result"
+description: "Write a review of the Spark plan and expected result."
+phase: 4
+module: "4-3-postgresql"
+order: 14
+estimatedMinutes: 18
+difficulty: 3
+prerequisites: ["4/4-3/11", "1/1-6/47"]
+standards: {"cs2023": [], "swebok": ["Software Quality"], "bloom": "apply", "dreyfus": "advanced-beginner", "sfia": 3}
+vocabulary: ["DataFrame", "lazy evaluation", "shuffle", "driver"]
+learningOutcomes: ["Trace a DataFrame plan and its actions.", "Reconcile null handling and grouped results.", "Identify collection and partition-skew resource risks."]
+thresholdConcept: false
+---
+
+## Why this matters
+
+A developer calls collect on a large distributed result and the driver runs out of memory. Spark distributes computation, but some actions deliberately bring data back to one process. Understanding the plan and result boundary prevents that surprise.
+
+## Start with something familiar
+
+A librarian can ask several branches to count books locally and return totals. Asking every branch to ship every book to one desk is a different operation. Distributed aggregation and collecting all rows have similarly different resource costs.
+
+## The mental model
+
+> DataFrame transformations build a lazy query plan. An action asks Spark to execute it. Grouping may require data exchange between partitions, and collecting a result concentrates it in driver memory.
+
+## The mechanism
+
+A SparkSession is the entry point for DataFrame work. A schema defines column names and types. Select/filter/groupBy express transformations; collect and count are actions. The optimizer can rearrange a plan while preserving its semantics, so inspect explain output rather than assuming each source line is a separate distributed job.
+
+This complete PySpark fixture uses a local two-thread master and a tiny explicit schema. Install and run it only in a separately configured Spark/Python/Java environment matching the chosen release’s requirements. Java is not available in this authoring environment, so the Spark runtime is not claimed as executed.
+
+```python
+from pyspark.sql import SparkSession, functions as F
+
+spark = SparkSession.builder.master("local[2]").appName("dura-reading-contract").getOrCreate()
+try:
+    readings = spark.createDataFrame(
+        [("A", 10), ("A", 20), ("B", 5), ("B", None)],
+        "station string, rpm long",
+    )
+    valid = readings.filter(F.col("rpm").isNotNull())
+    summary = valid.groupBy("station").agg(F.sum("rpm").alias("total_rpm"))
+    summary.explain()
+    result = {row["station"]: row["total_rpm"] for row in summary.collect()}
+    assert result == {"A": 30, "B": 5}
+    assert readings.count() == 4
+    assert valid.count() == 3
+    print("Spark fixture passed")
+finally:
+    spark.stop()
+```
+
+The null RPM is missing, not a zero measurement. This fixture filters it explicitly and reconciles four inputs to three valid rows; a real pipeline must report or quarantine the rejected count. The dictionary comparison avoids relying on a distributed row order that was never requested.
+
+Grouping by station may exchange records so matching keys can be aggregated. A highly frequent key can create skew: one partition receives disproportionate work. Increasing partitions blindly does not guarantee balanced keys or lower runtime. Inspect the physical plan and runtime metrics, then test a skewed input under bounded resources.
+
+collect is acceptable here because there are two aggregate rows. For a large output, write to a durable destination or inspect a bounded sample rather than bringing every row to the driver. Repeated actions can recompute a plan; caching has memory and lifecycle costs and should be justified by measurement. A local fixture teaches API and data semantics, not production cluster sizing, fault tolerance or streaming correctness.
+
+## Practice
+
+Why does the fixture compare a dictionary instead of assuming A appears before B? How many source rows are excluded before aggregation?
+
+<details><summary>Compare the reasoning</summary><p>No output order was requested, so a distributed result must not be assumed sorted. One null-RPM row is excluded; four source rows become three valid rows.</p></details>
+
+## Check your understanding
+
+<WrittenExercise title="Spark: Follow a Lazy DataFrame Plan to Its Result practice" instructions="Write a review of the Spark plan and expected result. Identify transformations and actions, explain the null-row policy and reconciliation counts, state why collect is bounded here but risky for raw production data, and propose one skew test with an observable metric." rubric={["Distinguishes lazy transformations from actions.", "Computes A30/B5 with four inputs and three valid rows.", "Does not assume order or treat null as zero.", "Bounds driver collection and proposes measured skew analysis."]} modelAnswer={"filter/groupBy/agg build a plan; collect/count request execution, and explain inspects the plan. One null row is excluded, yielding A30 and B5 from three valid rows out of four. Dictionary comparison ignores unspecified order. Collecting two aggregate rows is bounded; collecting an unbounded raw table can exhaust driver memory. Add a synthetic dominant station key and inspect task-duration/input-size imbalance under a fixed resource limit. Syntax correctness alone does not establish that Spark executed or that the cluster is production-ready."} />
+
+## What you learned
+
+- Trace a DataFrame plan and its actions.
+- Reconcile null handling and grouped results.
+- Identify collection and partition-skew resource risks.
+
+Reference: [Apache Spark DataFrame quickstart](https://spark.apache.org/docs/latest/api/python/getting_started/quickstart_df.html)
