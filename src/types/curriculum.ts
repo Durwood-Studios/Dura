@@ -1,3 +1,4 @@
+import type { ActivityEvidence } from "@/lib/activity-evidence";
 export type DreyfusStage = "novice" | "advanced-beginner" | "competent" | "proficient" | "expert";
 export type BloomLevel = "remember" | "understand" | "apply" | "analyze" | "evaluate" | "create";
 
@@ -68,6 +69,9 @@ export interface Phase {
 }
 
 export interface LessonProgress {
+  dailyTimeMs?: Record<string, number>;
+  /** Per-activity local practice evidence, scoped to this canonical lesson. */
+  activityEvidence?: Record<string, ActivityEvidence>;
   lessonId: string;
   phaseId: string;
   moduleId: string;

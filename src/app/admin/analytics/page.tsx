@@ -1,16 +1,10 @@
 import { currentReportTime } from "@/lib/admin/report-time";
+import { getLearningReport } from "@/lib/admin/learning-report";
 import type { ReactElement } from "react";
 
 import { createClient } from "@/lib/supabase/server";
 import { BarChart, LineChart } from "../_components/charts";
-import { bucketByDay, countBy, dauWau, formatCount } from "../_lib/data";
-
-/** Row shape for the bounded aggregate fetch (timestamp/name/user_id only). */
-interface AggregateEventRow {
-  name: string;
-  user_id: string | null;
-  timestamp: string | number;
-}
+import { formatCount } from "../_lib/data";
 
 /** Row shape for the recent-events table. */
 interface RecentEventRow {
@@ -90,20 +84,11 @@ function QueryError({ scope, message }: { scope: string; message: string }): Rea
 export default async function AdminAnalyticsPage(): Promise<ReactElement> {
   const supabase = await createClient();
   const now = currentReportTime();
-  // analytics_events.timestamp is bigint epoch-ms — filter numerically.
-  const thirtyDaysAgoMs = now - 30 * 24 * 60 * 60 * 1000;
 
   const [totalResult, aggregateResult, recentResult] = await Promise.all([
     // Exact count via head request — no rows transferred.
     supabase.from("analytics_events").select("id", { count: "exact", head: true }),
-    // Bounded aggregate fetch: narrow columns, newest first so the 30-day
-    // window and DAU/WAU stay accurate even past 10,000 total events.
-    supabase
-      .from("analytics_events")
-      .select("name, user_id, timestamp")
-      .gte("timestamp", thirtyDaysAgoMs)
-      .order("timestamp", { ascending: false })
-      .limit(10000),
+    getLearningReport(supabase),
     supabase
       .from("analytics_events")
       .select("id, user_id, name, timestamp, properties")
@@ -126,25 +111,21 @@ export default async function AdminAnalyticsPage(): Promise<ReactElement> {
   }
 
   const totalEvents = totalResult.count ?? 0;
-  const aggregateRows: AggregateEventRow[] =
-    (aggregateResult.data as AggregateEventRow[] | null) ?? [];
+  const report = aggregateResult.data;
   const recentEvents: RecentEventRow[] = (recentResult.data as RecentEventRow[] | null) ?? [];
-
-  const { dau, wau } = dauWau(
-    aggregateRows.filter((row): row is AggregateEventRow & { user_id: string } =>
-      Boolean(row.user_id)
-    )
-  );
-  const distinctNames = new Set(aggregateRows.map((row) => row.name)).size;
-  const eventsPerDay = bucketByDay(aggregateRows, 30);
-  const topEventNames = countBy(aggregateRows, (row) => row.name).slice(0, 10);
+  const dau = report?.dau ?? 0;
+  const wau = report?.wau ?? 0;
+  const distinctNames = report?.distinctNames ?? 0;
+  const eventsPerDay = report?.eventsPerDay ?? [];
+  const topEventNames = report?.topEvents ?? [];
 
   return (
     <div className="p-8">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Analytics</h1>
         <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-          Consent-gated events — only users who opted in appear here.
+          Consent-gated events — only users who opted in appear here. Daily counts use UTC; weekly
+          active users cover the trailing seven days.
         </p>
       </div>
 
@@ -159,9 +140,12 @@ export default async function AdminAnalyticsPage(): Promise<ReactElement> {
       {/* KPI row */}
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Total events" value={formatCount(totalEvents)} />
-        <StatCard label="Daily active users" value={formatCount(dau)} />
-        <StatCard label="Weekly active users" value={formatCount(wau)} />
-        <StatCard label="Distinct event names" value={formatCount(distinctNames)} />
+        <StatCard label="Daily active users" value={report ? formatCount(dau) : "Unavailable"} />
+        <StatCard label="Weekly active users" value={report ? formatCount(wau) : "Unavailable"} />
+        <StatCard
+          label="Distinct event names"
+          value={report ? formatCount(distinctNames) : "Unavailable"}
+        />
       </div>
 
       <div className="mb-6 grid gap-6 lg:grid-cols-5">
@@ -170,7 +154,7 @@ export default async function AdminAnalyticsPage(): Promise<ReactElement> {
           <h2 className="mb-4 text-sm font-semibold text-[var(--color-text-secondary)]">
             Events per day — last 30 days
           </h2>
-          {aggregateRows.length === 0 ? (
+          {!report?.eventCount ? (
             <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
               No events yet — data appears as users opt in.
             </p>

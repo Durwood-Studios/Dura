@@ -11,6 +11,7 @@ import { deleteOPFSSnapshot } from "@/lib/storage/opfs";
 import { suspendShadowWritesForReset } from "@/lib/storage/shadow-write";
 import { clearLocalSession, isSupabaseConfigured } from "@/lib/supabase/client";
 import { suspendSyncForReset } from "@/lib/supabase/sync";
+import { ownerDatabaseName } from "@/lib/storage/owner";
 
 function clearDuraStorage(storage: Storage): void {
   const keys = Array.from(
@@ -128,7 +129,8 @@ export async function exportAllData(): Promise<string> {
 
   // Include assessment data from localStorage (legacy)
   try {
-    const assessment = localStorage.getItem("dura-skill-assessment");
+    const assessment =
+      ownerDatabaseName() === "dura" ? localStorage.getItem("dura-skill-assessment") : null;
     if (assessment) dump["skill-assessment-legacy"] = JSON.parse(assessment);
   } catch {
     // ignore

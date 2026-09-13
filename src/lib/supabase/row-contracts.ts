@@ -67,6 +67,8 @@ export interface ReviewLogRow {
 }
 
 export interface GoalRow {
+  phase_id?: string | null;
+  role_id?: string | null;
   id: Goal["id"];
   user_id: string;
   type: Goal["type"];

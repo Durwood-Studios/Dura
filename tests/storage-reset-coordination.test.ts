@@ -8,7 +8,9 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/db/migrate-lesson-identity", () => ({ migrateLessonIdentities: vi.fn() }));
 vi.mock("idb", () => ({
-  openDB: vi.fn(async () => ({
+  openDB: vi.fn(async (name: string) => ({
+    name,
+    close: vi.fn(),
     objectStoreNames: ["progress", "feedback"],
     clear: mocks.clear,
     put: mocks.put,

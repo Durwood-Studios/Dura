@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { markActivityComplete } from "@/components/discover/Passport";
+import { markActivityComplete } from "@/components/discover/DiscoveryStampStatus";
 
 /**
  * RaceCondition — two threads share a counter; the learner watches the final

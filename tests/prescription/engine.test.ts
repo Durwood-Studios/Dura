@@ -73,6 +73,7 @@ describe("buildPlan — light review", () => {
     const fsrsBlock = plan.blocks.find((b) => b.kind === "fsrs-review");
     const lessonBlocks = plan.blocks.filter((b) => b.kind === "lesson");
     expect(fsrsBlock).toBeDefined();
+    expect(fsrsBlock!.href).toBe("/review");
     expect(fsrsBlock!.minutes).toBeCloseTo(30 * 0.3, 0);
     expect(lessonBlocks.length).toBeGreaterThanOrEqual(1);
   });

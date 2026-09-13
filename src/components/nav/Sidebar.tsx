@@ -1,5 +1,8 @@
 "use client";
 
+import { useTranslation } from "@/i18n/useTranslation";
+import { navigationLabel } from "@/i18n/navigation";
+
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -61,6 +64,7 @@ const NAV_GROUPS = [
       { href: "/challenge", label: "Challenge", icon: Swords },
       { href: "/dojo", label: "Dojo", icon: Sparkles },
       { href: "/sandbox", label: "Code Sandbox", icon: Code2 },
+      { href: "/judgment", label: "Engineering Judgment", icon: ShieldCheck },
     ],
   },
   {
@@ -96,6 +100,7 @@ interface SidebarUser {
 }
 
 export function Sidebar(): React.ReactElement {
+  const { locale } = useTranslation();
   const pathname = usePathname();
   const [stats, setStats] = useState<SidebarStats | null>(null);
   const [user, setUser] = useState<SidebarUser | null>(null);
@@ -180,7 +185,7 @@ export function Sidebar(): React.ReactElement {
             {groupIdx > 0 && <div className="dura-divider mx-2 my-2.5" />}
             {group.label && (
               <span className="mb-1 block px-3 pt-1 text-xs font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
-                {group.label}
+                <span lang={locale}>{navigationLabel(group.label, locale)}</span>
               </span>
             )}
             {group.items.map(({ href, label, icon: Icon }) => {
@@ -214,7 +219,9 @@ export function Sidebar(): React.ReactElement {
                     )}
                     aria-hidden
                   />
-                  <span className="flex-1">{label}</span>
+                  <span className="flex-1">
+                    <span lang={locale}>{navigationLabel(label, locale)}</span>
+                  </span>
                   {href === "/review" && <ReviewBadge />}
                 </Link>
               );

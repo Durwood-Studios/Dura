@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { markActivityComplete } from "@/components/discover/Passport";
+import { markActivityComplete } from "@/components/discover/DiscoveryStampStatus";
 
 const MIN_N = 1;
 const MAX_N = 35;

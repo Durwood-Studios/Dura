@@ -14,6 +14,8 @@ export interface AssessmentQuestion {
   explanation: string;
   difficulty: QuestionDifficulty;
   tags: string[];
+  /** Canonical authored lesson used for this practice item. */
+  sourceLesson?: string;
   standards?: {
     cs2023?: string[];
     swebok?: string[];

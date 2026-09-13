@@ -115,7 +115,7 @@ function BentoCard({ onRestart, onDismiss, prefersReduced }: BentoProps): React.
       aria-modal="true"
       aria-label="Update available"
       // Responsive width: fills width on small screens, caps at 340 px on larger
-      className="fixed top-1/2 left-1/2 z-[9998] w-[min(340px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-3xl border border-white/10 bg-[var(--color-bg-surface)] shadow-2xl"
+      className="fixed top-1/2 left-1/2 z-[9998] max-h-[calc(100dvh-2rem)] w-[min(340px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto overscroll-contain rounded-3xl border border-white/10 bg-[var(--color-bg-surface)] shadow-2xl"
       initial={prefersReduced ? false : { scale: 0.82, y: 56, opacity: 0 }}
       animate={{ scale: 1, y: 0, opacity: 1 }}
       // Exit: the card inflates very slightly then dissolves — as if the
@@ -156,8 +156,7 @@ function BentoCard({ onRestart, onDismiss, prefersReduced }: BentoProps): React.
         </p>
         <h2 className="text-xl font-bold text-[var(--color-text-primary)]">DURA just got better</h2>
         <p className="mt-2 text-sm leading-relaxed text-[var(--color-text-secondary)]">
-          A fresh build is cached and ready. Restart to get the latest —&nbsp; your progress is safe
-          and nothing is lost.
+          A fresh build is cached and ready. Save your current work, then restart to use it.
         </p>
 
         <div className="mt-5 flex flex-col gap-2.5">

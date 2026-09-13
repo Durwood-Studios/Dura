@@ -1,3 +1,10 @@
+import {
+  waitForOwnerInitialization,
+  knownOwnerDatabaseNames,
+  ownerDatabaseName,
+  getOwnerGeneration,
+  assertOwnerGeneration,
+} from "@/lib/storage/owner";
 import { assertCurrentStorageGeneration } from "@/lib/storage/reset-coordination";
 import { migrateLessonIdentities } from "@/lib/db/migrate-lesson-identity";
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
@@ -14,9 +21,20 @@ import type { DojoSession } from "@/types/dojo";
 import type { FeedbackEntry } from "@/types/feedback";
 
 export const DB_NAME = "dura";
-export const DB_VERSION = 7;
+export const DB_VERSION = 9;
 
 export interface DuraDBSchema extends DBSchema {
+  judgmentAttempts: { key: string; value: import("@/lib/db/judgment").StoredJudgmentAttempt };
+  tombstones: {
+    key: string;
+    value: {
+      id: string;
+      table: "flashcards" | "goals" | "sandbox_saves";
+      recordId: string;
+      deletedAt: number;
+      synced: 0 | 1;
+    };
+  };
   progress: {
     key: string;
     value: LessonProgress;
@@ -102,13 +120,18 @@ let dbPromise: Promise<DuraDB> | null = null;
 let resetDatabase: DuraDB | null = null;
 
 function protectDatabase(db: DuraDB): DuraDB {
+  const ownerGeneration = getOwnerGeneration();
   return new Proxy(db, {
     get(target: DuraDB, property: string | symbol): unknown {
       const value: unknown = Reflect.get(target, property);
       if (typeof value !== "function") return value;
       if (!["put", "add", "delete", "clear", "transaction"].includes(String(property)))
-        return value.bind(target);
+        return (...args: unknown[]): unknown => {
+          assertOwnerGeneration(ownerGeneration);
+          return Reflect.apply(value, target, args);
+        };
       return (...args: unknown[]): unknown => {
+        assertOwnerGeneration(ownerGeneration);
         if (property !== "transaction" || args[1] === "readwrite") assertCurrentStorageGeneration();
         return Reflect.apply(value, target, args);
       };
@@ -124,6 +147,22 @@ export async function prepareDatabaseReset(): Promise<void> {
 /** The sole reset bypass: erase every store using the underlying connection. */
 export async function eraseDatabaseForReset(): Promise<void> {
   if (!resetDatabase) throw new Error("Database reset was not prepared");
+  for (const name of knownOwnerDatabaseNames()) {
+    if (name === resetDatabase.name) continue;
+    const other = await openDB<DuraDBSchema>(name);
+    try {
+      const names = Array.from(other.objectStoreNames);
+      if (names.length) {
+        const erase = other.transaction(names, "readwrite");
+        await Promise.all([
+          ...names.map((store): Promise<void> => erase.objectStore(store).clear()),
+          erase.done,
+        ]);
+      }
+    } finally {
+      other.close();
+    }
+  }
   const stores = Array.from(resetDatabase.objectStoreNames);
   if (stores.length === 0) return;
   const transaction = resetDatabase.transaction(stores, "readwrite");
@@ -133,7 +172,18 @@ export async function eraseDatabaseForReset(): Promise<void> {
   ]);
 }
 
-export function getDB(): Promise<DuraDB> {
+/** Close the old namespace before selecting another learner. */
+export async function closeLearnerDatabase(): Promise<void> {
+  if (dbPromise) {
+    const db = await dbPromise;
+    db.close();
+  }
+  dbPromise = null;
+  resetDatabase = null;
+}
+
+export async function getDB(): Promise<DuraDB> {
+  await waitForOwnerInitialization();
   try {
     assertCurrentStorageGeneration();
   } catch (error) {
@@ -147,8 +197,12 @@ function openDatabase(isPreparingReset = false): Promise<DuraDB> {
     return Promise.reject(new Error("IndexedDB is only available in the browser"));
   }
   if (!dbPromise) {
-    dbPromise = openDB<DuraDBSchema>(DB_NAME, DB_VERSION, {
+    dbPromise = openDB<DuraDBSchema>(ownerDatabaseName(), DB_VERSION, {
       upgrade(db) {
+        if (!db.objectStoreNames.contains("judgmentAttempts"))
+          db.createObjectStore("judgmentAttempts", { keyPath: "id" });
+        if (!db.objectStoreNames.contains("tombstones"))
+          db.createObjectStore("tombstones", { keyPath: "id" });
         if (!db.objectStoreNames.contains("progress")) {
           const store = db.createObjectStore("progress", { keyPath: "lessonId" });
           store.createIndex("by-phase", "phaseId");
@@ -256,4 +310,32 @@ function openDatabase(isPreparingReset = false): Promise<DuraDB> {
       });
   }
   return dbPromise;
+}
+
+/** Erase one signed-in account's local namespace while preserving guest records. */
+export async function eraseOwnerData(userId: string): Promise<void> {
+  const name = ownerDatabaseName(`account:${userId}`);
+  const db = await openDB<DuraDBSchema>(name);
+  try {
+    const stores = Array.from(db.objectStoreNames);
+    if (stores.length) {
+      const transaction = db.transaction(stores, "readwrite");
+      await Promise.all([
+        ...stores.map((store): Promise<void> => transaction.objectStore(store).clear()),
+        transaction.done,
+      ]);
+    }
+  } finally {
+    db.close();
+  }
+  if (typeof navigator.storage?.getDirectory === "function") {
+    const directory = await navigator.storage.getDirectory();
+    try {
+      await directory.removeEntry(
+        name === "dura" ? "dura-learner-record.json" : `${name}-record.json`
+      );
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "NotFoundError")) throw error;
+    }
+  }
 }

@@ -36,6 +36,7 @@ export function MasteryGate({
   phaseId,
   questionCount = 12,
 }: MasteryGateProps): React.ReactElement {
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [status, setStatus] = useState<GateStatus>("loading");
   const [questions, setQuestions] = useState<AssessmentQuestion[]>([]);
   const [loadedPool, setLoadedPool] = useState<AssessmentQuestion[]>(externalPool ?? []);
@@ -44,9 +45,15 @@ export function MasteryGate({
   useEffect(() => {
     if (externalPool && externalPool.length > 0) return;
     if (!phaseId) return;
-    void import("@/content/questions").then(({ getQuestionsByPhase }) => {
-      setLoadedPool(getQuestionsByPhase(phaseId));
-    });
+    void import("@/content/questions")
+      .then(({ getQuestionsByPhase }) => {
+        setLoadedPool(getQuestionsByPhase(phaseId));
+        setLoadError(null);
+      })
+      .catch((error: unknown): void => {
+        console.error("[mastery-gate] Question bank could not load", error);
+        setLoadError("The question bank could not load. Reconnect and reload this page to retry.");
+      });
   }, [phaseId, externalPool]);
 
   const questionPool = externalPool ?? loadedPool;
@@ -97,9 +104,17 @@ export function MasteryGate({
   }, [moduleId]);
 
   const startAssessment = () => {
-    const picked = selectMasteryQuestions(moduleId, questionPool, questionCount);
+    const picked = selectMasteryQuestions(
+      moduleId,
+      questionPool,
+      questionCount,
+      latestResult?.questionResults.map((result) => result.questionId) ?? []
+    );
     if (picked.length === 0) {
       console.error("[mastery-gate] no questions available for module", moduleId);
+      setLoadError(
+        "This module’s question bank is unavailable. Your lesson progress is saved; reload this page to retry."
+      );
       return;
     }
     setQuestions(picked);
@@ -230,7 +245,11 @@ export function MasteryGate({
               Module Assessment
             </h3>
             <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-              {questionCount} questions · 80% to pass · 24h cooldown on a miss
+              {Math.min(
+                questionCount,
+                questionPool.filter((question) => question.moduleId === moduleId).length
+              ) || questionCount}{" "}
+              questions · 80% to pass · 24h cooldown on a miss
             </p>
             <button
               type="button"
@@ -239,6 +258,11 @@ export function MasteryGate({
             >
               Start assessment
             </button>
+            {loadError && (
+              <p role="alert" className="mt-3 text-sm text-[var(--color-text-secondary)]">
+                {loadError}
+              </p>
+            )}
           </div>
         </div>
       </section>

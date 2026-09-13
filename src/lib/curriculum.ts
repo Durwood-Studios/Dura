@@ -1,3 +1,4 @@
+import { lessonIdentity } from "@/lib/lesson-identity";
 import "server-only";
 import { PHASES, getPhase, getModule } from "@/content/phases";
 import { listLessons, loadLesson, type LoadedLesson } from "@/lib/content";
@@ -98,11 +99,12 @@ export async function collectStandards(): Promise<StandardRef[]> {
   };
 
   for (const meta of metas) {
-    for (const code of meta.standards.cs2023 ?? []) push("cs2023", code, meta.id);
-    for (const code of meta.standards.swebok ?? []) push("swebok", code, meta.id);
-    if (meta.standards.sfia) push("sfia", meta.standards.sfia, meta.id);
-    push("bloom", meta.bloom, meta.id);
-    push("dreyfus", meta.dreyfus, meta.id);
+    const id = lessonIdentity(meta.phaseId, meta.moduleId, meta.id);
+    for (const code of meta.standards.cs2023 ?? []) push("cs2023", code, id);
+    for (const code of meta.standards.swebok ?? []) push("swebok", code, id);
+    if (meta.standards.sfia) push("sfia", meta.standards.sfia, id);
+    push("bloom", meta.bloom, id);
+    push("dreyfus", meta.dreyfus, id);
   }
 
   return Array.from(map.values()).sort((a, b) => {

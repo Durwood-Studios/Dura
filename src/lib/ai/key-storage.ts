@@ -1,3 +1,4 @@
+import { ownerStorageKey, isOwnerInitialized } from "@/lib/storage/owner";
 /**
  * Anthropic API key — local-only storage.
  *
@@ -21,9 +22,9 @@ const KEY_STORAGE_KEY = "dura:ai:anthropic-key";
 const ANTHROPIC_KEY_PATTERN = /^sk-ant-[A-Za-z0-9_-]{8,}$/;
 
 export function getAnthropicKey(): string | null {
-  if (typeof localStorage === "undefined") return null;
+  if (typeof localStorage === "undefined" || !isOwnerInitialized()) return null;
   try {
-    return localStorage.getItem(KEY_STORAGE_KEY);
+    return localStorage.getItem(ownerStorageKey(KEY_STORAGE_KEY));
   } catch {
     return null;
   }
@@ -36,6 +37,8 @@ export function hasAnthropicKey(): boolean {
 export type SetKeyResult = { ok: true } | { ok: false; error: string };
 
 export function setAnthropicKey(rawKey: string): SetKeyResult {
+  if (!isOwnerInitialized())
+    return { ok: false, error: "Your account storage is still loading. Please wait." };
   const key = rawKey.trim();
   if (!key) return { ok: false, error: "Key is empty." };
   if (!ANTHROPIC_KEY_PATTERN.test(key)) {
@@ -48,7 +51,7 @@ export function setAnthropicKey(rawKey: string): SetKeyResult {
     return { ok: false, error: "Local storage unavailable in this browser." };
   }
   try {
-    localStorage.setItem(KEY_STORAGE_KEY, key);
+    localStorage.setItem(ownerStorageKey(KEY_STORAGE_KEY), key);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: `Couldn't save the key: ${(err as Error).message}` };
@@ -58,7 +61,7 @@ export function setAnthropicKey(rawKey: string): SetKeyResult {
 export function clearAnthropicKey(): void {
   if (typeof localStorage === "undefined") return;
   try {
-    localStorage.removeItem(KEY_STORAGE_KEY);
+    localStorage.removeItem(ownerStorageKey(KEY_STORAGE_KEY));
   } catch {
     // ignore — defensive against quota or storage-disabled contexts
   }

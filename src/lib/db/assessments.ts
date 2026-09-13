@@ -9,6 +9,7 @@ export async function putResult(result: AssessmentResult): Promise<void> {
     triggerShadowWrite();
   } catch (error) {
     console.error("[assessments] putResult failed", error);
+    throw error;
   }
 }
 

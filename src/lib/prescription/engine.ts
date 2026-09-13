@@ -106,7 +106,7 @@ function fsrsBlock(dueNow: number, minutes: number): PlanBlock {
     minutes,
     title: "Spaced-repetition review",
     target: `${cards} card${cards === 1 ? "" : "s"}`,
-    href: "/dojo",
+    href: "/review",
     rationale:
       dueNow >= 50
         ? `${dueNow} cards overdue — paying down the review debt comes first.`

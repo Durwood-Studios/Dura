@@ -1,19 +1,22 @@
+import {
+  knownOwnerDatabaseNames,
+  ownerSnapshotName,
+  getOwnerGeneration,
+  assertOwnerGeneration,
+} from "@/lib/storage/owner";
 import { assertCurrentStorageGeneration } from "@/lib/storage/reset-coordination";
 /**
  * Origin Private File System (OPFS) shadow layer.
  *
- * OPFS is exempt from Safari's 7-day eviction rule and from the
- * IndexedDB-style quota pressure that can clear a learner's months
- * of FSRS scheduling data. We use it as an invisible backup beneath
- * IndexedDB: every IDB mutation eventually flushes a snapshot here,
- * and on app init we restore from the snapshot if IDB is empty.
+ * OPFS provides a second local copy beneath IndexedDB. Both remain browser-managed
+ * origin storage and can be removed by eviction or user action. Independent
+ * downloadable exports are still needed for recovery after origin-wide data loss.
  *
  * The user never sees this. OPFS failure is non-fatal — IDB remains
  * the source of truth. We log and continue.
  *
  * Supported in: Chrome/Edge 86+, Firefox 111+, Safari 15.2+.
  */
-const SNAPSHOT_FILENAME = "dura-learner-record.json";
 
 export function opfsAvailable(): boolean {
   return (
@@ -25,11 +28,13 @@ export function opfsAvailable(): boolean {
 
 export async function saveToOPFS(data: unknown): Promise<void> {
   if (!opfsAvailable()) return;
+  const generation = getOwnerGeneration();
   try {
     const root = await navigator.storage.getDirectory();
-    const handle = await root.getFileHandle(SNAPSHOT_FILENAME, { create: true });
+    const handle = await root.getFileHandle(ownerSnapshotName(), { create: true });
     const writable = await handle.createWritable();
     try {
+      assertOwnerGeneration(generation);
       assertCurrentStorageGeneration();
       await writable.write(
         JSON.stringify(data, (_key: string, value: unknown): unknown =>
@@ -38,6 +43,7 @@ export async function saveToOPFS(data: unknown): Promise<void> {
             : value
         )
       );
+      assertOwnerGeneration(generation);
       assertCurrentStorageGeneration();
       await writable.close();
     } catch (error) {
@@ -51,11 +57,14 @@ export async function saveToOPFS(data: unknown): Promise<void> {
 
 export async function loadFromOPFS<T = unknown>(): Promise<T | null> {
   if (!opfsAvailable()) return null;
+  const generation = getOwnerGeneration();
+  const filename = ownerSnapshotName();
   try {
     const root = await navigator.storage.getDirectory();
-    const handle = await root.getFileHandle(SNAPSHOT_FILENAME);
+    const handle = await root.getFileHandle(filename);
     const file = await handle.getFile();
     const text = await file.text();
+    assertOwnerGeneration(generation);
     if (!text) return null;
     return JSON.parse(text, (_key: string, value: unknown): unknown => {
       if (value && typeof value === "object" && "__duraArrayBuffer" in value) {
@@ -88,7 +97,14 @@ export async function deleteOPFSSnapshot(): Promise<void> {
   if (!opfsAvailable()) return;
   try {
     const root = await navigator.storage.getDirectory();
-    await root.removeEntry(SNAPSHOT_FILENAME);
+    for (const name of knownOwnerDatabaseNames()) {
+      const filename = name === "dura" ? "dura-learner-record.json" : `${name}-record.json`;
+      try {
+        await root.removeEntry(filename);
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "NotFoundError")) throw error;
+      }
+    }
   } catch (error) {
     if (error instanceof DOMException && error.name === "NotFoundError") return;
     console.error("[opfs] delete failed", error);

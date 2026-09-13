@@ -33,6 +33,7 @@ interface AITutorPanelProps {
 }
 
 interface Turn {
+  interrupted?: boolean;
   id: string;
   role: "user" | "assistant";
   content: string;
@@ -151,7 +152,7 @@ export function AITutorPanel({ meta, lessonBody, onClose }: AITutorPanelProps): 
     // We strip the in-flight assistant placeholder; Claude doesn't
     // need to see its own empty reply.
     const messages = history
-      .filter((t) => !(t.role === "assistant" && t.streaming))
+      .filter((t) => !t.interrupted && !(t.role === "assistant" && t.streaming))
       .map((t) => ({ role: t.role, content: t.content }));
 
     try {
@@ -186,7 +187,22 @@ export function AITutorPanel({ meta, lessonBody, onClose }: AITutorPanelProps): 
       }
       // Roll the failed assistant placeholder back so the next attempt
       // doesn't include it in the conversation history.
-      setTurns((prev) => prev.filter((t) => t.id !== assistantTurn.id));
+      setTurns((prev) =>
+        prev.flatMap((t) =>
+          t.id !== assistantTurn.id
+            ? [t]
+            : t.content
+              ? [
+                  {
+                    ...t,
+                    streaming: false,
+                    interrupted: true,
+                    content: `${t.content}\n\n[Response interrupted. This answer is incomplete.]`,
+                  },
+                ]
+              : []
+        )
+      );
     } finally {
       setSending(false);
       abortRef.current = null;
@@ -202,7 +218,7 @@ export function AITutorPanel({ meta, lessonBody, onClose }: AITutorPanelProps): 
       className="fixed inset-0 z-[60] flex items-end justify-end bg-black/40 sm:items-stretch"
     >
       <div
-        className="flex h-[85vh] w-full flex-col rounded-t-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-2xl sm:h-screen sm:max-w-md sm:rounded-none"
+        className="flex h-[85dvh] max-h-[100dvh] w-full min-w-0 flex-col rounded-t-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-2xl sm:h-dvh sm:max-w-md sm:rounded-none"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center gap-3 border-b border-[var(--color-border)] px-4 py-3">
@@ -225,7 +241,7 @@ export function AITutorPanel({ meta, lessonBody, onClose }: AITutorPanelProps): 
 
         <div
           ref={scrollRef}
-          className="flex-1 space-y-3 overflow-y-auto p-4 text-sm leading-relaxed"
+          className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 text-sm leading-relaxed break-words"
         >
           {turns.length === 0 && (
             <p className="text-center text-xs text-[var(--color-text-muted)]">

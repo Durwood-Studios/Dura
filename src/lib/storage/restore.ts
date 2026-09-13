@@ -1,3 +1,8 @@
+import {
+  getOwnerGeneration,
+  assertOwnerGeneration,
+  waitForOwnerInitialization,
+} from "@/lib/storage/owner";
 import { loadFromOPFS, opfsAvailable } from "@/lib/storage/opfs";
 import {
   isLearnerStoreEmpty,
@@ -17,6 +22,8 @@ export async function restoreFromOPFSIfNeeded(): Promise<RestoreOutcome> {
   if (!opfsAvailable()) return "unsupported";
 
   try {
+    await waitForOwnerInitialization();
+    const generation = getOwnerGeneration();
     const empty = await isLearnerStoreEmpty();
     if (!empty) return "not-needed";
 
@@ -31,6 +38,7 @@ export async function restoreFromOPFSIfNeeded(): Promise<RestoreOutcome> {
       return "error";
     }
 
+    assertOwnerGeneration(generation);
     await restoreSnapshotToIDB(snapshot);
     console.info(
       "[opfs-restore] IndexedDB was empty. Restored from OPFS shadow backup.",

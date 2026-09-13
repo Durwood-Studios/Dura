@@ -32,12 +32,17 @@ export async function putPreferences(prefs: Preferences): Promise<void> {
     triggerShadowWrite();
   } catch (error) {
     console.error("[preferences] putPreferences failed", error);
+    throw error;
   }
 }
 
 export async function patchPreferences(patch: Partial<Preferences>): Promise<Preferences> {
-  const current = await getPreferences();
+  const db = await getDB();
+  const tx = db.transaction("preferences", "readwrite");
+  const current = normalize(await tx.store.get("user"));
   const next: Preferences = { ...current, ...patch, id: "user", updatedAt: Date.now() };
-  await putPreferences(next);
+  await tx.store.put(next);
+  await tx.done;
+  triggerShadowWrite();
   return next;
 }

@@ -13,6 +13,7 @@ export function memoryLearnerDB(): { db: DuraDB; stores: Map<string, Map<string,
     return {
       get: async (id: string): Promise<Row | undefined> => store(name).get(id),
       getAll: async (): Promise<Row[]> => [...store(name).values()],
+      count: async (): Promise<number> => store(name).size,
       put: async (row: Row): Promise<void> => {
         store(name).set(
           String(

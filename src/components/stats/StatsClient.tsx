@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Trophy, BookOpen, Clock, Award, Sparkles } from "lucide-react";
+import { getAllEncryptedLessonProgress } from "@/lib/idb/encrypted-store";
 import { getDB } from "@/lib/db";
 import { getTotalXP, getXPBySource } from "@/lib/db/xp";
 import { getAllCards } from "@/lib/db/flashcards";
@@ -57,7 +58,7 @@ function startOfDay(ts: number): number {
 
 async function loadStats(): Promise<StatsData> {
   const db = await getDB();
-  const allProgress: LessonProgress[] = await db.getAll("progress");
+  const allProgress: LessonProgress[] = await getAllEncryptedLessonProgress(db);
   const completed = allProgress.filter((p) => p.completedAt !== null);
   const totalTimeMs = allProgress.reduce((sum, p) => sum + p.timeSpentMs, 0);
 
@@ -79,8 +80,11 @@ async function loadStats(): Promise<StatsData> {
   const weekly: number[] = [];
   const today = startOfDay(Date.now());
   for (let i = 6; i >= 0; i--) {
-    const dayStart = today - i * 86_400_000;
-    const dayEnd = dayStart + 86_400_000;
+    const date = new Date(today);
+    date.setDate(date.getDate() - i);
+    const dayStart = date.getTime();
+    date.setDate(date.getDate() + 1);
+    const dayEnd = date.getTime();
     const count = completed.filter(
       (p) => (p.completedAt ?? 0) >= dayStart && (p.completedAt ?? 0) < dayEnd
     ).length;
@@ -117,12 +121,38 @@ async function loadStats(): Promise<StatsData> {
 }
 
 export function StatsClient(): React.ReactElement {
+  const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<StatsData | null>(null);
 
   useEffect(() => {
-    void loadStats().then(setData);
+    let active = true;
+    const refresh = (): void => {
+      void loadStats()
+        .then((result) => {
+          if (active) {
+            setData(result);
+            setError(null);
+          }
+        })
+        .catch((failure) => {
+          console.error("[stats] Load failed", failure);
+          if (active) setError("Statistics could not be loaded. Reload and try again.");
+        });
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+    };
   }, []);
 
+  if (error)
+    return (
+      <p role="alert" className="text-sm text-[var(--color-error)]">
+        {error}
+      </p>
+    );
   if (!data) {
     return (
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -397,7 +427,7 @@ export function StatsClient(): React.ReactElement {
                 <p className="dura-stat-gradient text-3xl font-bold">
                   {Math.round(data.retentionRate * 100)}%
                 </p>
-                <p className="mt-1 text-xs text-[var(--color-text-muted)]">Retention</p>
+                <p className="mt-1 text-xs text-[var(--color-text-muted)]">Cards in review state</p>
               </div>
             </div>
           </section>

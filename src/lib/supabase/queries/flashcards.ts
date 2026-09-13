@@ -1,3 +1,5 @@
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
+import { syncMutableRecords } from "@/lib/supabase/queries/record-sync";
 import { createClient } from "@/lib/supabase/client";
 import type { FlashcardRow, ReviewLogRow } from "@/lib/supabase/row-contracts";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
@@ -11,7 +13,6 @@ import type { FlashCard, ReviewLog } from "@/types/flashcard";
  */
 export async function syncFlashcards(userId: string, cards: FlashCard[]): Promise<void> {
   try {
-    const supabase = createClient();
     // FlashcardRow pins created_at/due/last_review to epoch-ms numbers —
     // the columns are bigint; ISO strings fail the insert.
     const rows: FlashcardRow[] = cards.map((card) => ({
@@ -33,12 +34,7 @@ export async function syncFlashcards(userId: string, cards: FlashCard[]): Promis
       last_review: card.lastReview,
     }));
 
-    const { error } = await supabase.from("flashcards").upsert(rows, { onConflict: "id,user_id" });
-
-    if (error) {
-      console.error("[syncFlashcards] Upsert error:", error.message);
-      throw error;
-    }
+    await syncMutableRecords("flashcards", rows);
   } catch (err) {
     console.error("[syncFlashcards] Failed to sync:", err);
     throw err;
@@ -50,13 +46,7 @@ export async function syncFlashcards(userId: string, cards: FlashCard[]): Promis
  */
 export async function fetchFlashcards(userId: string): Promise<FlashCard[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase.from("flashcards").select("*").eq("user_id", userId);
-
-    if (error) {
-      console.error("[fetchFlashcards] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("flashcards", userId);
 
     return (data ?? []).map((row) => ({
       id: row.id as string,
@@ -91,13 +81,7 @@ export async function fetchFlashcards(userId: string): Promise<FlashCard[]> {
  */
 export async function fetchReviewLogs(userId: string): Promise<ReviewLog[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase.from("review_logs").select("*").eq("user_id", userId);
-
-    if (error) {
-      console.error("[fetchReviewLogs] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("review_logs", userId);
 
     return (data ?? []).map((row) => ({
       id: row.id as string,

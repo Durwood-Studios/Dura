@@ -1,171 +1,104 @@
 "use client";
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { DISCOVERY_ACTIVITIES } from "@/lib/discovery/registry";
+import { getDiscoveryPassport } from "@/lib/discovery/passport";
+import { DISCOVERY_CHANGED } from "@/components/discover/DiscoveryStampStatus";
 
-const STORAGE_KEY = "dura-discovery-passport";
-
-interface Room {
-  slug: string;
-  name: string;
-  color: string;
-  activities: string[];
-}
-
-const ROOMS: Room[] = [
-  {
-    slug: "secret-codes",
-    name: "Secret Codes",
-    color: "#f472b6",
-    activities: ["binary-painter", "morse-code", "pixel-art", "secret-encoder", "hash-avalanche"],
-  },
-  {
-    slug: "robot-chef",
-    name: "Robot Chef",
-    color: "#fbbf24",
-    activities: ["algorithm-kitchen", "robot-dance", "treasure-map", "sorting-race"],
-  },
-  {
-    slug: "internet-explorer",
-    name: "Internet Explorer",
-    color: "#60a5fa",
-    activities: ["network-post-office", "dns-phonebook", "website-builder"],
-  },
-  {
-    slug: "pattern-factory",
-    name: "Pattern Factory",
-    color: "#a78bfa",
-    activities: [
-      "pattern-machine",
-      "fractal-tree",
-      "music-beats",
-      "tile-designer",
-      "memoization-cliff",
-    ],
-  },
-  {
-    slug: "bug-lab",
-    name: "Bug Lab",
-    color: "#34d399",
-    activities: ["bug-detective", "logic-gates", "story-builder"],
-  },
-  // The previous "first-steps" room (shape-sorter, counting-blocks, color-mixer)
-  // was removed from the Discovery surface in the 2026-05 refresh because the
-  // activities sat below DURA's target reading level. Components remain in the
-  // codebase; if they return, register the room here.
-];
-
-const ALL_ACTIVITIES = ROOMS.flatMap((room) =>
-  room.activities.map((activity) => ({
-    slug: activity,
-    color: room.color,
-    roomName: room.name,
-  }))
-);
-
-/** Call this from an activity component when the learner finishes the demo. */
-export function markActivityComplete(slug: string): void {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    const completed: string[] = raw ? (JSON.parse(raw) as string[]) : [];
-    if (!completed.includes(slug)) {
-      completed.push(slug);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(completed));
-      window.dispatchEvent(new Event("dura:discovery-changed"));
-    }
-  } catch {
-    // localStorage unavailable — silently ignore
-  }
-}
-
-/** Read completed activities from localStorage. */
-function readCompleted(): string[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as string[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function readPassportSnapshot(): string {
-  return JSON.stringify(readCompleted());
-}
-function subscribePassport(notify: () => void): () => void {
-  window.addEventListener("storage", notify);
-  window.addEventListener("dura:discovery-changed", notify);
-  return (): void => {
-    window.removeEventListener("storage", notify);
-    window.removeEventListener("dura:discovery-changed", notify);
-  };
-}
-
-/** Passport stamp tracker showing completion across all Discovery Zone activities. */
+/** Current, reachable Discovery stamps from the owner-scoped portable learner record. */
 export function Passport(): React.ReactElement {
-  const snapshot = useSyncExternalStore(
-    subscribePassport,
-    readPassportSnapshot,
-    (): string => "[]"
-  );
-  const completed: string[] = JSON.parse(snapshot) as string[];
-
+  const [completed, setCompleted] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  useEffect(() => {
+    let active = true;
+    let request = 0;
+    const load = (): void => {
+      const current = ++request;
+      setCompleted([]);
+      void getDiscoveryPassport()
+        .then((record) => {
+          if (active && current === request) {
+            setCompleted(record.activities);
+            setWarning(record.warning ?? null);
+            setError(null);
+          }
+        })
+        .catch((failure) => {
+          if (active && current === request)
+            setError(failure instanceof Error ? failure.message : "Passport unavailable.");
+        });
+    };
+    load();
+    window.addEventListener(DISCOVERY_CHANGED, load);
+    window.addEventListener("dura:storage-owner-ready", load);
+    window.addEventListener("focus", load);
+    return () => {
+      active = false;
+      window.removeEventListener(DISCOVERY_CHANGED, load);
+      window.removeEventListener("dura:storage-owner-ready", load);
+      window.removeEventListener("focus", load);
+    };
+  }, [reload]);
   const completedSet = new Set(completed);
-  const total = ALL_ACTIVITIES.length;
-  const doneCount = ALL_ACTIVITIES.filter((a) => completedSet.has(a.slug)).length;
-
-  const getLabel = useCallback((slug: string): string => {
-    return slug
-      .split("-")
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join(" ");
-  }, []);
-
   return (
-    <section className="mt-16 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-8">
-      <h2 className="mb-2 text-center text-2xl font-bold text-[var(--color-text-primary)]">
-        Discovery Passport
-      </h2>
-      <p className="mb-6 text-center text-sm text-[var(--color-text-muted)]">
-        {doneCount} of {total} explored
+    <section className="mt-16 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 [overflow-wrap:anywhere]">
+      <h2 className="mb-2 text-center text-2xl font-bold">Discovery Passport</h2>
+      <p className="mb-4 text-center text-sm">
+        {completed.length} of {DISCOVERY_ACTIVITIES.length} explored
       </p>
-
-      <div className="flex flex-wrap justify-center gap-3" role="list">
-        {ALL_ACTIVITIES.map((activity) => {
-          const isDone = completedSet.has(activity.slug);
-          const label = getLabel(activity.slug);
-          return (
-            <div
-              key={activity.slug}
-              role="listitem"
-              aria-label={isDone ? `${label} — completed` : `${label} — not yet explored`}
-              className="flex flex-col items-center gap-1"
+      <p className="mb-6 text-center text-sm text-[var(--color-text-secondary)]">
+        Stamps record exploration, not mastery. This learner’s passport is included in their
+        progress export.
+      </p>
+      {warning && (
+        <p role="status" className="mb-3 text-sm">
+          {warning}
+        </p>
+      )}
+      {error && (
+        <div role="alert" className="mb-3 text-sm">
+          <p>{error}</p>
+          <button
+            type="button"
+            className="min-h-12 underline"
+            onClick={() => setReload((value) => value + 1)}
+          >
+            Retry loading passport
+          </button>
+        </div>
+      )}
+      <ul className="grid gap-3 sm:grid-cols-2">
+        {DISCOVERY_ACTIVITIES.map((activity) => (
+          <li key={activity.slug}>
+            <Link
+              href={`/discover/${activity.roomSlug}/${activity.slug}`}
+              className="flex min-h-12 min-w-0 items-center gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm"
             >
-              <div
+              <span
+                aria-hidden
                 className={
-                  isDone
-                    ? "flex h-10 w-10 items-center justify-center rounded-full transition-colors duration-200"
-                    : "flex h-10 w-10 items-center justify-center rounded-full border-2 border-dashed border-[var(--color-border)] transition-colors duration-200"
+                  completedSet.has(activity.slug)
+                    ? "flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-celebration)] text-white"
+                    : "h-8 w-8 shrink-0 rounded-full border-2 border-dashed border-[var(--color-border)]"
                 }
-                style={isDone ? { backgroundColor: activity.color } : undefined}
-                aria-hidden="true"
               >
-                {isDone ? (
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path
-                      d="M3 8.5L6.5 12L13 4"
-                      stroke="white"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : null}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+                {completedSet.has(activity.slug) ? "✓" : ""}
+              </span>
+              <span>
+                {activity.title}
+                <span className="block text-xs text-[var(--color-text-secondary)]">
+                  {completedSet.has(activity.slug) ? "Explored" : "Not yet explored"} ·{" "}
+                  {activity.roomName}
+                </span>
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
-
 export default Passport;

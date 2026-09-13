@@ -1,5 +1,7 @@
 "use client";
 
+import { Popover } from "@base-ui/react/popover";
+
 import { useEffect, useRef, useState } from "react";
 import {
   SandpackProvider,
@@ -807,7 +809,7 @@ function SavesPanel({
   };
 
   return (
-    <div className="absolute right-0 z-30 mt-1 w-80 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-xl">
+    <div className="w-80 max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-xl">
       <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2.5">
         <span className="text-xs font-semibold text-[var(--color-text-primary)]">
           Saved Snippets
@@ -895,7 +897,7 @@ interface TemplatePanelProps {
 
 function TemplatePanel({ language, onSelect, onClose }: TemplatePanelProps): React.ReactElement {
   return (
-    <div className="absolute left-0 z-30 mt-1 w-72 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-xl">
+    <div className="w-72 max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-xl">
       <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2.5">
         <span className="text-xs font-semibold text-[var(--color-text-primary)]">Templates</span>
         <button
@@ -966,6 +968,9 @@ function Toolbar({
   const [showTemplates, setShowTemplates] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const lastSavedCode = useRef<string>("");
+  const saveId = useRef(currentSaveId);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const saving = useRef<Promise<boolean> | null>(null);
 
   const currentCode = (): string => {
     const file = sandpack.files[ENTRY_FILE[language]];
@@ -973,32 +978,60 @@ function Toolbar({
     return typeof file === "string" ? file : file.code;
   };
 
-  const doSave = async (manual: boolean): Promise<void> => {
+  const doSave = async (manual: boolean): Promise<boolean> => {
+    if (saving.current) await saving.current;
     const code = currentCode();
-    if (!manual && code === lastSavedCode.current) return;
-    const id = currentSaveId ?? generateId("snip");
-    const now = Date.now();
-    const existing = saves.find((s) => s.id === id);
-    const save: SandboxSave = {
-      id,
-      title: existing?.title ?? `${language} · ${new Date(now).toLocaleString()}`,
-      language,
-      code,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
+    if (!manual && code === lastSavedCode.current) return true;
+    const operation = async (): Promise<boolean> => {
+      try {
+        const id = saveId.current ?? generateId("snip");
+        const now = Date.now();
+        const existing = saves.find((entry) => entry.id === id);
+        await putSave({
+          id,
+          title: existing?.title ?? `${language} · ${new Date(now).toLocaleString()}`,
+          language,
+          code,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        });
+        saveId.current = id;
+        onSavedId(id);
+        lastSavedCode.current = code;
+        setSavedAt(now);
+        setSaveError(null);
+        await refreshSaves();
+        return true;
+      } catch (error) {
+        console.error("[sandbox] Save failed", error);
+        setSaveError(
+          "Your code could not be saved. Download a copy or retry before switching workspaces."
+        );
+        return false;
+      }
     };
-    await putSave(save);
-    onSavedId(id);
-    lastSavedCode.current = code;
-    setSavedAt(now);
-    if (manual) await refreshSaves();
+    saving.current = operation();
+    try {
+      return await saving.current;
+    } finally {
+      saving.current = null;
+    }
+  };
+
+  const switchAfterSave = async (change: () => void): Promise<void> => {
+    if (await doSave(false)) change();
   };
 
   const handleRename = async (id: string, title: string): Promise<void> => {
     const save = saves.find((s) => s.id === id);
     if (!save) return;
-    await putSave({ ...save, title });
-    await refreshSaves();
+    try {
+      await putSave({ ...save, title });
+      await refreshSaves();
+    } catch (error) {
+      console.error("[sandbox] Rename failed", error);
+      setSaveError("The snippet could not be renamed. Please retry.");
+    }
   };
 
   const saveActionRef = useRef(doSave);
@@ -1012,6 +1045,19 @@ function Toolbar({
     return () => clearInterval(id);
   }, [language]);
 
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent): void => {
+      const file = sandpack.files[ENTRY_FILE[language]];
+      const code = typeof file === "string" ? file : (file?.code ?? "");
+      if (code !== lastSavedCode.current) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [language, sandpack.files]);
+
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(currentCode());
@@ -1024,8 +1070,10 @@ function Toolbar({
     downloadFile(`dura-snippet.${EXTENSIONS[language]}`, currentCode());
   };
 
-  const reset = () => {
-    sandpack.updateFile(ENTRY_FILE[language], TEMPLATES[language][0].code);
+  const reset = (): void => {
+    void switchAfterSave(() =>
+      sandpack.updateFile(ENTRY_FILE[language], TEMPLATES[language][0].code)
+    );
   };
 
   const onRun = () => {
@@ -1037,10 +1085,19 @@ function Toolbar({
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-2.5">
+      {saveError && (
+        <p role="alert" className="w-full text-sm text-[var(--color-error)]">
+          {saveError}
+        </p>
+      )}
       {/* Language select */}
       <select
         value={language}
-        onChange={(e) => onLanguageChange(e.target.value as SandboxLanguage)}
+        aria-label="Sandbox language"
+        onChange={(e) => {
+          const next = e.target.value as SandboxLanguage;
+          void switchAfterSave(() => onLanguageChange(next));
+        }}
         className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-2 py-1.5 text-xs font-medium text-[var(--color-text-primary)] focus:ring-1 focus:ring-[var(--color-accent)] focus:outline-none"
       >
         {LANGUAGES.map((l) => (
@@ -1051,8 +1108,8 @@ function Toolbar({
       </select>
 
       {/* Templates */}
-      <div className="relative">
-        <button
+      <Popover.Root open={showTemplates} onOpenChange={setShowTemplates}>
+        <Popover.Trigger
           type="button"
           onClick={() => {
             setShowTemplates((v) => !v);
@@ -1062,15 +1119,28 @@ function Toolbar({
         >
           Templates
           <ChevronDown className="h-3 w-3" />
-        </button>
-        {showTemplates && (
-          <TemplatePanel
-            language={language}
-            onSelect={onTemplateSelect}
-            onClose={() => setShowTemplates(false)}
-          />
-        )}
-      </div>
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Positioner
+            side="bottom"
+            align="start"
+            sideOffset={8}
+            positionMethod="fixed"
+            sticky
+            collisionPadding={12}
+            collisionAvoidance={{ side: "flip", align: "shift" }}
+            className="z-[70]"
+          >
+            <Popover.Popup className="max-h-[min(var(--available-height),calc(100dvh-24px))] max-w-[min(var(--available-width),calc(100vw-24px))] overflow-y-auto">
+              <TemplatePanel
+                language={language}
+                onSelect={(code) => void switchAfterSave(() => onTemplateSelect(code))}
+                onClose={() => setShowTemplates(false)}
+              />
+            </Popover.Popup>
+          </Popover.Positioner>
+        </Popover.Portal>
+      </Popover.Root>
 
       {/* Run */}
       <button
@@ -1118,8 +1188,8 @@ function Toolbar({
       </button>
 
       {/* Saved snippets */}
-      <div className="relative">
-        <button
+      <Popover.Root open={showSaves} onOpenChange={setShowSaves}>
+        <Popover.Trigger
           type="button"
           onClick={() => {
             setShowSaves((v) => !v);
@@ -1135,17 +1205,38 @@ function Toolbar({
           Snippets{" "}
           {saves.length > 0 && <span className="ml-0.5 font-mono text-[10px]">{saves.length}</span>}
           <ChevronDown className="h-3 w-3" />
-        </button>
-        {showSaves && (
-          <SavesPanel
-            saves={saves}
-            onLoad={onLoadSave}
-            onDelete={onDeleteSave}
-            onClose={() => setShowSaves(false)}
-            onRename={handleRename}
-          />
-        )}
-      </div>
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Positioner
+            side="bottom"
+            align="start"
+            sideOffset={8}
+            positionMethod="fixed"
+            sticky
+            collisionPadding={12}
+            collisionAvoidance={{ side: "flip", align: "shift" }}
+            className="z-[70]"
+          >
+            <Popover.Popup className="max-h-[min(var(--available-height),calc(100dvh-24px))] max-w-[min(var(--available-width),calc(100vw-24px))] overflow-y-auto">
+              <SavesPanel
+                saves={saves}
+                onLoad={(save) => void switchAfterSave(() => onLoadSave(save))}
+                onDelete={async (id) => {
+                  try {
+                    await onDeleteSave(id);
+                    if (saveId.current === id) saveId.current = null;
+                  } catch (error) {
+                    console.error("[sandbox] Delete failed", error);
+                    setSaveError("The snippet could not be deleted. Please retry.");
+                  }
+                }}
+                onClose={() => setShowSaves(false)}
+                onRename={handleRename}
+              />
+            </Popover.Popup>
+          </Popover.Positioner>
+        </Popover.Portal>
+      </Popover.Root>
 
       {/* Spacer */}
       <span className="flex-1" />

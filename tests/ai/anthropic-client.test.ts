@@ -152,6 +152,7 @@ describe("chatStream()", () => {
           'event: ping\ndata: {"type":"ping"}',
           'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{"}}',
           'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+          'data: {"type":"message_stop"}',
         ])
       )
     ) as unknown as typeof fetch;
@@ -172,4 +173,70 @@ describe("chatStream()", () => {
     const iter = chatStream({ messages: [{ role: "user", content: "hi" }] });
     await expect(iter.next()).rejects.toBeInstanceOf(AIInvalidKeyError);
   });
+});
+
+describe("AI stream completion contract", (): void => {
+  it("rejects EOF after partial text instead of marking it complete", async (): Promise<void> => {
+    setAnthropicKey(VALID_KEY);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (): Promise<Response> =>
+          new Response(
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n'
+          )
+      )
+    );
+    const stream = chatStream({ messages: [] });
+    expect((await stream.next()).value).toBe("partial");
+    await expect(stream.next()).rejects.toThrow("interrupted");
+  });
+  it("accepts CRLF frames split across byte chunks", async (): Promise<void> => {
+    setAnthropicKey(VALID_KEY);
+    const payload =
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"café"}}\r\n\r\ndata: {"type":"message_stop"}\r\n\r\n';
+    const bytes = new TextEncoder().encode(payload);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (): Promise<Response> =>
+          new Response(
+            new ReadableStream({
+              start(controller): void {
+                for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+                controller.close();
+              },
+            })
+          )
+      )
+    );
+    let text = "";
+    for await (const delta of chatStream({ messages: [] })) text += delta;
+    expect(text).toBe("café");
+  });
+});
+
+it("aborts a hung AI request after sixty seconds", async () => {
+  vi.useFakeTimers();
+  try {
+    setAnthropicKey("sk-ant-test1234567890");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, options: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            options.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+              once: true,
+            });
+          })
+      )
+    );
+    const pending = expect(
+      chat({ messages: [{ role: "user", content: "hello" }] })
+    ).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(60000);
+    await pending;
+  } finally {
+    vi.useRealTimers();
+  }
 });

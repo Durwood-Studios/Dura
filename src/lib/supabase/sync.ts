@@ -1,3 +1,6 @@
+import { mergeRemoteProgress, mergeRemoteFlashcard } from "@/lib/idb/encrypted-store";
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
+import { getStorageOwner, getOwnerGeneration, assertOwnerGeneration } from "@/lib/storage/owner";
 import { getDB } from "@/lib/db";
 import { createClient } from "@/lib/supabase/client";
 import { syncLessonProgress, fetchLessonProgress } from "./queries/progress";
@@ -17,13 +20,9 @@ import { syncDojoSessions, fetchDojoSessions } from "./queries/dojo";
 import { isAnalyticsEnabled } from "@/lib/analytics/consent-gate";
 import {
   getAllEncryptedFlashcards,
-  getEncryptedFlashcard,
-  putEncryptedFlashcard,
   getAllEncryptedReviewLogs,
   putEncryptedReviewLog,
   getEncryptedUnsyncedLessonProgress,
-  getEncryptedLessonProgress,
-  putEncryptedLessonProgress,
 } from "@/lib/idb/encrypted-store";
 import type { LessonProgress } from "@/types/curriculum";
 import type { FlashCard, ReviewLog } from "@/types/flashcard";
@@ -41,10 +40,19 @@ interface SyncResult {
 let backgroundSyncInterval: ReturnType<typeof setInterval> | null = null;
 
 let isResetting = false;
+let syncQueue: Promise<unknown> = Promise.resolve();
 const activeOperations = new Set<Promise<unknown>>();
 
 async function trackOperation<T>(operation: () => Promise<T>): Promise<T> {
-  const pending = operation();
+  const generation = getOwnerGeneration();
+  const run = async (): Promise<T> => {
+    assertOwnerGeneration(generation);
+    const result = await operation();
+    assertOwnerGeneration(generation);
+    return result;
+  };
+  const pending = activeOperations.size === 0 ? run() : syncQueue.catch((): void => {}).then(run);
+  syncQueue = pending;
   activeOperations.add(pending);
   try {
     return await pending;
@@ -130,17 +138,39 @@ async function performPushChanges(): Promise<number> {
   if (!userId) return 0;
 
   const db = await getDB();
+  if (getStorageOwner() !== `account:${userId}`)
+    throw new Error("The sync account changed. Reload before syncing.");
   let pushed = 0;
+  const supabase = createClient();
+  for (const marker of await db.getAll("tombstones")) {
+    if (marker.synced) continue;
+    const { error } = await supabase.rpc("delete_learner_record", {
+      p_user_id: userId,
+      p_table: marker.table,
+      p_id: marker.recordId,
+      p_deleted_at: marker.deletedAt,
+    });
+    if (error) throw error;
+    await db.put("tombstones", { ...marker, synced: 1 });
+  }
 
   // Push unsynced lesson progress — read via encrypted wrapper so the
   // plaintext fields are correctly decrypted before handing to syncLessonProgress.
+  const capturedProgress = await db.getAllFromIndex("progress", "by-synced", 0);
+  const capturedById = new Map(capturedProgress.map((row) => [row.lessonId, row]));
   const unsyncedProgress = await getEncryptedUnsyncedLessonProgress(db);
   if (unsyncedProgress.length > 0) {
     await syncLessonProgress(userId, unsyncedProgress);
     // Write synced flag back through the encrypted wrapper to preserve encryption
+    const acknowledge = db.transaction("progress", "readwrite");
     for (const record of unsyncedProgress) {
-      await putEncryptedLessonProgress(db, { ...record, synced: 1 });
+      const current = await acknowledge.store.get(record.lessonId);
+      const captured = capturedById.get(record.lessonId);
+      if (current && captured && sameStoredRecord(current, captured)) {
+        await acknowledge.store.put({ ...current, synced: 1 });
+      }
     }
+    await acknowledge.done;
     pushed += unsyncedProgress.length;
   }
 
@@ -185,7 +215,8 @@ async function performPushChanges(): Promise<number> {
       await batchSyncAnalytics(userId, unsyncedAnalytics);
       const tx = db.transaction("analytics", "readwrite");
       for (const event of unsyncedAnalytics) {
-        await tx.store.put({ ...event, synced: 1 });
+        const current = await tx.store.get(event.id);
+        if (current && isAnalyticsEnabled()) await tx.store.put({ ...current, synced: 1 });
       }
       await tx.done;
       pushed += unsyncedAnalytics.length;
@@ -239,20 +270,48 @@ async function performPullChanges(): Promise<{ pulled: number; conflicts: number
   if (!userId) return { pulled: 0, conflicts: 0 };
 
   const db = await getDB();
+  if (getStorageOwner() !== `account:${userId}`)
+    throw new Error("The sync account changed. Reload before syncing.");
   let pulled = 0;
   let conflicts = 0;
+  const deleted = await fetchOwnedRows("learner_tombstones", userId);
+  for (const row of deleted ?? []) {
+    if (!["flashcards", "goals", "sandbox_saves"].includes(String(row.table_name))) continue;
+    const table = row.table_name as "flashcards" | "goals" | "sandbox_saves";
+    const store = table === "sandbox_saves" ? "sandbox-saves" : table;
+    const tx = db.transaction([store, "tombstones"], "readwrite");
+    await Promise.all([
+      tx.objectStore(store).delete(String(row.record_id)),
+      tx.objectStore("tombstones").put({
+        id: `${table}:${row.record_id}`,
+        table,
+        recordId: String(row.record_id),
+        deletedAt: Number(row.deleted_at),
+        synced: 1,
+      }),
+      tx.done,
+    ]);
+  }
+  const remoteXP = await fetchOwnedRows("xp_events", userId);
+  for (const row of remoteXP ?? []) {
+    if (!(await db.get("xp-events", String(row.id))))
+      await db.put("xp-events", {
+        id: String(row.id),
+        source: row.source as import("@/types/xp").XPEventSource,
+        amount: Number(row.amount),
+        sourceId: String(row.source_id),
+        awardedAt: Number(row.awarded_at),
+      });
+  }
+
+  const tombstones = new Set(
+    (await db.getAll("tombstones")).map((row) => `${row.table}:${row.recordId}`)
+  );
 
   // Pull lesson progress — read/write via encrypted wrapper
   const remoteProgress = await fetchLessonProgress(userId);
   for (const remote of remoteProgress) {
-    const local = await getEncryptedLessonProgress(db, remote.lessonId);
-    if (local) {
-      const merged = mergeProgress(local, remote);
-      if (merged !== local) conflicts++;
-      await putEncryptedLessonProgress(db, merged);
-    } else {
-      await putEncryptedLessonProgress(db, remote);
-    }
+    await mergeRemoteProgress(db, remote, mergeProgress);
     pulled++;
   }
 
@@ -261,28 +320,26 @@ async function performPullChanges(): Promise<{ pulled: number; conflicts: number
   // the locally-stored copy stays at-rest-encrypted.
   const remoteCards = await fetchFlashcards(userId);
   for (const remote of remoteCards) {
-    const local = await getEncryptedFlashcard(db, remote.id);
-    if (local) {
-      const merged = mergeFlashcard(local, remote);
-      if (merged !== local) conflicts++;
-      await putEncryptedFlashcard(db, merged);
-    } else {
-      await putEncryptedFlashcard(db, remote);
-    }
+    if (tombstones.has(`flashcards:${remote.id}`)) continue;
+    await mergeRemoteFlashcard(db, remote, mergeFlashcard);
     pulled++;
   }
 
   // Pull goals — latest updated_at wins (use achievedAt as proxy)
   const remoteGoals = await fetchGoals(userId);
   for (const remote of remoteGoals) {
-    const local = await db.get("goals", remote.id);
-    if (local) {
-      const merged = mergeGoal(local, remote);
-      if (merged !== local) conflicts++;
-      await db.put("goals", merged);
-    } else {
-      await db.put("goals", remote);
+    if (tombstones.has(`goals:${remote.id}`)) continue;
+    const tx = db.transaction(["goals", "tombstones"], "readwrite");
+    if (await tx.objectStore("tombstones").get(`goals:${remote.id}`)) {
+      await tx.done;
+      continue;
     }
+    const store = tx.objectStore("goals");
+    const local = await store.get(remote.id);
+    const merged = local ? mergeGoal(local, remote) : remote;
+    if (local && merged !== local) conflicts++;
+    await store.put(merged);
+    await tx.done;
     pulled++;
   }
 
@@ -315,14 +372,18 @@ async function performPullChanges(): Promise<{ pulled: number; conflicts: number
   // Pull sandbox saves — LWW by updatedAt
   const remoteSandbox = await fetchSandboxSaves(userId);
   for (const remote of remoteSandbox) {
-    const local = await db.get("sandbox-saves", remote.id);
-    if (local) {
-      const merged = mergeSandboxSave(local, remote);
-      if (merged !== local) conflicts++;
-      await db.put("sandbox-saves", merged);
-    } else {
-      await db.put("sandbox-saves", remote);
+    if (tombstones.has(`sandbox_saves:${remote.id}`)) continue;
+    const tx = db.transaction(["sandbox-saves", "tombstones"], "readwrite");
+    if (await tx.objectStore("tombstones").get(`sandbox_saves:${remote.id}`)) {
+      await tx.done;
+      continue;
     }
+    const store = tx.objectStore("sandbox-saves");
+    const local = await store.get(remote.id);
+    const merged = local ? mergeSandboxSave(local, remote) : remote;
+    if (local && merged !== local) conflicts++;
+    await store.put(merged);
+    await tx.done;
     pulled++;
   }
 
@@ -339,14 +400,13 @@ async function performPullChanges(): Promise<{ pulled: number; conflicts: number
   // Pull tutorial progress — LWW by lastActiveAt
   const remoteTutorial = await fetchTutorialProgress(userId);
   for (const remote of remoteTutorial) {
-    const local = await db.get("tutorial-progress", remote.id);
-    if (local) {
-      const merged = mergeTutorialProgress(local, remote);
-      if (merged !== local) conflicts++;
-      await db.put("tutorial-progress", merged);
-    } else {
-      await db.put("tutorial-progress", remote);
-    }
+    const tx = db.transaction("tutorial-progress", "readwrite");
+    const store = tx.objectStore("tutorial-progress");
+    const local = await store.get(remote.id);
+    const merged = local ? mergeTutorialProgress(local, remote) : remote;
+    if (local && merged !== local) conflicts++;
+    await store.put(merged);
+    await tx.done;
     pulled++;
   }
 
@@ -414,7 +474,16 @@ export function mergeProgress(local: LessonProgress, remote: LessonProgress): Le
     quizPassed: local.quizPassed || remote.quizPassed,
     quizScore: maxNullable(local.quizScore, remote.quizScore),
     xpEarned: Math.max(local.xpEarned, remote.xpEarned),
-    synced: 1,
+    synced: 0,
+    activityEvidence: mergeActivityEvidence(local.activityEvidence, remote.activityEvidence),
+    dailyTimeMs: Object.fromEntries(
+      [
+        ...new Set([
+          ...Object.keys(local.dailyTimeMs ?? {}),
+          ...Object.keys(remote.dailyTimeMs ?? {}),
+        ]),
+      ].map((day) => [day, Math.max(local.dailyTimeMs?.[day] ?? 0, remote.dailyTimeMs?.[day] ?? 0)])
+    ),
   };
 }
 
@@ -506,7 +575,7 @@ export function startBackgroundSync(): void {
     if (!navigator.onLine) return;
 
     const doSync = (): void => {
-      pushChanges().catch((err: unknown) => {
+      fullSync().catch((err: unknown) => {
         console.error("[sync] Background push failed:", err);
       });
     };
@@ -532,3 +601,20 @@ export function stopBackgroundSync(): void {
 
 // Re-export types for consumers
 export type { SyncResult };
+
+/** Preserve newly edited drafts and their deliberate completion invalidation. */
+function mergeActivityEvidence(
+  local: LessonProgress["activityEvidence"],
+  remote: LessonProgress["activityEvidence"]
+): LessonProgress["activityEvidence"] {
+  const merged = { ...local };
+  for (const [id, entry] of Object.entries(remote ?? {})) {
+    if (!merged[id] || entry.updatedAt > merged[id].updatedAt) merged[id] = entry;
+  }
+  return Object.keys(merged).length ? merged : undefined;
+}
+function sameStoredRecord(a: unknown, b: unknown): boolean {
+  const encode = (_key: string, value: unknown): unknown =>
+    value instanceof ArrayBuffer ? Array.from(new Uint8Array(value)) : value;
+  return JSON.stringify(a, encode) === JSON.stringify(b, encode);
+}

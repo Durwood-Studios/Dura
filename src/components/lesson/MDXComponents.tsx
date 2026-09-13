@@ -85,7 +85,7 @@ export const mdxComponents: MDXComponentsType = {
   hr: () => <hr className="my-10 border-[var(--color-border)]" />,
   code: ({ children, ...props }) => (
     <code
-      className="rounded bg-[var(--color-bg-subtle)] px-1.5 py-0.5 font-mono text-[0.9em] text-[var(--color-text-primary)]"
+      className="rounded bg-[var(--color-bg-subtle)] px-1.5 py-0.5 font-mono text-[0.9em] [overflow-wrap:anywhere] text-[var(--color-text-primary)]"
       {...props}
     >
       {children}
@@ -103,7 +103,7 @@ export const mdxComponents: MDXComponentsType = {
     ) {
       const props = children.props as { className?: string; children?: string };
       const className = props.className ?? "";
-      const match = /language-(\w+)/.exec(className);
+      const match = /language-([^\s]+)/.exec(className);
       const language = match?.[1] ?? "text";
       const code = typeof props.children === "string" ? props.children : "";
       return <CodeBlock language={language}>{code}</CodeBlock>;

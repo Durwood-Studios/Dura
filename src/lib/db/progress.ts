@@ -1,3 +1,4 @@
+import { getOwnerGeneration, assertOwnerGeneration } from "@/lib/storage/owner";
 import { lessonIdentity } from "@/lib/lesson-identity";
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
@@ -34,8 +35,10 @@ export async function getLessonProgress(lessonId: string): Promise<LessonProgres
 }
 
 export async function putLessonProgress(progress: LessonProgress): Promise<void> {
+  const ownerGeneration = getOwnerGeneration();
   try {
     const db = await getDB();
+    assertOwnerGeneration(ownerGeneration);
     await putEncryptedLessonProgress(db, {
       ...progress,
       lessonId: lessonIdentity(progress.phaseId, progress.moduleId, progress.lessonId),

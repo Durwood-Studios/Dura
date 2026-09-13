@@ -4,7 +4,7 @@ import Link from "next/link";
 export const metadata: Metadata = {
   title: "Privacy Policy — DURA",
   description:
-    "How DURA handles your data. Plain language, no legalese. Your data stays on your device unless you choose to sync.",
+    "How DURA handles your data. Plain language, no legalese. Local learning records, optional sync, and clearly disclosed external services.",
   openGraph: {
     title: "Privacy Policy — DURA",
     description: "How DURA handles your data. Plain language, no legalese.",
@@ -17,7 +17,9 @@ export default function PrivacyPage(): React.ReactElement {
       <h1 className="text-3xl font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-4xl">
         Privacy Policy
       </h1>
-      <p className="mt-2 text-sm text-[var(--color-text-muted)]">Last updated: April 14, 2026</p>
+      <p className="mt-2 text-sm text-[var(--color-text-muted)]">
+        Last updated: September 12, 2026
+      </p>
       <p className="mt-6 leading-relaxed text-[var(--color-text-secondary)]">
         DURA is built by Durwood Studios LLC. This policy explains what data we collect, where it
         lives, and what rights you have over it. We wrote it in plain language because you
@@ -58,19 +60,24 @@ export default function PrivacyPage(): React.ReactElement {
           <li>Sandbox code you write in the code editor (auto-saved locally)</li>
         </ul>
         <p className="mt-3">
-          By default, all of this stays on your device. Nothing is sent to a server unless you
-          create an account and opt into cross-device sync.
+          Learning records are stored locally by default. Account sync, submitted feedback,
+          server-scored assessments, optional AI tools, and web sandbox previews have the separate
+          network behavior described below. Hosting providers also receive ordinary web requests,
+          including your IP address.
         </p>
       </Section>
 
       {/* ---- What we do NOT collect ---- */}
       <Section title="What we do not collect">
         <ul className="list-disc space-y-1.5 pl-5">
-          <li>No cookies</li>
+          <li>No advertising cookies. Signed-in sessions use essential authentication cookies.</li>
           <li>No browser fingerprinting</li>
           <li>No third-party tracking scripts</li>
           <li>No advertising identifiers</li>
-          <li>No personal information in analytics events</li>
+          <li>
+            No names, email addresses, source code, or free-form answers in analytics event
+            properties. Synced events are linked to your account ID.
+          </li>
         </ul>
         <p className="mt-3">
           We do not sell data. We do not run behavioral advertising. We do not share data with third
@@ -98,8 +105,12 @@ export default function PrivacyPage(): React.ReactElement {
             data.
           </li>
           <li>
-            You can delete your account entirely from Settings. This removes all server-side data.
-            Local data remains on your device until you clear it.
+            Settings provides account deletion on deployments with the deletion database update
+            enabled. It requires a sign-in within five minutes and removes uploaded files first,
+            then your account and cascading learning records. It also erases this device’s account
+            copy while preserving guest records. Other devices, downloaded exports, and previously
+            shared copies must be cleared separately. A failed step is shown explicitly; contact the
+            site operator if deletion is unavailable.
           </li>
         </ul>
       </Section>
@@ -107,8 +118,9 @@ export default function PrivacyPage(): React.ReactElement {
       {/* ---- Analytics ---- */}
       <Section title="Analytics">
         <p>
-          DURA tracks behavioral events to understand which learning sequences are most effective.
-          These events contain no personally identifiable information. Examples: &ldquo;a lesson was
+          Analytics are off until you opt in. Opted-in events help understand which learning
+          sequences are useful. Event properties exclude direct identifiers, but synced events are
+          linked to your account and must be treated as personal data. Examples: &ldquo;a lesson was
           started,&rdquo; &ldquo;a quiz was passed,&rdquo; &ldquo;a flashcard was reviewed.&rdquo;
         </p>
         <p className="mt-3">
@@ -128,13 +140,16 @@ export default function PrivacyPage(): React.ReactElement {
         <ul className="mt-3 list-disc space-y-1.5 pl-5">
           <li>
             <strong className="text-[var(--color-text-primary)]">Access your data</strong> &mdash;
-            Settings &rarr; Export Data gives you a full JSON export of everything DURA knows about
-            your learning.
+            Settings &rarr; Save progress to file downloads a portable learner-record archive for
+            the current local learner, including JSON records.
           </li>
           <li>
             <strong className="text-[var(--color-text-primary)]">Delete your data</strong> &mdash;
-            Settings &rarr; Clear All Data removes everything from your device. If you have an
-            account, deleting your account removes all server-side data.
+            Settings &rarr; Clear local data removes DURA’s device records, including guest and
+            account copies. Account deletion separately removes your account and its linked live
+            database records. Anonymous feedback is not linked to an account and cannot be
+            identified from your account ID; include a submission ID when asking the operator about
+            a specific message.
           </li>
           <li>
             <strong className="text-[var(--color-text-primary)]">Portability</strong> &mdash; Your
@@ -147,8 +162,9 @@ export default function PrivacyPage(): React.ReactElement {
           </li>
         </ul>
         <p className="mt-3">
-          If we ever experience a data breach affecting your information, we will notify affected
-          users within 72 hours.
+          If a breach affects your information, we will provide notices required by applicable law.
+          Hosting providers may retain security logs and backups under their retention policies;
+          account deletion does not recall copies already downloaded by recipients.
         </p>
       </Section>
 
@@ -156,9 +172,9 @@ export default function PrivacyPage(): React.ReactElement {
       <Section title="Users under 13">
         <p>
           DURA does not knowingly collect personal information from anyone under the age of 13.
-          Account creation requires age verification. If you are under 13, you can still use DURA
-          without an account — all features work locally on your device without collecting any
-          personal information.
+          Account creation requires an age attestation, not identity verification. If you are under
+          13, use local lessons without an account and do not submit personal information in
+          feedback or external tools. Network requests still reach the hosting provider.
         </p>
         <p className="mt-3">
           If we learn that we have collected personal information from a user under 13, we will
@@ -192,7 +208,8 @@ export default function PrivacyPage(): React.ReactElement {
           </li>
           <li>
             <strong className="text-[var(--color-text-primary)]">Supabase</strong> — authentication
-            and database (only when signed in).{" "}
+            and database for account sync, public certificate lookup, and submitted feedback
+            (including guest feedback).{" "}
             <a
               href="https://supabase.com/privacy"
               target="_blank"
@@ -215,7 +232,15 @@ export default function PrivacyPage(): React.ReactElement {
             </a>
           </li>
         </ul>
-        <p className="mt-3">No other third-party services receive your data.</p>
+        <p className="mt-3">
+          Optional AI Tutor and Code Review send the text and code you submit directly to Anthropic
+          using your own API key, after consent. Web sandbox previews load a CodeSandbox-origin
+          runtime that receives your sandbox source and may load third-party packages. Runtime
+          downloads can also contact package CDNs. Do not include credentials or private data in
+          sandbox code. Configured authentication protection may send a hashed request identifier to
+          the deployment’s rate-limit service. External links and payment pages have their own
+          policies.
+        </p>
       </Section>
 
       {/* ---- Open source ---- */}

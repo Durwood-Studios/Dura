@@ -25,7 +25,7 @@ describe("FillBlank placeholder runs", (): void => {
       expect(container.textContent).not.toContain("_");
       fireEvent.change(screen.getByRole("textbox"), { target: { value: "bit" } });
       fireEvent.click(screen.getByRole("button", { name: /check/i }));
-      expect(passQuiz).toHaveBeenCalledOnce();
+      expect(passQuiz).not.toHaveBeenCalled();
     }
   );
 
@@ -41,6 +41,6 @@ describe("FillBlank placeholder runs", (): void => {
       target: { value: "beta" },
     });
     fireEvent.click(screen.getByRole("button", { name: /check/i }));
-    expect(passQuiz).toHaveBeenCalledOnce();
+    expect(passQuiz).not.toHaveBeenCalled();
   });
 });

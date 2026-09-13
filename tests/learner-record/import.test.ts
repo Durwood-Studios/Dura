@@ -107,7 +107,7 @@ describe("parseLearnerRecordZip", () => {
     await expect(parseLearnerRecordZip(blob)).rejects.toThrow(/entries/i);
   });
 
-  it("reads x-dura sidecar lesson_progress + goals counts", async () => {
+  it("rejects malformed sidecar records before any mutation", async () => {
     const payload = {
       ...validCanonical(),
       "x-dura": {
@@ -117,8 +117,6 @@ describe("parseLearnerRecordZip", () => {
       },
     };
     const blob = await buildZip(payload);
-    const { summary } = await parseLearnerRecordZip(blob);
-    expect(summary.lessonProgressRestored).toBe(3);
-    expect(summary.goalsRestored).toBe(1);
+    await expect(parseLearnerRecordZip(blob)).rejects.toThrow();
   });
 });

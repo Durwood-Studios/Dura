@@ -25,13 +25,16 @@ export async function getDojoStats(): Promise<{
   bestScore: number;
   recentTrend: number[]; // last 10 avg scores, oldest→newest
 }> {
-  const sessions = await getRecentDojoSessions(100);
+  const db = await getDB();
+  const sessions = await db.getAllFromIndex("dojo-sessions", "by-completed");
   if (sessions.length === 0) {
     return { totalSessions: 0, avgScore: 0, bestScore: 0, recentTrend: [] };
   }
   const scores = sessions.map((s) => s.avgScore);
   const avgScore = Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10;
-  const bestScore = Math.max(...scores);
-  const recentTrend = [...scores].reverse().slice(0, 10);
+  const bestScore = scores.reduce((best, score) => Math.max(best, score), 0);
+  // The completion index is oldest first. All-time totals include every
+  // record; the chart separately selects the most recent ten in time order.
+  const recentTrend = scores.slice(-10);
   return { totalSessions: sessions.length, avgScore, bestScore, recentTrend };
 }

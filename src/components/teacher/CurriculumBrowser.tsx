@@ -1,5 +1,7 @@
 "use client";
 
+import { lessonIdentity } from "@/lib/lesson-identity";
+
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight, Search, Filter, Clock, BookOpen } from "lucide-react";
@@ -185,7 +187,11 @@ export function CurriculumBrowser({
           const filteredModules = node.modules
             .map((m) => {
               const lessons = m.lessons.filter((l) => {
-                if (standardLessonIds && !standardLessonIds.has(l.id)) return false;
+                if (
+                  standardLessonIds &&
+                  !standardLessonIds.has(lessonIdentity(l.phaseId, l.moduleId, l.id))
+                )
+                  return false;
                 return (
                   matchesSearch(l.title) ||
                   matchesSearch(l.description ?? "") ||

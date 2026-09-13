@@ -1,5 +1,8 @@
 "use client";
 
+import { ActivitySaveStatus } from "@/components/lesson/ActivitySaveStatus";
+import { useActivityEvidence, type ActivityProps } from "@/hooks/useActivityEvidence";
+
 import { useEffect, useState } from "react";
 import { Check, X, Plus } from "lucide-react";
 import { useProgressStore } from "@/stores/progress";
@@ -23,7 +26,7 @@ export interface QuizQuestion {
   terms?: string[];
 }
 
-interface QuizProps {
+interface QuizProps extends ActivityProps {
   /** Array-format: pass an array of questions. */
   questions?: QuizQuestion[];
   /** Single-question format props (used in many Phase 3-9 lessons). */
@@ -56,6 +59,8 @@ function correctAsArray(correct: number | number[]): number[] {
 
 export function Quiz(props: QuizProps): React.ReactElement {
   const { passingScore = 0.8 } = props;
+  const activity = useActivityEvidence(props);
+  const { saveEvidence } = activity;
 
   // Normalize: support both array format and single-question format
   const safeQuestions: QuizQuestion[] = (() => {
@@ -80,6 +85,8 @@ export function Quiz(props: QuizProps): React.ReactElement {
   const [history, setHistory] = useState<AnswerRecord[]>([]);
   const [done, setDone] = useState(false);
   const [earnedXP, setEarnedXP] = useState(0);
+  const [resultSaveError, setResultSaveError] = useState<string | null>(null);
+  const [isSavingResult, setSavingResult] = useState(false);
   const [cardSaveError, setCardSaveError] = useState<string | null>(null);
   const [addedTerms, setAddedTerms] = useState<Set<string>>(new Set());
   const [termCache, setTermCache] = useState<Map<string, DictionaryTerm>>(new Map());
@@ -160,23 +167,42 @@ export function Quiz(props: QuizProps): React.ReactElement {
       setSelected([]);
       setSubmitted(false);
     } else {
-      finish();
+      void finish();
     }
   };
 
-  const finish = () => {
+  const finish = async (): Promise<void> => {
+    if (isSavingResult || (activity.hasContext && !activity.isReady)) return;
     const correctCount = history.filter((h) => h.correct).length;
     const finalScore = correctCount / total;
     setDone(true);
-    void setQuizScore(finalScore).catch((error: unknown): void => {
-      console.error("[quiz] Could not save score", error);
-    });
-    if (finalScore >= passingScore) {
-      passQuiz();
-      void track("quiz_passed", { score: finalScore, total });
-      if (currentLesson) {
-        void awardXPWithToast("quiz", XP_AWARDS.quiz, currentLesson.lessonId).then(setEarnedXP);
+    if (!activity.hasContext) return;
+    setSavingResult(true);
+    setResultSaveError(null);
+    try {
+      // Serialize score and evidence writes so a whole-record score write cannot erase evidence.
+      await setQuizScore(finalScore);
+      if (finalScore >= passingScore) {
+        await saveEvidence({
+          kind: "automatic",
+          updatedAt: Date.now(),
+          completedAt: Date.now(),
+          score: finalScore,
+        });
+        passQuiz();
+        void track("quiz_passed", { score: finalScore, total });
+        if (currentLesson)
+          void awardXPWithToast("quiz", XP_AWARDS.quiz, currentLesson.lessonId)
+            .then(setEarnedXP)
+            .catch((error: unknown): void => console.error("[quiz] XP save failed", error));
       }
+    } catch (error: unknown) {
+      console.error("[quiz] Could not save result", error);
+      setResultSaveError(
+        "Your quiz result could not be saved. Your answers remain here; retry before leaving."
+      );
+    } finally {
+      setSavingResult(false);
     }
   };
 
@@ -216,6 +242,23 @@ export function Quiz(props: QuizProps): React.ReactElement {
     const passed = finalScore >= passingScore;
     return (
       <section className="my-8 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+        {resultSaveError ? (
+          <p role="alert" className="my-2 text-sm">
+            {resultSaveError}
+            <button
+              type="button"
+              disabled={isSavingResult || !activity.isReady}
+              className="ml-2 min-h-12 underline"
+              onClick={(): void => {
+                void finish();
+              }}
+            >
+              Retry saving quiz
+            </button>
+          </p>
+        ) : (
+          <ActivitySaveStatus state={activity} />
+        )}
         {cardSaveError && (
           <p role="alert" className="mb-3 text-sm text-[var(--color-error)]">
             {cardSaveError}
@@ -285,6 +328,7 @@ export function Quiz(props: QuizProps): React.ReactElement {
 
   return (
     <section className="my-8 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+      <ActivitySaveStatus state={activity} />
       <div className="mb-3 flex items-center justify-between">
         <p className="font-mono text-xs text-[var(--color-text-muted)]">
           Question {index + 1} of {total}
@@ -384,9 +428,14 @@ export function Quiz(props: QuizProps): React.ReactElement {
           <button
             type="button"
             onClick={next}
+            disabled={index + 1 === total && activity.hasContext && !activity.isReady}
             className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600"
           >
-            {index + 1 === total ? "Finish" : "Next question"}
+            {index + 1 === total
+              ? activity.hasContext && !activity.isReady
+                ? "Waiting for lesson to load…"
+                : "Finish"
+              : "Next question"}
           </button>
         )}
       </div>

@@ -10,6 +10,11 @@ import {
   forgetLastAuthUser,
 } from "@/lib/idb/encryption-key";
 import { setActiveKey } from "@/lib/idb/active-key";
+import {
+  selectStorageOwner,
+  beginOwnerInitialization,
+  finishOwnerInitialization,
+} from "@/lib/storage/owner";
 import type { User } from "@supabase/supabase-js";
 
 interface AuthContextValue {
@@ -33,17 +38,34 @@ interface AuthProviderProps {
  * and triggers sync operations on sign-in/sign-out.
  */
 export function AuthProvider({ children }: AuthProviderProps): React.ReactElement {
+  beginOwnerInitialization();
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isChangingOwner, setChangingOwner] = useState(false);
   const syncTriggeredRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     let generation = 0;
+    let initializedOwner: string | undefined;
 
     const initialize = async (nextUser: User | null, signedOut = false): Promise<void> => {
       const request = ++generation;
       try {
+        if (signedOut) forgetLastAuthUser();
+        const targetOwner = nextUser?.id ?? (signedOut ? null : readLastAuthUser());
+        if (initializedOwner !== undefined && initializedOwner !== (targetOwner ?? "guest")) {
+          // A full document replacement discards every module-level learner store and
+          // cancels old effects before the next owner opens its independent database.
+          stopBackgroundSync();
+          selectStorageOwner(targetOwner);
+          setLoading(true);
+          setChangingOwner(true);
+          window.location.reload();
+          return;
+        }
+        selectStorageOwner(targetOwner);
+        initializedOwner = targetOwner ?? "guest";
         if (signedOut) forgetLastAuthUser();
         if (nextUser) rememberLastAuthUser(nextUser.id);
         // Children must not read encrypted IDB records until their key is installed.
@@ -52,6 +74,7 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
         );
         if (cancelled || request !== generation) return;
         setActiveKey(resolution);
+        finishOwnerInitialization();
         setUser(nextUser);
         setLoading(false);
         if (nextUser && isSupabaseConfigured()) {
@@ -68,6 +91,7 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
         }
       } catch (error) {
         console.error("[auth] Initialization failed:", error);
+        finishOwnerInitialization(error);
         if (!cancelled) setLoading(false);
       }
     };
@@ -109,7 +133,8 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       stopBackgroundSync();
       if (!isSupabaseConfigured()) return;
       const supabase = createClient();
-      await supabase.auth.signOut();
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
       setUser(null);
     } catch (err) {
       console.error("[auth] Sign out failed:", err);
@@ -119,10 +144,10 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
 
   return (
     <AuthContext.Provider value={{ user, loading, signOut }}>
-      {loading ? (
-        <p role="status" className="p-6">
-          Preparing your local learning record…
-        </p>
+      {isChangingOwner ? (
+        <div role="status" className="p-6 text-text-secondary">
+          Switching learner account…
+        </div>
       ) : (
         children
       )}

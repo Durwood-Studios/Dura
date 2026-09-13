@@ -1,5 +1,6 @@
 "use client";
 
+import { isOwnerInitialized } from "@/lib/storage/owner";
 import { useRef, useSyncExternalStore } from "react";
 import {
   CONSENT_CHANGED_EVENT,
@@ -11,7 +12,7 @@ import { purgeAnalyticsQueue } from "@/lib/analytics";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 function needsChoice(): boolean {
-  return !hasMadeConsentChoice();
+  return isOwnerInitialized() && !hasMadeConsentChoice();
 }
 function subscribeConsent(notify: () => void): () => void {
   window.addEventListener(CONSENT_CHANGED_EVENT, notify);
@@ -68,7 +69,7 @@ export function AnalyticsConsentBanner({
       aria-modal="true"
       aria-labelledby="analytics-consent-title"
       aria-describedby="analytics-consent-body"
-      className="fixed inset-x-4 bottom-4 z-50 mx-auto max-w-2xl rounded-2xl border border-[var(--border)] bg-[var(--bg-surface)] p-5 shadow-xl backdrop-blur-xl sm:inset-x-auto sm:right-6 sm:bottom-6 sm:left-auto"
+      className="fixed inset-x-4 bottom-4 z-50 mx-auto max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-2xl overflow-y-auto rounded-2xl border border-[var(--border)] bg-[var(--bg-surface)] p-5 shadow-xl backdrop-blur-xl sm:inset-x-auto sm:right-6 sm:bottom-6 sm:left-auto"
     >
       <h2
         id="analytics-consent-title"
@@ -80,10 +81,11 @@ export function AnalyticsConsentBanner({
         id="analytics-consent-body"
         className="mt-2 text-sm leading-relaxed text-[var(--text-secondary)]"
       >
-        DURA can record anonymous usage events — which lessons get opened, which quizzes get
+        DURA can record optional usage events — which lessons get opened, which quizzes get
         completed, which dictionary terms get searched — to help us improve the platform. Events are
-        stored on your device and synced to Supabase under your account ID. No third parties. No
-        advertising. You can change your mind anytime in Settings.
+        stored on your device and, when signed in, synced to Supabase under your account ID. They
+        are not anonymous account records. No advertising. You can change your mind anytime in
+        Settings.
       </p>
       <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
         <button

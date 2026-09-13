@@ -1,3 +1,4 @@
+import { getCareerRequirement } from "@/lib/career-coverage";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import {
@@ -21,8 +22,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { buildMetadata } from "@/lib/og";
 import { ROLES, getRoleBySlug, getRole } from "@/content/roles";
-import { getSkill } from "@/content/skills";
-import { getPathBySlug } from "@/lib/paths";
+import { PATHS } from "@/lib/paths";
 import type { Role } from "@/types/career-track";
 
 const ICON_MAP: Record<string, LucideIcon> = {
@@ -77,13 +77,6 @@ function formatSalary(value: number): string {
   return `$${(value / 1000).toFixed(0)}k`;
 }
 
-function resolveSkillNames(ids: string[]): string[] {
-  return ids.map((id) => {
-    const skill = getSkill(id);
-    return skill ? skill.name : id;
-  });
-}
-
 export default async function RoleDetailPage({ params }: PageProps): Promise<React.ReactElement> {
   const { slug } = await params;
   const role = getRoleBySlug(slug);
@@ -95,9 +88,7 @@ export default async function RoleDetailPage({ params }: PageProps): Promise<Rea
   const leadsToRoles = role.leadsTo
     .map((id) => getRole(id))
     .filter((r): r is Role => r !== undefined);
-  // If a curriculum Path matches this Role's slug, link to it.
-  // Paths sequence DURA's phases; Tracks describe the destination.
-  const matchedPath = getPathBySlug(role.slug);
+  const matchedPaths = PATHS.filter((path) => path.destinationRoleSlugs.includes(role.slug));
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
@@ -153,8 +144,9 @@ export default async function RoleDetailPage({ params }: PageProps): Promise<Rea
       </section>
 
       {/* Cross-link to the matching curriculum Path */}
-      {matchedPath && (
+      {matchedPaths.map((matchedPath) => (
         <Link
+          key={matchedPath.id}
           href={`/paths/p/${matchedPath.slug}`}
           className="dura-card group mb-12 flex items-start justify-between gap-4 p-5 transition-colors"
         >
@@ -172,7 +164,7 @@ export default async function RoleDetailPage({ params }: PageProps): Promise<Rea
             aria-hidden="true"
           />
         </Link>
-      )}
+      ))}
 
       {/* Skills at each level */}
       <section className="mb-12">
@@ -181,18 +173,27 @@ export default async function RoleDetailPage({ params }: PageProps): Promise<Rea
         </h2>
         <div className="grid gap-4 md:grid-cols-3">
           {(["junior", "mid", "senior"] as const).map((level) => {
-            const skillNames = resolveSkillNames(role.levels[level].required);
             return (
               <div key={level} className="dura-card p-5">
                 <h3 className="mb-3 text-sm font-semibold tracking-wider text-[var(--color-text-muted)] uppercase">
                   {level === "mid" ? "Mid-Level" : level.charAt(0).toUpperCase() + level.slice(1)}
                 </h3>
                 <ul className="space-y-1.5">
-                  {skillNames.map((name) => (
-                    <li key={name} className="text-sm text-[var(--color-text-secondary)]">
-                      {name}
-                    </li>
-                  ))}
+                  {role.levels[level].required.map((id) => {
+                    const skill = getCareerRequirement(id);
+                    const lesson = skill?.lessonIds[0];
+                    return (
+                      <li key={id} className="text-sm text-[var(--color-text-secondary)]">
+                        {lesson ? (
+                          <Link href={`/paths/${lesson}`} className="underline underline-offset-4">
+                            {skill?.name}
+                          </Link>
+                        ) : (
+                          `${skill?.name ?? id.replaceAll("-", " ")} — not yet covered by DURA`
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
                 <p className="mt-3 text-xs text-[var(--color-text-muted)]">
                   {role.levels[level].required.length} required
@@ -215,7 +216,14 @@ export default async function RoleDetailPage({ params }: PageProps): Promise<Rea
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {role.portfolio.map((project) => (
               <div key={project.tutorialSlug} className="dura-card p-5">
-                <h3 className="font-medium text-[var(--color-text-primary)]">{project.title}</h3>
+                <h3 className="font-medium text-[var(--color-text-primary)]">
+                  <Link
+                    href={project.href ?? `/tutorials/${project.tutorialSlug}`}
+                    className="underline underline-offset-4"
+                  >
+                    {project.title}
+                  </Link>
+                </h3>
                 <span
                   className="mt-2 inline-block rounded-full px-2.5 py-0.5 text-xs font-medium"
                   style={{ backgroundColor: `${role.color}15`, color: role.color }}

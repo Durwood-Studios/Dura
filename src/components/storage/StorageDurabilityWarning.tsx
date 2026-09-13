@@ -48,17 +48,17 @@ export function StorageDurabilityWarning(): React.ReactElement | null {
     <div
       role="status"
       aria-live="polite"
-      className="fixed inset-x-4 top-4 z-50 mx-auto max-w-2xl rounded-2xl border border-[var(--border)] bg-[var(--bg-surface)] p-4 shadow-xl backdrop-blur-xl sm:inset-x-auto sm:top-6 sm:right-6 sm:left-auto"
+      className="fixed inset-x-4 top-4 z-50 mx-auto max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-2xl overflow-y-auto rounded-2xl border border-[var(--border)] bg-[var(--bg-surface)] p-4 shadow-xl backdrop-blur-xl sm:inset-x-auto sm:top-6 sm:right-6 sm:left-auto"
     >
       <div className="flex items-start gap-3">
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <h2 className="text-sm font-semibold text-[var(--text-primary)]">
             Your study data may be cleared
           </h2>
           <p className="mt-1 text-sm leading-relaxed text-[var(--text-secondary)]">
             Your browser hasn&apos;t granted DURA persistent storage. Without it, lesson progress
-            and flashcard reviews can be cleared during cleanup. Install DURA to your home screen
-            (or bookmark this page) to keep your study history safe.
+            and flashcard reviews can be cleared during cleanup. Export a backup in Settings.
+            Installing or bookmarking DURA does not guarantee that browser storage will be retained.
           </p>
         </div>
         <button

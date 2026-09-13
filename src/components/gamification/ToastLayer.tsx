@@ -10,7 +10,7 @@ export function ToastLayer(): React.ReactElement {
   return (
     <div
       aria-live="polite"
-      className="pointer-events-none fixed right-4 bottom-20 z-40 flex flex-col gap-2 sm:bottom-6"
+      className="pointer-events-none fixed right-4 bottom-20 z-40 flex max-h-[calc(100dvh-6rem)] max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto break-words sm:bottom-6 sm:max-h-[calc(100dvh-3rem)]"
     >
       {toasts.map((t) => (
         <div

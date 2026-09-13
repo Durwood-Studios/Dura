@@ -7,7 +7,7 @@ import {
   setStoredLocale,
   LOCALE_CHANGED_EVENT,
 } from "@/lib/i18n/locale-storage";
-import { findLocale, type LocaleCode } from "@/lib/i18n/languages";
+import { type LocaleCode } from "@/lib/i18n/languages";
 import { getStrings, type Strings } from "./strings";
 
 /**
@@ -18,9 +18,8 @@ import { getStrings, type Strings } from "./strings";
  * stored locale differs, and subscribes to in-tab changes from the
  * locale picker.
  *
- * The html `lang` attribute is updated as a side-effect so screen
- * readers and search engines see the right value. `dir` is set when
- * the locale's writing direction is RTL.
+ * The document remains English because lessons are not translated.
+ * Translated UI regions declare their own lang attribute.
  */
 interface TranslationState {
   /** Current locale code. */
@@ -38,16 +37,15 @@ export function useTranslation(): TranslationState {
     const refresh = (): void => {
       const next = getStoredLocale() ?? getEffectiveLocale();
       setLocale(next);
-      if (typeof document !== "undefined") {
-        document.documentElement.lang = next;
-        const entry = findLocale(next);
-        document.documentElement.dir = entry?.direction ?? "ltr";
-      }
     };
     refresh();
     if (typeof window === "undefined") return;
     window.addEventListener(LOCALE_CHANGED_EVENT, refresh);
-    return () => window.removeEventListener(LOCALE_CHANGED_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(LOCALE_CHANGED_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
   }, []);
 
   const apply = (next: LocaleCode): void => {

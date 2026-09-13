@@ -1,4 +1,5 @@
-import { createClient } from "@/lib/supabase/client";
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
+import { syncMutableRecords } from "@/lib/supabase/queries/record-sync";
 import type { GoalRow } from "@/lib/supabase/row-contracts";
 import type { Goal } from "@/types/goal";
 
@@ -11,7 +12,6 @@ import type { Goal } from "@/types/goal";
  */
 export async function syncGoals(userId: string, goals: Goal[]): Promise<void> {
   try {
-    const supabase = createClient();
     // GoalRow pins started_at/deadline/achieved_at to epoch-ms numbers —
     // the columns are bigint; ISO strings fail the insert.
     const rows: GoalRow[] = goals.map((goal) => ({
@@ -25,14 +25,11 @@ export async function syncGoals(userId: string, goals: Goal[]): Promise<void> {
       deadline: goal.deadline,
       achieved_at: goal.achievedAt,
       label: goal.label,
+      phase_id: goal.phaseId ?? null,
+      role_id: goal.roleId ?? null,
     }));
 
-    const { error } = await supabase.from("goals").upsert(rows, { onConflict: "id,user_id" });
-
-    if (error) {
-      console.error("[syncGoals] Upsert error:", error.message);
-      throw error;
-    }
+    await syncMutableRecords("goals", rows);
   } catch (err) {
     console.error("[syncGoals] Failed to sync:", err);
     throw err;
@@ -44,13 +41,7 @@ export async function syncGoals(userId: string, goals: Goal[]): Promise<void> {
  */
 export async function fetchGoals(userId: string): Promise<Goal[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase.from("goals").select("*").eq("user_id", userId);
-
-    if (error) {
-      console.error("[fetchGoals] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("goals", userId);
 
     return (data ?? []).map((row) => ({
       id: row.id as string,
@@ -62,6 +53,8 @@ export async function fetchGoals(userId: string): Promise<Goal[]> {
       deadline: row.deadline === null ? null : Number(row.deadline),
       achievedAt: row.achieved_at === null ? null : Number(row.achieved_at),
       label: row.label as string,
+      phaseId: (row.phase_id as string | null) ?? undefined,
+      roleId: (row.role_id as string | null) ?? undefined,
     }));
   } catch (err) {
     console.error("[fetchGoals] Failed to fetch:", err);

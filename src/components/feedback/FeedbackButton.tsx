@@ -88,7 +88,7 @@ export function FeedbackButton(): React.ReactElement {
           />
 
           {/* Panel */}
-          <div className="relative w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 shadow-2xl">
+          <div className="relative max-h-[calc(100dvh-2rem)] w-full max-w-sm overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 shadow-2xl">
             <div className="mb-4 flex items-center justify-between">
               <h2
                 id="feedback-title"

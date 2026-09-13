@@ -42,7 +42,7 @@ export interface Strings {
 export const STRINGS_EN: Strings = {
   locale: {
     name: "Language",
-    hint: "Switch DURA's interface language. Lesson and dictionary translation rolls out phase by phase — see ROADMAP for status.",
+    hint: "Translate navigation and selected Settings headings. Lessons, dictionary definitions, and other controls remain in English.",
     machineTranslatedBadge: "Machine-translated",
     comingSoon: "Coming soon",
   },

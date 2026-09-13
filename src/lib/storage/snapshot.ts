@@ -7,6 +7,7 @@ import type { Preferences } from "@/types/preferences";
 import type { AssessmentResult, Certificate } from "@/types/assessment";
 import type { XPEvent } from "@/types/xp";
 import type { TutorialProgress } from "@/types/tutorial";
+import type { DojoSession } from "@/types/dojo";
 import type { SandboxSave } from "@/types/sandbox";
 
 /**
@@ -29,10 +30,33 @@ export interface LearnerRecordSnapshot {
   certificates: Certificate[];
   xpEvents: XPEvent[];
   tutorialProgress: TutorialProgress[];
+  dojoSessions?: DojoSession[];
+  judgmentAttempts?: import("@/lib/db/judgment").StoredJudgmentAttempt[];
+  tombstones?: import("@/lib/db").DuraDBSchema["tombstones"]["value"][];
 }
 
 export async function buildLearnerSnapshot(): Promise<LearnerRecordSnapshot> {
   const db = await getDB();
+  const tx = db.transaction(
+    [
+      "progress",
+      "moduleProgress",
+      "phaseProgress",
+      "flashcards",
+      "reviewLogs",
+      "goals",
+      "preferences",
+      "sandbox-saves",
+      "assessment-results",
+      "certificates",
+      "xp-events",
+      "tutorial-progress",
+      "dojo-sessions",
+      "tombstones",
+      "judgmentAttempts",
+    ],
+    "readonly"
+  );
   const [
     progress,
     moduleProgress,
@@ -46,20 +70,27 @@ export async function buildLearnerSnapshot(): Promise<LearnerRecordSnapshot> {
     certificates,
     xpEvents,
     tutorialProgress,
+    dojoSessions,
+    tombstones,
+    judgmentAttempts,
   ] = await Promise.all([
-    db.getAll("progress"),
-    db.getAll("moduleProgress"),
-    db.getAll("phaseProgress"),
-    db.getAll("flashcards"),
-    db.getAll("reviewLogs"),
-    db.getAll("goals"),
-    db.getAll("preferences"),
-    db.getAll("sandbox-saves"),
-    db.getAll("assessment-results"),
-    db.getAll("certificates"),
-    db.getAll("xp-events"),
-    db.getAll("tutorial-progress"),
+    tx.objectStore("progress").getAll(),
+    tx.objectStore("moduleProgress").getAll(),
+    tx.objectStore("phaseProgress").getAll(),
+    tx.objectStore("flashcards").getAll(),
+    tx.objectStore("reviewLogs").getAll(),
+    tx.objectStore("goals").getAll(),
+    tx.objectStore("preferences").getAll(),
+    tx.objectStore("sandbox-saves").getAll(),
+    tx.objectStore("assessment-results").getAll(),
+    tx.objectStore("certificates").getAll(),
+    tx.objectStore("xp-events").getAll(),
+    tx.objectStore("tutorial-progress").getAll(),
+    tx.objectStore("dojo-sessions").getAll(),
+    tx.objectStore("tombstones").getAll(),
+    tx.objectStore("judgmentAttempts").getAll(),
   ]);
+  await tx.done;
 
   return {
     schemaVersion: 1,
@@ -76,6 +107,9 @@ export async function buildLearnerSnapshot(): Promise<LearnerRecordSnapshot> {
     certificates,
     xpEvents,
     tutorialProgress,
+    dojoSessions,
+    tombstones,
+    judgmentAttempts,
   };
 }
 
@@ -98,6 +132,8 @@ export async function isLearnerStoreEmpty(db?: DuraDB): Promise<boolean> {
     handle.count("certificates"),
     handle.count("xp-events"),
     handle.count("tutorial-progress"),
+    handle.count("dojo-sessions"),
+    handle.count("judgmentAttempts"),
   ]);
   return counts.every((c) => c === 0);
 }
@@ -105,47 +141,49 @@ export async function isLearnerStoreEmpty(db?: DuraDB): Promise<boolean> {
 export async function restoreSnapshotToIDB(snapshot: LearnerRecordSnapshot): Promise<void> {
   const db = await getDB();
 
-  await Promise.all([
-    bulkPut(db, "progress", snapshot.progress),
-    bulkPut(db, "moduleProgress", snapshot.moduleProgress),
-    bulkPut(db, "phaseProgress", snapshot.phaseProgress),
-    bulkPut(db, "flashcards", snapshot.flashcards),
-    bulkPut(db, "reviewLogs", snapshot.reviewLogs),
-    bulkPut(db, "goals", snapshot.goals),
-    bulkPut(db, "preferences", snapshot.preferences),
-    bulkPut(db, "sandbox-saves", snapshot.sandboxSaves),
-    bulkPut(db, "assessment-results", snapshot.assessmentResults),
-    bulkPut(db, "certificates", snapshot.certificates),
-    bulkPut(db, "xp-events", snapshot.xpEvents),
-    bulkPut(db, "tutorial-progress", snapshot.tutorialProgress),
-  ]);
+  const rows = {
+    progress: snapshot.progress,
+    moduleProgress: snapshot.moduleProgress,
+    phaseProgress: snapshot.phaseProgress,
+    flashcards: snapshot.flashcards,
+    reviewLogs: snapshot.reviewLogs,
+    goals: snapshot.goals,
+    preferences: snapshot.preferences,
+    "sandbox-saves": snapshot.sandboxSaves,
+    "assessment-results": snapshot.assessmentResults,
+    certificates: snapshot.certificates,
+    "xp-events": snapshot.xpEvents,
+    "tutorial-progress": snapshot.tutorialProgress,
+    "dojo-sessions": snapshot.dojoSessions ?? [],
+    tombstones: snapshot.tombstones ?? [],
+    judgmentAttempts: snapshot.judgmentAttempts ?? [],
+  };
+  // One transaction ensures an interrupted recovery remains empty and retryable.
+  const names = Object.keys(rows) as (keyof typeof rows)[];
+  const transaction = db.transaction(names, "readwrite");
+  try {
+    for (const name of names) {
+      // A learner can write while OPFS is loading. Recovery must never overwrite
+      // that new work after an earlier, separate emptiness check succeeded.
+      if (
+        name !== "preferences" &&
+        name !== "tombstones" &&
+        (await transaction.objectStore(name).count())
+      )
+        throw new Error("Learning data changed while loading the backup. Recovery was cancelled.");
+    }
+    for (const name of names) {
+      for (const row of rows[name]) await transaction.objectStore(name).put(row as never);
+    }
+    await transaction.done;
+  } catch (error) {
+    try {
+      transaction.abort();
+    } catch {
+      /* A rejected transaction may already be aborted. */
+    }
+    await transaction.done.catch((): void => {});
+    throw error;
+  }
   await migrateLessonIdentities(db);
 }
-
-async function bulkPut<S extends keyof LearnerStoreMap>(
-  db: DuraDB,
-  store: S,
-  rows: LearnerStoreMap[S][]
-): Promise<void> {
-  if (rows.length === 0) return;
-  const tx = db.transaction(store, "readwrite");
-  for (const row of rows) {
-    await tx.store.put(row as never);
-  }
-  await tx.done;
-}
-
-type LearnerStoreMap = {
-  progress: LessonProgress;
-  moduleProgress: ModuleProgress;
-  phaseProgress: PhaseProgress;
-  flashcards: FlashCard;
-  reviewLogs: ReviewLog;
-  goals: Goal;
-  preferences: Preferences;
-  "sandbox-saves": SandboxSave;
-  "assessment-results": AssessmentResult;
-  certificates: Certificate;
-  "xp-events": XPEvent;
-  "tutorial-progress": TutorialProgress;
-};

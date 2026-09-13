@@ -25,6 +25,42 @@ describe("lesson identity", (): void => {
     });
     useProgressStore.getState().reset();
   });
+  it("persists independent activity evidence and clears review after an edit", async (): Promise<void> => {
+    await useProgressStore.getState().start("01", "0", "0-1");
+    await useProgressStore.getState().recordActivity("0/0-1/01", "quiz:one", {
+      kind: "automatic",
+      updatedAt: 1,
+      completedAt: 1,
+      score: 1,
+    });
+    await useProgressStore.getState().recordActivity("0/0-1/01", "written:two", {
+      kind: "self-reviewed",
+      updatedAt: 2,
+      completedAt: 2,
+      response: "My reasoning",
+    });
+    useProgressStore.getState().reset();
+    await useProgressStore.getState().start("01", "0", "0-1");
+    expect(useProgressStore.getState().current?.activityEvidence?.["quiz:one"]?.completedAt).toBe(
+      1
+    );
+    await useProgressStore.getState().recordActivity("0/0-1/01", "written:two", {
+      kind: "self-reviewed",
+      updatedAt: 3,
+      completedAt: null,
+      response: "Revised reasoning",
+    });
+    expect(records.get("0/0-1/01")?.activityEvidence?.["written:two"]?.completedAt).toBeNull();
+    await expect(
+      useProgressStore.getState().recordActivity("1/1-1/01", "wrong-owner", {
+        kind: "automatic",
+        updatedAt: 4,
+        completedAt: 4,
+      })
+    ).rejects.toThrow("lesson is still loading");
+    expect(useProgressStore.getState().current?.activityEvidence?.["wrong-owner"]).toBeUndefined();
+  });
+
   it("keeps same-number lessons separate across modules and phases", async (): Promise<void> => {
     await useProgressStore.getState().start("01", "0", "0-1");
     await useProgressStore.getState().complete(10);

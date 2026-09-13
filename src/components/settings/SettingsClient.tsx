@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslation } from "@/i18n/useTranslation";
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
 import Link from "next/link";
 import {
@@ -27,6 +28,10 @@ import {
   disableNotifications,
 } from "@/lib/notifications";
 import { AIFeaturesPanel } from "@/components/settings/AIFeaturesPanel";
+import { AnalyticsPreference } from "@/components/settings/AnalyticsPreference";
+import { OfflineDownload } from "@/components/settings/OfflineDownload";
+import { AdoptGuestRecord } from "@/components/settings/AdoptGuestRecord";
+import { DeleteAccount } from "@/components/settings/DeleteAccount";
 import { RestoreFromFile } from "@/components/settings/RestoreFromFile";
 import { LocalePicker } from "@/components/settings/LocalePicker";
 import type { FontSize, StudyMode } from "@/types/preferences";
@@ -127,8 +132,11 @@ interface SettingsClientProps {
 }
 
 export function SettingsClient({ version }: SettingsClientProps): React.ReactElement {
+  const { locale, t } = useTranslation();
   const prefs = usePreferencesStore((s) => s.prefs);
   const update = usePreferencesStore((s) => s.update);
+  const preferenceError = usePreferencesStore((s) => s.error);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [clearError, setClearError] = useState<string | null>(null);
@@ -144,8 +152,10 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
   /** Wrap update calls to show the save indicator */
   const save = useCallback(
     (patch: Parameters<typeof update>[0]) => {
-      void update(patch);
-      confirmSave();
+      setSaved(false);
+      void update(patch).then((isSaved) => {
+        if (isSaved) confirmSave();
+      });
     },
     [update, confirmSave]
   );
@@ -157,6 +167,7 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
       await downloadLearnerRecord();
     } catch (err) {
       console.error("[settings] Export failed:", err);
+      setActionError("Your export could not be created. Please retry before clearing any data.");
     }
   };
 
@@ -180,10 +191,18 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
     <div className="flex flex-col gap-8">
       {/* ── Profile card ─────────────────────────────────────────────── */}
       <ProfileCard />
+      {(preferenceError || actionError) && (
+        <p role="alert" className="text-sm text-[var(--color-error)]">
+          {preferenceError ?? actionError}
+        </p>
+      )}
 
       {/* ── Appearance ──────────────────────────────────────────────── */}
-      <Section title="Appearance">
-        <SettingRow label="Language" hint="DURA's interface language">
+      <Section title={t.settings.appearance} lang={locale}>
+        <SettingRow
+          label="Language"
+          hint="Navigation and selected Settings headings; lessons remain in English"
+        >
           <LocalePicker />
         </SettingRow>
         <SettingRow label="Theme" hint="Light, dark, or follow your system">
@@ -211,20 +230,36 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
       </Section>
 
       {/* ── Accessibility ──────────────────────────────────────────── */}
-      <Section title="Accessibility" icon={<Accessibility className="h-4 w-4 text-emerald-500" />}>
+      <Section
+        title={t.settings.accessibility}
+        lang={locale}
+        icon={<Accessibility className="h-4 w-4 text-emerald-500" />}
+      >
         <SettingRow label="Reduced motion" hint="Disable animations site-wide">
-          <Toggle value={prefs.reducedMotion} onChange={(v) => save({ reducedMotion: v })} />
+          <Toggle
+            label="Reduced motion"
+            value={prefs.reducedMotion}
+            onChange={(v) => save({ reducedMotion: v })}
+          />
         </SettingRow>
         <SettingRow label="High contrast" hint="Increase text contrast and border visibility">
-          <Toggle value={prefs.highContrast} onChange={(v) => save({ highContrast: v })} />
+          <Toggle
+            label="High contrast"
+            value={prefs.highContrast}
+            onChange={(v) => save({ highContrast: v })}
+          />
         </SettingRow>
         <SettingRow label="Dyslexia-friendly font" hint="Switch to OpenDyslexic for body text">
-          <Toggle value={prefs.dyslexiaFont} onChange={(v) => save({ dyslexiaFont: v })} />
+          <Toggle
+            label="Dyslexia-friendly font"
+            value={prefs.dyslexiaFont}
+            onChange={(v) => save({ dyslexiaFont: v })}
+          />
         </SettingRow>
       </Section>
 
       {/* ── Learning ───────────────────────────────────────────────── */}
-      <Section title="Learning">
+      <Section title={t.settings.learning} lang={locale}>
         <SettingRow label="Default study mode" hint="Choose how lessons are presented">
           <div className="flex flex-col gap-1.5">
             {STUDY_MODES.map((m) => (
@@ -251,6 +286,7 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
         <SettingRow label="Daily goal" hint="Minutes you aim to study each day">
           <input
             type="number"
+            aria-label="Daily goal minutes"
             min={5}
             max={240}
             step={5}
@@ -265,28 +301,41 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
           />
         </SettingRow>
         <SettingRow label="Strict gating" hint="Require mastery gates to advance between modules">
-          <Toggle value={prefs.strictGating} onChange={(v) => save({ strictGating: v })} />
+          <Toggle
+            label="Strict gating"
+            value={prefs.strictGating}
+            onChange={(v) => save({ strictGating: v })}
+          />
         </SettingRow>
         <SettingRow
           label="Show streak counter"
           hint="Turn off if streaks feel pressuring. Missing a day changes nothing about what you've learned."
         >
-          <Toggle value={prefs.showStreak} onChange={(v) => save({ showStreak: v })} />
+          <Toggle
+            label="Show streak counter"
+            value={prefs.showStreak}
+            onChange={(v) => save({ showStreak: v })}
+          />
         </SettingRow>
       </Section>
 
       {/* ── Notifications ──────────────────────────────────────────── */}
-      <Section title="Notifications">
+      <Section title={t.settings.notifications} lang={locale}>
         <NotificationToggle />
         <SettingRow
           label="Sound effects"
-          hint="Enable audio feedback for completions and timers (coming soon)"
+          hint="Play a short chime for earned XP, level-ups and streak celebrations after interacting with the page"
         >
-          <Toggle value={prefs.soundEnabled} onChange={(v) => save({ soundEnabled: v })} />
+          <Toggle
+            label="Sound effects"
+            value={prefs.soundEnabled}
+            onChange={(v) => save({ soundEnabled: v })}
+          />
         </SettingRow>
         <p className="text-xs text-[var(--color-text-muted)]">
-          Notifications work when DURA is open or recently used. They check your local data — streak
-          status, due flashcards, daily goal progress — and remind you gently. No server required.
+          Reminders run while DURA is open; they do not wake a closed app. They check your local
+          data — streak status, due flashcards, daily goal progress — and remind you gently. No
+          server required.
         </p>
       </Section>
 
@@ -318,7 +367,7 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
       <AIFeaturesPanel />
 
       {/* ── Data ───────────────────────────────────────────────────── */}
-      <Section title="Data">
+      <Section title={t.settings.data} lang={locale}>
         <p className="text-xs text-[var(--color-text-secondary)]">
           Your progress is stored locally on this device. Browsers can clear site data under storage
           pressure — save a copy you can restore later, like a game save.
@@ -342,10 +391,12 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
           </button>
         </div>
         <RestoreFromFile />
+        <AdoptGuestRecord />
+        <OfflineDownload />
       </Section>
 
       {/* ── Privacy ────────────────────────────────────────────────── */}
-      <Section title="Privacy">
+      <Section title={t.settings.privacy} lang={locale}>
         <div className="flex items-start gap-3">
           <Shield className="mt-0.5 h-4 w-4 text-emerald-500" />
           <div className="text-xs text-[var(--color-text-secondary)]">
@@ -369,13 +420,8 @@ export function SettingsClient({ version }: SettingsClientProps): React.ReactEle
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          disabled
-          className="mt-3 inline-flex cursor-not-allowed items-center gap-2 rounded-lg border border-[var(--color-border)] px-4 py-2 text-xs font-medium text-[var(--color-text-muted)] opacity-50"
-        >
-          Delete Account — available when signed in
-        </button>
+        <AnalyticsPreference />
+        <DeleteAccount />
       </Section>
 
       {/* ── About ──────────────────────────────────────────────────── */}
@@ -480,16 +526,21 @@ function Section({
   title,
   children,
   icon,
+  lang = "en",
 }: {
   title: string;
   children: React.ReactNode;
   icon?: React.ReactNode;
+  lang?: string;
 }): React.ReactElement {
   return (
     <section className="dura-card p-6">
       <div className="mb-4 flex items-center gap-2">
         {icon}
-        <h2 className="text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase">
+        <h2
+          lang={lang}
+          className="text-sm font-semibold tracking-widest text-[var(--color-text-muted)] uppercase"
+        >
           {title}
         </h2>
       </div>
@@ -513,13 +564,14 @@ function SettingRow({
         <p className="text-sm font-medium text-[var(--color-text-primary)]">{label}</p>
         {hint && <p className="text-xs text-[var(--color-text-muted)]">{hint}</p>}
       </div>
-      <div className="shrink-0">{children}</div>
+      <div className="max-w-full min-w-0 sm:max-w-[65%]">{children}</div>
     </div>
   );
 }
 
 function NotificationToggle(): React.ReactElement {
   const [enabled, setEnabled] = useState(false);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
   const [supported, setSupported] = useState(false);
 
   useEffect(() => {
@@ -529,19 +581,29 @@ function NotificationToggle(): React.ReactElement {
   }, []);
 
   const handleToggle = async (): Promise<void> => {
-    if (enabled) {
-      disableNotifications();
-      setEnabled(false);
-    } else {
-      const granted = await requestPermission();
-      setEnabled(granted);
+    try {
+      setNotificationError(null);
+      if (enabled) {
+        disableNotifications();
+        setEnabled(false);
+      } else {
+        const granted = await requestPermission();
+        setEnabled(granted);
+        if (!granted)
+          setNotificationError(
+            "Reminders were not enabled. Check browser permission and site storage settings."
+          );
+      }
+    } catch (error) {
+      console.error("[settings] Notification permission failed", error);
+      setNotificationError("Notification permission could not be updated. Please retry.");
     }
   };
 
   if (!supported) {
     return (
       <SettingRow label="Push notifications" hint="Not supported in this browser">
-        <Toggle value={false} onChange={() => {}} />
+        <Toggle label="Notifications unavailable" value={false} onChange={() => {}} />
       </SettingRow>
     );
   }
@@ -552,18 +614,20 @@ function NotificationToggle(): React.ReactElement {
       hint={
         enabled
           ? "Streak reminders, due flashcards, and daily goal nudges"
-          : "Get gentle reminders about streaks, flashcards, and goals"
+          : (notificationError ?? "Get gentle reminders about streaks, flashcards, and goals")
       }
     >
-      <Toggle value={enabled} onChange={() => void handleToggle()} />
+      <Toggle label="Study reminders" value={enabled} onChange={() => void handleToggle()} />
     </SettingRow>
   );
 }
 
 function Toggle({
+  label,
   value,
   onChange,
 }: {
+  label: string;
   value: boolean;
   onChange: (next: boolean) => void;
 }): React.ReactElement {
@@ -571,6 +635,7 @@ function Toggle({
     <button
       type="button"
       role="switch"
+      aria-label={label}
       aria-checked={value}
       onClick={() => onChange(!value)}
       className={cn(

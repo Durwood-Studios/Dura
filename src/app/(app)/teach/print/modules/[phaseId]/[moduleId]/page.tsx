@@ -1,3 +1,10 @@
+import {
+  PrintQuiz,
+  PrintFillBlank,
+  PrintParsons,
+  PrintWritten,
+  PrintSandbox,
+} from "@/components/teacher/PrintActivities";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { evaluate } from "@mdx-js/mdx";
@@ -93,5 +100,16 @@ async function LessonMDX({ body }: { body: string }): Promise<React.ReactElement
   }
   if (!compiled) return <p className="text-sm text-red-500">Failed to render lesson content.</p>;
   const MDXContent = compiled.default;
-  return <MDXContent components={mdxComponents} />;
+  return (
+    <MDXContent
+      components={{
+        ...mdxComponents,
+        Quiz: PrintQuiz,
+        FillBlank: PrintFillBlank,
+        ParsonsPanel: PrintParsons,
+        WrittenExercise: PrintWritten,
+        SandboxExercise: PrintSandbox,
+      }}
+    />
+  );
 }

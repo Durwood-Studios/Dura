@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAllData, exportAllData } from "@/lib/clearAllData";
+import { selectStorageOwner } from "@/lib/storage/owner";
 
 const mocks = vi.hoisted(() => ({
   clear: vi.fn(),
@@ -127,6 +128,17 @@ describe("complete local reset", () => {
     expect(dump.feedback).toEqual([]);
     expect(dump["dojo-sessions"]).toEqual([]);
     expect(dump["future-store"]).toEqual([]);
+  });
+  it("does not add another learner's legacy placement answers to a debug export", async (): Promise<void> => {
+    localStorage.setItem("dura-skill-assessment", JSON.stringify({ answers: ["private"] }));
+    selectStorageOwner("new-account");
+    try {
+      const dump = JSON.parse(await exportAllData());
+      expect(dump).not.toHaveProperty("skill-assessment-legacy");
+      expect(localStorage.getItem("dura-skill-assessment")).toContain("private");
+    } finally {
+      selectStorageOwner(null);
+    }
   });
   it("finishes erasing caches when service-worker unregistration never settles", async (): Promise<void> => {
     vi.useFakeTimers();

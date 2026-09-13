@@ -46,7 +46,7 @@ export default function HowItWorksPage(): React.ReactElement {
           number="3"
           icon={<ShieldCheck className="h-5 w-5 text-emerald-600" aria-hidden />}
           title="Verify"
-          body="80% on the module assessment to advance. A timed phase test at the end. Pass and you earn a verifiable certificate with a public URL."
+          body="Practice module checks and phase tests. Optional strict gating requires a passing module score. Local certificates record your results; a separate online assessment can issue a server-scored receipt."
         />
       </section>
 
@@ -60,14 +60,17 @@ export default function HowItWorksPage(): React.ReactElement {
           <em>do</em>.
         </p>
         <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          After every module, you take a <strong>mastery gate</strong>: 10–15 randomized questions
-          drawn from that module&apos;s pool. Score 80% or higher and the next module unlocks. Fail
-          and the assessment cools down for 24 hours, then you try again with different questions.
+          Module assessments sample the available question bank. Strict gating is optional in
+          Settings; when enabled, the configured passing score unlocks the next module. Check the
+          assessment screen for its question count and retry timing. You can keep reading freely
+          with strict gating off.
         </p>
         <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          At the end of each phase, a longer verification test confirms your grasp of the whole
-          phase. Passing generates a tamper-resistant certificate with a public verification URL you
-          can share on LinkedIn, in a resume, or with a hiring manager.
+          Phase tests support self-review and produce local learner certificates. Separately, the
+          online server-scored assessment can issue an integrity-protected receipt of submitted
+          answers and a self-reported name. These are unproctored learning records, not identity
+          verification, accreditation, or proof of workplace competence. Public lookup of a synced
+          local certificate does not make its score server-verified.
         </p>
       </section>
 
@@ -77,13 +80,14 @@ export default function HowItWorksPage(): React.ReactElement {
           Remembering, not cramming
         </h2>
         <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          Every vocabulary term and missed quiz question becomes a flashcard. DURA uses{" "}
-          <strong>FSRS-5</strong>, the same spaced-repetition algorithm Anki power users swear by,
-          to decide when to show each card next.
+          Use Add to cards on vocabulary terms and supported quiz feedback to create flashcards.
+          DURA uses <strong>FSRS-5</strong>, the same spaced-repetition algorithm Anki power users
+          swear by, to decide when to show each card next.
         </p>
         <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          The goal is 90% retention. You see a card right before you would have forgotten it — not a
-          day later, not a week earlier. The algorithm learns your rhythm.
+          The goal is 90% retention. Review intervals estimate when another practice session may
+          help; they cannot predict exactly when you will forget. Your ratings adjust future
+          scheduling.
         </p>
       </section>
 
@@ -128,12 +132,14 @@ export default function HowItWorksPage(): React.ReactElement {
           Yours on every device, online or not
         </h2>
         <p className="mb-4 leading-[1.9] text-[var(--color-text-primary)]">
-          DURA is a Progressive Web App. First visit loads the shell; after that it runs offline.
-          Your progress, flashcards, goals, and certificates live in your browser&apos;s IndexedDB —
-          never on a remote server you don&apos;t control.
+          DURA is a Progressive Web App. Previously cached lessons and local learner records work
+          offline; visit content and initialize supported local runtimes online before
+          disconnecting. Web previews, AI, account sync, and server-scored receipts require a
+          connection. Optional account sync sends learning records to the configured Supabase
+          deployment.
         </p>
         <p className="leading-[1.9] text-[var(--color-text-primary)]">
-          You can export every byte of it as JSON from the settings page. That&apos;s not a GDPR
+          You can export a portable learner-record archive from Settings. That&apos;s not a GDPR
           afterthought — it&apos;s the point. Your learning is yours.
         </p>
       </section>

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
+import { Popover } from "@base-ui/react/popover";
 import { ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { decodeCode, type StandardsBadge } from "@/lib/standards";
@@ -20,28 +21,10 @@ interface StandardsBadgesProps {
  */
 export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactElement | null {
   const [openId, setOpenId] = useState<string | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!openId) return;
-    const onDocClick = (e: MouseEvent): void => {
-      if (!containerRef.current?.contains(e.target as Node)) setOpenId(null);
-    };
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") setOpenId(null);
-    };
-    document.addEventListener("mousedown", onDocClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [openId]);
-
   if (badges.length === 0) return null;
 
   return (
-    <div ref={containerRef} className="mb-4 flex flex-wrap items-center gap-1.5">
+    <div className="mb-4 flex flex-wrap items-center gap-1.5">
       <span className="mr-1 text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
         Aligned to
       </span>
@@ -49,10 +32,13 @@ export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactEl
         const isOpen = openId === body.id;
         const preview = codes[0] + (codes.length > 1 ? ` +${codes.length - 1}` : "");
         return (
-          <span key={body.id} className="relative inline-block">
-            <button
+          <Popover.Root
+            key={body.id}
+            open={isOpen}
+            onOpenChange={(open): void => setOpenId(open ? body.id : null)}
+          >
+            <Popover.Trigger
               type="button"
-              onClick={() => setOpenId(isOpen ? null : body.id)}
               aria-expanded={isOpen}
               aria-label={`${body.full}: ${codes.join(", ")}`}
               className={cn(
@@ -64,52 +50,63 @@ export function StandardsBadges({ badges }: StandardsBadgesProps): React.ReactEl
             >
               <span className="font-semibold">{body.short}</span>
               <span className="font-mono text-xs text-[var(--color-text-muted)]">{preview}</span>
-            </button>
-            {isOpen && (
-              <span
-                role="dialog"
-                aria-label={body.full}
-                className="absolute top-full left-0 z-30 mt-2 block w-80 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4 text-left shadow-xl"
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Positioner
+                side="bottom"
+                align="start"
+                sideOffset={8}
+                positionMethod="fixed"
+                sticky
+                collisionPadding={12}
+                collisionAvoidance={{ side: "flip", align: "shift" }}
+                className="z-50"
               >
-                <strong className="block text-sm text-[var(--color-text-primary)]">
-                  {body.full}
-                </strong>
-                <span className="mt-1 block text-xs leading-relaxed text-[var(--color-text-secondary)]">
-                  {body.description}
-                </span>
-                <span className="mt-3 block text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
-                  This lesson covers
-                </span>
-                <span className="mt-1 flex flex-col gap-1">
-                  {codes.map((c) => (
-                    <span
-                      key={c}
-                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-2 py-1 text-xs text-[var(--color-text-primary)]"
+                <Popover.Popup
+                  role="dialog"
+                  aria-label={body.full}
+                  className="block max-h-[min(var(--available-height),calc(100dvh-24px))] w-80 max-w-[min(var(--available-width),calc(100vw-24px))] overflow-y-auto overscroll-contain rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4 text-left break-words shadow-xl focus:outline-none"
+                >
+                  <strong className="block text-sm text-[var(--color-text-primary)]">
+                    {body.full}
+                  </strong>
+                  <span className="mt-1 block text-xs leading-relaxed text-[var(--color-text-secondary)]">
+                    {body.description}
+                  </span>
+                  <span className="mt-3 block text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
+                    This lesson covers
+                  </span>
+                  <span className="mt-1 flex flex-col gap-1">
+                    {codes.map((c) => (
+                      <span
+                        key={c}
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-2 py-1 text-xs text-[var(--color-text-primary)]"
+                      >
+                        <span className="font-mono">{decodeCode(body.id, c)}</span>
+                      </span>
+                    ))}
+                  </span>
+                  <span className="mt-3 flex flex-wrap items-center gap-3">
+                    <a
+                      href={`/standards#${body.id}`}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] hover:underline"
                     >
-                      <span className="font-mono">{decodeCode(body.id, c)}</span>
-                    </span>
-                  ))}
-                </span>
-                <span className="mt-3 flex flex-wrap items-center gap-3">
-                  <a
-                    href={`/standards#${body.id}`}
-                    className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] hover:underline"
-                  >
-                    All DURA coverage →
-                  </a>
-                  <a
-                    href={body.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] hover:underline"
-                  >
-                    Official spec
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
-                </span>
-              </span>
-            )}
-          </span>
+                      All DURA coverage →
+                    </a>
+                    <a
+                      href={body.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-accent)] hover:underline"
+                    >
+                      Official spec
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </span>
+                </Popover.Popup>
+              </Popover.Positioner>
+            </Popover.Portal>
+          </Popover.Root>
         );
       })}
     </div>

@@ -1,3 +1,4 @@
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
 import { createClient } from "@/lib/supabase/client";
 import type { DojoSession } from "@/types/dojo";
 
@@ -36,12 +37,7 @@ export async function syncDojoSessions(userId: string, items: DojoSession[]): Pr
 /** Fetch all dojo sessions for a user from Supabase. */
 export async function fetchDojoSessions(userId: string): Promise<DojoSession[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase.from("dojo_sessions").select("*").eq("user_id", userId);
-    if (error) {
-      console.error("[fetchDojoSessions] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("dojo_sessions", userId);
     return (data ?? []).map((row) => {
       const session: DojoSession = {
         id: row.id as string,

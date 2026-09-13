@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft, ArrowUpRight } from "lucide-react";
+import { DISCOVERY_ACTIVITIES } from "@/lib/discovery/registry";
 import { buildMetadata } from "@/lib/og";
 
 interface Activity {
@@ -80,7 +81,7 @@ const ROOMS: Record<string, Room> = {
         description:
           "Scramble a message with a substitution cipher. Learn why the rules of encryption are mathematical — and why this specific cipher hasn't been considered secure since the 9th century.",
         concept: "Substitution ciphers · Cryptography 101",
-        teaches: { label: "Phase 7 · Security Engineering", href: "/paths/7" },
+        teaches: { label: "Phase 8 · Security Practice", href: "/paths/8/8-4" },
       },
       {
         slug: "hash-avalanche",
@@ -88,7 +89,7 @@ const ROOMS: Record<string, Room> = {
         description:
           "Paste a message and see its SHA-256 bit grid. Change one character — watch about half the 256 output bits flip. The avalanche property is what makes cryptographic hashes safe for signatures, passwords, and blockchain integrity.",
         concept: "Cryptographic hashing · Avalanche property",
-        teaches: { label: "Phase 7 · Security Engineering", href: "/paths/7" },
+        teaches: { label: "Phase 8 · Security Practice", href: "/paths/8/8-4" },
       },
     ],
   },
@@ -438,48 +439,55 @@ export default async function DiscoverRoomPage({
 
       {/* Activity grid */}
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-        {room.activities.map((activity) => (
-          <div
-            key={activity.slug}
-            className="group flex min-h-[200px] flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] transition-shadow duration-200 hover:shadow-lg hover:shadow-black/20"
-          >
-            {/* Colored top border */}
-            <div className="h-1.5 w-full shrink-0" style={{ backgroundColor: room.color }} />
-
-            <div className="flex flex-1 flex-col p-5">
-              {/* Concept badge */}
-              <span
-                className="self-start rounded-full px-2.5 py-0.5 text-xs font-medium tracking-wide uppercase"
-                style={{
-                  backgroundColor: `${room.color}1f`,
-                  color: room.color,
-                }}
+        {DISCOVERY_ACTIVITIES.filter((activity) => activity.roomSlug === slug).map(
+          ({ slug: activitySlug }) => {
+            const activity = room.activities.find((entry) => entry.slug === activitySlug);
+            if (!activity)
+              throw new Error(`Discovery activity ${activitySlug} has no room description.`);
+            return (
+              <div
+                key={activity.slug}
+                className="group flex min-h-[200px] flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] transition-shadow duration-200 hover:shadow-lg hover:shadow-black/20"
               >
-                {activity.concept}
-              </span>
+                {/* Colored top border */}
+                <div className="h-1.5 w-full shrink-0" style={{ backgroundColor: room.color }} />
 
-              {/* Title + description */}
-              <Link
-                href={`/discover/${slug}/${activity.slug}`}
-                className="mt-3 text-lg font-semibold text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
-              >
-                {activity.name}
-              </Link>
-              <p className="mt-1.5 flex-1 text-sm leading-relaxed text-[var(--color-text-secondary)]">
-                {activity.description}
-              </p>
+                <div className="flex flex-1 flex-col p-5">
+                  {/* Concept badge */}
+                  <span
+                    className="self-start rounded-full px-2.5 py-0.5 text-xs font-medium tracking-wide uppercase"
+                    style={{
+                      backgroundColor: `${room.color}1f`,
+                      color: room.color,
+                    }}
+                  >
+                    {activity.concept}
+                  </span>
 
-              {/* Teaches link */}
-              <Link
-                href={activity.teaches.href}
-                className="mt-4 inline-flex items-center gap-1 self-start text-xs font-medium text-[var(--color-text-muted)] transition hover:text-[var(--color-accent)]"
-              >
-                Teaches: {activity.teaches.label}
-                <ArrowUpRight size={12} />
-              </Link>
-            </div>
-          </div>
-        ))}
+                  {/* Title + description */}
+                  <Link
+                    href={`/discover/${slug}/${activity.slug}`}
+                    className="mt-3 text-lg font-semibold text-[var(--color-text-primary)] transition hover:text-[var(--color-accent)]"
+                  >
+                    {activity.name}
+                  </Link>
+                  <p className="mt-1.5 flex-1 text-sm leading-relaxed text-[var(--color-text-secondary)]">
+                    {activity.description}
+                  </p>
+
+                  {/* Teaches link */}
+                  <Link
+                    href={activity.teaches.href}
+                    className="mt-4 inline-flex items-center gap-1 self-start text-xs font-medium text-[var(--color-text-muted)] transition hover:text-[var(--color-accent)]"
+                  >
+                    Teaches: {activity.teaches.label}
+                    <ArrowUpRight size={12} />
+                  </Link>
+                </div>
+              </div>
+            );
+          }
+        )}
       </div>
     </main>
   );

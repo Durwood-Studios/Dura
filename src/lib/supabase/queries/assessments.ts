@@ -1,3 +1,4 @@
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
 import { createClient } from "@/lib/supabase/client";
 import type { AssessmentResult } from "@/types/assessment";
 
@@ -43,15 +44,7 @@ export async function syncAssessmentResults(
 /** Fetch all assessment results for a user from Supabase. */
 export async function fetchAssessmentResults(userId: string): Promise<AssessmentResult[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase
-      .from("assessment_results")
-      .select("*")
-      .eq("user_id", userId);
-    if (error) {
-      console.error("[fetchAssessmentResults] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("assessment_results", userId);
     return (data ?? []).map((row) => ({
       id: row.id as string,
       type: row.type as AssessmentResult["type"],

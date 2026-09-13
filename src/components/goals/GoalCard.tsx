@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useCurrentTime } from "@/hooks/useCurrentTime";
 import { Trash2, Check } from "lucide-react";
 import { useGoalsStore } from "@/stores/goals";
@@ -12,6 +13,16 @@ interface GoalCardProps {
 }
 
 export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement {
+  const [error, setError] = useState<string | null>(null);
+  const run = async (action: () => Promise<void>): Promise<void> => {
+    try {
+      await action();
+      setError(null);
+    } catch (failure) {
+      console.error("[goals] Change failed", failure);
+      setError("Your goal could not be updated. Please retry.");
+    }
+  };
   const remove = useGoalsStore((s) => s.remove);
   const complete = useGoalsStore((s) => s.complete);
   const achieved = goal.achievedAt !== null;
@@ -41,7 +52,12 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
   const dashOffset = circumference * (1 - ratio);
 
   return (
-    <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 shadow-sm">
+    <article className="min-w-0 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5 break-words shadow-sm">
+      {error && (
+        <p role="alert" className="mb-2 text-sm text-[var(--color-error)]">
+          {error}
+        </p>
+      )}
       <header className="mb-3 flex items-start justify-between gap-3">
         <div>
           <p className="font-mono text-xs tracking-widest text-[var(--color-text-muted)] uppercase">
@@ -51,7 +67,7 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
         </div>
         <button
           type="button"
-          onClick={() => void remove(goal.id)}
+          onClick={() => void run(() => remove(goal.id))}
           aria-label="Delete goal"
           className="rounded-md p-1.5 text-[var(--color-text-muted)] hover:bg-rose-50 hover:text-rose-600"
         >
@@ -90,7 +106,9 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
         </div>
         <div className="flex-1 text-sm">
           <p className="text-[var(--color-text-primary)]">
-            <span className="font-mono text-lg font-semibold">{progress}</span>{" "}
+            <span className="font-mono text-lg font-semibold">
+              {Number.isInteger(progress) ? progress : progress.toFixed(2)}
+            </span>{" "}
             <span className="text-[var(--color-text-muted)]">
               / {goal.target} {goal.unit}
             </span>
@@ -109,7 +127,7 @@ export function GoalCard({ goal, progress }: GoalCardProps): React.ReactElement 
           {!achieved && ratio >= 1 && (
             <button
               type="button"
-              onClick={() => void complete(goal.id)}
+              onClick={() => void run(() => complete(goal.id))}
               className="mt-2 inline-flex items-center gap-1 rounded-md bg-emerald-500 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-600"
             >
               Mark complete

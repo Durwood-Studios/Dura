@@ -24,6 +24,7 @@ export async function putTutorialProgress(progress: TutorialProgress): Promise<v
     triggerShadowWrite();
   } catch (error) {
     console.error("[tutorial-progress] putTutorialProgress failed", error);
+    throw error;
   }
 }
 

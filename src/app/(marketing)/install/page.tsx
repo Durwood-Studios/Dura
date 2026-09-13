@@ -21,8 +21,8 @@ export default function InstallPage(): React.ReactElement {
         </h1>
         <p className="mt-4 text-lg leading-relaxed text-[var(--color-text-secondary)]">
           DURA is a Progressive Web App. Install it directly from your browser — no app store, no
-          download manager, no account required. It works offline, stays up to date automatically,
-          and your data never leaves your device.
+          download manager, no account required. Cached content works offline, updates are offered
+          when online, and learning records stay local unless you use optional connected features.
         </p>
       </header>
 
@@ -43,8 +43,10 @@ export default function InstallPage(): React.ReactElement {
           <li className="flex items-start gap-3">
             <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
             <span>
-              <strong className="text-[var(--color-text-primary)]">Offline access.</strong> Lessons,
-              flashcards, sandbox, and your progress — all available without internet.
+              <strong className="text-[var(--color-text-primary)]">Offline access.</strong>{" "}
+              Previously cached lessons, local flashcards, and progress remain available offline.
+              Visit lessons and initialize supported local runtimes while online first. Web
+              previews, AI, sync, and uncached content require a connection.
             </span>
           </li>
           <li className="flex items-start gap-3">
@@ -57,8 +59,9 @@ export default function InstallPage(): React.ReactElement {
           <li className="flex items-start gap-3">
             <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
             <span>
-              <strong className="text-[var(--color-text-primary)]">Auto-updates.</strong> Always the
-              latest version. No manual updates, no app store approval delays.
+              <strong className="text-[var(--color-text-primary)]">Auto-updates.</strong> New
+              versions download while online. When an update is ready, save your work and use the
+              restart prompt. Offline devices keep the cached version.
             </span>
           </li>
           <li className="flex items-start gap-3">

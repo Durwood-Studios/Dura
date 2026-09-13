@@ -1,10 +1,14 @@
 "use client";
 
+import { ExternalSandboxConsent } from "@/components/sandbox/ExternalSandboxConsent";
+import type { ActivityProps } from "@/hooks/useActivityEvidence";
+import { WrittenExercise } from "@/components/lesson/WrittenExercise";
+
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import { SandboxExerciseSkeleton } from "@/components/lesson/SandboxExerciseSkeleton";
 
-interface SandboxExerciseProps {
+interface SandboxExerciseProps extends ActivityProps {
   language?: "javascript" | "typescript" | "react" | "html";
   instructions: string;
   initialCode: string;
@@ -70,6 +74,8 @@ function SandboxFallback({
 }
 
 export function SandboxExercise({
+  activityId,
+  activityLessonId,
   language = "javascript",
   instructions,
   initialCode,
@@ -81,14 +87,33 @@ export function SandboxExercise({
   );
 
   return (
-    <SandboxErrorBoundary fallback={fallback}>
-      <SandboxExerciseInner
-        language={language}
-        instructions={instructions}
-        initialCode={initialCode}
-        solution={solution}
-        testCases={testCases}
-      />
-    </SandboxErrorBoundary>
+    <>
+      <SandboxErrorBoundary fallback={fallback}>
+        <ExternalSandboxConsent>
+          <SandboxExerciseInner
+            activityId={activityId}
+            activityLessonId={activityLessonId}
+            language={language}
+            instructions={instructions}
+            initialCode={initialCode}
+            solution={solution}
+            testCases={testCases}
+          />
+        </ExternalSandboxConsent>
+      </SandboxErrorBoundary>
+      {activityId && (
+        <WrittenExercise
+          activityId={activityId}
+          activityLessonId={activityLessonId}
+          title="Record a code review or offline solution"
+          instructions={instructions}
+          rubric={[
+            "Explain how your solution meets the exercise instructions",
+            "Record the checks you performed, their results, and any untested assumptions",
+          ]}
+          modelAnswer={solution}
+        />
+      )}
+    </>
   );
 }

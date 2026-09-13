@@ -1,3 +1,5 @@
+import { ownerDatabaseName, getStorageOwner } from "@/lib/storage/owner";
+import { resolveEncryptionKey } from "@/lib/idb/encryption-key";
 /**
  * IDB encryption wrapper (P5-A.2 + P5-A.3) — at-rest encryption for the
  * four sensitive stores: flashcards, reviewLogs, progress, moduleProgress.
@@ -38,14 +40,8 @@ interface FlashCardEnvelope {
 async function hydrate(stored: FlashCard | undefined): Promise<FlashCard | undefined> {
   if (!stored) return stored;
   if (!stored._e) return stored;
-  if (!isEncryptedRecord(stored._e)) {
-    // Defensive: an `_e` field that doesn't carry the magic prefix is
-    // corrupt or wasn't produced by us. Best-effort: drop the field
-    // and return whatever plaintext fields we have.
-    const rest = { ...stored };
-    delete rest._e;
-    return rest as FlashCard;
-  }
+  if (!isEncryptedRecord(stored._e))
+    throw new Error("Encrypted flashcard data is damaged; restore a valid backup.");
   const resolution = peekActiveKey();
   if (!resolution || !resolution.key) {
     // Encrypted record but no key in scope — surface a clear error so
@@ -55,7 +51,7 @@ async function hydrate(stored: FlashCard | undefined): Promise<FlashCard | undef
         "AuthProvider must call setActiveKey() before reads."
     );
   }
-  const plaintext = (await decryptRecord(stored._e, resolution.key)) as FlashCardEnvelope;
+  const plaintext = (await decryptOwnedRecord(stored._e, resolution.key)) as FlashCardEnvelope;
   const rest = { ...stored };
   delete rest._e;
   return { ...rest, front: plaintext.front, back: plaintext.back } as FlashCard;
@@ -122,18 +118,18 @@ async function hydrateGeneric<T extends { _e?: ArrayBuffer }>(
 ): Promise<T | undefined> {
   if (!stored) return stored;
   if (!stored._e) return stored;
-  if (!isEncryptedRecord(stored._e)) {
-    const rest = { ...stored };
-    delete (rest as { _e?: ArrayBuffer })._e;
-    return rest;
-  }
+  if (!isEncryptedRecord(stored._e))
+    throw new Error(`Encrypted ${storeLabel} data is damaged; restore a valid backup.`);
   const resolution = peekActiveKey();
   if (!resolution || !resolution.key) {
     throw new Error(
       `[encrypted-store] Encrypted ${storeLabel} record found but no active encryption key.`
     );
   }
-  const plaintext = (await decryptRecord(stored._e, resolution.key)) as Record<string, unknown>;
+  const plaintext = (await decryptOwnedRecord(stored._e, resolution.key)) as Record<
+    string,
+    unknown
+  >;
   const rest = { ...stored };
   delete (rest as { _e?: ArrayBuffer })._e;
   return { ...rest, ...plaintext } as T;
@@ -275,4 +271,103 @@ export async function getAllEncryptedModuleProgress(db: DuraDB): Promise<ModuleP
   return Promise.all(
     stored.map((m) => hydrateGeneric(m, "moduleProgress") as Promise<ModuleProgress>)
   );
+}
+
+/** Seal a complete import before starting its single IDB transaction. */
+export async function sealPortableRows(rows: {
+  flashcards: FlashCard[];
+  reviewLogs: ReviewLog[];
+  progress: LessonProgress[];
+  moduleProgress: ModuleProgress[];
+}): Promise<{
+  flashcards: FlashCard[];
+  reviewLogs: ReviewLog[];
+  progress: LessonProgress[];
+  moduleProgress: ModuleProgress[];
+}> {
+  const [flashcards, reviewLogs, progress, moduleProgress] = await Promise.all([
+    Promise.all(rows.flashcards.map(dehydrate)),
+    Promise.all(
+      rows.reviewLogs.map((row): Promise<ReviewLog> => dehydrateGeneric(row, REVIEW_LOG_PLAINTEXT))
+    ),
+    Promise.all(
+      rows.progress.map((row): Promise<LessonProgress> => dehydrateGeneric(row, PROGRESS_PLAINTEXT))
+    ),
+    Promise.all(
+      rows.moduleProgress.map(
+        (row): Promise<ModuleProgress> => dehydrateGeneric(row, MODULE_PROGRESS_PLAINTEXT)
+      )
+    ),
+  ]);
+  return { flashcards, reviewLogs, progress, moduleProgress };
+}
+
+/** Old pre-namespace records may retain their original guest key inside the legacy owner's DB. */
+async function decryptOwnedRecord(ciphertext: ArrayBuffer, key: CryptoKey): Promise<unknown> {
+  try {
+    return await decryptRecord(ciphertext, key);
+  } catch (error) {
+    if (
+      ownerDatabaseName() !== "dura" ||
+      !getStorageOwner().startsWith("account:") ||
+      peekActiveKey()?.tier !== "auth"
+    )
+      throw error;
+    const original = await resolveEncryptionKey(null);
+    if (!original.key) throw error;
+    return decryptRecord(ciphertext, original.key);
+  }
+}
+
+/** Merge a remote progress row without overwriting work changed during decryption/encryption. */
+export async function mergeRemoteProgress(
+  db: DuraDB,
+  remote: LessonProgress,
+  merge: (local: LessonProgress, remote: LessonProgress) => LessonProgress
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const captured = await db.get("progress", remote.lessonId);
+    const local = await hydrateGeneric(captured, "lessonProgress");
+    const sealed = await dehydrateGeneric(
+      local ? merge(local, remote) : remote,
+      PROGRESS_PLAINTEXT
+    );
+    const tx = db.transaction("progress", "readwrite");
+    const current = await tx.store.get(remote.lessonId);
+    if (!sameEnvelope(current, captured)) {
+      await tx.done;
+      continue;
+    }
+    await tx.store.put(sealed);
+    await tx.done;
+    return;
+  }
+  // A busy learner wins; a later periodic pull can retry the remote merge.
+}
+
+/** Merge scheduling atomically with respect to a concurrent local review. */
+export async function mergeRemoteFlashcard(
+  db: DuraDB,
+  remote: FlashCard,
+  merge: (local: FlashCard, remote: FlashCard) => FlashCard
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const captured = await db.get("flashcards", remote.id);
+    const local = await hydrate(captured);
+    const sealed = await dehydrate(local ? merge(local, remote) : remote);
+    const tx = db.transaction("flashcards", "readwrite");
+    const current = await tx.store.get(remote.id);
+    if (!sameEnvelope(current, captured)) {
+      await tx.done;
+      continue;
+    }
+    await tx.store.put(sealed);
+    await tx.done;
+    return;
+  }
+}
+function sameEnvelope(a: unknown, b: unknown): boolean {
+  const encode = (_key: string, value: unknown): unknown =>
+    value instanceof ArrayBuffer ? Array.from(new Uint8Array(value)) : value;
+  return JSON.stringify(a, encode) === JSON.stringify(b, encode);
 }

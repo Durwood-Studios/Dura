@@ -9,13 +9,18 @@ interface PreferencesState {
    *  a late-completing hydrate() from overwriting an explicit user change. */
   _pendingUpdate: boolean;
   hydrate: () => Promise<void>;
-  update: (patch: Partial<Preferences>) => Promise<void>;
+  update: (patch: Partial<Preferences>) => Promise<boolean>;
+  error: string | null;
 }
+
+let pendingWrites = 0;
+let writeQueue: Promise<unknown> = Promise.resolve();
 
 export const usePreferencesStore = create<PreferencesState>((set) => ({
   prefs: DEFAULT_PREFERENCES,
   hydrated: false,
   _pendingUpdate: false,
+  error: null,
 
   hydrate: async () => {
     try {
@@ -32,15 +37,21 @@ export const usePreferencesStore = create<PreferencesState>((set) => ({
   },
 
   update: async (patch) => {
-    // Mark update in-flight BEFORE the optimistic set so hydrate()
-    // racing on another tick cannot overwrite it
-    set((s) => ({ prefs: { ...s.prefs, ...patch }, _pendingUpdate: true }));
+    pendingWrites += 1;
+    set({ _pendingUpdate: true, error: null });
+    const write = writeQueue.then(() => patchPreferencesDb(patch));
+    writeQueue = write.catch(() => undefined);
     try {
-      await patchPreferencesDb(patch);
+      const persisted = await write;
+      set({ prefs: persisted });
+      return true;
     } catch (error) {
       console.error("[preferences] Failed to persist update:", error);
+      set({ error: "Your preference could not be saved. Reload and try again." });
+      return false;
     } finally {
-      set({ _pendingUpdate: false });
+      pendingWrites -= 1;
+      set({ _pendingUpdate: pendingWrites > 0 });
     }
   },
 }));

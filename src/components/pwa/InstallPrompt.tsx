@@ -190,7 +190,7 @@ export function InstallPrompt(): React.ReactElement | null {
   const PlatformIcon = platform === "ios" || platform === "android" ? Smartphone : Monitor;
 
   return (
-    <div className="fixed right-4 bottom-20 left-4 z-40 mx-auto max-w-sm lg:right-6 lg:bottom-6 lg:left-auto">
+    <div className="fixed right-4 bottom-20 left-4 z-40 mx-auto max-h-[calc(100dvh-6rem)] max-w-sm overflow-y-auto overscroll-contain lg:right-6 lg:bottom-6 lg:left-auto lg:max-h-[calc(100dvh-3rem)]">
       <div className="dura-card overflow-hidden p-5 shadow-lg">
         <button
           type="button"
@@ -205,7 +205,7 @@ export function InstallPrompt(): React.ReactElement | null {
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
             <PlatformIcon className="h-5 w-5" />
           </div>
-          <div className="flex-1 pr-4">
+          <div className="min-w-0 flex-1 pr-4">
             <p className="text-sm font-semibold text-[var(--color-text-primary)]">
               {instructions.title}
             </p>
@@ -230,7 +230,8 @@ export function InstallPrompt(): React.ReactElement | null {
             )}
 
             <p className="mt-3 text-xs text-[var(--color-text-muted)]">
-              Works offline. Your data stays on your device.
+              Download lessons in Settings for offline study. Optional account sync is controlled in
+              Settings.
             </p>
           </div>
         </div>

@@ -1,3 +1,4 @@
+import { deleteLearnerRecord } from "@/lib/db/deletion";
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { SandboxSave } from "@/types/sandbox";
@@ -30,15 +31,16 @@ export async function putSave(save: SandboxSave): Promise<void> {
     triggerShadowWrite();
   } catch (error) {
     console.error("[sandbox] putSave failed", error);
+    throw error;
   }
 }
 
 export async function deleteSave(id: string): Promise<void> {
   try {
-    const db = await getDB();
-    await db.delete("sandbox-saves", id);
+    await deleteLearnerRecord("sandbox_saves", id);
     triggerShadowWrite();
   } catch (error) {
     console.error("[sandbox] deleteSave failed", error);
+    throw error;
   }
 }

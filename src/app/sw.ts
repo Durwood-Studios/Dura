@@ -2,6 +2,7 @@
 import { defaultCache } from "@serwist/next/worker";
 import type { PrecacheEntry, SerwistGlobalConfig } from "serwist";
 import { Serwist } from "serwist";
+import { cacheVisitedResponse } from "@/lib/offline/visited-response";
 
 declare global {
   interface WorkerGlobalScope extends SerwistGlobalConfig {
@@ -23,7 +24,46 @@ const serwist = new Serwist({
   skipWaiting: false,
   clientsClaim: false,
   navigationPreload: true,
-  runtimeCaching: defaultCache,
+  runtimeCaching: [
+    {
+      matcher: ({ request, url }) =>
+        url.origin === self.location.origin &&
+        ((request.mode === "navigate" &&
+          (url.pathname.startsWith("/paths") ||
+            url.pathname.startsWith("/judgment") ||
+            url.pathname.startsWith("/labs"))) ||
+          url.pathname.startsWith("/_next/static/") ||
+          /^\/labs\/[\w-]+\.zip$/.test(url.pathname)),
+      handler: async ({ request, event }) => {
+        try {
+          const preload =
+            "preloadResponse" in event
+              ? ((await (event as FetchEvent).preloadResponse) as Response | undefined)
+              : undefined;
+          const response = preload ?? (await fetch(request));
+          if (response.ok) return cacheVisitedResponse(request, response, event);
+          throw new Error("Network response unavailable");
+        } catch (error) {
+          const index = await caches.open("dura-offline-index");
+          const pointer = await index.match("/__dura_offline_pack__");
+          if (pointer) {
+            const pack = (await pointer.json()) as { cache?: unknown };
+            if (typeof pack.cache === "string" && pack.cache.startsWith("dura-offline-pack-")) {
+              const cached = await (
+                await caches.open(pack.cache)
+              ).match(decodeURI(new URL(request.url).pathname));
+              if (cached) return cached;
+            }
+          }
+          // Preserve ordinary visited-page caching when no full pack was downloaded.
+          const visited = await caches.match(request);
+          if (visited) return visited;
+          throw error;
+        }
+      },
+    },
+    ...defaultCache,
+  ],
   fallbacks: {
     entries: [
       {

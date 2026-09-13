@@ -1,3 +1,10 @@
+import { addDailyStudyTime } from "@/lib/daily-study-time";
+import { ACTIVITY_EVIDENCE_SCHEMA, type ActivityEvidence } from "@/lib/activity-evidence";
+import {
+  getOwnerGeneration,
+  assertOwnerGeneration,
+  waitForOwnerInitialization,
+} from "@/lib/storage/owner";
 import { lessonIdentity } from "@/lib/lesson-identity";
 import { create } from "zustand";
 import { putLessonProgress, getLessonProgress } from "@/lib/db/progress";
@@ -6,6 +13,7 @@ import type { LessonProgress } from "@/types/curriculum";
 
 interface ProgressState {
   current: LessonProgress | null;
+  currentOwnerGeneration: number;
   scrollPercent: number;
   timeSpentMs: number;
   quizPassed: boolean;
@@ -19,12 +27,18 @@ interface ProgressState {
   setQuizScore: (score: number) => Promise<void>;
   complete: (xp: number) => Promise<void>;
   reset: () => void;
+  recordActivity: (
+    lessonId: string,
+    activityId: string,
+    evidence: ActivityEvidence
+  ) => Promise<void>;
 }
 
 let startRequest = 0;
 
 export const useProgressStore = create<ProgressState>((set, get) => ({
   current: null,
+  currentOwnerGeneration: getOwnerGeneration(),
   scrollPercent: 0,
   timeSpentMs: 0,
   quizPassed: false,
@@ -33,8 +47,12 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
 
   start: async (lessonId: string, phaseId: string, moduleId: string): Promise<void> => {
     const request = ++startRequest;
+    await waitForOwnerInitialization();
+    const ownerGeneration = getOwnerGeneration();
+    if (request !== startRequest) return;
     set({
       current: null,
+      currentOwnerGeneration: ownerGeneration,
       scrollPercent: 0,
       timeSpentMs: 0,
       quizPassed: false,
@@ -44,6 +62,7 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
     lessonId = lessonIdentity(phaseId, moduleId, lessonId);
     const existing = await getLessonProgress(lessonId);
     if (request !== startRequest) return;
+    assertOwnerGeneration(ownerGeneration);
     const next: LessonProgress = existing ?? {
       lessonId,
       phaseId,
@@ -59,6 +78,7 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
     };
     if (!existing) await putLessonProgress(next);
     if (request !== startRequest) return;
+    assertOwnerGeneration(ownerGeneration);
     set({
       current: next,
       scrollPercent: next.scrollPercent,
@@ -77,8 +97,59 @@ export const useProgressStore = create<ProgressState>((set, get) => ({
   },
 
   tick: (deltaMs: number): void => {
-    if (!Number.isFinite(deltaMs) || deltaMs < 0) return;
-    set({ timeSpentMs: get().timeSpentMs + deltaMs });
+    if (!Number.isFinite(deltaMs) || deltaMs < 0 || deltaMs > 60000) return;
+    const state = get();
+    const timeSpentMs = state.timeSpentMs + deltaMs;
+    const current = state.current
+      ? {
+          ...state.current,
+          timeSpentMs,
+          dailyTimeMs: addDailyStudyTime(state.current.dailyTimeMs ?? {}, deltaMs),
+          synced: 0 as const,
+        }
+      : null;
+    set({ timeSpentMs, current });
+    if (current)
+      void putLessonProgress(current).catch((error: unknown): void =>
+        console.error("[progress] Study time save failed", error)
+      );
+  },
+
+  recordActivity: async (
+    lessonId: string,
+    activityId: string,
+    evidence: ActivityEvidence
+  ): Promise<void> => {
+    const current = get().current;
+    if (!current || current.lessonId !== lessonId)
+      throw new Error("The lesson is still loading. Your response has not been saved yet.");
+    const ownerGeneration = get().currentOwnerGeneration;
+    assertOwnerGeneration(ownerGeneration);
+    const parsed = ACTIVITY_EVIDENCE_SCHEMA.parse(evidence);
+    const updated: LessonProgress = {
+      ...current,
+      activityEvidence: { ...current.activityEvidence, [activityId]: parsed },
+      synced: 0,
+    };
+    set({ current: updated });
+    try {
+      await putLessonProgress(updated);
+    } catch (error: unknown) {
+      const latest = get().current;
+      if (
+        getOwnerGeneration() === ownerGeneration &&
+        get().currentOwnerGeneration === ownerGeneration &&
+        latest?.lessonId === lessonId &&
+        latest.activityEvidence?.[activityId]?.updatedAt === parsed.updatedAt
+      ) {
+        const restored = { ...latest.activityEvidence };
+        const previous = current.activityEvidence?.[activityId];
+        if (previous) restored[activityId] = previous;
+        else delete restored[activityId];
+        set({ current: { ...latest, activityEvidence: restored } });
+      }
+      throw error;
+    }
   },
 
   passQuiz: () => set({ quizPassed: true }),

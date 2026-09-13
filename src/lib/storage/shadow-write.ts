@@ -1,3 +1,4 @@
+import { getOwnerGeneration, assertOwnerGeneration } from "@/lib/storage/owner";
 import { saveToOPFS, opfsAvailable } from "@/lib/storage/opfs";
 import { buildLearnerSnapshot } from "@/lib/storage/snapshot";
 
@@ -26,7 +27,9 @@ let isResetting = false;
 async function performShadowWrite(): Promise<void> {
   if (isResetting || !opfsAvailable()) return;
   try {
+    const generation = getOwnerGeneration();
     const snapshot = await buildLearnerSnapshot();
+    assertOwnerGeneration(generation);
     await saveToOPFS(snapshot);
   } catch (error) {
     console.warn("[shadow-write] snapshot build failed", error);

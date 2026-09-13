@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
+import { submitAuth } from "@/lib/auth/client-actions";
 import AgeGate from "@/components/auth/AgeGate";
 import type { Provider } from "@supabase/supabase-js";
 
@@ -35,24 +36,13 @@ export default function SignUpForm(): React.ReactElement {
     setIsLoading(true);
 
     try {
-      const supabase = createClient();
-      const { error: authError } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          emailRedirectTo: `${window.location.origin}/auth/callback?next=/dashboard`,
-        },
-      });
-
-      if (authError) {
-        // Generic message prevents email enumeration (OWASP A07)
-        setError("Account creation failed. Please try a different email or contact support.");
-        return;
-      }
+      await submitAuth("sign-up", { email, password, ageAttested: isAgeVerified });
 
       setIsSuccess(true);
-    } catch {
-      setError("Account creation failed. Please try again.");
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : "Account creation failed. Please try again."
+      );
     } finally {
       setIsLoading(false);
     }
@@ -228,14 +218,14 @@ export default function SignUpForm(): React.ReactElement {
       <p className="mt-6 text-center text-xs leading-relaxed text-[var(--color-text-muted)]">
         By creating an account you agree to our{" "}
         <Link
-          href="/legal/terms"
+          href="/terms"
           className="underline underline-offset-2 hover:text-[var(--color-text-secondary)]"
         >
           Terms of Service
         </Link>{" "}
         and{" "}
         <Link
-          href="/legal/privacy"
+          href="/privacy"
           className="underline underline-offset-2 hover:text-[var(--color-text-secondary)]"
         >
           Privacy Policy

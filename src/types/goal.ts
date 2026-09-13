@@ -3,6 +3,8 @@ export type GoalUnit = "minutes" | "lessons" | "hours" | "xp";
 
 export interface Goal {
   id: string;
+  phaseId?: string;
+  roleId?: string;
   type: GoalType;
   unit: GoalUnit;
   target: number;

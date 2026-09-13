@@ -6,7 +6,10 @@ import type { NextRequest } from "next/server";
 
 const querySchema = z.object({
   q: z.string().max(200).optional(),
-  phase: z.string().regex(/^\d$/).optional(),
+  phase: z
+    .string()
+    .regex(/^(?:[0-9]|1[0-4])$/)
+    .optional(),
   category: z.string().max(50).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });

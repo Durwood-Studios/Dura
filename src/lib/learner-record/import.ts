@@ -1,36 +1,19 @@
-import { lessonIdentity } from "@/lib/lesson-identity";
+import {
+  PORTABLE_RECORD_SCHEMA,
+  PORTABLE_PROGRESS_SCHEMA,
+  type PortableRecord,
+} from "@/lib/learner-record/portable-schema";
+import { buildPortableRecord, applyPortableRecord } from "@/lib/learner-record/portable";
+import { z } from "zod";
 /**
- * Learner record import — the inverse of export.ts.
- *
- * Reads a DURA learner-record ZIP (the one downloadLearnerRecord()
- * produces) and merges it into the local IndexedDB stores. This is the
- * "load save file" surface — for learners who:
- *
- *   - move to a new device / browser
- *   - just had their site data evicted by Chrome under storage pressure
- *   - want a checkpoint they can drop back to ("I broke my streak,
- *     restore my July state")
- *   - are switching from another LFLRS-1.0 compatible LRS
- *
- * Merge strategy: last-write-wins per item by `last_modified`. Cards
- * with a `termSlug` re-derive their `front`/`back` from the local
- * dictionary so no card content is needed in the export to fully
- * restore. Cards without a termSlug carry forward only their FSRS
- * state — content needs to be re-entered by the learner.
- *
- * What this DOES NOT do (deliberate scope):
- *   - It does not modify the local learner_id. The imported record's
- *     learner_id is recorded under x-dura-source-learner-id on each
- *     restored card so a future "Identity from import" follow-up can
- *     surface it. Today the IDs stay separate to avoid silently
- *     stomping device-local sync state.
- *   - It does not import certificates from a foreign learner. Adding
- *     somebody else's certificates to your IDB would be a forgery
- *     vector; certificates are kept device-local.
+ * Import validates the canonical archive and its versioned plaintext inventory
+ * before mutation. Version 2 restores complete content under the destination
+ * key in one transaction and merges newer local work. Legacy records can only
+ * recover fields actually present in their archive. Imported certificates remain
+ * learner-controlled records; their signed artifacts require independent verification.
  */
 
 import JSZip from "jszip";
-import { getDB } from "@/lib/db";
 
 /**
  * Defensive limits applied before the ZIP is parsed. Aimed at a class
@@ -55,19 +38,15 @@ import {
   fromCanonicalReviewLog,
   type CanonicalCard,
   type CanonicalLearnerRecord,
-  type StoredFlashCard,
-  type StoredReviewLog,
 } from "@/lib/learner-record/types";
-import { putCard } from "@/lib/db/flashcards";
-import { putModuleProgress } from "@/lib/db/progress";
-import { putGoal } from "@/lib/db/goals";
 import { DICTIONARY_BY_SLUG } from "@/content/dictionary";
 import type { DictionaryDifficulty } from "@/types/dictionary";
 import type { Goal } from "@/types/goal";
-import type { LessonProgress, ModuleProgress } from "@/types/curriculum";
+import type { LessonProgress } from "@/types/curriculum";
 
 /** Manifest fields the export sidecar adds under the x-dura namespace. */
 interface DuraSidecar {
+  portable?: PortableRecord;
   lesson_progress?: LessonProgress[];
   goals?: Goal[];
   /** Certificates intentionally NOT imported — see module-level note. */
@@ -185,13 +164,22 @@ export async function parseLearnerRecordZip(file: Blob): Promise<{
   }
   const canonical = canonicalResult.data;
 
-  const sidecar: DuraSidecar =
-    typeof raw === "object" && raw !== null && "x-dura" in raw
-      ? ((raw as { "x-dura": DuraSidecar })["x-dura"] ?? {})
-      : {};
+  const rawSidecar =
+    typeof raw === "object" && raw !== null && "x-dura" in raw ? raw["x-dura"] : {};
+  const sidecar: DuraSidecar = z
+    .object({
+      portable: PORTABLE_RECORD_SCHEMA.optional(),
+      lesson_progress: z.array(PORTABLE_PROGRESS_SCHEMA).optional(),
+      goals: PORTABLE_RECORD_SCHEMA.shape.goals.optional(),
+      certificates: z.array(z.unknown()).optional(),
+      export_version: z.string().optional(),
+    })
+    .parse(rawSidecar ?? {});
 
   // Best-effort tally — actual restored counts come from applyLearnerRecord.
-  const cardsWithContent = canonical.cards.filter((c) => Boolean(resolveCardContent(c))).length;
+  const cardsWithContent =
+    sidecar.portable?.flashcards.length ??
+    canonical.cards.filter((c) => Boolean(resolveCardContent(c))).length;
   const cardsSkippedNoContent = canonical.cards.length - cardsWithContent;
 
   const summary: ImportSummary = {
@@ -222,110 +210,57 @@ export async function applyLearnerRecord(parsed: {
   sidecar: DuraSidecar;
 }): Promise<ImportSummary> {
   const { canonical, sidecar } = parsed;
-  const db = await getDB();
-
-  const existingCards = new Map<string, StoredFlashCard>(
-    (await db.getAll("flashcards")).map((c) => [c.id, c])
-  );
-  const existingReviewLog = new Set<string>((await db.getAll("reviewLogs")).map((r) => r.id));
-  const existingModules = new Map<string, ModuleProgress>(
-    (await db.getAll("moduleProgress")).map((m) => [m.moduleId, m])
-  );
-
-  // ── Cards ─────────────────────────────────────────────────────────────────
-  let cardsRestored = 0;
-  let cardsSkippedNoContent = 0;
-
-  for (const card of canonical.cards) {
+  if (sidecar.portable) {
+    const portable = PORTABLE_RECORD_SCHEMA.parse(sidecar.portable);
+    await applyPortableRecord(portable);
+    return {
+      cardsParsed: portable.flashcards.length,
+      cardsRestored: portable.flashcards.length,
+      cardsSkippedNoContent: 0,
+      reviewLogsRestored: portable.reviewLogs.length,
+      modulesRestored: portable.moduleProgress.length,
+      goalsRestored: portable.goals.length,
+      lessonProgressRestored: portable.progress.length,
+      sourceGeneratedAt: canonical.exported_at,
+      sourceLearnerId: canonical.learner_id,
+    };
+  }
+  // Legacy archives lack a complete portable inventory. Validate their sidecar,
+  // retain existing categories, and commit the recoverable subset atomically too.
+  const snapshot = await buildPortableRecord();
+  const goals = PORTABLE_RECORD_SCHEMA.shape.goals.parse(sidecar.goals ?? []);
+  const progress = z.array(PORTABLE_PROGRESS_SCHEMA).parse(sidecar.lesson_progress ?? []);
+  let skipped = 0;
+  const cards = canonical.cards.flatMap((card) => {
     const content = resolveCardContent(card);
     if (!content) {
-      cardsSkippedNoContent++;
-      continue;
+      skipped++;
+      return [];
     }
-    const existing = existingCards.get(card.id);
-    if (existing) {
-      const existingTs = existing.lastReview ?? existing.createdAt;
-      const incomingTs = isoToEpoch(card.last_modified);
-      if (existingTs >= incomingTs) continue;
-    }
-    const stored = fromCanonicalCard(card, {
-      front: content.front,
-      back: content.back,
-      lessonId: existing?.lessonId ?? null,
-      termSlug: content.termSlug,
-      createdAt: existing?.createdAt ?? isoToEpoch(card.last_modified),
-      elapsedDays: 0,
-      scheduledDays: 0,
-      lastReview: existing?.lastReview ?? null,
-    });
-    await putCard(stored);
-    cardsRestored++;
-  }
-
-  // ── Review log ─────────────────────────────────────────────────────────────
-  let reviewLogsRestored = 0;
-  for (const entry of canonical.review_log) {
-    if (existingReviewLog.has(entry.id)) continue;
-    const stored: StoredReviewLog = fromCanonicalReviewLog(entry);
-    // reviewLogs has its own store; use the raw db handle since logReview()
-    // is the runtime path and writes additional indices.
-    await db.put("reviewLogs", stored);
-    reviewLogsRestored++;
-  }
-
-  // ── Module progress ────────────────────────────────────────────────────────
-  let modulesRestored = 0;
-  for (const mastery of canonical.mastery_records) {
-    const existing = existingModules.get(mastery.module_id);
-    if (existing) {
-      const existingTs = existing.unlockedAt > 0 ? existing.unlockedAt : 0;
-      const incomingTs = mastery.unlocked_at ? isoToEpoch(mastery.unlocked_at) : 0;
-      // Keep local if it's both newer AND already mastery-gated.
-      if (existingTs >= incomingTs && existing.masteryGatePassed) continue;
-    }
-    // mastery_score in the canonical record was derived from
-    // completedLessons/totalLessons + masteryGatePassed (see
-    // moduleProgressToCanonicalMastery in src/lib/xapi/projection.ts).
-    // Reverse-derive: score=1 ⇒ masteryGatePassed=true. We can't
-    // recover the exact completedLessons split without the sidecar,
-    // so we preserve the local count when present.
-    const restored: ModuleProgress = {
-      moduleId: mastery.module_id,
-      phaseId: existing?.phaseId ?? mastery.module_id.split("-")[0] ?? "",
-      completedLessons: existing?.completedLessons ?? 0,
-      totalLessons: existing?.totalLessons ?? 0,
-      masteryGatePassed: mastery.mastery_score >= 0.999,
-      unlockedAt: mastery.unlocked_at ? isoToEpoch(mastery.unlocked_at) : 0,
-    };
-    await putModuleProgress(restored);
-    modulesRestored++;
-  }
-
-  // ── Goals (sidecar) ────────────────────────────────────────────────────────
-  let goalsRestored = 0;
-  for (const goal of sidecar.goals ?? []) {
-    await putGoal(goal);
-    goalsRestored++;
-  }
-
-  // ── Lesson progress (sidecar) ──────────────────────────────────────────────
-  let lessonProgressRestored = 0;
-  for (const progress of sidecar.lesson_progress ?? []) {
-    await db.put("progress", {
-      ...progress,
-      lessonId: lessonIdentity(progress.phaseId, progress.moduleId, progress.lessonId),
-    });
-    lessonProgressRestored++;
-  }
-
+    return [
+      fromCanonicalCard(card, {
+        ...content,
+        lessonId: null,
+        createdAt: isoToEpoch(card.last_modified),
+        elapsedDays: 0,
+        scheduledDays: 0,
+        lastReview: null,
+      }),
+    ];
+  });
+  const knownCards = new Set([...snapshot.flashcards, ...cards].map((card) => card.id));
+  const logs = canonical.review_log
+    .filter((row) => knownCards.has(row.card_id))
+    .map(fromCanonicalReviewLog);
+  await applyPortableRecord({ ...snapshot, flashcards: cards, reviewLogs: logs, goals, progress });
   return {
     cardsParsed: canonical.cards.length,
-    cardsRestored,
-    cardsSkippedNoContent,
-    reviewLogsRestored,
-    modulesRestored,
-    goalsRestored,
-    lessonProgressRestored,
+    cardsRestored: cards.length,
+    cardsSkippedNoContent: skipped,
+    reviewLogsRestored: logs.length,
+    modulesRestored: 0,
+    goalsRestored: goals.length,
+    lessonProgressRestored: progress.length,
     sourceGeneratedAt: canonical.exported_at,
     sourceLearnerId: canonical.learner_id,
   };

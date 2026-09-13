@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { markActivityComplete } from "@/components/discover/Passport";
+import { markActivityComplete } from "@/components/discover/DiscoveryStampStatus";
 
 const ROUNDS = [3, 5, 2, 7, 10];
 const TOTAL_BLOCKS = 10;

@@ -1,4 +1,5 @@
-import { createClient } from "@/lib/supabase/client";
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
+import { syncMutableRecords } from "@/lib/supabase/queries/record-sync";
 import type { SandboxSave } from "@/types/sandbox";
 
 /**
@@ -9,7 +10,6 @@ import type { SandboxSave } from "@/types/sandbox";
  */
 export async function syncSandboxSaves(userId: string, saves: SandboxSave[]): Promise<void> {
   try {
-    const supabase = createClient();
     const rows = saves.map((s) => ({
       id: s.id,
       user_id: userId,
@@ -19,13 +19,7 @@ export async function syncSandboxSaves(userId: string, saves: SandboxSave[]): Pr
       created_at: s.createdAt,
       updated_at: s.updatedAt,
     }));
-    const { error } = await supabase
-      .from("sandbox_saves")
-      .upsert(rows, { onConflict: "id,user_id" });
-    if (error) {
-      console.error("[syncSandboxSaves] Upsert error:", error.message);
-      throw error;
-    }
+    await syncMutableRecords("sandbox_saves", rows);
   } catch (err) {
     console.error("[syncSandboxSaves] Failed to sync:", err);
     throw err;
@@ -35,12 +29,7 @@ export async function syncSandboxSaves(userId: string, saves: SandboxSave[]): Pr
 /** Fetch all sandbox saves for a user from Supabase. */
 export async function fetchSandboxSaves(userId: string): Promise<SandboxSave[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase.from("sandbox_saves").select("*").eq("user_id", userId);
-    if (error) {
-      console.error("[fetchSandboxSaves] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("sandbox_saves", userId);
     return (data ?? []).map((row) => ({
       id: row.id as string,
       title: row.title as string,

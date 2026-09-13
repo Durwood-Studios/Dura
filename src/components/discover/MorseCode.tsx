@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { markActivityComplete } from "@/components/discover/Passport";
+import { markActivityComplete } from "@/components/discover/DiscoveryStampStatus";
 
 const MORSE_MAP: Record<string, string> = {
   A: ".-",

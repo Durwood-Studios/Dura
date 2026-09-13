@@ -1,5 +1,8 @@
 "use client";
 
+import { useTranslation } from "@/i18n/useTranslation";
+import { navigationLabel } from "@/i18n/navigation";
+
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -59,6 +62,7 @@ const TABS = [
 ] as const;
 
 export function MobileBottomTabs(): React.ReactElement {
+  const { locale } = useTranslation();
   const pathname = usePathname();
   return (
     <nav
@@ -88,7 +92,7 @@ export function MobileBottomTabs(): React.ReactElement {
                 <ReviewBadge className="absolute -top-1 -right-2 h-4 min-w-[16px] text-[9px]" />
               )}
             </span>
-            {label}
+            <span lang={locale}>{navigationLabel(label, locale)}</span>
           </Link>
         );
       })}
@@ -132,6 +136,7 @@ const DRAWER_SECTIONS: DrawerSection[] = [
       { href: "/challenge", label: "Challenge", icon: Swords },
       { href: "/dojo", label: "Dojo", icon: Sparkles },
       { href: "/sandbox", label: "Code Sandbox", icon: Code2 },
+      { href: "/judgment", label: "Engineering Judgment", icon: ShieldCheck },
     ],
   },
   {
@@ -153,6 +158,7 @@ const DRAWER_SECTIONS: DrawerSection[] = [
 ];
 
 export function MobileDrawer(): React.ReactElement | null {
+  const { locale } = useTranslation();
   const pathname = usePathname();
   const open = useUIStore((s) => s.mobileNavOpen);
   const close = useUIStore((s) => s.setMobileNav);
@@ -235,7 +241,7 @@ export function MobileDrawer(): React.ReactElement | null {
         className="absolute inset-0 bg-black/40"
       />
       <div
-        className="absolute inset-y-0 left-0 flex w-72 flex-col bg-[var(--color-bg-surface)] shadow-xl"
+        className="absolute inset-y-0 left-0 flex w-72 max-w-[calc(100vw-1rem)] flex-col bg-[var(--color-bg-surface)] shadow-xl"
         style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
       >
         {/* Header */}
@@ -286,7 +292,7 @@ export function MobileDrawer(): React.ReactElement | null {
                       )}
                       aria-hidden
                     />
-                    {label}
+                    <span lang={locale}>{navigationLabel(label, locale)}</span>
                     {href === "/review" && (
                       <ReviewBadge className="ml-auto h-5 min-w-[20px] text-xs" />
                     )}

@@ -51,6 +51,10 @@ export type Path = {
   slug: string;
   /** Display title — "Robotics Software Engineer". */
   title: string;
+  /** Explicit career destinations; an empty list means no matching catalog role exists. */
+  destinationRoleSlugs: readonly string[];
+  /** Adjacent careers, not equivalent claims about the path outcome. */
+  relatedRoleSlugs: readonly string[];
   /** One short line shown on cards. */
   tagline: string;
   /** Two to three sentences of description. */

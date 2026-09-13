@@ -119,7 +119,7 @@ export function ReviewSession(): React.ReactElement {
         </p>
         <p className="mt-1 font-mono text-sm text-emerald-600">+{xp} XP</p>
         <p className="mt-4 text-xs text-[var(--color-text-muted)]">
-          Cards marked &ldquo;Again&rdquo; will reappear shortly. Time: {formatTime(elapsedMs)}
+          Your next review dates are saved in your deck. Time: {formatTime(elapsedMs)}
         </p>
         <div className="mt-6 flex justify-center gap-2">
           <button

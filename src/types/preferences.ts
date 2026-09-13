@@ -18,6 +18,8 @@ export interface Preferences {
   strictGating: boolean;
   showStreak: boolean;
   streak: StreakState;
+  discoveryActivities?: string[];
+  discoveryPassportMigrated?: boolean;
   updatedAt: number;
 }
 

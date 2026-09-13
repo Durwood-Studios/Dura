@@ -1,3 +1,6 @@
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
+import { DAILY_TIME_SCHEMA } from "@/lib/daily-study-time";
+import { ACTIVITY_EVIDENCE_MAP_SCHEMA } from "@/lib/activity-evidence";
 import { lessonIdentity } from "@/lib/lesson-identity";
 import { createClient } from "@/lib/supabase/client";
 import type { LessonProgress, ModuleProgress } from "@/types/curriculum";
@@ -17,14 +20,12 @@ export async function syncLessonProgress(
 ): Promise<void> {
   try {
     const supabase = createClient();
-    const { error } = await supabase.rpc("sync_progress", {
-      p_user_id: userId,
-      p_data: progress,
-    });
-
-    if (error) {
-      console.error("[syncLessonProgress] RPC error:", error.message);
-      throw error;
+    for (let offset = 0; offset < progress.length; offset += 500) {
+      const { error } = await supabase.rpc("sync_progress_v2", {
+        p_user_id: userId,
+        p_data: progress.slice(offset, offset + 500),
+      });
+      if (error) throw error;
     }
   } catch (err) {
     console.error("[syncLessonProgress] Failed to sync:", err);
@@ -41,16 +42,7 @@ export async function syncLessonProgress(
  */
 export async function fetchLessonProgress(userId: string): Promise<LessonProgress[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase
-      .from("lesson_progress")
-      .select("*")
-      .eq("user_id", userId);
-
-    if (error) {
-      console.error("[fetchLessonProgress] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("lesson_progress", userId);
 
     return (data ?? []).map((row) => ({
       lessonId: lessonIdentity(
@@ -68,6 +60,8 @@ export async function fetchLessonProgress(userId: string): Promise<LessonProgres
       quizScore: row.quiz_score !== null ? Number(row.quiz_score) : null,
       xpEarned: Number(row.xp_earned),
       synced: 1 as const,
+      activityEvidence: ACTIVITY_EVIDENCE_MAP_SCHEMA.parse(row.activity_evidence ?? {}),
+      dailyTimeMs: DAILY_TIME_SCHEMA.parse(row.daily_time_ms ?? {}),
     }));
   } catch (err) {
     console.error("[fetchLessonProgress] Failed to fetch:", err);
@@ -80,16 +74,7 @@ export async function fetchLessonProgress(userId: string): Promise<LessonProgres
  */
 export async function fetchModuleProgress(userId: string): Promise<ModuleProgress[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase
-      .from("module_progress")
-      .select("*")
-      .eq("user_id", userId);
-
-    if (error) {
-      console.error("[fetchModuleProgress] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("module_progress", userId);
 
     return (data ?? []).map((row) => ({
       moduleId: row.module_id as string,

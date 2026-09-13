@@ -1,3 +1,4 @@
+import { lessonIdentity } from "@/lib/lesson-identity";
 import type { StandardRef } from "@/lib/curriculum";
 import type { LessonMeta } from "@/types/curriculum";
 import { toCSV } from "@/lib/exports/csv";
@@ -7,7 +8,9 @@ import { toCSV } from "@/lib/exports/csv";
  * pairing with the list of lessons that reference it.
  */
 export function standardsCSV(standards: StandardRef[], lessons: LessonMeta[]): string {
-  const lessonLookup = new Map(lessons.map((l) => [l.id, l]));
+  const lessonLookup = new Map(
+    lessons.map((l) => [lessonIdentity(l.phaseId, l.moduleId, l.id), l])
+  );
   const rows = standards.map((s) => ({
     framework: s.framework,
     code: s.code,

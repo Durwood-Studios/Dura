@@ -1,3 +1,4 @@
+import { ownerDatabaseName } from "@/lib/storage/owner";
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { SkillAssessmentResult } from "@/types/skill-assessment";
@@ -24,9 +25,10 @@ export async function getSkillAssessment(): Promise<SkillAssessmentResult | null
     }
 
     // Migrate from legacy localStorage if present
-    const legacy = migrateLegacyLocalStorage();
+    const legacy = ownerDatabaseName() === "dura" ? migrateLegacyLocalStorage() : null;
     if (legacy) {
       await putSkillAssessment(legacy);
+      localStorage.removeItem("dura-skill-assessment");
       return legacy;
     }
 
@@ -46,6 +48,7 @@ export async function putSkillAssessment(result: SkillAssessmentResult): Promise
     triggerShadowWrite();
   } catch (error) {
     console.error("[skill-assessment] putSkillAssessment failed:", error);
+    throw error;
   }
 }
 
@@ -58,7 +61,6 @@ function migrateLegacyLocalStorage(): SkillAssessmentResult | null {
     const raw = localStorage.getItem("dura-skill-assessment");
     if (!raw) return null;
     const parsed = JSON.parse(raw) as SkillAssessmentResult;
-    localStorage.removeItem("dura-skill-assessment");
     return parsed;
   } catch {
     return null;

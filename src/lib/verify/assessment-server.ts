@@ -1,3 +1,4 @@
+import { selectVerificationQuestions } from "@/lib/assessment";
 import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { getQuestionsByPhase } from "@/content/questions";
@@ -109,12 +110,14 @@ export function startServerAssessment(
   const pool = getQuestionsByPhase(parsed.data.phaseId);
   if (!pool.length || new Set(pool.map((q): string => q.id)).size !== pool.length)
     throw new AssessmentRequestError("This phase's question bank is unavailable.", 503);
-  const selected = [...pool];
-  for (let i = selected.length - 1; i > 0; i--) {
-    const j = randomInt(i + 1);
-    [selected[i], selected[j]] = [selected[j], selected[i]];
-  }
-  const questions = selected.slice(0, 30);
+  const questions = selectVerificationQuestions(
+    parsed.data.phaseId,
+    pool,
+    30,
+    (): number => randomInt(0x100000000) / 0x100000000
+  );
+  if (!questions.length)
+    throw new AssessmentRequestError("This phase's coverage blueprint is unavailable.", 503);
   const expiresAt = now + ATTEMPT_DURATION_MS;
   return {
     attempt: sign(

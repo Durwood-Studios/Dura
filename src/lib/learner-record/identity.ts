@@ -14,6 +14,8 @@
  * is fine — localStorage events propagate.
  */
 
+import { ownerStorageKey } from "@/lib/storage/owner";
+
 const STORAGE_KEY = "dura:learner-id";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -26,11 +28,12 @@ export function getLocalLearnerId(): string {
   if (typeof window === "undefined") {
     throw new Error("getLocalLearnerId() is browser-only");
   }
-  const existing = window.localStorage.getItem(STORAGE_KEY);
+  const key = ownerStorageKey(STORAGE_KEY);
+  const existing = window.localStorage.getItem(key);
   if (existing && UUID_RE.test(existing)) return existing.toLowerCase();
 
   const fresh = window.crypto.randomUUID();
-  window.localStorage.setItem(STORAGE_KEY, fresh);
+  window.localStorage.setItem(key, fresh);
   return fresh;
 }
 
@@ -41,5 +44,5 @@ export function getLocalLearnerId(): string {
  */
 export function resetLocalLearnerId(): void {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(STORAGE_KEY);
+  window.localStorage.removeItem(ownerStorageKey(STORAGE_KEY));
 }

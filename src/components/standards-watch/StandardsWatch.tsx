@@ -1,5 +1,6 @@
 import { scanStandards } from "@/lib/standards-watch/scan";
-import { STANDARDS_REGISTRY } from "@/lib/standards-watch/registry";
+import { scanAuthoredCitations } from "@/lib/standards-watch/content-references";
+import { STANDARDS_REGISTRY, REGISTRY_LAST_REVIEWED } from "@/lib/standards-watch/registry";
 
 /**
  * Standards-watch — author-facing view of the current scan report.
@@ -18,6 +19,7 @@ import { STANDARDS_REGISTRY } from "@/lib/standards-watch/registry";
  */
 export function StandardsWatch(): React.ReactElement {
   const report = scanStandards();
+  const authored = scanAuthoredCitations();
   const generated = new Date(report.generatedAt).toLocaleString();
 
   return (
@@ -30,9 +32,10 @@ export function StandardsWatch(): React.ReactElement {
           Are we citing current revisions?
         </h1>
         <p className="text-base leading-relaxed text-[var(--color-text-secondary)]">
-          Scans Phase R + Phase M lesson registries against the canonical revision of each standard
-          family. The CI gate fails on any outdated reference; this page exposes the same report so
-          authors can see the state before opening a PR.
+          Checks structured robotics/manufacturing references and scans every authored lesson, guide
+          and assessment item for review candidates. Registry revisions were last reviewed{" "}
+          {REGISTRY_LAST_REVIEWED}; this report does not independently verify publisher updates or
+          standards conformance.
         </p>
       </header>
 
@@ -42,6 +45,39 @@ export function StandardsWatch(): React.ReactElement {
         upcomingCount={report.upcoming.length}
         generatedAt={generated}
       />
+
+      <section className="space-y-3 rounded-xl border border-[var(--color-border)] p-5">
+        <h2 className="font-semibold">Authored content review queue</h2>
+        <p className="text-sm">
+          {authored.documents} documents and questions scanned; {authored.findings.length} review
+          candidates. Older-edition mentions may be historical or comparative. Untracked anchors may
+          be valid sources whose editions this registry does not maintain. Neither is automatically
+          an incorrect lesson.
+        </p>
+        <details>
+          <summary className="cursor-pointer text-sm underline">
+            Inspect all candidate locations
+          </summary>
+          <ul className="mt-3 max-h-[60dvh] space-y-3 overflow-y-auto break-words">
+            {authored.findings.map((finding, i) => (
+              <li
+                key={`${finding.source}-${finding.ownerId}-${i}`}
+                className="rounded-lg border border-[var(--color-border)] p-3 text-sm"
+              >
+                <p className="font-semibold">{finding.citedAs}</p>
+                <p>
+                  {finding.reason === "untracked-anchor"
+                    ? "Edition not tracked"
+                    : `Older-edition mention; registry points to ${finding.registryRevision}`}
+                </p>
+                <p className="mt-1 text-xs [overflow-wrap:anywhere]">
+                  {finding.source} · {finding.ownerId}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </details>
+      </section>
 
       {report.outdated.length > 0 && (
         <section className="rounded-xl border border-[var(--color-rating-again)]/30 bg-[var(--color-rating-again)]/5 p-5">
@@ -78,8 +114,8 @@ export function StandardsWatch(): React.ReactElement {
             Upcoming revisions
           </h2>
           <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-            Standards with an in-progress new edition. Curriculum content anchored to the current
-            revision is still correct, but will need an update when the new revision lands.
+            Standards with an in-progress new edition. A revision match does not establish content
+            correctness. Confirm publication and applicability before changing a lesson.
           </p>
           <ul className="flex flex-col gap-3">
             {report.upcoming.map((entry, i) => (
@@ -102,10 +138,10 @@ export function StandardsWatch(): React.ReactElement {
 
       <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-5">
         <h2 className="mb-3 text-sm font-semibold text-[var(--color-text-primary)]">
-          Registry · 28 families
+          Registry · {STANDARDS_REGISTRY.length} families
         </h2>
         <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-          Source of truth for &ldquo;what&apos;s current.&rdquo; Add or update entries in
+          Maintained revision inventory, subject to its review dates. Add or update entries in
           src/lib/standards-watch/registry.ts when a standards body publishes a new revision; the
           scanner will then flag any lesson still citing the prior revision.
         </p>
@@ -123,7 +159,7 @@ export function StandardsWatch(): React.ReactElement {
                   {entry.current}
                 </span>
               </div>
-              <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
                 <span>effective {entry.effectiveFrom}</span>
                 {entry.inProgress && (
                   <span className="rounded-full border border-[var(--color-rating-hard)]/30 bg-[var(--color-rating-hard)]/10 px-2 py-0.5 text-[10px] text-[var(--color-rating-hard)]">
@@ -141,11 +177,12 @@ export function StandardsWatch(): React.ReactElement {
 
       <footer className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4">
         <p className="text-xs leading-relaxed text-[var(--color-text-muted)]">
-          Scope: typed registries only (PHASE_R + PHASE_M lesson standards). MDX lesson-body
-          free-text scanning and diagnostic-catalog free-text scanning are deferred — both need
-          natural-language extraction to distinguish a citation from a mention. The typed registries
-          are the load-bearing source today; adding new content via Phase R / Phase M registries is
-          covered by this scanner.
+          Scope: structured references from the robotics/manufacturing registries; explicit primary
+          anchors from all MDX content; known older-edition strings in MDX and scored banks. This
+          literal scan cannot identify every free-text citation, decide contractual applicability,
+          distinguish all historical uses, or validate a clause. Review the surrounding text and the
+          publisher’s current material before editing. Untracked sources are surfaced rather than
+          silently counted as current.
         </p>
       </footer>
     </main>
@@ -163,7 +200,9 @@ function StatusBar({
   upcomingCount: number;
   generatedAt: string;
 }): React.ReactElement {
-  const statusLabel = clean ? "All references current" : "Outdated references found";
+  const statusLabel = clean
+    ? "No older editions in the typed registry scan"
+    : "Typed registry references need review";
   const statusColor = clean ? "var(--color-accent-emerald)" : "var(--color-rating-again)";
   return (
     <section

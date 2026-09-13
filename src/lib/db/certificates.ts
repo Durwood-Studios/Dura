@@ -9,6 +9,7 @@ export async function putCertificate(cert: Certificate): Promise<void> {
     triggerShadowWrite();
   } catch (error) {
     console.error("[certificates] putCertificate failed", error);
+    throw error;
   }
 }
 

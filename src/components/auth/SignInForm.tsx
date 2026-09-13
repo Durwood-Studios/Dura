@@ -5,6 +5,8 @@ import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { safeRedirectPath } from "@/lib/safe-url";
 import Link from "next/link";
+import { submitAuth } from "@/lib/auth/client-actions";
+import AgeGate from "@/components/auth/AgeGate";
 import type { Provider } from "@supabase/supabase-js";
 
 /**
@@ -15,6 +17,8 @@ export default function SignInForm(): React.ReactElement {
   // Validate redirectTo to prevent open redirect attacks (OWASP A01)
   const redirectTo = safeRedirectPath(searchParams.get("redirectTo"), "/dashboard");
 
+  const [pendingProvider, setPendingProvider] = useState<Provider | null>(null);
+  const [ageAttested, setAgeAttested] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -26,27 +30,17 @@ export default function SignInForm(): React.ReactElement {
     setIsLoading(true);
 
     try {
-      const supabase = createClient();
-      const { error: authError } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (authError) {
-        // Generic message prevents email enumeration (OWASP A07)
-        setError("Invalid email or password. Please try again.");
-        return;
-      }
+      await submitAuth("sign-in", { email, password });
 
       window.location.href = redirectTo;
-    } catch {
-      setError("Sign in failed. Please try again.");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Sign in failed. Please try again.");
     } finally {
       setIsLoading(false);
     }
   }
 
-  async function handleOAuth(provider: Provider): Promise<void> {
+  async function beginOAuth(provider: Provider): Promise<void> {
     setError(null);
 
     try {
@@ -65,6 +59,26 @@ export default function SignInForm(): React.ReactElement {
       setError("OAuth sign in failed. Please try again.");
     }
   }
+
+  async function handleOAuth(provider: Provider): Promise<void> {
+    if (!ageAttested) {
+      setPendingProvider(provider);
+      return;
+    }
+    await beginOAuth(provider);
+  }
+
+  if (pendingProvider)
+    return (
+      <AgeGate
+        onVerified={() => {
+          const provider = pendingProvider;
+          setAgeAttested(true);
+          setPendingProvider(null);
+          void beginOAuth(provider);
+        }}
+      />
+    );
 
   return (
     <div className="mx-auto w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-8 shadow-sm backdrop-blur-xl">

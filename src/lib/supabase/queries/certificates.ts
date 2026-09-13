@@ -1,3 +1,4 @@
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
 import { createClient } from "@/lib/supabase/client";
 import type { CertificateRow } from "@/lib/supabase/row-contracts";
 import type { Certificate } from "@/types/assessment";
@@ -67,13 +68,7 @@ export async function syncCertificates(userId: string, certs: Certificate[]): Pr
  */
 export async function fetchCertificates(userId: string): Promise<Certificate[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase.from("certificates").select("*").eq("user_id", userId);
-
-    if (error) {
-      console.error("[fetchCertificates] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("certificates", userId);
 
     return (data ?? []).map((row) => ({
       id: row.id as string,

@@ -103,102 +103,108 @@ function throwForStatus(status: number): never {
   throw new AIServerError(status);
 }
 
-/**
- * Non-streaming chat call. Returns the assistant's full reply text.
- * The Messages API returns `content: [{type: "text", text: "…"}]`;
- * we concatenate every text block in order.
- */
+/** A bounded request owns its abort listener and timer through response consumption. */
+function requestLifetime(signal?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const abort = (): void => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(
+    () => controller.abort(new Error("AI request timed out. Please retry.")),
+    60_000
+  );
+  return {
+    signal: controller.signal,
+    dispose: (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    },
+  };
+}
+
+/** Request a complete response with a bounded lifetime. */
 export async function chat(params: ChatParams): Promise<string> {
   const key = getAnthropicKey();
   if (!key) throw new AIKeyMissingError();
-
-  const response = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: buildHeaders(key),
-    body: buildBody(params, false),
-    signal: params.signal,
-  });
-
-  if (!response.ok) throwForStatus(response.status);
-
-  const data = (await response.json()) as {
-    content?: { type: string; text?: string }[];
-  };
-  if (!data.content) return "";
-  return data.content
-    .filter((b) => b.type === "text" && typeof b.text === "string")
-    .map((b) => b.text!)
-    .join("");
+  const lifetime = requestLifetime(params.signal);
+  try {
+    const response = await fetch(ENDPOINT, {
+      method: "POST",
+      headers: buildHeaders(key),
+      body: buildBody(params, false),
+      signal: lifetime.signal,
+    });
+    if (!response.ok) throwForStatus(response.status);
+    const data = (await response.json()) as { content?: { type: string; text?: string }[] };
+    return (data.content ?? [])
+      .filter((block) => block.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("");
+  } finally {
+    lifetime.dispose();
+  }
 }
 
-/**
- * Streaming chat call. Yields each text delta as it arrives.
- *
- * The Messages SSE stream emits a sequence of named events. The ones
- * that carry text are `content_block_delta` with `delta.type ===
- * "text_delta"`. All other events (ping, message_start, content_block_
- * start/stop, message_delta, message_stop, error) are accepted but not
- * yielded. An `error` event is rethrown as `AIServerError` since by
- * definition something went wrong server-side after streaming began.
- */
+/** Yield SSE text, requiring the provider's completion marker before declaring success. */
 export async function* chatStream(params: ChatParams): AsyncGenerator<string, void, unknown> {
   const key = getAnthropicKey();
   if (!key) throw new AIKeyMissingError();
-
-  const response = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: buildHeaders(key),
-    body: buildBody(params, true),
-    signal: params.signal,
-  });
-
-  if (!response.ok) throwForStatus(response.status);
-  if (!response.body) throw new AIServerError(response.status);
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
+  const lifetime = requestLifetime(params.signal);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
+    const response = await fetch(ENDPOINT, {
+      method: "POST",
+      headers: buildHeaders(key),
+      body: buildBody(params, true),
+      signal: lifetime.signal,
+    });
+    if (!response.ok) throwForStatus(response.status);
+    if (!response.body) throw new Error("AI response was empty. Please retry.");
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      // SSE messages are separated by blank lines. Process every complete
-      // event in the buffer, leaving any partial trailing event for the
-      // next chunk.
-      let sep: number;
-      while ((sep = buffer.indexOf("\n\n")) !== -1) {
-        const rawEvent = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        const dataLines: string[] = [];
-        for (const line of rawEvent.split("\n")) {
-          if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-        }
-        if (dataLines.length === 0) continue;
-        const payload = dataLines.join("\n");
-        if (payload === "[DONE]") return;
-
-        let parsed: unknown;
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      let boundary: RegExpExecArray | null;
+      while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
+        const raw = buffer.slice(0, boundary.index);
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+        const payload = raw
+          .split(/\r?\n/)
+          .filter((line: string): boolean => line.startsWith("data:"))
+          .map((line: string): string => line.slice(5).trimStart())
+          .join("\n");
+        if (!payload) continue;
+        let event: { type?: string; delta?: { type?: string; text?: string } };
         try {
-          parsed = JSON.parse(payload);
+          event = JSON.parse(payload);
         } catch {
-          continue;
+          throw new Error("AI response was malformed. Please retry.");
         }
-        const event = parsed as {
-          type?: string;
-          delta?: { type?: string; text?: string };
-          error?: { message?: string };
-        };
-        if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
-          if (typeof event.delta.text === "string") yield event.delta.text;
-        } else if (event.type === "error") {
-          throw new AIServerError(500);
+        if (!event || typeof event !== "object")
+          throw new Error("AI response was malformed. Please retry.");
+        if (event.type === "message_stop") return;
+        if (event.type === "error") throw new AIServerError(500);
+        if (
+          event.type === "content_block_delta" &&
+          event.delta?.type === "text_delta" &&
+          typeof event.delta.text === "string"
+        ) {
+          yield event.delta.text;
         }
       }
+      if (done) throw new Error("AI response was interrupted before completion. Please retry.");
     }
   } finally {
-    reader.releaseLock();
+    if (reader) {
+      try {
+        await reader.cancel();
+      } catch (error: unknown) {
+        console.error("[ai] Stream cleanup failed", error);
+      }
+      reader.releaseLock();
+    }
+    lifetime.dispose();
   }
 }

@@ -1,17 +1,17 @@
+import { getLearningReport } from "@/lib/admin/learning-report";
 import { currentReportTime } from "@/lib/admin/report-time";
 import type { ReactElement, ReactNode } from "react";
 import Link from "next/link";
 import { User, ChevronLeft, ChevronRight } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { LineChart } from "@/app/admin/_components/charts";
-import { bucketByDay, formatCount } from "@/app/admin/_lib/data";
+import { formatCount } from "@/app/admin/_lib/data";
 
 const PAGE_SIZE = 25;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SIGNUP_WINDOW_DAYS = 30;
 // Bounded fetch for the chart: 10k signups/30d is far beyond current scale,
 // and rows are 1 column, so this stays cheap while surviving growth.
-const SIGNUP_FETCH_LIMIT = 10_000;
 
 interface ProfileRow {
   id: string;
@@ -128,9 +128,6 @@ export default async function AdminUsersPage({
   const now = currentReportTime();
   const todayStartIso = new Date(Math.floor(now / DAY_MS) * DAY_MS).toISOString();
   const weekAgoIso = new Date(now - 7 * DAY_MS).toISOString();
-  const windowStartIso = new Date(
-    Math.floor(now / DAY_MS) * DAY_MS - (SIGNUP_WINDOW_DAYS - 1) * DAY_MS
-  ).toISOString();
 
   const [totalResult, weekResult, todayResult, signupsResult] = await Promise.all([
     supabase.from("profiles").select("id", { count: "exact", head: true }),
@@ -142,12 +139,7 @@ export default async function AdminUsersPage({
       .from("profiles")
       .select("id", { count: "exact", head: true })
       .gte("created_at", todayStartIso),
-    supabase
-      .from("profiles")
-      .select("created_at")
-      .gte("created_at", windowStartIso)
-      .order("created_at", { ascending: true })
-      .limit(SIGNUP_FETCH_LIMIT),
+    getLearningReport(supabase),
   ]);
 
   const totalUsers = totalResult.count ?? 0;
@@ -175,12 +167,7 @@ export default async function AdminUsersPage({
     console.error(`[admin/users] ${e.scope} query failed: ${e.message}`);
   }
 
-  const signupSeries = bucketByDay(
-    (signupsResult.data ?? []).map((row: { created_at: string }) => ({
-      timestamp: row.created_at,
-    })),
-    SIGNUP_WINDOW_DAYS
-  );
+  const signupSeries = signupsResult.data?.signupsPerDay ?? [];
 
   const profiles: ProfileRow[] = (pageResult.data as ProfileRow[] | null) ?? [];
   const tableCount = pageResult.count ?? totalUsers;

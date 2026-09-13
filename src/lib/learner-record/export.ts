@@ -18,8 +18,13 @@
  */
 
 import JSZip from "jszip";
-import { getDB } from "@/lib/db";
+import { buildPortableRecord } from "@/lib/learner-record/portable";
 import { getLocalLearnerId } from "@/lib/learner-record/identity";
+import {
+  assertOwnerGeneration,
+  getOwnerGeneration,
+  waitForOwnerInitialization,
+} from "@/lib/storage/owner";
 import {
   toCanonicalCard,
   toCanonicalIdAsync,
@@ -34,7 +39,7 @@ import { generateMarkdownSummary } from "@/lib/learner-record/summary";
 import type { CanonicalLearnerRecord } from "@/lib/learner-record/types";
 import type { XAPIStatement } from "@/lib/xapi/projection";
 
-const EXPORT_VERSION = "1.0";
+const EXPORT_VERSION = "2.0";
 
 const README_TEXT = `DURA Learner Record Export
 ==========================
@@ -74,19 +79,22 @@ export interface LearnerExportBundle {
  * from anywhere in the app once the IDB is open.
  */
 export async function exportLearnerRecord(): Promise<LearnerExportBundle> {
-  const db = await getDB();
+  await waitForOwnerInitialization();
+  const ownerGeneration = getOwnerGeneration();
+  const portable = await buildPortableRecord();
+  assertOwnerGeneration(ownerGeneration);
   const learnerId = getLocalLearnerId();
   const now = Date.now();
   const generatedAt = new Date(now).toISOString();
 
-  const [cards, reviewLog, progress, moduleProgress, goals, certificates] = await Promise.all([
-    db.getAll("flashcards"),
-    db.getAll("reviewLogs"),
-    db.getAll("progress"),
-    db.getAll("moduleProgress"),
-    db.getAll("goals"),
-    db.getAll("certificates"),
-  ]);
+  const {
+    flashcards: cards,
+    reviewLogs: reviewLog,
+    progress,
+    moduleProgress,
+    goals,
+    certificates,
+  } = portable;
 
   // ── Pre-compute real RFC 4122 v5 UUIDs for every stored id ─────────────
   // The sync `toCanonicalId` produces a stable pseudo-UUID that's fine for
@@ -143,6 +151,7 @@ export async function exportLearnerRecord(): Promise<LearnerExportBundle> {
       goals,
       certificates,
       export_version: EXPORT_VERSION,
+      portable,
     },
   };
 
@@ -175,6 +184,7 @@ export async function exportLearnerRecord(): Promise<LearnerExportBundle> {
   zip.file("README.txt", README_TEXT);
 
   const blob = await zip.generateAsync({ type: "blob" });
+  assertOwnerGeneration(ownerGeneration);
   const filename = `dura-learner-record-${generatedAt.slice(0, 10)}.zip`;
 
   return {
@@ -196,7 +206,10 @@ export async function exportLearnerRecord(): Promise<LearnerExportBundle> {
  * a[download] hack — no native file picker dependency, works offline.
  */
 export async function downloadLearnerRecord(): Promise<LearnerExportBundle["stats"]> {
+  await waitForOwnerInitialization();
+  const ownerGeneration = getOwnerGeneration();
   const bundle = await exportLearnerRecord();
+  assertOwnerGeneration(ownerGeneration);
   const url = URL.createObjectURL(bundle.blob);
   try {
     const a = document.createElement("a");

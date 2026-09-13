@@ -1,5 +1,8 @@
 "use client";
 
+import { ActivitySaveStatus } from "@/components/lesson/ActivitySaveStatus";
+import { useActivityEvidence, type ActivityProps } from "@/hooks/useActivityEvidence";
+
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import {
   SandpackProvider,
@@ -24,7 +27,7 @@ import { usePlayOnMount } from "@/components/celebration/usePlayOnMount";
 
 type SandboxLanguage = "javascript" | "typescript" | "react" | "html";
 
-interface SandboxExerciseInnerProps {
+interface SandboxExerciseInnerProps extends ActivityProps {
   language: SandboxLanguage;
   instructions: string;
   initialCode: string;
@@ -93,18 +96,22 @@ function extractLogText(data: Array<string | Record<string, string>> | undefined
 }
 
 function SandboxControls({
+  activityId,
+  activityLessonId,
   initialCode,
   solution,
   testCases,
   language,
   mainFile,
-}: {
+}: ActivityProps & {
   initialCode: string;
   solution: string;
   testCases: string[];
   language: SandboxLanguage;
   mainFile: string;
 }): React.ReactElement {
+  const activity = useActivityEvidence({ activityId, activityLessonId });
+  const { saveEvidence } = activity;
   const { sandpack } = useSandpack();
   const { logs, reset: resetLogs } = useSandpackConsole({
     resetOnPreviewRestart: true,
@@ -112,6 +119,7 @@ function SandboxControls({
     showSyntaxError: true,
   });
   const [hasAttempted, setHasAttempted] = useState(false);
+  const [hasRevealed, setHasRevealed] = useState(false);
   const [verdict, setVerdict] = useState<Verdict>("idle");
   const [verdictMessage, setVerdictMessage] = useState("");
   const [testStates, setTestStates] = useState<Map<string, TestState>>(new Map());
@@ -146,12 +154,20 @@ function SandboxControls({
       setTestStates(new Map(markers));
       const result = gradeExercise(testCases, markers, hasErrors);
       setVerdict(result.verdict);
+      if (result.verdict === "pass" && markers.size > 0 && !hasRevealed) {
+        void saveEvidence({
+          kind: "automatic",
+          updatedAt: Date.now(),
+          completedAt: Date.now(),
+          score: 1,
+        }).catch((error: unknown): void => console.error("[sandbox] Evidence save failed", error));
+      }
       setVerdictMessage(result.message);
       void track("sandbox_executed", { language, success: result.success });
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [logs, markers, testCases, language]);
+  }, [logs, markers, testCases, language, saveEvidence, hasRevealed]);
 
   const run = useCallback(() => {
     setHasAttempted(true);
@@ -164,6 +180,7 @@ function SandboxControls({
   }, [sandpack, resetLogs]);
 
   const reset = () => {
+    setHasRevealed(false);
     pendingCheck.current = false;
     sandpack.updateFile(mainFile, initialCode);
     setVerdict("idle");
@@ -173,6 +190,7 @@ function SandboxControls({
   };
 
   const showSolution = () => {
+    setHasRevealed(true);
     pendingCheck.current = false;
     sandpack.updateFile(mainFile, solution);
     setVerdict("idle");
@@ -201,6 +219,7 @@ function SandboxControls({
 
   return (
     <>
+      <ActivitySaveStatus state={activity} />
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-2">
         <button
           type="button"
@@ -293,6 +312,8 @@ function SandboxControls({
 }
 
 export default function SandboxExerciseInner({
+  activityId,
+  activityLessonId,
   language,
   instructions,
   initialCode,
@@ -330,6 +351,8 @@ export default function SandboxExerciseInner({
           {instructions}
         </figcaption>
         <SandboxControls
+          activityId={activityId}
+          activityLessonId={activityLessonId}
           initialCode={initialCode}
           solution={solution}
           testCases={testCases}

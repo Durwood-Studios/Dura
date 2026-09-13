@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { markActivityComplete } from "@/components/discover/Passport";
+import { markActivityComplete } from "@/components/discover/DiscoveryStampStatus";
 
 const TILE_SIZE = 4;
 const MOSAIC_SIZE = 4;

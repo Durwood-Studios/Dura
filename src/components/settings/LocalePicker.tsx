@@ -22,7 +22,7 @@ export function LocalePicker(): React.ReactElement {
   const upcoming = LOCALES.filter((l) => !l.enabled);
 
   return (
-    <div className="flex flex-col gap-2">
+    <div lang={locale} className="flex min-w-0 flex-col gap-2">
       <label
         htmlFor="dura-locale-picker"
         className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)]"
@@ -34,7 +34,7 @@ export function LocalePicker(): React.ReactElement {
         id="dura-locale-picker"
         value={locale}
         onChange={(e) => setLocale(e.target.value as LocaleCode)}
-        className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-2 text-sm text-[var(--color-text-primary)] focus:ring-2 focus:ring-[var(--color-accent)] focus:outline-none sm:w-auto"
+        className="min-h-12 w-full max-w-full min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 py-2 text-sm text-[var(--color-text-primary)] focus:ring-2 focus:ring-[var(--color-accent)] focus:outline-none"
       >
         <optgroup label={t.locale.name}>
           {enabled.map((l) => (

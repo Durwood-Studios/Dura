@@ -69,7 +69,7 @@ export const StoredFlashCardSchema = z.object({
   createdAt: z.number().int().nonnegative(),
   due: z.number(),
   stability: z.number().min(0),
-  difficulty: z.number().min(1).max(10),
+  difficulty: z.number().min(0).max(10),
   elapsedDays: z.number(),
   scheduledDays: z.number(),
   reps: z.number().int().min(0),
@@ -221,7 +221,7 @@ export function toCanonicalCard(card: StoredFlashCard, lastModifiedMs: number): 
   return CanonicalCardSchema.parse({
     id: toCanonicalId(card.id),
     stability: card.stability,
-    difficulty: card.difficulty,
+    difficulty: Math.max(1, card.difficulty),
     due: epochToISO(card.due),
     reps: card.reps,
     lapses: card.lapses,

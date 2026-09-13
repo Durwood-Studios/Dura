@@ -24,7 +24,7 @@ export interface Role {
     mid: { required: string[]; valuable: string[] };
     senior: { required: string[]; valuable: string[] };
   };
-  portfolio: { title: string; tutorialSlug: string; skill: string }[];
+  portfolio: { title: string; tutorialSlug: string; skill: string; href?: string }[];
   standards: {
     name: string;
     body: string;

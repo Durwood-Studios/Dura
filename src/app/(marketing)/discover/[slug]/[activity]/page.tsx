@@ -1,3 +1,9 @@
+import { DiscoveryStampStatus } from "@/components/discover/DiscoveryStampStatus";
+import {
+  DISCOVERY_ACTIVITIES,
+  isDiscoveryActivitySlug,
+  type DiscoveryActivitySlug,
+} from "@/lib/discovery/registry";
 import type { Metadata } from "next";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -51,7 +57,7 @@ function ActivitySkeleton(): React.ReactElement {
  * color-mixer) was removed from the public surface in the 2026-05 refresh.
  * Components remain in the codebase but are not registered here.
  */
-const ACTIVITIES: Record<string, ActivityEntry> = {
+const ACTIVITIES: Record<DiscoveryActivitySlug, ActivityEntry> = {
   // ─── Secret Codes — encoding & representation ───────────────────────────
   "binary-painter": {
     title: "Binary Painter",
@@ -78,11 +84,11 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     description: "Tap out letters in dots and dashes. The original digital protocol.",
     concept: "Symbol encoding · Variable-length codes",
     intro:
-      "Morse is binary in disguise: every letter is a sequence of two symbols (dot, dash) plus timed gaps. The frequent letters get the shortest codes — E is a single dot — which is the same idea Huffman coding uses, 130 years later, to compress every JPEG and ZIP file you've opened.",
+      "Morse is binary in disguise: every letter is a sequence of two symbols (dot, dash) plus timed gaps. The frequent letters get the shortest codes — E is a single dot — a principle also used by variable-length compression codes. Unlike Huffman codes, Morse letters need timing gaps to separate them.",
     underTheHood: [
-      "Two symbols per letter, variable length per letter — a prefix code (no letter's encoding is the prefix of another's).",
+      "Morse uses variable-length dot/dash sequences plus timing gaps. It is not prefix-free: E (dot) is a prefix of A (dot-dash), so the letter gap is essential.",
       "Letter frequency drove the length assignments. Samuel Morse counted type cases in a printer to find common English letters.",
-      "Huffman (1952) generalized this idea into the optimal-prefix-code algorithm at the heart of every modern compression format.",
+      "Huffman coding assigns shorter prefix-free codes to more frequent symbols. Some compression formats use it; modern compression also uses other coding methods.",
     ],
     teaches: { label: "Phase 0 · How Computers Think", href: "/paths/0" },
     roomSlug: "secret-codes",
@@ -122,9 +128,9 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
     underTheHood: [
       "Key: a permutation of the 26-letter alphabet. Encrypt = lookup table. Decrypt = reverse lookup. Trivial to implement, trivial to attack.",
       "Vulnerable to frequency analysis: in English, E appears ~12% of the time, T ~9%, A ~8%. The most common letter in the ciphertext is almost certainly E.",
-      "Modern algorithms (AES, ChaCha20) defeat frequency analysis by encrypting blocks of bytes with a key that changes every block — defeating any single-letter statistical attack.",
+      "Modern encryption does not preserve single-letter substitution patterns. AES is a block cipher used with an appropriate mode; ChaCha20 produces a keystream from a key, nonce, and counter. Neither requires a new secret key for every block. Correct nonce use and authentication are essential.",
     ],
-    teaches: { label: "Phase 7 · Security Engineering", href: "/paths/7" },
+    teaches: { label: "Phase 8 · Security Practice", href: "/paths/8/8-4" },
     roomSlug: "secret-codes",
     roomName: "Secret Codes",
     roomColor: "#f472b6",
@@ -146,7 +152,7 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
       "Avalanche is measured by Hamming distance — count of differing bits. Ideal value for a one-character change: ~128 bits (50%). SHA-256 hovers right around that.",
       "The Web Crypto API (crypto.subtle.digest) runs the same SHA-256 implementation browsers use for HTTPS certificate verification — no JS-level reimplementation needed.",
     ],
-    teaches: { label: "Phase 7 · Security Engineering", href: "/paths/7" },
+    teaches: { label: "Phase 8 · Security Practice", href: "/paths/8/8-4" },
     roomSlug: "secret-codes",
     roomName: "Secret Codes",
     roomColor: "#f472b6",
@@ -648,36 +654,9 @@ const ACTIVITIES: Record<string, ActivityEntry> = {
   },
 };
 
-/** Room-to-activities mapping for generateStaticParams. */
-const ROOM_ACTIVITIES: Record<string, string[]> = {
-  "secret-codes": ["binary-painter", "morse-code", "pixel-art", "secret-encoder", "hash-avalanche"],
-  "robot-chef": ["algorithm-kitchen", "robot-dance", "treasure-map", "sorting-race", "pathfinding"],
-  "internet-explorer": ["network-post-office", "dns-phonebook", "website-builder"],
-  "pattern-factory": [
-    "pattern-machine",
-    "fractal-tree",
-    "music-beats",
-    "tile-designer",
-    "memoization-cliff",
-    "embedding-galaxy",
-  ],
-  "bug-lab": ["bug-detective", "logic-gates", "story-builder", "race-condition", "gc-visualizer"],
-  // New rooms (2026-05-28) — each anchored by one well-built activity
-  // with room to grow as more land. The four below cover frontend (web
-  // platform), backend (databases + queries), full-stack (distributed
-  // state), and live data (sockets + pub/sub) — the "frontend, backend,
-  // full stack, sockets" axis the universality audit asked for.
-  "web-platform": ["event-loop"],
-  "data-vault": ["n-plus-one"],
-  "state-machine": ["optimistic-ui"],
-  "live-wire": ["pubsub"],
-};
-
-/** Pre-render all room+activity combinations at build time. */
+/** Pre-render exactly the canonical reachable room/activity pairs. */
 export function generateStaticParams(): Array<{ slug: string; activity: string }> {
-  return Object.entries(ROOM_ACTIVITIES).flatMap(([roomSlug, activities]) =>
-    activities.map((activity) => ({ slug: roomSlug, activity }))
-  );
+  return DISCOVERY_ACTIVITIES.map((entry) => ({ slug: entry.roomSlug, activity: entry.slug }));
 }
 
 /** Generate metadata per activity. */
@@ -687,7 +666,7 @@ export async function generateMetadata({
   params: Promise<{ slug: string; activity: string }>;
 }): Promise<Metadata> {
   const { slug, activity: activitySlug } = await params;
-  const entry = ACTIVITIES[activitySlug];
+  const entry = isDiscoveryActivitySlug(activitySlug) ? ACTIVITIES[activitySlug] : undefined;
   if (!entry || entry.roomSlug !== slug) return {};
 
   return buildMetadata({
@@ -703,7 +682,7 @@ export default async function DiscoverActivityPage({
   params: Promise<{ slug: string; activity: string }>;
 }): Promise<React.ReactElement> {
   const { slug, activity: activitySlug } = await params;
-  const entry = ACTIVITIES[activitySlug];
+  const entry = isDiscoveryActivitySlug(activitySlug) ? ACTIVITIES[activitySlug] : undefined;
 
   // Validate that the activity exists and belongs to this room
   if (!entry || entry.roomSlug !== slug) notFound();
@@ -759,6 +738,7 @@ export default async function DiscoverActivityPage({
       {/* The interactive activity itself — unchanged */}
       <section className="mb-12">
         <Component />
+        <DiscoveryStampStatus slug={activitySlug} />
       </section>
 
       {/* Under the hood — what's really happening, in CS terms */}

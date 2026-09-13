@@ -1,64 +1,40 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
-import { AnimatePresence, motion } from "motion/react";
 import { usePreferencesStore } from "@/stores/preferences";
-import { SPRINGS } from "@/lib/motion/springs";
 
-/** Routes that are part of the Discover surface */
-const isDiscover = (path: string): boolean => path.startsWith("/discover");
-
-/**
- * Page-level transition wrapper.
- *
- * Default: subtle fade + 8px slide-up (300ms ease-out).
- * Any → Discover: source slides left, Discover enters from the right (250ms,
- *   SPRINGS.fluid). DLS-2.0 §Surface Transitions.
- * Discover → Any: reverse — Discover slides left, target enters from right.
- *
- * Respects prefers-reduced-motion and the user's reducedMotion preference.
- */
+/** Animate route entry without replacing the router's live learner-state subtree. */
 export function PageTransition({ children }: { children: React.ReactNode }): React.ReactElement {
   const pathname = usePathname();
-  const reducedMotion = usePreferencesStore((s) => s.prefs.reducedMotion);
+  const reducedMotion = usePreferencesStore((state) => state.prefs.reducedMotion);
+  const container = useRef<HTMLDivElement>(null);
 
-  if (reducedMotion) {
-    return <>{children}</>;
-  }
-
-  // Discover surface gets a horizontal slide; everything else gets a pure presence fade
-  const toDiscover = isDiscover(pathname);
-
-  const variants = toDiscover
-    ? {
-        initial: { opacity: 0, x: 40 },
-        animate: { opacity: 1, x: 0 },
-        exit: { opacity: 0, x: -40 },
+  useEffect(() => {
+    const element = container.current;
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (!element || reducedMotion || preference.matches || !element.animate) return;
+    // App Router can update children while an outgoing keyed presence wrapper exits.
+    // Keeping one DOM parent prevents that destination from mounting twice and losing drafts.
+    const animation = element.animate(
+      pathname.startsWith("/discover")
+        ? [
+            { opacity: 0, transform: "translateX(40px)" },
+            { opacity: 1, transform: "none" },
+          ]
+        : [{ opacity: 0 }, { opacity: 1 }],
+      {
+        duration: pathname.startsWith("/discover") ? 250 : 350,
+        easing: "cubic-bezier(.25,.1,.25,1)",
       }
-    : {
-        // Pure opacity fade — no axis shift so the page feels like it "arrives"
-        // rather than flying in. DLS-2.0 §Surface Transitions.
-        initial: { opacity: 0 },
-        animate: { opacity: 1 },
-        exit: { opacity: 0 },
-      };
+    );
+    const stop = (): void => animation.cancel();
+    preference.addEventListener("change", stop);
+    return (): void => {
+      animation.cancel();
+      preference.removeEventListener("change", stop);
+    };
+  }, [pathname, reducedMotion]);
 
-  const transition = toDiscover
-    ? { ...SPRINGS.fluid, duration: undefined }
-    : { duration: 0.35, ease: [0.25, 0.1, 0.25, 1] as const };
-
-  return (
-    <AnimatePresence mode="wait">
-      <motion.div
-        key={pathname}
-        initial={variants.initial}
-        animate={variants.animate}
-        exit={variants.exit}
-        transition={transition}
-        style={{ willChange: "transform, opacity" }}
-      >
-        {children}
-      </motion.div>
-    </AnimatePresence>
-  );
+  return <div ref={container}>{children}</div>;
 }

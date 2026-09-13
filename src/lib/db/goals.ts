@@ -1,3 +1,4 @@
+import { deleteLearnerRecord } from "@/lib/db/deletion";
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import type { Goal, GoalType } from "@/types/goal";
@@ -19,16 +20,17 @@ export async function putGoal(goal: Goal): Promise<void> {
     triggerShadowWrite();
   } catch (error) {
     console.error("[goals] putGoal failed", error);
+    throw error;
   }
 }
 
 export async function deleteGoal(id: string): Promise<void> {
   try {
-    const db = await getDB();
-    await db.delete("goals", id);
+    await deleteLearnerRecord("goals", id);
     triggerShadowWrite();
   } catch (error) {
     console.error("[goals] deleteGoal failed", error);
+    throw error;
   }
 }
 

@@ -1,5 +1,8 @@
 "use client";
 
+import { ActivitySaveStatus } from "@/components/lesson/ActivitySaveStatus";
+import { useActivityEvidence, type ActivityProps } from "@/hooks/useActivityEvidence";
+
 import { useEffect, useMemo, useState } from "react";
 import { useProgressStore } from "@/stores/progress";
 import { ArrowUp, ArrowDown, ChevronRight, ChevronLeft, X } from "lucide-react";
@@ -16,7 +19,7 @@ export interface ParsonsSolutionStep {
   indent: number;
 }
 
-interface ParsonsPanelProps {
+interface ParsonsPanelProps extends ActivityProps {
   /** Source blocks the learner can pull from. */
   blocks: ParsonsBlock[];
   /** Wrong-answer blocks that must NOT appear in the solution. */
@@ -40,6 +43,8 @@ const REVEAL_AFTER_ATTEMPTS = 3;
  * source pool but must not appear in the solution.
  */
 export function ParsonsPanel({
+  activityId,
+  activityLessonId,
   blocks,
   distractors = [],
   solution,
@@ -61,10 +66,20 @@ export function ParsonsPanel({
 
   // A correct arrangement satisfies the lesson's quiz requirement —
   // ParsonsPanel counts toward hasQuiz, so it must also be able to pass it.
+  const activity = useActivityEvidence({ activityId, activityLessonId });
+  const { saveEvidence } = activity;
   const passQuiz = useProgressStore((s) => s.passQuiz);
   useEffect(() => {
-    if (result === "correct" && !revealed) passQuiz();
-  }, [result, revealed, passQuiz]);
+    if (result === "correct" && !revealed) {
+      if (activity.isReady) passQuiz();
+      void saveEvidence({
+        kind: "automatic",
+        updatedAt: Date.now(),
+        completedAt: Date.now(),
+        score: 1,
+      }).catch((error: unknown): void => console.error("[activity] Evidence save failed", error));
+    }
+  }, [result, revealed, passQuiz, saveEvidence, activity.isReady]);
 
   const moveToTarget = (id: string) => {
     if (revealed) return;
@@ -153,6 +168,7 @@ export function ParsonsPanel({
 
   return (
     <section className="my-8 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+      <ActivitySaveStatus state={activity} />
       <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
         Drag or tap blocks to build a valid solution. Some blocks are distractors and should not
         appear in your answer.

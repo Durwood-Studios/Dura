@@ -28,8 +28,24 @@ beforeEach((): void => {
 
 describe("database client contracts", (): void => {
   it("sends a JSON array to the jsonb progress RPC, not a double-encoded string", async (): Promise<void> => {
-    await syncLessonProgress("learner-a", []);
-    expect(rpc).toHaveBeenCalledWith("sync_progress", { p_user_id: "learner-a", p_data: [] });
+    const progress = {
+      lessonId: "0/0-1/hello",
+      phaseId: "0",
+      moduleId: "0-1",
+      startedAt: 1,
+      completedAt: null,
+      scrollPercent: 0,
+      timeSpentMs: 0,
+      quizPassed: false,
+      quizScore: null,
+      xpEarned: 0,
+      synced: 0 as const,
+    };
+    await syncLessonProgress("learner-a", [progress]);
+    expect(rpc).toHaveBeenCalledWith("sync_progress_v2", {
+      p_user_id: "learner-a",
+      p_data: [progress],
+    });
   });
 
   it("deduplicates analytics and XP within each learner's primary key", async (): Promise<void> => {

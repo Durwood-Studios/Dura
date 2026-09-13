@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { markActivityComplete } from "@/components/discover/Passport";
+import { markActivityComplete } from "@/components/discover/DiscoveryStampStatus";
 
 const INSTRUMENTS = ["Kick", "Snare", "Hi-Hat", "Clap"] as const;
 const BEATS = 8;

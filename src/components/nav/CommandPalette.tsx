@@ -1,5 +1,7 @@
 "use client";
 
+import { useFocusTrap } from "@/hooks/useFocusTrap";
+
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Search, ArrowRight } from "lucide-react";
@@ -61,6 +63,8 @@ export function CommandPalette(): React.ReactElement | null {
   const [termResults, setTermResults] = useState<SearchResult[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, open);
   const router = useRouter();
 
   // Filter static results
@@ -163,15 +167,17 @@ export function CommandPalette(): React.ReactElement | null {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]">
+    <div className="fixed inset-0 z-50 flex items-start justify-center px-3 pt-[min(15dvh,4rem)]">
       {/* Backdrop */}
       <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={close} />
 
       {/* Panel */}
       <div
+        ref={dialogRef}
         role="dialog"
         aria-label="Search"
-        className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-2xl"
+        aria-modal="true"
+        className="relative flex max-h-[calc(100dvh-5rem)] w-full max-w-lg min-w-0 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-2xl"
         onKeyDown={handleKeyDown}
       >
         {/* Input */}
@@ -182,8 +188,9 @@ export function CommandPalette(): React.ReactElement | null {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            aria-label="Search pages, phases, dictionary"
             placeholder="Search pages, phases, dictionary…"
-            className="flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-muted)]"
+            className="min-w-0 flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-muted)]"
           />
           <kbd className="rounded border border-[var(--color-border)] px-1.5 py-0.5 font-mono text-xs text-[var(--color-text-muted)]">
             ESC
@@ -191,7 +198,7 @@ export function CommandPalette(): React.ReactElement | null {
         </div>
 
         {/* Results */}
-        <ul className="max-h-80 overflow-y-auto py-2">
+        <ul className="max-h-80 min-h-0 overflow-y-auto py-2">
           {allResults.length === 0 && query.length > 0 && (
             <li className="px-4 py-6 text-center text-sm text-[var(--color-text-muted)]">
               No results for &ldquo;{query}&rdquo;

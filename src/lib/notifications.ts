@@ -1,19 +1,22 @@
+import { ownerStorageKey, isOwnerInitialized } from "@/lib/storage/owner";
 /**
  * Local push notifications — no server, no database, no network required.
  *
  * Uses the Web Notification API + IndexedDB state to trigger
  * contextual reminders. All logic runs client-side.
  *
- * Honest limitation: these only fire when the app is open or the
- * service worker is active (recently used). True background push
- * when the app has been closed for days requires a push server,
- * which will be available after Supabase integration.
+ * Reminders are checked while a DURA page is open. A service worker
+ * displays supported mobile notifications; it does not schedule wakeups.
  */
 
+import { getAllEncryptedLessonProgress } from "@/lib/idb/encrypted-store";
+import { dailyStudyMinutes, localDayKey } from "@/lib/study-time";
 import { getDB } from "@/lib/db";
 import { getDueCards } from "@/lib/db/flashcards";
 import { getPreferences } from "@/lib/db/preferences";
 import { isStreakAlive } from "@/lib/streak";
+
+export const NOTIFICATION_PREFERENCE_EVENT = "dura:notification-preference";
 
 const PERMISSION_KEY = "dura-notifications-enabled";
 const LAST_STREAK_REMINDER_KEY = "dura-last-streak-reminder";
@@ -36,8 +39,13 @@ export function isSupported(): boolean {
 
 /** Check if the user has opted into DURA notifications. */
 export function isEnabled(): boolean {
-  if (typeof localStorage === "undefined") return false;
-  return localStorage.getItem(PERMISSION_KEY) === "true";
+  if (typeof localStorage === "undefined" || !isOwnerInitialized()) return false;
+  try {
+    return localStorage.getItem(ownerStorageKey(PERMISSION_KEY)) === "true";
+  } catch (error) {
+    console.warn("[notifications] Preference unavailable", error);
+    return false;
+  }
 }
 
 /**
@@ -50,9 +58,11 @@ export async function requestPermission(): Promise<boolean> {
   const result = await Notification.requestPermission();
   if (result === "granted") {
     try {
-      localStorage.setItem(PERMISSION_KEY, "true");
-    } catch {
-      // ignore
+      localStorage.setItem(ownerStorageKey(PERMISSION_KEY), "true");
+      window.dispatchEvent(new Event(NOTIFICATION_PREFERENCE_EVENT));
+    } catch (error) {
+      console.error("[notifications] Could not save consent", error);
+      return false;
     }
     return true;
   }
@@ -62,24 +72,33 @@ export async function requestPermission(): Promise<boolean> {
 /** Disable notifications. */
 export function disableNotifications(): void {
   try {
-    localStorage.setItem(PERMISSION_KEY, "false");
-  } catch {
-    // ignore
+    localStorage.setItem(ownerStorageKey(PERMISSION_KEY), "false");
+    window.dispatchEvent(new Event(NOTIFICATION_PREFERENCE_EVENT));
+  } catch (error) {
+    console.error("[notifications] Preference could not be saved", error);
+    throw new Error("The reminder preference could not be saved. Please retry.", { cause: error });
   }
 }
 
 /** Send a notification if permitted. Returns true if sent. */
-function notify(title: string, body: string, tag: string): boolean {
+async function notify(title: string, body: string, tag: string): Promise<boolean> {
   if (!hasPermission() || !isEnabled()) return false;
 
   try {
-    const notification = new Notification(title, {
+    const options: NotificationOptions = {
       body,
       icon: "/icons/icon-192x192.png",
       badge: "/icons/icon-192x192.png",
       tag, // Prevents duplicate notifications with same tag
       silent: false,
-    });
+    };
+    const registration =
+      "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
+    if (registration) {
+      await registration.showNotification(title, options);
+      return true;
+    }
+    const notification = new Notification(title, options);
 
     notification.onclick = () => {
       window.focus();
@@ -87,7 +106,8 @@ function notify(title: string, body: string, tag: string): boolean {
     };
 
     return true;
-  } catch {
+  } catch (error) {
+    console.warn("[notifications] Delivery failed", error);
     return false;
   }
 }
@@ -95,7 +115,7 @@ function notify(title: string, body: string, tag: string): boolean {
 /** Check if a reminder cooldown has passed. */
 function canRemind(key: string): boolean {
   try {
-    const last = localStorage.getItem(key);
+    const last = localStorage.getItem(ownerStorageKey(key));
     if (!last) return true;
     return Date.now() - parseInt(last, 10) > REMINDER_COOLDOWN_MS;
   } catch {
@@ -106,7 +126,7 @@ function canRemind(key: string): boolean {
 /** Mark a reminder as sent. */
 function markReminded(key: string): void {
   try {
-    localStorage.setItem(key, Date.now().toString());
+    localStorage.setItem(ownerStorageKey(key), Date.now().toString());
   } catch {
     // ignore
   }
@@ -138,25 +158,20 @@ async function checkStreakReminder(): Promise<void> {
     const streak = prefs.streak;
     if (!streak || streak.current === 0) return;
 
-    // Check if there's been activity today
-    const db = await getDB();
-    const allProgress = await db.getAll("progress");
-    const today = new Date().toISOString().slice(0, 10);
-    const activityToday = allProgress.some((p) => {
-      const started = new Date(p.startedAt).toISOString().slice(0, 10);
-      return started === today;
-    });
+    const activityToday =
+      streak.lastActivityAt !== null &&
+      localDayKey(streak.lastActivityAt) === localDayKey(Date.now());
 
     if (!activityToday && isStreakAlive(streak)) {
-      notify(
+      const sent = await notify(
         "Your streak is still going",
         `${streak.current} days of consistent learning. Even 5 minutes keeps it alive.`,
         "streak-reminder"
       );
-      markReminded(LAST_STREAK_REMINDER_KEY);
+      if (sent) markReminded(LAST_STREAK_REMINDER_KEY);
     }
-  } catch {
-    // Silent failure — notifications are never critical
+  } catch (error) {
+    console.warn("[notifications] Streak check failed", error);
   }
 }
 
@@ -167,15 +182,15 @@ async function checkReviewReminder(): Promise<void> {
   try {
     const due = await getDueCards();
     if (due.length >= 5) {
-      notify(
+      const sent = await notify(
         "Flashcards ready for review",
         `${due.length} cards are due. A quick review session strengthens long-term memory.`,
         "review-reminder"
       );
-      markReminded(LAST_REVIEW_REMINDER_KEY);
+      if (sent) markReminded(LAST_REVIEW_REMINDER_KEY);
     }
-  } catch {
-    // Silent failure
+  } catch (error) {
+    console.warn("[notifications] Reminder check failed", error);
   }
 }
 
@@ -191,24 +206,20 @@ async function checkGoalReminder(): Promise<void> {
     if (prefs.dailyGoalMinutes <= 0) return;
 
     const db = await getDB();
-    const allProgress = await db.getAll("progress");
-    const today = new Date().toISOString().slice(0, 10);
-    const todayTimeMs = allProgress
-      .filter((p) => new Date(p.startedAt).toISOString().slice(0, 10) === today)
-      .reduce((sum, p) => sum + p.timeSpentMs, 0);
-    const todayMinutes = Math.round(todayTimeMs / 60_000);
+    const allProgress = await getAllEncryptedLessonProgress(db);
+    const todayMinutes = dailyStudyMinutes(allProgress, Date.now());
 
     if (todayMinutes < prefs.dailyGoalMinutes) {
       const remaining = prefs.dailyGoalMinutes - todayMinutes;
-      notify(
+      const sent = await notify(
         "Daily goal update",
         `${remaining} minutes left to hit your ${prefs.dailyGoalMinutes}-minute goal today.`,
         "goal-reminder"
       );
-      markReminded(LAST_GOAL_REMINDER_KEY);
+      if (sent) markReminded(LAST_GOAL_REMINDER_KEY);
     }
-  } catch {
-    // Silent failure
+  } catch (error) {
+    console.warn("[notifications] Reminder check failed", error);
   }
 }
 

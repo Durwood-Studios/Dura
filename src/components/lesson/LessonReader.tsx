@@ -1,3 +1,4 @@
+import { lessonActivities } from "@/lib/lesson-activities";
 import { lessonIdentity } from "@/lib/lesson-identity";
 import Link from "next/link";
 import { ArrowLeft, ArrowRight } from "lucide-react";
@@ -52,10 +53,23 @@ export async function LessonReader({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   type MDXComponentType = React.ComponentType<{ components?: Record<string, any> }>;
   let MDXContent: MDXComponentType;
+  const requiredActivities: string[] = [];
+  let isContentAvailable = true;
   try {
-    const result = await evaluate(body, { ...runtime, development: false });
+    const result = await evaluate(body, {
+      ...runtime,
+      development: false,
+      remarkPlugins: [
+        lessonActivities(
+          body,
+          lessonIdentity(meta.phaseId, meta.moduleId, meta.id),
+          requiredActivities
+        ),
+      ],
+    });
     MDXContent = result.default as MDXComponentType;
   } catch (err) {
+    isContentAvailable = false;
     console.error(`[LessonReader] MDX compile error in ${meta.id}:`, err);
     function MDXFallback(): React.ReactElement {
       return (
@@ -93,7 +107,7 @@ export async function LessonReader({
   });
 
   return (
-    <article className="mx-auto max-w-[700px] px-6 py-12">
+    <article className="mx-auto max-w-[700px] min-w-0 px-6 py-12 [overflow-wrap:anywhere]">
       <ScrollTracker lessonId={meta.id} phaseId={meta.phaseId} moduleId={meta.moduleId} />
 
       <header className="mb-8 border-b border-[var(--color-border)] pb-6">
@@ -130,14 +144,17 @@ export async function LessonReader({
         </div>
       </BiteMode>
 
-      <CompletionGate
-        estimatedMinutes={meta.estimatedMinutes}
-        lessonTitle={meta.title}
-        hasQuiz={hasQuiz}
-        nextHref={next?.href}
-        nextTitle={next ? nextLabel(next) : undefined}
-        vocabulary={meta.vocabulary}
-      />
+      {isContentAvailable && (
+        <CompletionGate
+          estimatedMinutes={meta.estimatedMinutes}
+          lessonTitle={meta.title}
+          hasQuiz={hasQuiz}
+          requiredActivities={requiredActivities}
+          nextHref={next?.href}
+          nextTitle={next ? nextLabel(next) : undefined}
+          vocabulary={meta.vocabulary}
+        />
+      )}
 
       <AnnotationsPanel lessonId={lessonIdentity(meta.phaseId, meta.moduleId, meta.id)} />
 

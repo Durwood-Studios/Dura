@@ -1,4 +1,4 @@
-import type { AssessmentQuestion, QuestionResult, QuestionDifficulty } from "@/types/assessment";
+import type { AssessmentQuestion, QuestionResult } from "@/types/assessment";
 
 const COOLDOWN_DEFAULT_MS = 24 * 60 * 60 * 1000;
 const MASTERY_DEFAULT_COUNT = 12;
@@ -44,13 +44,24 @@ function asArray(value: number | number[]): number[] {
 export function selectMasteryQuestions(
   moduleId: string,
   pool: AssessmentQuestion[],
-  count: number = MASTERY_DEFAULT_COUNT
+  count: number = MASTERY_DEFAULT_COUNT,
+  previousQuestionIds: string[] = []
 ): AssessmentQuestion[] {
   try {
     const moduleQuestions = pool.filter((q) => q.moduleId === moduleId);
     if (moduleQuestions.length === 0) return [];
     const rng = mulberry32(Date.now());
-    const shuffled = shuffle(moduleQuestions, rng);
+    const previous = new Set(previousQuestionIds);
+    const shuffled = [
+      ...shuffle(
+        moduleQuestions.filter((question) => !previous.has(question.id)),
+        rng
+      ),
+      ...shuffle(
+        moduleQuestions.filter((question) => previous.has(question.id)),
+        rng
+      ),
+    ];
     return shuffled.slice(0, Math.min(count, shuffled.length));
   } catch (error) {
     console.error("[assessment] selectMasteryQuestions failed", error);
@@ -59,55 +70,44 @@ export function selectMasteryQuestions(
 }
 
 /**
- * Select questions for a phase verification test.
- * Draws from every module in the phase, weighted toward medium/hard.
+ * Module-stratified phase sampling. Each nonempty module gets an item before
+ * any receives a second; subsequent rounds balance module representation.
+ * Counts below the number of modules are rejected rather than claiming coverage.
+ * Callers can inject a cryptographic RNG on the server or a seeded RNG in tests.
  */
 export function selectVerificationQuestions(
   phaseId: string,
   pool: AssessmentQuestion[],
-  count: number = VERIFICATION_DEFAULT_COUNT
+  count: number = VERIFICATION_DEFAULT_COUNT,
+  rng: () => number = mulberry32(Date.now())
 ): AssessmentQuestion[] {
-  try {
-    const phaseQuestions = pool.filter((q) => q.phaseId === phaseId);
-    if (phaseQuestions.length === 0) return [];
-
-    // Group by difficulty for weighted selection.
-    const buckets: Record<QuestionDifficulty, AssessmentQuestion[]> = {
-      easy: [],
-      medium: [],
-      hard: [],
-    };
-    for (const q of phaseQuestions) buckets[q.difficulty].push(q);
-
-    const rng = mulberry32(Date.now());
-    // Target mix: 30% easy, 50% medium, 20% hard.
-    const targets = {
-      easy: Math.round(count * 0.3),
-      medium: Math.round(count * 0.5),
-      hard: count - Math.round(count * 0.3) - Math.round(count * 0.5),
-    };
-
-    const picked: AssessmentQuestion[] = [];
-    for (const difficulty of ["easy", "medium", "hard"] as QuestionDifficulty[]) {
-      const shuffled = shuffle(buckets[difficulty], rng);
-      picked.push(...shuffled.slice(0, targets[difficulty]));
-    }
-
-    // Pad with anything remaining if buckets were too small.
-    if (picked.length < count) {
-      const used = new Set(picked.map((p) => p.id));
-      const remaining = shuffle(
-        phaseQuestions.filter((q) => !used.has(q.id)),
-        rng
-      );
-      picked.push(...remaining.slice(0, count - picked.length));
-    }
-
-    return shuffle(picked, rng).slice(0, Math.min(count, picked.length));
-  } catch (error) {
-    console.error("[assessment] selectVerificationQuestions failed", error);
-    return [];
+  if (!Number.isInteger(count) || count <= 0) return [];
+  const groups = new Map<string, AssessmentQuestion[]>();
+  for (const question of pool) {
+    if (question.phaseId !== phaseId) continue;
+    const group = groups.get(question.moduleId) ?? [];
+    group.push(question);
+    groups.set(question.moduleId, group);
   }
+  if (groups.size > count) return [];
+  const queues = shuffle(
+    [...groups.values()].map((items) => shuffle(items, rng)),
+    rng
+  );
+  const selected: AssessmentQuestion[] = [];
+  while (selected.length < count) {
+    let added = false;
+    for (const queue of queues) {
+      const question = queue.shift();
+      if (question) {
+        selected.push(question);
+        added = true;
+      }
+      if (selected.length === count) break;
+    }
+    if (!added) break;
+  }
+  return shuffle(selected, rng);
 }
 
 /**

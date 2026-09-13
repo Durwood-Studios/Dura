@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState, useRef } from "react";
-import { markActivityComplete } from "@/components/discover/Passport";
+import { markActivityComplete } from "@/components/discover/DiscoveryStampStatus";
 import { cn } from "@/lib/utils";
 
 function scale3(value: number): number {

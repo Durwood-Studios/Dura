@@ -10,6 +10,9 @@ test("written lesson response survives reload and exposes its worked answer", as
   await response.fill(
     "I would delegate the implementation, agree on outcomes, and schedule a review of the risks."
   );
+  await expect(exercise).toContainText(
+    "Responses save with this learner’s encrypted lesson records"
+  );
   await page.reload();
   await expect(response).toHaveValue(
     "I would delegate the implementation, agree on outcomes, and schedule a review of the risks."
@@ -50,7 +53,17 @@ test("guest completes a lesson and keeps completion after reload", async ({ page
   await page.getByRole("button", { name: "Submit", exact: true }).click();
   await page.getByRole("button", { name: "Finish", exact: true }).click();
   await page.evaluate((): void => window.scrollTo(0, document.documentElement.scrollHeight));
-  await page.clock.fastForward(5 * 60 * 1000);
+  // Run observed timer ticks; a single wall-clock jump is deliberately rejected
+  // as unobserved study time. Passing the quiz alone must not complete this lesson.
+  // Observe bounded ten-second intervals without replaying thousands of animation frames.
+  for (let tick = 0; tick < 13; tick++) await page.clock.fastForward(10_000);
+  await expect(page.getByText("Time logged.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Keep going", exact: true })).toBeDisabled();
+  await page.getByRole("textbox", { name: "Blank 1", exact: true }).fill("bit");
+  await page.getByRole("textbox", { name: "Blank 2", exact: true }).fill("byte");
+  await page.getByRole("button", { name: "Check answers", exact: true }).click();
+  await expect(page.getByText("All correct.", { exact: true })).toBeVisible();
+  await page.evaluate((): void => window.scrollTo(0, document.documentElement.scrollHeight));
   const complete = page.getByRole("button", { name: /^Complete lesson/ });
   await expect(complete).toBeEnabled();
   await complete.click();

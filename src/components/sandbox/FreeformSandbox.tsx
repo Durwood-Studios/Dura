@@ -1,5 +1,6 @@
 "use client";
 
+import { ExternalSandboxConsent } from "@/components/sandbox/ExternalSandboxConsent";
 import dynamic from "next/dynamic";
 import { FreeformSandboxSkeleton } from "@/components/sandbox/FreeformSandboxSkeleton";
 
@@ -9,5 +10,9 @@ const FreeformSandboxInner = dynamic(() => import("@/components/sandbox/Freeform
 });
 
 export function FreeformSandbox(): React.ReactElement {
-  return <FreeformSandboxInner />;
+  return (
+    <ExternalSandboxConsent>
+      <FreeformSandboxInner />
+    </ExternalSandboxConsent>
+  );
 }

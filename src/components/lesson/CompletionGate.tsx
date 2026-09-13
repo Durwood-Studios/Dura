@@ -1,5 +1,7 @@
 "use client";
 
+import { areActivitiesComplete } from "@/lib/activity-evidence";
+
 import { lessonRouteId } from "@/lib/lesson-identity";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -25,6 +27,7 @@ import { SITE_URL } from "@/lib/og";
 import { cn } from "@/lib/utils";
 
 interface CompletionGateProps {
+  requiredActivities?: string[];
   estimatedMinutes: number;
   lessonTitle: string;
   /** Whether this lesson contains a Quiz component. */
@@ -97,6 +100,7 @@ export function CompletionGate({
   estimatedMinutes,
   lessonTitle,
   hasQuiz = true,
+  requiredActivities,
   nextHref,
   nextTitle,
   vocabulary = [],
@@ -113,7 +117,11 @@ export function CompletionGate({
   const requiredMinutes = Math.ceil(estimatedMinutes * TIME_REQUIRED_RATIO);
   const scrollOk = scrollPercent >= SCROLL_REQUIRED;
   const timeOk = timeSpentMs >= requiredMs;
-  const quizOk = hasQuiz ? quizPassed : true;
+  const quizOk = requiredActivities
+    ? areActivitiesComplete(requiredActivities, current?.activityEvidence)
+    : hasQuiz
+      ? quizPassed
+      : true;
   const ready = scrollOk && timeOk && quizOk;
 
   const timeProgress = Math.min(1, timeSpentMs / requiredMs);
@@ -199,9 +207,27 @@ export function CompletionGate({
         subtitle: timeOk ? `Time logged.` : `${formatTimeRemaining(timeRemainingMs)} remaining`,
         progress: timeProgress,
       },
-      ...(hasQuiz ? [{ label: "Pass the quiz", done: quizPassed }] : []),
+      ...(requiredActivities?.length || hasQuiz
+        ? [
+            {
+              label: requiredActivities
+                ? "Complete each practice activity (self-review is labeled separately)"
+                : "Pass the quiz",
+              done: quizOk,
+            },
+          ]
+        : []),
     ],
-    [scrollOk, timeOk, quizPassed, requiredMinutes, timeRemainingMs, timeProgress, hasQuiz]
+    [
+      scrollOk,
+      timeOk,
+      requiredMinutes,
+      timeRemainingMs,
+      timeProgress,
+      hasQuiz,
+      requiredActivities,
+      quizOk,
+    ]
   );
 
   // After celebrating, fetch due card count and completed lesson count.

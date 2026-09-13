@@ -1,12 +1,15 @@
 "use client";
 
+import { ActivitySaveStatus } from "@/components/lesson/ActivitySaveStatus";
+import { useActivityEvidence, type ActivityProps } from "@/hooks/useActivityEvidence";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check } from "lucide-react";
 import { track } from "@/lib/analytics";
 import { useProgressStore } from "@/stores/progress";
 import { cn } from "@/lib/utils";
 
-interface FillBlankProps {
+interface FillBlankProps extends ActivityProps {
   /** Multi-blank format */
   prompt?: string;
   answers?: string[];
@@ -60,10 +63,20 @@ export function FillBlank(props: FillBlankProps): React.ReactElement {
   // answers guard stops a malformed lesson from passing on mount.
   // retry() below reopens revealed blanks so the gate stays reachable.
   const passedGenuinely = safeAnswers.length > 0 && allCorrect && !anyRevealed;
+  const activity = useActivityEvidence(props);
+  const { saveEvidence } = activity;
   const passQuiz = useProgressStore((s) => s.passQuiz);
   useEffect(() => {
-    if (passedGenuinely) passQuiz();
-  }, [passedGenuinely, passQuiz]);
+    if (passedGenuinely) {
+      if (activity.isReady) passQuiz();
+      void saveEvidence({
+        kind: "automatic",
+        updatedAt: Date.now(),
+        completedAt: Date.now(),
+        score: 1,
+      }).catch((error: unknown): void => console.error("[activity] Evidence save failed", error));
+    }
+  }, [passedGenuinely, passQuiz, saveEvidence, activity.isReady]);
 
   const retry = (): void => {
     setValues((vs) => vs.map((v, i) => (blanks[i].revealed ? "" : v)));
@@ -123,6 +136,7 @@ export function FillBlank(props: FillBlankProps): React.ReactElement {
 
   return (
     <section className="my-8 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6">
+      <ActivitySaveStatus state={activity} />
       <p className="leading-[1.9] text-[var(--color-text-primary)]">
         {segments.map((seg, i) => (
           <span key={i}>

@@ -2,21 +2,12 @@
 
 import { useState } from "react";
 
-/**
- * AgeGate — Verifies the user is 13 or older before proceeding to account
- * creation. Required for COPPA compliance.
- *
- * Usage: Rendered during the Supabase auth sign-up flow (Phase J).
- * Not wired into any current flow — all current features work locally
- * without an account and collect no personal information.
- *
- * The component captures month/year only (not full birthdate) to minimize
- * PII collection. The result is stored in sessionStorage so it persists
- * for the current sign-up attempt but is not saved long-term.
+/** Dura onboarding age self-attestation. Birth inputs stay in component memory.
+ * This is not identity verification or a substitute for provider-side signup controls.
  */
 
 interface AgeGateProps {
-  /** Called when the user passes age verification (13+) */
+  /** Called after the user self-attests an age of 13+ */
   onVerified: () => void;
 }
 
@@ -49,12 +40,12 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
     setError(null);
     setIsUnder13(false);
 
-    if (month === null) {
+    if (month === null || !Number.isInteger(month) || month < 0 || month > 11) {
       setError("Please select your birth month.");
       return;
     }
 
-    const yearNum = parseInt(year, 10);
+    const yearNum = /^\d{4}$/.test(year) ? Number(year) : NaN;
     if (isNaN(yearNum) || yearNum < MIN_YEAR || yearNum > MAX_YEAR) {
       setError("Please enter a valid birth year.");
       return;
@@ -62,7 +53,7 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
 
     // Calculate age using month/year only.
     // Use the last day of the birth month to be conservative (gives the
-    // user the benefit of the doubt if their birthday hasn't passed yet).
+    // check never assumes a birthday earlier than the entered month).
     const now = new Date();
     const birthDate = new Date(yearNum, month + 1, 0); // last day of birth month
     let age = now.getFullYear() - birthDate.getFullYear();
@@ -121,7 +112,7 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
 
   return (
     <div className="mx-auto max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 shadow-sm">
-      <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">Verify your age</h2>
+      <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">Confirm your age</h2>
       <p className="mt-1 text-sm text-[var(--color-text-muted)]">
         DURA requires account holders to be at least 13 years old.
       </p>
@@ -186,7 +177,7 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
       </button>
 
       <p className="mt-4 text-center text-xs text-[var(--color-text-muted)]">
-        We only use this to verify your age. Your birth month and year are not stored.
+        This is a self-attestation. Your birth month and year are not saved or sent.
       </p>
     </div>
   );

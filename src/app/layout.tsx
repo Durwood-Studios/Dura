@@ -1,7 +1,10 @@
+import { AuthProvider } from "@/components/providers/AuthProvider";
 import { LocalResetBoundary } from "@/components/providers/LocalResetBoundary";
 import type { Metadata, Viewport } from "next";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
+import { CompletionSounds } from "@/components/providers/CompletionSounds";
+import { OfflineNavigation } from "@/components/providers/OfflineNavigation";
 import { FeedbackDelivery } from "@/components/providers/FeedbackDelivery";
 import { ThemeProvider } from "@/components/providers/ThemeProvider";
 import { AnalyticsProvider } from "@/components/providers/AnalyticsProvider";
@@ -123,10 +126,14 @@ export default function RootLayout({
         />
         <ChunkRecovery />
         <LocalResetBoundary>
-          <ThemeProvider>
-            <FeedbackDelivery />
-            <AnalyticsProvider>{children}</AnalyticsProvider>
-          </ThemeProvider>
+          <AuthProvider>
+            <ThemeProvider>
+              <FeedbackDelivery />
+              <OfflineNavigation />
+              <CompletionSounds />
+              <AnalyticsProvider>{children}</AnalyticsProvider>
+            </ThemeProvider>
+          </AuthProvider>
         </LocalResetBoundary>
       </body>
     </html>

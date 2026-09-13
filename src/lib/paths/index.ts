@@ -16,6 +16,8 @@ export const PATHS: readonly Path[] = [
   {
     id: "full-stack-engineer",
     slug: "full-stack-engineer",
+    destinationRoleSlugs: ["full-stack-engineer"],
+    relatedRoleSlugs: [],
     title: "Full-Stack Web Engineer",
     tagline: "Ship features end-to-end against modern web infrastructure.",
     description:
@@ -61,6 +63,8 @@ export const PATHS: readonly Path[] = [
   {
     id: "frontend-engineer",
     slug: "frontend-engineer",
+    destinationRoleSlugs: ["frontend-engineer"],
+    relatedRoleSlugs: [],
     title: "Frontend Engineer",
     tagline: "Build production UIs with React + Next.js 15.",
     description:
@@ -89,6 +93,8 @@ export const PATHS: readonly Path[] = [
   {
     id: "backend-engineer",
     slug: "backend-engineer",
+    destinationRoleSlugs: ["backend-engineer"],
+    relatedRoleSlugs: [],
     title: "Backend Engineer",
     tagline: "Build the systems behind the screen.",
     description:
@@ -122,6 +128,8 @@ export const PATHS: readonly Path[] = [
   {
     id: "ml-engineer",
     slug: "ml-engineer",
+    destinationRoleSlugs: ["ai-ml-engineer"],
+    relatedRoleSlugs: [],
     title: "ML / AI Engineer",
     tagline: "Build with foundation models, end to end.",
     description:
@@ -155,6 +163,8 @@ export const PATHS: readonly Path[] = [
   {
     id: "agent-engineer",
     slug: "agent-engineer",
+    destinationRoleSlugs: ["ai-ml-engineer"],
+    relatedRoleSlugs: [],
     title: "Agentic AI Engineer",
     tagline: "Ship agents that survive prod.",
     description:
@@ -188,6 +198,8 @@ export const PATHS: readonly Path[] = [
   {
     id: "systems-engineer",
     slug: "systems-engineer",
+    destinationRoleSlugs: [],
+    relatedRoleSlugs: ["site-reliability-engineer", "devops-platform-engineer"],
     title: "Systems Engineer",
     tagline: "Understand the machine, debug production at the layer below.",
     description:
@@ -215,6 +227,8 @@ export const PATHS: readonly Path[] = [
   {
     id: "robotics-software-engineer",
     slug: "robotics-software-engineer",
+    destinationRoleSlugs: ["robotics-software-engineer"],
+    relatedRoleSlugs: [],
     title: "Robotics Software Engineer",
     tagline: "Write ROS 2 code that ships through a safety review.",
     description:
@@ -244,10 +258,12 @@ export const PATHS: readonly Path[] = [
   {
     id: "manufacturing-systems-engineer",
     slug: "manufacturing-systems-engineer",
+    destinationRoleSlugs: ["manufacturing-systems-engineer"],
+    relatedRoleSlugs: [],
     title: "Manufacturing Systems Engineer",
     tagline: "Bridge the shop floor and the IT stack.",
     description:
-      "For engineers integrating MES, SCADA, OPC UA, MTConnect, and PPAP workflows. Pairs the backend + systems substrate with Phase 14's twelve-lesson manufacturing-standards stack covering QMS, GD&T, ISA-95, OPC UA, IEC 62443, and a hands-on MTConnect → OPC UA bridge capstone.",
+      "For engineers integrating MES, SCADA, OPC UA, MTConnect, and PPAP workflows. Pairs the backend + systems substrate with Phase14's manufacturing-standards stack covering QMS, GD&T, ISA-95, OPC UA, IEC 62443, and a hands-on MTConnect → OPC UA bridge capstone.",
     outcome:
       "Stand up a working MTConnect → OPC UA bridge against a simulated CNC and integrate it into an MES with documented zones and conduits.",
     archetype: "Manufacturing",
@@ -275,10 +291,12 @@ export const PATHS: readonly Path[] = [
   {
     id: "embedded-engineer",
     slug: "embedded-engineer",
+    destinationRoleSlugs: ["embedded-engineer"],
+    relatedRoleSlugs: [],
     title: "Embedded / Firmware Engineer",
     tagline: "Ship production firmware against ARM Cortex-M.",
     description:
-      "C and Rust on bare metal, RTOS fundamentals, MISRA-C:2023 compliant style, driver development for the four canonical buses (UART, SPI, I2C, CAN), DMA-driven peripherals, and a real-time sensor pipeline capstone. Code-first throughout — eight hands-on lessons targeting ARM Cortex-M.",
+      "C and Rust on bare metal, RTOS fundamentals, MISRA-C:2023 compliant style, driver development for the four canonical buses (UART, SPI, I2C, CAN), DMA-driven peripherals, and a real-time sensor pipeline capstone. Code-first throughout — hands-on modules targeting ARM Cortex-M.",
     outcome:
       "Build production firmware against an ARM Cortex-M target with documented register access, RTOS scheduling, DMA-driven peripherals, and a real-time sensor pipeline that compiles, flashes, and runs.",
     archetype: "Embedded",
@@ -301,7 +319,7 @@ export const PATHS: readonly Path[] = [
       {
         phaseId: "10",
         scope: "spine",
-        rationale: "Embedded / Firmware — eight code-first lessons on ARM Cortex-M.",
+        rationale: "Embedded / Firmware — code-first modules on ARM Cortex-M.",
       },
     ],
     status: "complete",
@@ -311,12 +329,14 @@ export const PATHS: readonly Path[] = [
   {
     id: "hardware-verification-engineer",
     slug: "hardware-verification-engineer",
+    destinationRoleSlugs: [],
+    relatedRoleSlugs: [],
     title: "Hardware Verification Engineer",
     tagline: "Stand up UVM testbenches for any IP block.",
     description:
-      "Pairs the CS + systems substrate with Phase H's eight-lesson SystemVerilog + UVM curriculum. IEEE 1800-2023 and IEEE 1800.2-2020 anchored throughout. The credential of choice for semiconductor DV roles.",
+      "Pairs the CS + systems substrate with Phase11's SystemVerilog + UVM curriculum. IEEE 1800-2023 and IEEE 1800.2-2020 anchored throughout. Includes source and evidence workflows for semiconductor verification practice.",
     outcome:
-      "Compose a complete UVM testbench for a UART IP block — driver, monitor, sequencer, scoreboard, constrained-random sequences, functional coverage, SVA assertions — with 100% coverage closure documented and hash-anchored via /verify.",
+      "Compose a complete UVM testbench for a UART IP block — driver, monitor, sequencer, scoreboard, constrained-random sequences, functional coverage, SVA assertions — with a declared coverage model, recorded exclusions and reproducible simulator evidence.",
     archetype: "Systems",
     color: "#a78bfa",
     phases: [
@@ -341,12 +361,14 @@ export const PATHS: readonly Path[] = [
   {
     id: "quant-hft-engineer",
     slug: "quant-hft-engineer",
+    destinationRoleSlugs: [],
+    relatedRoleSlugs: [],
     title: "Quantitative / HFT Engineer",
     tagline: "Build microsecond-latency C++ for quant trading.",
     description:
-      "Pairs the CS + systems substrate with Phase Q's eight-lesson low-latency C++ curriculum — move semantics, IEEE 754 numerics, cache-aware programming, lock-free data structures, kernel-bypass networking, and the Nasdaq ITCH/OUCH + FIX market-data protocols. ISO C++23 anchored throughout.",
+      "Pairs the CS + systems substrate with Phase12's low-latency C++ curriculum — move semantics, IEEE 754 numerics, cache-aware programming, lock-free data structures, kernel-bypass networking, and the Nasdaq ITCH/OUCH + FIX market-data protocols. ISO C++23 anchored throughout.",
     outcome:
-      "Build a microsecond-latency, in-memory limit order book that consumes ITCH market data, maintains price levels feeding a lock-free SPSC queue, computes mid/spread, and is latency-profiled — hash-anchored via /verify.",
+      "Build a microsecond-latency, in-memory limit order book that consumes ITCH market data, maintains price levels feeding a lock-free SPSC queue, computes mid/spread, and is profiled against an explicitly defined workload, with source and correctness evidence retained in your portfolio.",
     archetype: "Systems",
     color: "#f59e0b",
     phases: [
@@ -384,6 +406,8 @@ export const PATHS: readonly Path[] = [
   {
     id: "engineering-leader",
     slug: "engineering-leader",
+    destinationRoleSlugs: ["engineering-manager"],
+    relatedRoleSlugs: ["solutions-architect"],
     title: "Engineering Leader / CTO Track",
     tagline: "From IC to engineering org leader.",
     description:

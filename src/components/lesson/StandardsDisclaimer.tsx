@@ -39,7 +39,7 @@ export function StandardsDisclaimer({
       className="mt-4 flex gap-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3.5 py-3 text-xs leading-relaxed text-[var(--color-text-secondary)]"
     >
       <Info aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
-      <p>
+      <p className="min-w-0 [overflow-wrap:anywhere]">
         {anchor ? (
           <>
             This lesson is anchored to <span className="font-medium">{anchor}</span>. Standards

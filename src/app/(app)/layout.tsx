@@ -8,18 +8,16 @@ import { ToastLayer } from "@/components/gamification/ToastLayer";
 import { TipButton } from "@/components/support/TipButton";
 import { CommandPalette } from "@/components/nav/CommandPalette";
 import { LenisProvider } from "@/components/providers/LenisProvider";
-import { AuthProvider } from "@/components/providers/AuthProvider";
 import { PageTransition } from "@/components/motion/PageTransition";
 import { RestReminder } from "@/components/study/RestReminder";
 import { InstallPrompt } from "@/components/pwa/InstallPrompt";
 import { OfflineIndicator } from "@/components/pwa/OfflineIndicator";
 import { NotificationScheduler } from "@/components/pwa/NotificationScheduler";
 
-// Auth gate is enforced at the middleware layer — unauthenticated requests
-// are redirected to /auth/sign-in before any layout renders.
+// Learning remains available to guests; the root provider selects local ownership before hydration.
 export default function AppLayout({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
-    <AuthProvider>
+    <>
       <div className="flex min-h-screen bg-[var(--color-bg-primary)] text-[var(--color-text-primary)]">
         <a
           href="#main-content"
@@ -49,6 +47,6 @@ export default function AppLayout({ children }: { children: React.ReactNode }): 
           <NotificationScheduler />
         </LenisProvider>
       </div>
-    </AuthProvider>
+    </>
   );
 }

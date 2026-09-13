@@ -1,3 +1,4 @@
+import { ownerStorageKey, isOwnerInitialized } from "@/lib/storage/owner";
 /**
  * Analytics consent gate (PPLAS-R4 / GDPR Art. 7).
  *
@@ -47,9 +48,9 @@ function isConsentState(value: unknown): value is ConsentState {
 }
 
 function readStorage(): ConsentState {
-  if (typeof localStorage === "undefined") return DEFAULT_STATE;
+  if (!isOwnerInitialized() || typeof localStorage === "undefined") return DEFAULT_STATE;
   try {
-    const raw = localStorage.getItem(CONSENT_KEY);
+    const raw = localStorage.getItem(ownerStorageKey(CONSENT_KEY));
     if (!raw) return DEFAULT_STATE;
     const parsed: unknown = JSON.parse(raw);
     if (!isConsentState(parsed)) return DEFAULT_STATE;
@@ -70,20 +71,20 @@ export function isAnalyticsEnabled(): boolean {
 export function hasMadeConsentChoice(): boolean {
   if (typeof localStorage === "undefined") return false;
   try {
-    return localStorage.getItem(CONSENT_KEY) !== null;
+    return localStorage.getItem(ownerStorageKey(CONSENT_KEY)) !== null;
   } catch {
     return false;
   }
 }
 
 export function grantAnalyticsConsent(): void {
-  if (typeof localStorage === "undefined") return;
+  if (!isOwnerInitialized() || typeof localStorage === "undefined") return;
   const state: ConsentState = {
     analyticsConsented: true,
     consentedAt: new Date().toISOString(),
   };
   try {
-    localStorage.setItem(CONSENT_KEY, JSON.stringify(state));
+    localStorage.setItem(ownerStorageKey(CONSENT_KEY), JSON.stringify(state));
     dispatchConsentChanged();
   } catch (error) {
     console.error("[consent-gate] grant failed", error);
@@ -91,13 +92,13 @@ export function grantAnalyticsConsent(): void {
 }
 
 export function declineAnalyticsConsent(): void {
-  if (typeof localStorage === "undefined") return;
+  if (!isOwnerInitialized() || typeof localStorage === "undefined") return;
   const state: ConsentState = {
     analyticsConsented: false,
     consentedAt: new Date().toISOString(),
   };
   try {
-    localStorage.setItem(CONSENT_KEY, JSON.stringify(state));
+    localStorage.setItem(ownerStorageKey(CONSENT_KEY), JSON.stringify(state));
     dispatchConsentChanged();
   } catch (error) {
     console.error("[consent-gate] decline failed", error);
@@ -105,9 +106,9 @@ export function declineAnalyticsConsent(): void {
 }
 
 export function revokeAnalyticsConsent(): void {
-  if (typeof localStorage === "undefined") return;
+  if (!isOwnerInitialized() || typeof localStorage === "undefined") return;
   try {
-    localStorage.removeItem(CONSENT_KEY);
+    localStorage.removeItem(ownerStorageKey(CONSENT_KEY));
     dispatchConsentChanged();
   } catch (error) {
     console.error("[consent-gate] revoke failed", error);

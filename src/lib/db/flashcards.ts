@@ -1,3 +1,4 @@
+import { deleteLearnerRecord } from "@/lib/db/deletion";
 import { getDB } from "@/lib/db";
 import { triggerShadowWrite } from "@/lib/storage/shadow-write";
 import {
@@ -34,8 +35,7 @@ export async function putCard(card: FlashCard): Promise<void> {
 
 export async function deleteCard(id: string): Promise<void> {
   try {
-    const db = await getDB();
-    await db.delete("flashcards", id);
+    await deleteLearnerRecord("flashcards", id);
     triggerShadowWrite();
   } catch (error) {
     console.error("[flashcards] deleteCard failed", error);

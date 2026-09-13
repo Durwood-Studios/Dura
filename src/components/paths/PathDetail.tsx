@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getPhase } from "@/content/phases";
+import { PRACTICAL_LABS } from "@/lib/labs";
 import { getRoleBySlug } from "@/content/roles";
 import { estimatedPathHours, spinePhaseCount } from "@/lib/paths";
 import type { Path, PathPhaseRef, PathStatus } from "@/lib/paths/types";
@@ -19,10 +20,13 @@ export function PathDetail({ path }: { path: Path }): React.ReactElement {
   const electives = path.phases.filter((p) => p.scope === "elective");
   const hours = estimatedPathHours(path);
   const phaseCount = spinePhaseCount(path);
-  // If the Path's slug matches a career-track Role slug, link to it.
-  // Paths sequence the curriculum; Tracks describe the destination
-  // role (junior/mid/senior skills, salary, demand).
-  const matchedRole = getRoleBySlug(path.slug);
+  const roleLinks = [
+    ...path.destinationRoleSlugs.map((slug) => ({ slug, label: "Career-track destination" })),
+    ...path.relatedRoleSlugs.map((slug) => ({ slug, label: "Related career — different outcome" })),
+  ].flatMap(({ slug, label }) => {
+    const role = getRoleBySlug(slug);
+    return role ? [{ role, label }] : [];
+  });
 
   return (
     <main className="mx-auto flex max-w-4xl flex-col gap-10 px-6 py-12">
@@ -34,7 +38,7 @@ export function PathDetail({ path }: { path: Path }): React.ReactElement {
       </Link>
 
       <header className="flex flex-col gap-4">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span
             aria-hidden
             className="h-3 w-3 rounded-full"
@@ -59,27 +63,48 @@ export function PathDetail({ path }: { path: Path }): React.ReactElement {
         <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">{path.outcome}</p>
       </section>
 
-      {matchedRole && (
+      <section className="space-y-3 rounded-xl border border-[var(--color-border)] p-5">
+        <h2 className="text-lg font-semibold">Practice and portfolio evidence</h2>
+        <p className="text-sm text-[var(--color-text-secondary)]">
+          Available curriculum means the lessons can be studied. Demonstrating the path outcome also
+          requires applied work, review and any stated external tools.
+        </p>
+        <Link href="/judgment" className="block text-[var(--color-accent)] underline">
+          Practice engineering judgment →
+        </Link>
+        {PRACTICAL_LABS.filter((lab) => lab.pathIds.includes(path.id)).map((lab) => (
+          <Link
+            key={lab.id}
+            href={`/labs/${lab.id}`}
+            className="block text-[var(--color-accent)] underline"
+          >
+            {lab.title} →
+          </Link>
+        ))}
+      </section>
+
+      {roleLinks.map(({ role, label }) => (
         <Link
-          href={`/tracks/${matchedRole.slug}`}
+          key={role.slug}
+          href={`/tracks/${role.slug}`}
           className="group flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-4 transition hover:border-[var(--color-accent)]"
         >
           <div>
             <p className="text-xs font-medium tracking-wide text-[var(--color-text-muted)] uppercase">
-              Career-track destination
+              {label}
             </p>
             <p className="mt-1 text-sm font-semibold text-[var(--color-text-primary)] group-hover:text-[var(--color-accent)]">
-              {matchedRole.title} →
+              {role.title} →
             </p>
             <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
               Junior / mid / senior skill matrix, salary range, market demand.
             </p>
           </div>
         </Link>
-      )}
+      ))}
 
       <section className="flex flex-col gap-4">
-        <header className="flex items-baseline justify-between">
+        <header className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold tracking-wide text-[var(--color-text-secondary)] uppercase">
             Spine sequence
           </h2>
@@ -96,7 +121,7 @@ export function PathDetail({ path }: { path: Path }): React.ReactElement {
 
       {electives.length > 0 && (
         <section className="flex flex-col gap-4">
-          <header className="flex items-baseline justify-between">
+          <header className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="text-sm font-semibold tracking-wide text-[var(--color-text-secondary)] uppercase">
               Recommended electives
             </h2>
@@ -155,7 +180,7 @@ function PhaseRefRow({
   return (
     <li className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4">
       <div className="flex items-baseline justify-between gap-3">
-        <div className="flex items-baseline gap-3">
+        <div className="flex min-w-0 items-baseline gap-3">
           {!elective && index !== undefined && (
             <span aria-hidden className="font-mono text-xs font-medium" style={{ color: accent }}>
               {String(index).padStart(2, "0")}
@@ -197,7 +222,7 @@ function scopedHours(
 function StatusBadge({ status }: { status: PathStatus }): React.ReactElement {
   const config: Record<PathStatus, { label: string; color: string }> = {
     complete: {
-      label: "Complete",
+      label: "Curriculum available",
       color: "var(--color-accent-emerald)",
     },
     scaffold: {

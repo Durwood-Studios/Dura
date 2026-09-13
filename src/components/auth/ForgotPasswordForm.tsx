@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { submitAuth } from "@/lib/auth/client-actions";
 import Link from "next/link";
 
 /**
@@ -10,6 +10,7 @@ import Link from "next/link";
  * email enumeration (OWASP A07).
  */
 export default function ForgotPasswordForm(): React.ReactElement {
+  const [error, setError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -18,19 +19,18 @@ export default function ForgotPasswordForm(): React.ReactElement {
     e.preventDefault();
     setIsLoading(true);
 
+    setError(null);
     try {
-      const supabase = createClient();
-      // Route through the existing callback handler which exchanges the
-      // PKCE code for a session, then forwards to the reset-password page.
-      await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent("/auth/reset-password")}`,
-      });
-    } catch {
-      // Intentionally swallowed — success state shown regardless to
-      // prevent leaking whether the address is registered.
+      await submitAuth("forgot-password", { email });
+      setSubmitted(true);
+    } catch (error) {
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Reset email could not be requested. Please try again."
+      );
     } finally {
       setIsLoading(false);
-      setSubmitted(true);
     }
   }
 
@@ -96,6 +96,12 @@ export default function ForgotPasswordForm(): React.ReactElement {
             placeholder="you@example.com"
           />
         </div>
+
+        {error && (
+          <p role="alert" className="text-sm text-[var(--color-error)]">
+            {error}
+          </p>
+        )}
 
         <button
           type="submit"

@@ -3,7 +3,7 @@
 import { useHydrated } from "@/hooks/useHydrated";
 import { useAIAvailability } from "@/hooks/useAIAvailability";
 
-import { useCallback, useState } from "react";
+import { useCallback, useState, useRef, useEffect } from "react";
 import { Sparkles, Loader2, CircleAlert } from "lucide-react";
 import Link from "next/link";
 import { chat, AIInvalidKeyError, AIKeyMissingError } from "@/lib/ai/anthropic-client";
@@ -82,8 +82,13 @@ function tryParse(raw: string): CodeReview | null {
 }
 
 export function CodeReviewClient(): React.ReactElement {
+  const activeRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => activeRequest.current?.abort(), []);
   const hydrated = useHydrated();
   const available = useAIAvailability();
+  useEffect(() => {
+    if (!available) activeRequest.current?.abort(new Error("AI consent or key was removed."));
+  }, [available]);
   const [code, setCode] = useState("");
   const [language, setLanguage] = useState<(typeof LANGUAGES)[number]["value"]>("javascript");
   const [submitting, setSubmitting] = useState(false);
@@ -102,8 +107,11 @@ export function CodeReviewClient(): React.ReactElement {
     setReview(null);
     setRawFallback(null);
 
+    const controller = new AbortController();
+    activeRequest.current = controller;
     try {
       const text = await chat({
+        signal: controller.signal,
         messages: [{ role: "user", content: code }],
         system: buildSystemPrompt(language),
         maxTokens: 1400,
@@ -145,8 +153,8 @@ export function CodeReviewClient(): React.ReactElement {
             to get started.
           </p>
           <p className="text-xs text-[var(--color-text-muted)]">
-            DURA never sees or stores your code or your key. Requests go directly from your browser
-            to <code>api.anthropic.com</code>.
+            DURA’s server does not receive your code or key. Your key is stored on this device;
+            Requests go directly from your browser to <code>api.anthropic.com</code>.
           </p>
         </div>
       </Shell>
@@ -155,6 +163,15 @@ export function CodeReviewClient(): React.ReactElement {
 
   return (
     <Shell>
+      {submitting && (
+        <button
+          type="button"
+          onClick={() => activeRequest.current?.abort(new Error("Review cancelled."))}
+          className="min-h-12 px-4 text-sm underline"
+        >
+          Cancel review
+        </button>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -165,6 +182,7 @@ export function CodeReviewClient(): React.ReactElement {
         <div className="flex items-center gap-3">
           <label className="text-xs font-medium text-[var(--color-text-secondary)]">Language</label>
           <select
+            aria-label="Code review language"
             value={language}
             onChange={(e) => setLanguage(e.target.value as typeof language)}
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1 text-xs text-[var(--color-text-primary)]"

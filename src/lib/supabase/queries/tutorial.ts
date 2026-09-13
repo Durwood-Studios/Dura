@@ -1,4 +1,5 @@
-import { createClient } from "@/lib/supabase/client";
+import { fetchOwnedRows } from "@/lib/supabase/queries/record-sync";
+import { syncMutableRecords } from "@/lib/supabase/queries/record-sync";
 import type { TutorialProgress } from "@/types/tutorial";
 
 /**
@@ -12,7 +13,6 @@ export async function syncTutorialProgress(
   items: TutorialProgress[]
 ): Promise<void> {
   try {
-    const supabase = createClient();
     const rows = items.map((t) => ({
       id: t.id,
       user_id: userId,
@@ -25,13 +25,7 @@ export async function syncTutorialProgress(
       completed_at: t.completedAt,
       last_active_at: t.lastActiveAt,
     }));
-    const { error } = await supabase
-      .from("tutorial_progress")
-      .upsert(rows, { onConflict: "id,user_id" });
-    if (error) {
-      console.error("[syncTutorialProgress] Upsert error:", error.message);
-      throw error;
-    }
+    await syncMutableRecords("tutorial_progress", rows);
   } catch (err) {
     console.error("[syncTutorialProgress] Failed to sync:", err);
     throw err;
@@ -41,15 +35,7 @@ export async function syncTutorialProgress(
 /** Fetch all tutorial progress for a user from Supabase. */
 export async function fetchTutorialProgress(userId: string): Promise<TutorialProgress[]> {
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase
-      .from("tutorial_progress")
-      .select("*")
-      .eq("user_id", userId);
-    if (error) {
-      console.error("[fetchTutorialProgress] Query error:", error.message);
-      throw error;
-    }
+    const data = await fetchOwnedRows("tutorial_progress", userId);
     return (data ?? []).map((row) => ({
       id: row.id as string,
       slug: row.slug as string,

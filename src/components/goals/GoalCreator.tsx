@@ -1,9 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { useState, useRef } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { useGoalsStore } from "@/stores/goals";
 import { generateId, cn } from "@/lib/utils";
+import { ROLES } from "@/content/roles";
+import { getRoleLessonIds } from "@/lib/career-coverage";
 import { PHASES } from "@/content/phases";
 import type { Goal, GoalType, GoalUnit } from "@/types/goal";
 
@@ -16,7 +20,7 @@ const GOAL_TYPES: { value: GoalType; label: string; hint: string }[] = [
   { value: "daily", label: "Daily", hint: "Lessons or minutes per day" },
   { value: "weekly", label: "Weekly", hint: "Lessons this week" },
   { value: "phase", label: "Phase", hint: "Finish a phase by a date" },
-  { value: "career", label: "Career", hint: "Reach a role level" },
+  { value: "career", label: "Career", hint: "Study lessons mapped to a role" },
 ];
 
 const DAILY_UNITS: { value: GoalUnit; label: string; min: number; max: number; step: number }[] = [
@@ -25,17 +29,25 @@ const DAILY_UNITS: { value: GoalUnit; label: string; min: number; max: number; s
 ];
 
 export function GoalCreator({ open, onClose }: GoalCreatorProps): React.ReactElement | null {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, open);
   const add = useGoalsStore((s) => s.add);
   const [type, setType] = useState<GoalType>("daily");
   const [unit, setUnit] = useState<GoalUnit>("lessons");
   const [target, setTarget] = useState<number>(2);
   const [phaseId, setPhaseId] = useState<string>("0");
   const [deadline, setDeadline] = useState<string>("");
-  const [careerRole, setCareerRole] = useState<string>("Junior");
+  const [careerRole, setCareerRole] = useState<string>(ROLES[0].id);
+
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   if (!open) return null;
 
   const handleSave = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
     let label = "";
     let finalUnit: GoalUnit = unit;
     let finalTarget = target;
@@ -50,19 +62,26 @@ export function GoalCreator({ open, onClose }: GoalCreatorProps): React.ReactEle
     } else if (type === "phase") {
       finalUnit = "lessons";
       finalDeadline = deadline ? new Date(deadline).getTime() : null;
-      finalTarget = 1;
       const phase = PHASES.find((p) => p.id === phaseId);
+      finalTarget = phase?.lessonCount ?? 1;
       label = `Finish ${phase?.title ?? `Phase ${phaseId}`}${
         deadline ? ` by ${new Date(deadline).toLocaleDateString()}` : ""
       }`;
     } else {
       finalUnit = "lessons";
-      finalTarget = 1;
-      label = `Reach ${careerRole}`;
+      finalTarget = getRoleLessonIds(careerRole).length;
+      if (!finalTarget) {
+        setSaveError("This role does not yet have mapped lessons. Choose another role.");
+        setIsSaving(false);
+        return;
+      }
+      label = `Study ${ROLES.find((role) => role.id === careerRole)?.title ?? careerRole} mapped lessons`;
     }
 
     const goal: Goal = {
       id: generateId("goal"),
+      ...(type === "phase" ? { phaseId } : {}),
+      ...(type === "career" ? { roleId: careerRole } : {}),
       type,
       unit: finalUnit,
       target: finalTarget,
@@ -72,13 +91,29 @@ export function GoalCreator({ open, onClose }: GoalCreatorProps): React.ReactEle
       achievedAt: null,
       label,
     };
-    await add(goal);
-    onClose();
+    try {
+      await add(goal);
+      onClose();
+    } catch (error) {
+      console.error("[goals] Save failed", error);
+      setSaveError("Your goal could not be saved. Please retry.");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center">
-      <div className="w-full max-w-md rounded-t-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 sm:rounded-2xl">
+  return createPortal(
+    <div
+      ref={dialogRef}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") onClose();
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="New goal"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-3 sm:items-center"
+    >
+      <div className="max-h-[calc(100dvh-1.5rem)] w-full max-w-md overflow-y-auto rounded-t-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-6 sm:rounded-2xl">
         <header className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">New Goal</h2>
           <button
@@ -197,23 +232,35 @@ export function GoalCreator({ open, onClose }: GoalCreatorProps): React.ReactEle
               onChange={(e) => setCareerRole(e.target.value)}
               className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-sm"
             >
-              <option>Junior</option>
-              <option>Mid-level</option>
-              <option>Senior</option>
-              <option>Staff</option>
-              <option>CTO</option>
+              {ROLES.map((role) => (
+                <option key={role.id} value={role.id}>
+                  {role.title}
+                </option>
+              ))}
             </select>
           </label>
         )}
 
+        {saveError && (
+          <p role="alert" className="mb-3 text-sm text-[var(--color-error)]">
+            {saveError}
+          </p>
+        )}
+        {type === "career" && (
+          <p className="mb-3 text-sm">
+            Progress counts mapped lessons, not job readiness or professional competence.
+          </p>
+        )}
         <button
           type="button"
+          disabled={isSaving}
           onClick={() => void handleSave()}
           className="w-full rounded-lg bg-emerald-500 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-600"
         >
-          Set goal
+          {isSaving ? "Saving…" : "Set goal"}
         </button>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

@@ -29,6 +29,8 @@ export interface SkillScore {
   correct: number;
   byBracket: Record<string, { total: number; correct: number }>;
   dreyfusLevel: DreyfusLevel;
+  /** Topic evidence for recommendations; absent on legacy results. */
+  byPhase?: Record<string, { total: number; correct: number }>;
 }
 
 export interface SkillAssessmentResult {

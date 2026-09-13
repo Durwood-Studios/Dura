@@ -61,9 +61,12 @@ export default function TermsPage(): React.ReactElement {
           are responsible for keeping your credentials secure.
         </p>
         <p className="mt-3">
-          You can delete your account at any time from Settings. Deleting your account removes all
-          server-side data associated with it. Local data on your device remains until you clear it
-          manually.
+          Settings provides account deletion when enabled on this deployment, requiring a recent
+          sign-in. It removes uploaded files, your account and linked live database records, then
+          this device’s account copy. Guest records are preserved. Anonymous feedback, retained
+          provider backups, downloaded copies, and records on other devices are separate; see the
+          Privacy Policy. If the control reports an unavailable deployment or failed step, contact
+          the site operator.
         </p>
       </Section>
 

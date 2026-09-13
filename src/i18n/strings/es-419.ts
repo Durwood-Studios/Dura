@@ -20,7 +20,7 @@ import type { Strings } from "./en";
 export const STRINGS_ES_419: Strings = {
   locale: {
     name: "Idioma",
-    hint: "Cambia el idioma de la interfaz de DURA. La traducción de lecciones y diccionario se lanza fase por fase — consulta el ROADMAP para el estado actual.",
+    hint: "Traduce la navegación y algunos títulos de Configuración. Las lecciones, definiciones y otros controles siguen en inglés.",
     machineTranslatedBadge: "Traducido por máquina",
     comingSoon: "Próximamente",
   },

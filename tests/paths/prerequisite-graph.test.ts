@@ -8,7 +8,7 @@ import {
 describe("curriculum prerequisite identity", (): void => {
   it("keeps identically numbered lessons in separate modules and specialty phases", (): void => {
     const graph = buildPrerequisiteGraph();
-    expect(graph.size).toBe(668);
+    expect(graph.size).toBe(749);
     expect(graph.get("0/0-1/01")?.title).toBe("Binary: The Language of Machines");
     expect(graph.get("0/0-5/01")?.title).toBeDefined();
     expect(graph.get("10/10-1/01")?.moduleId).toBe("10-1");

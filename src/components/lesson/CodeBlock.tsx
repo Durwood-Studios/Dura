@@ -1,4 +1,4 @@
-import { codeToHtml } from "shiki";
+import { bundledLanguages, codeToHtml } from "shiki";
 
 interface CodeBlockProps {
   children: string;
@@ -16,9 +16,14 @@ export async function CodeBlock({
   filename,
 }: CodeBlockProps): Promise<React.ReactElement> {
   let html: string;
+  const requestedLanguage =
+    language === "systemverilog" || language === "sv" ? "system-verilog" : language;
+  const supportedLanguage = Object.hasOwn(bundledLanguages, requestedLanguage)
+    ? requestedLanguage
+    : "text";
   try {
     html = await codeToHtml(children.trim(), {
-      lang: language,
+      lang: supportedLanguage,
       themes: {
         light: "github-light",
         dark: "github-dark",

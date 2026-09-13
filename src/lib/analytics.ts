@@ -34,6 +34,7 @@ export async function track(
       synced: 0,
     };
     const db = await getDB();
+    if (!isAnalyticsEnabled()) return;
     await db.put("analytics", event);
   } catch (error) {
     console.error("[analytics] track failed", error);
@@ -96,14 +97,13 @@ async function markSynced(ids: string[]): Promise<void> {
  * Flush queued events. The default sink is a no-op (no remote endpoint
  * yet) — pass a sink to ship batches to a backend later.
  */
-export async function flush(
-  sink: (events: AnalyticsEvent[]) => Promise<void> = async () => {}
-): Promise<void> {
-  if (!isAnalyticsEnabled()) return;
+export async function flush(sink?: (events: AnalyticsEvent[]) => Promise<void>): Promise<void> {
+  if (!sink || !isAnalyticsEnabled()) return;
   if (typeof navigator !== "undefined" && navigator.onLine === false) return;
   try {
     const batch = await getUnsyncedBatch(BATCH_SIZE);
     if (batch.length === 0) return;
+    if (!isAnalyticsEnabled()) return;
     await sink(batch);
     await markSynced(batch.map((e) => e.id));
   } catch (error) {

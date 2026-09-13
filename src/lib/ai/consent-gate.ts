@@ -1,3 +1,4 @@
+import { ownerStorageKey, isOwnerInitialized } from "@/lib/storage/owner";
 /**
  * AI features consent gate. Independent of the analytics consent gate
  * (src/lib/analytics/consent-gate.ts) — the data-flow categories are
@@ -55,9 +56,9 @@ function dispatchConsentChanged(): void {
 }
 
 function readStorage(): AIConsentState {
-  if (typeof localStorage === "undefined") return DEFAULT_STATE;
+  if (typeof localStorage === "undefined" || !isOwnerInitialized()) return DEFAULT_STATE;
   try {
-    const raw = localStorage.getItem(CONSENT_KEY);
+    const raw = localStorage.getItem(ownerStorageKey(CONSENT_KEY));
     if (!raw) return DEFAULT_STATE;
     const parsed: unknown = JSON.parse(raw);
     if (!isAIConsentState(parsed)) return DEFAULT_STATE;
@@ -76,14 +77,14 @@ export function isAIConsented(): boolean {
 }
 
 export function grantAIConsent(options: { byokAcknowledged: boolean }): void {
-  if (typeof localStorage === "undefined") return;
+  if (typeof localStorage === "undefined" || !isOwnerInitialized()) return;
   const state: AIConsentState = {
     aiConsented: true,
     consentedAt: new Date().toISOString(),
     byokAcknowledged: options.byokAcknowledged,
   };
   try {
-    localStorage.setItem(CONSENT_KEY, JSON.stringify(state));
+    localStorage.setItem(ownerStorageKey(CONSENT_KEY), JSON.stringify(state));
     dispatchConsentChanged();
   } catch (error) {
     console.error("[ai-consent] grant failed", error);
@@ -96,9 +97,9 @@ export function grantAIConsent(options: { byokAcknowledged: boolean }): void {
  * that DURA forgets about their key, full stop.
  */
 export function revokeAIConsent(): void {
-  if (typeof localStorage === "undefined") return;
+  if (typeof localStorage === "undefined" || !isOwnerInitialized()) return;
   try {
-    localStorage.removeItem(CONSENT_KEY);
+    localStorage.removeItem(ownerStorageKey(CONSENT_KEY));
     clearAnthropicKey();
     dispatchConsentChanged();
   } catch (error) {
@@ -114,5 +115,9 @@ export function revokeAIConsent(): void {
 export function subscribeAIConsentChanges(callback: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   window.addEventListener(AI_CONSENT_CHANGED_EVENT, callback);
-  return () => window.removeEventListener(AI_CONSENT_CHANGED_EVENT, callback);
+  window.addEventListener("storage", callback);
+  return () => {
+    window.removeEventListener(AI_CONSENT_CHANGED_EVENT, callback);
+    window.removeEventListener("storage", callback);
+  };
 }

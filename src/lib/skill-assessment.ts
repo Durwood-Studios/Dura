@@ -55,7 +55,15 @@ export function scoreAssessment(answers: SkillAnswer[]): SkillScore {
             ? "proficient"
             : "expert";
 
-  return { total, correct, byBracket, dreyfusLevel };
+  const byPhase: Record<string, { total: number; correct: number }> = {};
+  for (const answer of answers) {
+    const key = String(answer.phaseLevel);
+    const current = byPhase[key] ?? { total: 0, correct: 0 };
+    current.total++;
+    if (answer.correct) current.correct++;
+    byPhase[key] = current;
+  }
+  return { total, correct, byBracket, dreyfusLevel, byPhase };
 }
 
 function bracketPct(score: SkillScore, bracket: string): number {
@@ -72,8 +80,8 @@ export function recommendPath(score: SkillScore): PathId {
   const p67 = bracketPct(score, "6-7");
   const p89 = bracketPct(score, "8-9");
 
-  // Score < 50% in basics → start from the beginning
-  if (p01 < 0.5) return "foundation";
+  // Foundations must be established before recommending an advanced entry point.
+  if (p01 < 0.7) return "foundation";
 
   // Basics ok, web/CS weak → career switch path
   if (p01 >= 0.7 && p23 < 0.5) return "career-switch";
@@ -83,14 +91,8 @@ export function recommendPath(score: SkillScore): PathId {
 
   // Everything through systems ok, AI/advanced weak → mid to senior
   if (p01 >= 0.7 && p23 >= 0.5 && p45 >= 0.5 && p67 < 0.5) {
-    // Special case: strong in AI specifically → AI specialist
-    const aiAnswers = score.byBracket["6-7"];
-    if (aiAnswers && aiAnswers.total > 0) {
-      // Check if they got the AI questions right (phase 6 specifically)
-      // Since we can't distinguish phase 6 from 7 in bracket data,
-      // use the overall 6-7 score with a lower threshold
-      if (bracketPct(score, "6-7") >= 0.33) return "ai-specialist";
-    }
+    const ai = score.byPhase?.["6"];
+    if (ai && ai.total >= 2 && ai.correct / ai.total >= 0.7) return "ai-specialist";
     return "mid-to-senior";
   }
 

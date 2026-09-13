@@ -22,14 +22,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // Basic abuse guard: 10 checkout creations / 5 min / IP.
   const ip = getClientIp(request);
-  const { success, retryAfter } = await rateLimit(`tips:${ip}`, {
+  const { success, retryAfter, reason } = await rateLimit(`tips:${ip}`, {
     limit: 10,
     windowMs: 5 * 60 * 1_000,
   });
   if (!success) {
     return NextResponse.json(
       { error: "Too many requests. Please try again shortly." },
-      { status: 429, headers: { "Retry-After": String(retryAfter) } }
+      {
+        status: reason === "unavailable" ? 503 : 429,
+        headers: { "Retry-After": String(retryAfter) },
+      }
     );
   }
 
