@@ -15,11 +15,11 @@
 
 ---
 
-A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 668 lessons across 15 phases, a technical dictionary, spaced-repetition flashcards, code sandboxes, and cross-device sync — all offline-capable, all free forever.
+A free, open-source learning platform that serves the full education lifecycle — from a child's first encounter with computing to engineering leadership. 749 lessons across 15 phases, a technical dictionary, spaced-repetition flashcards, code sandboxes, and cross-device sync — all offline-capable, all free forever.
 
 ## Features
 
-- **668 lessons** across 15 phases — Digital Literacy through specialty engineering tracks
+- **749 lessons** across 15 phases — Digital Literacy through specialty engineering tracks
 - **Learning paths / career tracks** — structured progressions with skill graphs
 - **FSRS-5 spaced repetition** — flashcard system for long-term retention
 - **Code sandboxes** — write and run code in-browser with templates, fullscreen, console, and save management
@@ -63,29 +63,29 @@ Next.js 15 (App Router) · TypeScript strict · Tailwind v4 · Supabase (19 tabl
 | Phase | Focus                    | Lessons |
 | ----- | ------------------------ | ------- |
 | 0     | Digital Literacy         | 24      |
-| 1     | Programming Fundamentals | 50      |
-| 2     | Web Development          | 60      |
+| 1     | Programming Fundamentals | 52      |
+| 2     | Web Development          | 80      |
 | 3     | CS Fundamentals          | 45      |
-| 4     | Backend Engineering      | 50      |
-| 5     | Systems Engineering      | 40      |
-| 6     | AI/ML Engineering        | 71      |
-| 7     | Advanced Systems         | 35      |
-| 8     | Professional Practice    | 44      |
-| 9     | CTO Track                | 68      |
+| 4     | Backend Engineering      | 70      |
+| 5     | Systems Engineering      | 46      |
+| 6     | AI/ML Engineering        | 75      |
+| 7     | Advanced Systems         | 37      |
+| 8     | Professional Practice    | 52      |
+| 9     | CTO Track                | 72      |
 
 ### Specialty Phases
 
 | Phase | Focus                      | Lessons |
 | ----- | -------------------------- | ------- |
-| 10    | Embedded / Firmware        | 47      |
+| 10    | Embedded / Firmware        | 56      |
 | 11    | Hardware Verification      | 32      |
 | 12    | Quantitative / HFT Systems | 30      |
-| 13    | Robotics                   | 37      |
-| 14    | Manufacturing              | 35      |
+| 13    | Robotics                   | 41      |
+| 14    | Manufacturing              | 37      |
 
-**Total: 15 phases · 668 lessons**
+**Total: 15 phases · 749 lessons**
 
-Phase 0 includes an eight-lesson reading and testing bridge with offline guided practice and competency quizzes. All 668 lessons now pass the current structural LP audit and compile as MDX. Technical corrections, executable-example checks, and standards-claim boundaries are tracked in [the curriculum conformance inventory](standards/pedagogy/CONFORMANCE.md).
+Phase 0 includes an eight-lesson reading and testing bridge with offline guided practice and competency quizzes. All 749 lessons now pass the current structural LP audit and compile as MDX. Technical corrections, executable-example checks, and standards-claim boundaries are tracked in [the curriculum conformance inventory](standards/pedagogy/CONFORMANCE.md).
 
 Standards: ACM CS2023 · SWEBOK v4 · SFIA 9 · CSTA K-12 · AP CS Principles · AP CS A · ISTE
 
@@ -104,7 +104,7 @@ supabase/
   README.md     — Supabase setup guide
 ```
 
-See [PLANNING.md](PLANNING.md) for full architecture documentation.
+See [the implementation and release ledger](DURA-COMPLETION.md) for current design decisions, validation and rollout requirements.
 
 ## Contributing
 

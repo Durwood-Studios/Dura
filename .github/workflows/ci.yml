@@ -4,7 +4,10 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, "codex/**"]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -82,6 +85,15 @@ jobs:
       - name: AINDGS-R3 — AI provenance tags on high-risk-path commits
         run: npm run check:ai-provenance
 
+      - name: Production and provenance gate regressions
+        run: node --test tests/release/*.test.mjs
+
+      - name: Tutorial runtime evidence inventory
+        run: node scripts/check-tutorial-runtime-inventory.mjs
+
+      - name: Assemble and execute the static-site-generator tutorial
+        run: node scripts/check-ssg-tutorial.mjs
+
       - name: LFLRS / xAPI — Vitest learner-record suite
         run: npx vitest run tests/learner-record
 
@@ -101,8 +113,16 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install browser engines
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Check encrypted account isolation and portable recovery in Chromium
+        run: node scripts/check-data-browser.mjs
+      - name: Check the complete Markdown notes teaching project in Chromium
+        run: |
+          cp -R public/labs/markdown-notes "$RUNNER_TEMP/dura-markdown-notes"
+          npm ci --ignore-scripts --prefix "$RUNNER_TEMP/dura-markdown-notes"
+          npm test --prefix "$RUNNER_TEMP/dura-markdown-notes"
+          npm run test:browser --prefix "$RUNNER_TEMP/dura-markdown-notes"
       - name: Run production browser tests
         run: npm run test:e2e
       - name: Upload browser failure evidence
@@ -149,3 +169,65 @@ jobs:
         run: |
           createdb --host=localhost --username=postgres dura_live_test
           bash scripts/check-live-supabase-reconciliation.sh
+
+      - name: Check conflict-safe sync and deletion history against reconciled schema
+        env:
+          PGPASSWORD: local-test-only
+          DURA_TEST_DATABASE_URL: postgres://postgres:local-test-only@localhost:5432/dura_sync_test
+        run: |
+          createdb --host=localhost --username=postgres dura_sync_test
+          bash scripts/check-conflict-safe-sync.sh
+
+  practical-labs:
+    name: Executable capstone and tutorial projects
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install lab tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y iverilog
+          python -m pip install -r public/labs/manufacturing/requirements.txt platformio==6.2.0
+          npm ci --ignore-scripts --prefix public/labs/mcp-server
+          npm ci --ignore-scripts --prefix public/labs/ai-agent
+          npm ci --ignore-scripts --prefix public/labs/mcp-postgres
+      - name: Run the actual protocol and agent projects
+        run: |
+          npm test --prefix public/labs/mcp-server
+          npm test --prefix public/labs/ai-agent
+          npm test --prefix public/labs/rag-chatbot
+          npm test --prefix public/labs/mcp-postgres
+          npm test --prefix public/labs/password-vault
+          python -m unittest discover -s public/labs/manufacturing -v
+          python -m unittest discover -s public/labs/robotics -v
+      - name: Simulate UART and compile firmware
+        run: |
+          iverilog -g2012 -s tb -o /tmp/dura-uart.vvp public/labs/uart/uart.sv public/labs/uart/tb.sv
+          vvp /tmp/dura-uart.vvp
+          pio run --project-dir public/labs/embedded
+          cc -std=c11 -Wall -Wextra -Werror public/labs/embedded/test_health.c -o /tmp/dura-health
+          /tmp/dura-health
+      - name: Replay correctness and memory-safety checks
+        run: |
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread public/labs/quant/replay.cpp -o /tmp/dura-quant
+          /tmp/dura-quant
+          g++ -std=c++20 -O1 -g -fsanitize=address,undefined -pthread public/labs/quant/replay.cpp -o /tmp/dura-quant-sanitized
+          /tmp/dura-quant-sanitized
+
+  release-readiness:
+    name: Release readiness
+    if: always()
+    needs: [ci, standards-gate, browser-tests, database-contracts, practical-labs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every release check to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node -e 'const jobs = JSON.parse(process.env.RESULTS); const failed = Object.entries(jobs).filter(([, job]) => job.result !== "success"); if (failed.length) { console.error("Release blocked:", failed.map(([name, job]) => `${name}: ${job.result}`).join(", ")); process.exit(1); } console.log("Every required release check passed.");'

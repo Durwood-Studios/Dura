@@ -63,15 +63,17 @@ No service_role key is required or permitted for this flow. The anon key + RLS i
 
 ### Rate limiting
 
-Edge rate limiting is applied to auth endpoints (sign-in, sign-up, password reset) via Upstash Redis. The env var is `UPSTASH_REDIS_REST_URL` (plus `UPSTASH_REDIS_REST_TOKEN`). These are secrets — never commit them; they belong in `.env.local` or Vercel project environment variables only.
+Dura form submissions (sign-in, sign-up, password reset) and OAuth callbacks pass an atomic Upstash Redis budget before reaching the provider. Production requests fail with503 when the limiter is absent or unavailable; development uses a bounded local limiter. Redis stores HMAC-derived bucket identifiers, not raw IP addresses. The env var is `UPSTASH_REDIS_REST_URL` (plus `UPSTASH_REDIS_REST_TOKEN`). These are secrets — never commit them; they belong in `.env.local` or Vercel project environment variables only.
 
-### OWASP ASVS Level 2
+### Authentication controls and deployment checks
 
-Auth flows have been hardened to OWASP ASVS Level 2. Key controls applied:
+These application controls are not an ASVS certification. Supabase Auth remains publicly reachable independently of Dura routes. Verify provider rate limits, CAPTCHA configuration, redirect URLs and email-expiry settings in the hosted project before release. UI age confirmation is a self-attestation, not identity verification or a server-side before-user-created hook.
+
+Controls and settings to verify:
 
 - Session tokens are HTTP-only, SameSite=Lax, Secure
 - Password reset links are single-use and expire in 1 hour
-- Failed login attempts are rate-limited at the edge before reaching Supabase
+- Dura form login attempts are rate-limited before reaching Supabase
 - All redirects after auth are validated against an allowlist
 
 ### RLS admin read policies

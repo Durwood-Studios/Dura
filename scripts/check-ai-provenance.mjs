@@ -8,8 +8,6 @@
  *   - `AI-assisted: <agent> ~X%` body trailer (canonical, post-2026-05-21)
  *   - `Human-only: <one-line reason>` body trailer (explicit no-AI opt-out on
  *     high-risk diffs; only relevant when AI was not involved)
- *   - `[AI: <agent> ~X%]` legacy header prefix (pre-2026-05-21 commits;
- *     accepted indefinitely so historical commits don't fail the gate)
  *
  * Format defined in xDocs/decisions/0002-ai-provenance-format.md (Amendment
  * 2026-05-21) and mirrored in CLAUDE.md > Provenance Format. The commit-msg-
@@ -17,19 +15,18 @@
  * `ai-provenance-required` custom rule.
  *
  * Range:
- *   - In a PR: GITHUB_BASE_REF..HEAD (the GitHub Action sets this)
- *   - On push to main: HEAD~1..HEAD
- *   - Locally: defaults to HEAD~10..HEAD; override with --since=<rev>
+ *   - In a PR: event base SHA..HEAD
+ *   - On push: event before SHA..after SHA (the entire push)
+ *   - Locally: origin/main..HEAD; override with --since=<rev>
  *
- * Skips: commits whose message starts with `Merge `, `Revert `, or that are
- * authored by a known-bot pattern. Skips deleted-only commits (no add/mod
- * lines on the high-risk paths).
+ * Skips only actual multi-parent merge commits; author-controlled subjects do not bypass the check.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { provenanceRange } from "./provenance-range.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const repoRoot = resolve(dirname(__filename), "..");
@@ -46,20 +43,14 @@ const HIGH_RISK_PATHS = codeowners
 // ── Resolve the commit range ────────────────────────────────────────────────
 function resolveRange() {
   const sinceArg = process.argv.find((a) => a.startsWith("--since="));
-  if (sinceArg) return `${sinceArg.slice("--since=".length)}..HEAD`;
-
-  // GitHub Actions PR: GITHUB_BASE_REF set
-  if (process.env.GITHUB_BASE_REF) {
-    try {
-      execSync(`git fetch origin ${process.env.GITHUB_BASE_REF} --depth=50`, { stdio: "ignore" });
-      return `origin/${process.env.GITHUB_BASE_REF}..HEAD`;
-    } catch {
-      // fall through
-    }
-  }
-
-  // Push to main / local default
-  return "HEAD~10..HEAD";
+  const event = process.env.GITHUB_EVENT_PATH
+    ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"))
+    : undefined;
+  return provenanceRange({
+    eventName: process.env.GITHUB_EVENT_NAME,
+    event,
+    since: sinceArg?.slice(8),
+  });
 }
 
 const range = resolveRange();
@@ -67,7 +58,7 @@ const range = resolveRange();
 // ── Walk commits ────────────────────────────────────────────────────────────
 let log;
 try {
-  log = execSync(`git log ${range} --pretty=format:%H%x00%s%x00%b%x1e`, {
+  log = execFileSync("git", ["log", range, "--pretty=format:%H%x00%s%x00%b%x1e"], {
     cwd: repoRoot,
     encoding: "utf8",
   });
@@ -89,17 +80,28 @@ const commits = log
 const AI_TRAILER_RE = /^AI-assisted:\s+[\w.-]+\s+~?\d+%\s*$/m;
 // Explicit no-AI opt-out for high-risk diffs.
 const HUMAN_TRAILER_RE = /^Human-only:\s+\S.*$/m;
-// Legacy (pre-2026-05-21): `[AI: <agent> ~X%]` header prefix. Accepted indefinitely
-// so historical commits still pass the gate.
-const LEGACY_HEADER_RE = /\[AI:\s*[a-z0-9._-]+\s*~?\d{1,3}%\]/i;
 
-const SKIP_PREFIXES = ["Merge ", "Revert "];
+// Subject text is author-controlled; only Git topology identifies a merge.
+function isMergeCommit(sha) {
+  return (
+    execFileSync("git", ["rev-list", "--parents", "-n", "1", sha], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    })
+      .trim()
+      .split(/\s+/).length > 2
+  );
+}
 
 function commitTouchesHighRisk(sha) {
-  const files = execSync(`git diff-tree --no-commit-id --name-only -r ${sha}`, {
-    cwd: repoRoot,
-    encoding: "utf8",
-  })
+  const files = execFileSync(
+    "git",
+    ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", sha],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }
+  )
     .split("\n")
     .filter(Boolean);
   return files.some((file) =>
@@ -115,14 +117,10 @@ function commitTouchesHighRisk(sha) {
 
 const violations = [];
 for (const c of commits) {
-  if (SKIP_PREFIXES.some((p) => c.subject.startsWith(p))) continue;
+  if (isMergeCommit(c.sha)) continue;
   if (!commitTouchesHighRisk(c.sha)) continue;
   const message = `${c.subject}\n${c.body}`;
-  if (
-    !AI_TRAILER_RE.test(message) &&
-    !HUMAN_TRAILER_RE.test(message) &&
-    !LEGACY_HEADER_RE.test(message)
-  ) {
+  if (!AI_TRAILER_RE.test(message) && !HUMAN_TRAILER_RE.test(message)) {
     violations.push(c);
   }
 }
@@ -137,8 +135,7 @@ if (violations.length > 0) {
   console.error(
     "\nExpected (any one):" +
       "\n  - Body trailer: `AI-assisted: <agent> ~X%`            (canonical, post-2026-05-21)" +
-      "\n  - Body trailer: `Human-only: <one-line reason>`        (high-risk diff with no AI involvement)" +
-      "\n  - Header prefix: `[AI: <agent> ~X%]`                  (legacy form, still accepted)"
+      "\n  - Body trailer: `Human-only: <one-line reason>`        (high-risk diff with no AI involvement)"
   );
   console.error(
     "See CLAUDE.md > Provenance Format and xDocs/decisions/0002-ai-provenance-format.md"
@@ -147,8 +144,8 @@ if (violations.length > 0) {
 }
 
 const highRiskCount = commits.filter(
-  (c) => !SKIP_PREFIXES.some((p) => c.subject.startsWith(p)) && commitTouchesHighRisk(c.sha)
+  (c) => !isMergeCommit(c.sha) && commitTouchesHighRisk(c.sha)
 ).length;
 console.log(
-  `✓ Provenance check passed: ${commits.length} commit(s) in ${range}, ${highRiskCount} touched high-risk paths, all carry a provenance trailer or legacy header tag (or were skipped as merge/revert).`
+  `✓ Provenance check passed: ${commits.length} commit(s) in ${range}, ${highRiskCount} touched high-risk paths, all carry a provenance trailer (or were verified as merge commits).`
 );

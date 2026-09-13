@@ -12,32 +12,32 @@ DURA is built in the open. This roadmap reflects the actual state of the work, i
 
 These features are present in source. This inventory does not certify the currently deployed production revision.
 
-### Curriculum (668 lessons across 15 phases)
+### Curriculum (749 lessons across 15 phases)
 
-**Core track (10 phases, 487 lessons)**
+**Core track (10 phases, 505 lessons)**
 
 | Phase | Focus                    | Lessons | Status   |
 | ----- | ------------------------ | ------- | -------- |
 | 0     | Digital Literacy         | 24      | Authored |
-| 1     | Programming Fundamentals | 50      | Authored |
-| 2     | Web Development          | 60      | Authored |
+| 1     | Programming Fundamentals | 51      | Authored |
+| 2     | Web Development          | 69      | Authored |
 | 3     | CS Fundamentals          | 45      | Authored |
-| 4     | Backend Engineering      | 50      | Authored |
-| 5     | Systems Engineering      | 40      | Authored |
-| 6     | AI/ML Engineering        | 71      | Authored |
+| 4     | Backend Engineering      | 51      | Authored |
+| 5     | Systems Engineering      | 41      | Authored |
+| 6     | AI/ML Engineering        | 75      | Authored |
 | 7     | Advanced Systems         | 35      | Authored |
 | 8     | Professional Practice    | 44      | Authored |
-| 9     | CTO Track                | 68      | Authored |
+| 9     | CTO Track                | 70      | Authored |
 
-**Specialty track (5 phases, 181 lessons)**
+**Specialty track (5 phases, 196 lessons)**
 
 | Phase | Focus                      | Lessons | Status   |
 | ----- | -------------------------- | ------- | -------- |
-| 10    | Embedded & Firmware        | 47      | Authored |
+| 10    | Embedded & Firmware        | 56      | Authored |
 | 11    | Hardware Verification      | 32      | Authored |
 | 12    | Quantitative / HFT Systems | 30      | Authored |
-| 13    | Robotics                   | 37      | Authored |
-| 14    | Manufacturing              | 35      | Authored |
+| 13    | Robotics                   | 41      | Authored |
+| 14    | Manufacturing              | 37      | Authored |
 
 ### Platform
 
@@ -103,7 +103,7 @@ Work that is actively running now.
 
 The previously listed gap-fill modules are authored, including TypeScript, OOP, discrete mathematics, queues, concurrency, classical ML, vision, formal methods/GPU, system design, incident management, due diligence, governance, and specialty expansions. Phase 0 now has 24 lessons, including eight lessons on tracing and testing code.
 
-All 668 lessons now pass the current structural LP audit and compile as MDX, with explicit prerequisites, topic-specific outcomes, guided practice, and aligned assessment tasks. Actual MDX execution tests and targeted native checks cover repaired reference programs. The original baseline remains historical evidence; structural success does not certify every technical claim or replace specialist review. The 65 pending module mappings have scope decisions, while unverified obsolete AP taxonomies are withheld from current claims. See [the conformance inventory](standards/pedagogy/CONFORMANCE.md) for review boundaries.
+All 749 lessons now pass the current structural LP audit and compile as MDX, with explicit prerequisites, topic-specific outcomes, guided practice, and aligned assessment tasks. Actual MDX execution tests and targeted native checks cover repaired reference programs. The original baseline remains historical evidence; structural success does not certify every technical claim or replace specialist review. The 65 pending module mappings have scope decisions, while unverified obsolete AP taxonomies are withheld from current claims. See [the conformance inventory](standards/pedagogy/CONFORMANCE.md) for review boundaries.
 
 ### Supabase go-live
 
@@ -130,20 +130,20 @@ Roughly in priority order. Dates are intent, not commitments.
 ### Platform hygiene
 
 - Semantic versioning + in-app audit log (release notes surface, like an app store changelog)
-- CSP `unsafe-eval` removal once Sandpack execution path is reconfirmed safe
+- Continue CSP hardening while preserving the verified Sandpack execution path; `unsafe-eval` is already absent from the host policy.
 
 ### Mobile
 
-- Mobile lesson UX follow-up pass — first audit closed 2026-05-28 (tap targets, breadcrumb collapse, VocabTooltip). Deferred issues tracked in [`xDocs/active/mobile-ux-audit-2026-05.md`](xDocs/active/mobile-ux-audit-2026-05.md)
+- Continue mobile lesson UX checks across device and accessibility configurations. Current containment and workflow evidence is recorded in [the release ledger](DURA-COMPLETION.md).
 
 ### Global reach + i18n
 
-DURA's framing is "a global tool for all software engineers." The language registry declares ~38 languages. Only English is enabled today; the phased plan:
+DURA's framing is "a global tool for all software engineers." The language registry declares ~38 languages. English content is available, with a partial Spanish navigation/settings preview; lesson translation is not complete. The phased plan:
 
 1. **Phase 1 — extraction.** Audit the ~2,000 UI strings; route through a `t()` helper. English baseline first. No user-visible change.
 2. **Phase 2 — RTL + bidi.** Wire `dir="rtl"` swap; verify lesson reader, sidebar, and dictionary in Arabic + Hebrew.
 3. **Phase 3 — machine-translated baseline.** Translate the UI string catalog; flip each locale's `enabled` flag after native-speaker validation. Lessons remain English-only.
-4. **Phase 4 — community + AI-assisted lesson translation.** 668 lessons × N languages is a six-to-seven-figure translation surface. Community-first, AI-translated drafts as a baseline. Provenance and credit tracked per lesson per locale.
+4. **Phase 4 — community + AI-assisted lesson translation.** 749 lessons × N languages is a six-to-seven-figure translation surface. Community-first, AI-translated drafts as a baseline. Provenance and credit tracked per lesson per locale.
 
 This will not happen in a single sprint. The scaffolding is here so contributions can flow in piece by piece.
 
@@ -174,7 +174,7 @@ Deliberate non-goals. Asking for these in an issue is fine, but the answer is "n
 ## How decisions get made
 
 - **Curriculum changes** — Dustin Snellings (project owner) reviews alignment with the published standards before merge.
-- **Architectural changes** — recorded as ADRs under [`xDocs/decisions/`](xDocs/decisions/) when the choice is load-bearing.
+- **Architectural changes** — recorded as ADRs under the local `xDocs/decisions/` directory when the choice is load-bearing; published contracts live under [standards](standards/).
 - **Roadmap reprioritization** — happens when a sprint closes or when an outside signal (security advisory, user incident, accessibility regression) warrants it.
 
 If you want to influence the roadmap, the best path is a [GitHub Discussion](https://github.com/Durwood-Studios/Dura/discussions) explaining the learner-facing problem you want solved. Feature requests framed around outcomes get further than ones framed around implementations.
@@ -188,3 +188,7 @@ If you want to influence the roadmap, the best path is a [GitHub Discussion](htt
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community standards
 - [SECURITY.md](SECURITY.md) — vulnerability reporting
 - [`standards/`](standards/) — the published DURA standards (DLS, LFLRS, PPLAS, AINDGS)
+
+### Adjacent career foundations — 2026-09-13
+
+48 applied foundation lessons and 56 assessment questions close the 64 remaining historical adjacent-role topic mappings, including a 12-lesson synthetic financial-systems module. The current inventory is 749 lessons and 1,806 questions. All 106 original missing-topic IDs now have study links; advanced role proficiency and external platform execution remain separate from this introductory coverage. [Exact coverage and execution limits](standards/pedagogy/CAREER-COVERAGE.md).
