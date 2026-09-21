@@ -30,6 +30,7 @@ The token bucket is the most intuitive rate limiting algorithm. Imagine a bucket
 
 ```typescript
 // src/algorithms/token-bucket.ts
+import { CleanableStore } from "../store/cleanup";
 interface TokenBucket {
   tokens: number;
   lastRefill: number;
@@ -40,16 +41,20 @@ interface TokenBucketConfig {
   refillRate: number; // tokens per second
 }
 
-class TokenBucketLimiter {
-  private buckets: Map<string, TokenBucket> = new Map();
+export class TokenBucketLimiter {
+  private buckets: CleanableStore<TokenBucket>;
   private config: TokenBucketConfig;
 
-  constructor(config: TokenBucketConfig) {
+  constructor(config: TokenBucketConfig, private clock: () => number = Date.now) {
+    if (!Number.isInteger(config.maxTokens) || config.maxTokens < 1 || !Number.isFinite(config.refillRate) || config.refillRate <= 0) throw new Error("Invalid bucket configuration");
     this.config = config;
+    this.buckets = new CleanableStore(2 * config.maxTokens / config.refillRate * 1000, 60000, clock);
   }
 
+  destroy(): void { this.buckets.destroy(); }
+
   consume(key: string): { allowed: boolean; remaining: number; retryAfter: number } {
-    const now = Date.now();
+    const now = this.clock();
     let bucket = this.buckets.get(key);
 
     if (!bucket) {
@@ -84,6 +89,7 @@ The sliding window counter offers smoother rate limiting with less burstiness. I
 
 ```typescript
 // src/algorithms/sliding-window.ts
+import { CleanableStore } from "../store/cleanup";
 interface WindowCounter {
   currentCount: number;
   previousCount: number;
@@ -95,16 +101,20 @@ interface SlidingWindowConfig {
   maxRequests: number;
 }
 
-class SlidingWindowLimiter {
-  private counters: Map<string, WindowCounter> = new Map();
+export class SlidingWindowLimiter {
+  private counters: CleanableStore<WindowCounter>;
   private config: SlidingWindowConfig;
 
-  constructor(config: SlidingWindowConfig) {
+  constructor(config: SlidingWindowConfig, private clock: () => number = Date.now) {
+    if (!Number.isInteger(config.maxRequests) || config.maxRequests < 1 || !Number.isInteger(config.windowMs) || config.windowMs < 1) throw new Error("Invalid window configuration");
     this.config = config;
+    this.counters = new CleanableStore(2 * config.windowMs, 60000, clock);
   }
 
+  destroy(): void { this.counters.destroy(); }
+
   consume(key: string): { allowed: boolean; remaining: number; resetAt: number } {
-    const now = Date.now();
+    const now = this.clock();
     const windowStart = now - (now % this.config.windowMs);
     let counter = this.counters.get(key);
 
@@ -146,6 +156,9 @@ Abstract both algorithms behind a common interface so middleware can use either 
 
 ```typescript
 // src/limiter.ts
+import type { Request } from "express";
+import { TokenBucketLimiter } from "./algorithms/token-bucket";
+import { SlidingWindowLimiter } from "./algorithms/sliding-window";
 type Algorithm = "token-bucket" | "sliding-window";
 
 interface LimitResult {
@@ -156,14 +169,14 @@ interface LimitResult {
   retryAfter: number;
 }
 
-interface RateLimitConfig {
+export interface RateLimitConfig {
   algorithm: Algorithm;
   limit: number;
   windowMs: number;
   keyGenerator?: (req: Request) => string;
 }
 
-class RateLimiter {
+export class RateLimiter {
   private tokenBucket?: TokenBucketLimiter;
   private slidingWindow?: SlidingWindowLimiter;
   private config: RateLimitConfig;
@@ -182,6 +195,8 @@ class RateLimiter {
       });
     }
   }
+
+  destroy(): void { this.tokenBucket?.destroy(); this.slidingWindow?.destroy(); }
 
   check(key: string): LimitResult {
     if (this.tokenBucket) {
@@ -213,6 +228,7 @@ Transform the limiter into Express middleware. The middleware extracts a key fro
 ```typescript
 // src/middleware.ts
 import { Request, Response, NextFunction } from "express";
+import { RateLimiter, type RateLimitConfig } from "./limiter";
 
 function rateLimitMiddleware(config: RateLimitConfig) {
   const limiter = new RateLimiter(config);
@@ -295,51 +311,43 @@ function matchRoute(method: string, path: string): RateLimitConfig {
 
 ## Step 6: Memory Management and Cleanup
 
-Without cleanup, the in-memory store grows unbounded as new clients appear. Add a periodic sweep that removes entries that have not been accessed recently.
+Without cleanup, the in-memory store grows unbounded as new clients appear. Both algorithms above use this shared store. Its periodic sweep removes inactive entries. Destroy short-lived limiters after use; long-lived middleware keeps its limiter for the server lifetime. Cleanup is linear in stored keys; this teaching implementation is not a hard memory cap under sustained unique-client traffic.
 
 ```typescript
 // src/store/cleanup.ts
-class CleanableStore<T extends { lastAccess: number }> {
-  private store: Map<string, T> = new Map();
-  private cleanupTimer: NodeJS.Timeout;
+export class CleanableStore<T> {
+  private store = new Map<string, { value: T; lastAccess: number }>();
+  private cleanupTimer: ReturnType<typeof setInterval>;
 
-  constructor(
-    private ttlMs: number,
-    cleanupIntervalMs: number = 60_000
-  ) {
+  constructor(private ttlMs: number, cleanupIntervalMs = 60000, private clock: () => number = Date.now) {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0 || !Number.isFinite(cleanupIntervalMs) || cleanupIntervalMs <= 0) throw new Error("Invalid cleanup configuration");
     this.cleanupTimer = setInterval(() => this.cleanup(), cleanupIntervalMs);
+    this.cleanupTimer.unref();
   }
 
   get(key: string): T | undefined {
     const entry = this.store.get(key);
-    if (entry) entry.lastAccess = Date.now();
-    return entry;
+    if (!entry) return undefined;
+    if (entry.lastAccess <= this.clock() - this.ttlMs) {
+      this.store.delete(key);
+      return undefined;
+    }
+    entry.lastAccess = this.clock();
+    return entry.value;
   }
 
   set(key: string, value: T): void {
-    value.lastAccess = Date.now();
-    this.store.set(key, value);
+    this.store.set(key, { value, lastAccess: this.clock() });
   }
 
-  private cleanup(): void {
-    const cutoff = Date.now() - this.ttlMs;
-    let removed = 0;
+  cleanup(): void {
+    const cutoff = this.clock() - this.ttlMs;
     for (const [key, entry] of this.store) {
-      if (entry.lastAccess < cutoff) {
-        this.store.delete(key);
-        removed++;
-      }
-    }
-    if (removed > 0) {
-      console.log(
-        `Rate limiter cleanup: removed ${removed} stale entries, ${this.store.size} remaining`
-      );
+      if (entry.lastAccess <= cutoff) this.store.delete(key);
     }
   }
 
-  destroy(): void {
-    clearInterval(this.cleanupTimer);
-  }
+  destroy(): void { clearInterval(this.cleanupTimer); this.store.clear(); }
 }
 ```
 
@@ -351,11 +359,15 @@ Rate limiters need deterministic tests. Inject a clock function so tests can con
 
 ```typescript
 // src/__tests__/token-bucket.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { TokenBucketLimiter } from "../algorithms/token-bucket";
+const active: TokenBucketLimiter[] = [];
+afterEach(() => { for (const limiter of active.splice(0)) limiter.destroy(); });
 
 describe("TokenBucketLimiter", () => {
   it("allows requests up to the token limit", () => {
     const limiter = new TokenBucketLimiter({ maxTokens: 5, refillRate: 1 });
+    active.push(limiter);
 
     for (let i = 0; i < 5; i++) {
       const result = limiter.consume("user-1");
@@ -369,6 +381,7 @@ describe("TokenBucketLimiter", () => {
 
   it("isolates limits per key", () => {
     const limiter = new TokenBucketLimiter({ maxTokens: 2, refillRate: 1 });
+    active.push(limiter);
 
     limiter.consume("user-a");
     limiter.consume("user-a");
@@ -379,15 +392,17 @@ describe("TokenBucketLimiter", () => {
     expect(allowedB.allowed).toBe(true);
   });
 
-  it("refills tokens over time", async () => {
-    const limiter = new TokenBucketLimiter({ maxTokens: 2, refillRate: 10 });
+  it("refills tokens over time", () => {
+    let now = 0;
+    const limiter = new TokenBucketLimiter({ maxTokens: 2, refillRate: 10 }, () => now);
+    active.push(limiter);
 
     limiter.consume("user-1");
     limiter.consume("user-1");
     expect(limiter.consume("user-1").allowed).toBe(false);
 
-    // Wait for refill (100ms = 1 token at 10/sec)
-    await new Promise((r) => setTimeout(r, 150));
+    // Advance the injected clock: 100ms = 1 token at 10/sec.
+    now += 150;
     expect(limiter.consume("user-1").allowed).toBe(true);
   });
 });
@@ -399,45 +414,35 @@ Wire everything together and verify the system holds up under simulated load. Us
 
 ```typescript
 // test/load-test.ts
-async function loadTest(url: string, totalRequests: number, concurrency: number): Promise<void> {
+export async function loadTest(url: string, totalRequests: number, concurrency: number): Promise<{ allowed: number; rejected: number; errors: number }> {
+  if (!Number.isInteger(totalRequests) || totalRequests < 1 || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 100) throw new Error("Invalid load-test budget");
+  let reserved = 0;
   let allowed = 0;
   let rejected = 0;
-  const startTime = Date.now();
-
-  const semaphore = new Array(concurrency).fill(null);
-
+  let errors = 0;
   async function worker(): Promise<void> {
-    while (allowed + rejected < totalRequests) {
+    while (reserved < totalRequests) {
+      // Reserve synchronously before awaiting: every attempted request consumes budget.
+      reserved++;
       try {
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        await res.body?.cancel();
         if (res.status === 200) allowed++;
         else if (res.status === 429) rejected++;
-
-        const remaining = res.headers.get("RateLimit-Remaining");
-        if (rejected === 1) {
-          console.log(
-            `First rejection at request ${allowed + rejected}, remaining header: ${remaining}`
-          );
-        }
-      } catch {
-        // Connection error under load is expected
+        else errors++;
+      } catch (error) {
+        errors++;
+        console.error("Load-test request failed", error);
       }
     }
   }
-
-  await Promise.all(semaphore.map(() => worker()));
-
-  const elapsed = Date.now() - startTime;
-  console.log(`\nLoad Test Results:`);
-  console.log(`  Total: ${totalRequests} requests in ${elapsed}ms`);
-  console.log(`  Allowed: ${allowed}`);
-  console.log(`  Rejected: ${rejected}`);
-  console.log(`  Rate: ${Math.round((totalRequests / elapsed) * 1000)} req/sec`);
+  await Promise.all(Array.from({ length: Math.min(concurrency, totalRequests) }, () => worker()));
+  return { allowed, rejected, errors };
 }
 
-loadTest("http://localhost:3000/api/data", 500, 20);
+loadTest("http://localhost:3000/api/data", 500, 20).then(console.log).catch(console.error);
 ```
 
 Run this against your server and verify that: the number of allowed requests matches your configured limit, rejected requests get 429 status codes with proper headers, and the server remains responsive throughout — no memory leaks, no CPU spikes, no dropped connections.
 
-For production deployment, consider Redis as a backing store for distributed rate limiting across multiple server instances. The algorithms remain identical — only the storage layer changes from a Map to Redis GET/SET with TTL.
+For production deployment, consider Redis as a backing store for distributed rate limiting across multiple server instances. Distributed admission must be atomic; separate GET/SET operations are not a safe replacement for the in-process check. Use a transactional database operation or an atomic server-side script. Run load tests only against a local or explicitly authorized test server.

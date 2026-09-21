@@ -75,25 +75,29 @@ const inventory = paths.map((path) => {
   return {
     path,
     sha256: createHash("sha256").update(text).digest("hex"),
-    execution: path.endsWith("/91-password-manager.mdx")
-      ? "separate-lab-crypto-storage-and-real-terminal-workflow-tested"
-      : path.endsWith("/07-markdown-notes.mdx")
-        ? "separate-lab-model-and-real-browser-workflow-tested"
-        : path.endsWith("/04-rag-chatbot.mdx")
-          ? "separate-lab-retrieval-http-and-provider-fixtures-tested"
-          : path.endsWith("/18-mcp-server-tutorial.mdx")
-            ? "separate-lab-stdio-and-disposable-sql-tested"
-            : path.endsWith("/32-mcp-server.mdx")
-              ? "separate-lab-stdio-tested"
-              : path.endsWith("/17-ai-agent.mdx")
-                ? "separate-lab-offline-and-provider-fixtures-tested"
-                : path.endsWith("/39-static-site-gen.mdx")
-                  ? "assembled-typescript-and-cli-build-tested"
-                  : /\/(31-monitoring-dashboard|32-embeddings-search|40-migration-tool)\.mdx$/.test(
-                        path
-                      )
-                    ? "selected-helper-regressions-tested-not-full-project"
-                    : "not-executed",
+    execution: path.endsWith("/11-auth-system.mdx")
+      ? "extracted-session-sql-and-secret-policy-tested-jwt-mocked"
+      : path.endsWith("/33-rate-limiter.mdx")
+        ? "extracted-store-clock-and-bounded-load-test-helpers-tested"
+        : path.endsWith("/91-password-manager.mdx")
+          ? "separate-lab-crypto-storage-and-real-terminal-workflow-tested"
+          : path.endsWith("/07-markdown-notes.mdx")
+            ? "separate-lab-model-and-real-browser-workflow-tested"
+            : path.endsWith("/04-rag-chatbot.mdx")
+              ? "separate-lab-retrieval-http-and-provider-fixtures-tested"
+              : path.endsWith("/18-mcp-server-tutorial.mdx")
+                ? "separate-lab-stdio-and-disposable-sql-tested"
+                : path.endsWith("/32-mcp-server.mdx")
+                  ? "separate-lab-stdio-tested"
+                  : path.endsWith("/17-ai-agent.mdx")
+                    ? "separate-lab-offline-and-provider-fixtures-tested"
+                    : path.endsWith("/39-static-site-gen.mdx")
+                      ? "assembled-typescript-and-cli-build-tested"
+                      : /\/(31-monitoring-dashboard|32-embeddings-search|40-migration-tool)\.mdx$/.test(
+                            path
+                          )
+                        ? "selected-helper-regressions-tested-not-full-project"
+                        : "not-executed",
     contextTags,
     blocks,
   };

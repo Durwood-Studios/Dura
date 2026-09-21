@@ -54,7 +54,7 @@ Open [http://localhost:3000](http://localhost:3000). That's it.
 
 ## Tech Stack
 
-Next.js 15 (App Router) · TypeScript strict · Tailwind v4 · Supabase (19 tables, RLS) · Zustand · IndexedDB · FSRS-5 · Serwist (PWA) · Framer Motion v12 · Lucide React · MDX · Sandpack
+Next.js 16 (App Router) · TypeScript strict · Tailwind v4 · Supabase (19 tables, RLS) · Zustand · IndexedDB · FSRS-5 · Serwist (PWA) · Framer Motion v12 · Lucide React · MDX · Sandpack
 
 ## Curriculum
 

@@ -58,3 +58,29 @@ for (const viewport of [
     await inViewport(page, vocabulary);
   });
 }
+
+for (const viewport of [
+  { width: 320, height: 568 },
+  { width: 667, height: 320 },
+  { width: 375, height: 250 },
+]) {
+  test(`lesson flashcard form is named, focusable and contained at ${viewport.width}×${viewport.height}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/paths/0/0-1/01");
+    await page.getByRole("button", { name: "No thanks", exact: true }).click();
+    const trigger = page.getByRole("button", { name: "Add to flashcards", exact: true });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Add flashcard", exact: true });
+    await inViewport(page, dialog);
+    await expect(dialog.getByRole("textbox", { name: "Term (front)", exact: true })).toBeFocused();
+    await dialog
+      .getByRole("textbox", { name: "Definition (back)", exact: true })
+      .fill("A test definition");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  });
+}

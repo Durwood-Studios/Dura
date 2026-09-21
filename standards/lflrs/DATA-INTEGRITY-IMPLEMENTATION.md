@@ -1,6 +1,6 @@
 # Learner-data implementation evidence
 
-Working-tree implementation; no hosted SQL applied by this work. High-risk auth, encryption-wrapper and sync changes require named human review before merge.
+Implementation and local evidence, updated September21: migrations through025 were applied by Dustin and independently verified, and releaseac96abf is live. Hosted cross-device and deletion acceptance remains separate. Historical test counts below describe earlier snapshots.
 
 ## Implemented contracts
 
@@ -23,6 +23,6 @@ Working-tree implementation; no hosted SQL applied by this work. High-risk auth,
 
 ## Deployment dependency and limits
 
-`supabase/staged/022-conflict-safe-sync.sql` must be manually reviewed/applied with the matching frontend release. It adds owner tombstones, conflict-safe mutation/progress RPCs, activity/daily-time JSON fields and goal references, and removes direct mutable-table write grants from client roles. Until that manual rollout, those cloud operations fail visibly while local learning remains available. Staged account deletion 021 is a separate contract owned by the Settings implementation.
+`supabase/migrations/Already Ran/022-conflict-safe-sync.sql` has been applied and verified with the matching frontend release. It adds owner tombstones, conflict-safe mutation/progress RPCs, activity/daily-time JSON fields and goal references, and removes direct mutable-table write grants from client roles. That rollout is complete. Account deletion021 is also applied; actual hosted multi-device and deletion behavior still needs acceptance. Do not rerun archived SQL.
 
 No claim is made that hosted account deletion, hosted two-device convergence, browser private-mode persistence, or every tutorial's external runtime has been exercised. Legacy canonical-only exports cannot reconstruct missing flashcard text; the importer reports the recoverable subset. Browser-managed storage can still be removed by the user or browser; downloadable exports remain the independent recovery mechanism.

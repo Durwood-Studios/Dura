@@ -1,5 +1,7 @@
 # Dura promise audit and remaining work
 
+> Historical snapshot of September12 at19b5ec2. Do not use its old migration, limiter or browser-coverage descriptions as current setup instructions. See DURA-COMPLETION.md for release status and DURA-EXPERIENCE-AUDIT.md for the September21 audit.
+
 Date: September 12, 2026. Repository: Durwood-Studios/Dura. Audited tracked revision: `19b5ec24e4c2bb6a91c2f6d874acc3f3cad92cab`.
 
 **Dura has substantial implemented learning functionality, but the current code does not yet support several of its strongest promises. Protecting learner work, completing assessment coverage, and correcting privacy/verification claims should precede broad curriculum expansion.** Passing structural checks and compiling 668 lessons establish useful properties; they do not establish reliable restore, safe two-device sync, or demonstrated competency.
