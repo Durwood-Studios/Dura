@@ -1,3 +1,20 @@
+# Current rollout: Supabase request limiter (025)
+
+Redis/Upstash setup is cancelled. Dura now uses its existing Supabase project for server-authorized request limiting. No additional provider account is required. This consumes existing database resources; it is not a promise of unlimited free traffic.
+
+1. Run only `supabase/migrations/Need To Run/025-supabase-rate-limits.sql` in Dura after the prior migrations. It creates private limiter tables, a database-generated server credential, and an atomic RPC. It changes no learner records. Client roles cannot read or write the tables directly; the RPC validates a separate server credential before writes. Raw IPs are HMAC-hashed by the server.
+2. In the privileged Supabase SQL Editor, privately run `SELECT secret FROM dura_private.rate_limit_config WHERE singleton;`. Copy the result into Vercel's **server-only** `DURA_RATE_LIMIT_SECRET` for Production (and only previews using this database). Do not paste the result in chat, commit it, expose it with NEXT_PUBLIC, or share a screenshot of it. This is a narrowly scoped limiter credential, not a Supabase service-role key.
+3. Verify the migration's live objects/permissions and the configured RPC. Then set `DURA_SUPABASE_CONTRACT_VERSION=2026-09-025` in Vercel. Existing NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY remain required. Stripe-only deployments also require these limiter settings. No Upstash settings are required.
+4. Deploy the matching main commit only after its trusted Release readiness check passes. Verify account endpoints distinguish rate exhaustion (429) from infrastructure failure (503). Guest/local learning stays available independently.
+
+The production client fails closed on RPC errors, invalid responses, or missing configuration. Expired buckets are cleaned in bounded batches as authorized requests arrive. Without traffic, expired hashes can remain until the next request; no raw IPs are stored. Secret rotation requires coordinated database and Vercel changes. Reapplying 025 preserves the existing secret.
+
+Local SQL regression includes explicit-role authorization, private-table denial, expiry, replay, and 16 concurrent consumers competing for five slots. Never run fixture harnesses against production.
+
+## Historical rollout notes (superseded where inconsistent)
+
+> September 21 update: 001 and 021–023 are applied and archived under `supabase/migrations/Already Ran/`. Only 024 is queued; see the migration index. Historical proposal descriptions below are not execution instructions.
+
 # Hosted rollout readiness
 
 Repository: `Durwood-Studios/Dura`. Read-only SQL inspection verified the hosted Dura schema. No hosted migration or deployment is confirmed; the current workflow is for the user to run the reviewed SQL manually. The repository’s existing production deployment is visible in GitHub; its Vercel project settings and required environment configuration remain unverified.
@@ -12,7 +29,9 @@ The dashboard's empty migration listing does not mean an empty schema. Do not re
 
 ## What needs to run manually
 
-Use the [run/skip matrix](live/README.md#manual-run-queue-for-this-dura-project). The initial target-specific reconciliation script for this observed project is [001-dura-contract-reconciliation.sql](live/001-dura-contract-reconciliation.sql). It combines the missing feedback, moderation, vote and signed-proof changes while preserving legacy feedback insertion during frontend rollout. Do not run staged 014–020 separately against this project.
+The canonical queue is now `supabase/migrations/Need To Run/`. Follow [the migration index](../migrations/INDEX.md) for the reviewed order, checksums and September 21 run/skip decisions. SQL bytes are unchanged; only their repository locations changed.
+
+Use the [run/skip matrix](live/README.md#manual-run-queue-for-this-dura-project). The initial target-specific reconciliation script for this observed project is [001-dura-contract-reconciliation.sql](../migrations/Already%20Ran/001-dura-contract-reconciliation.sql). It combines the missing feedback, moderation, vote and signed-proof changes while preserving legacy feedback insertion during frontend rollout. Do not run staged 014–020 separately against this project.
 
 After that base reconciliation, the current frontend has three additional manual proposals, in this order:
 
@@ -26,7 +45,7 @@ Before running it, verify the same organization/project and inspect the current 
 
 ## Frontend release attestation
 
-After verifying the correct project, committed SQL transactions and resulting functions/grants, set server-only `DURA_SUPABASE_CONTRACT_VERSION=2026-09-023` in the production deployment environment. The build gate requires this exact value when accounts are configured, together with both server-only Upstash Redis settings and successful CI for the deployed commit. Until then, the previous production deployment stays live. Do not set the flag in advance to bypass the coordinated sync cutover.
+After verifying the correct project, committed SQL transactions and resulting functions/grants, set server-only `DURA_SUPABASE_CONTRACT_VERSION=2026-09-025` in the production deployment environment. The build gate requires this exact value when accounts are configured, together with the server-only DURA_RATE_LIMIT_SECRET and successful CI for the deployed commit. Until then, the previous production deployment stays live. Do not set the flag in advance to bypass the coordinated sync cutover.
 
 This is an explicit operator attestation of completed verification, not an automatic live-schema check or proof against later drift. No secret database key is required. Preview/local builds remain available for reviewing and testing the implementation before the manual database rollout.
 

@@ -8,6 +8,6 @@ for migration in supabase/migrations/00[1-6]-*.sql supabase/migrations/013-*.sql
   psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "$migration"
 done
 psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/live-reconciliation-fixture.sql
-psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/staged/live/001-dura-contract-reconciliation.sql
+psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "supabase/migrations/Already Ran/001-dura-contract-reconciliation.sql"
 psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/live-reconciliation.sql
 psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/credential-storage.sql

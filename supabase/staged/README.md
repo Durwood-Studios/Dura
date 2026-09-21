@@ -1,4 +1,8 @@
+> September 21 update: 001 and 021–023 are applied and archived under `supabase/migrations/Already Ran/`. Only 024 is queued; see the migration index. Historical proposal descriptions below are not execution instructions.
+
 # Staged database repairs
+
+The executable manual queue is [supabase/migrations/Need To Run](../migrations/Need%20To%20Run/README.md). The target reconciliation and 021–023 moved there unchanged. This directory retains historical baseline proposals and reference documentation, not Dustin’s execution queue.
 
 For the verified existing Dura production project, use the [manual run/skip matrix](live/README.md#manual-run-queue-for-this-dura-project). The proposals below are not a batch to apply: the target-specific patch includes only the missing changes. No hosted application is confirmed.
 

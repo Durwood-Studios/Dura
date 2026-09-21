@@ -1,8 +1,6 @@
 import { createHmac } from "node:crypto";
-import { Redis } from "@upstash/redis";
-import { Ratelimit } from "@upstash/ratelimit";
 
-/** Distributed, atomic request limiting. Raw IP identifiers never enter Redis. */
+/** Distributed, atomic request limiting. Raw IP identifiers never enter the database. */
 export interface RateLimitResult {
   success: boolean;
   remaining: number;
@@ -15,7 +13,6 @@ interface LocalBucket {
   expires: number;
 }
 const localBuckets = new Map<string, LocalBucket>();
-const limiters = new Map<string, Ratelimit>();
 
 function unavailable(): RateLimitResult {
   return { success: false, remaining: 0, retryAfter: 30, reason: "unavailable" };
@@ -48,40 +45,63 @@ export async function rateLimit(
   if (
     !Number.isInteger(opts.limit) ||
     opts.limit < 1 ||
+    opts.limit > 1000 ||
     !Number.isInteger(opts.windowMs) ||
-    opts.windowMs < 1
+    opts.windowMs < 1 ||
+    opts.windowMs > 86_400_000
   )
     throw new Error("Invalid rate-limit configuration");
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const secret = process.env.DURA_RATE_LIMIT_SECRET;
+  if (!url || !anonKey || !secret || !/^[0-9a-f]{64}$/.test(secret)) {
     if (process.env.NODE_ENV === "production") return unavailable();
     return localLimit(`${opts.limit}:${opts.windowMs}:${key}`, opts.limit, opts.windowMs);
   }
   try {
-    const credentialId = createHmac("sha256", token).update("dura-limiter-client").digest("hex");
-    const config = `${url}:${credentialId}:${opts.limit}:${opts.windowMs}`;
-    let limiter = limiters.get(config);
-    if (!limiter) {
-      limiter = new Ratelimit({
-        redis: new Redis({ url, token, retry: { retries: 0 } }),
-        limiter: Ratelimit.slidingWindow(opts.limit, `${opts.windowMs} ms`),
-        prefix: "dura:requests",
-        analytics: false,
-        timeout: 5_000,
-      });
-      limiters.set(config, limiter);
-    }
-    const bucket = createHmac("sha256", token)
-      .update(`dura-rate-limit-v1:${opts.limit}:${opts.windowMs}:${key}`)
+    const endpoint = new URL("/rest/v1/rpc/consume_rate_limit", url);
+    if (endpoint.protocol !== "https:") return unavailable();
+    const bucket = createHmac("sha256", secret)
+      .update(`dura-rate-limit-v2:${opts.limit}:${opts.windowMs}:${key}`)
       .digest("hex");
-    const result = await limiter.limit(bucket);
-    if (result.reason === "timeout") return unavailable();
-    return {
-      success: result.success,
-      remaining: result.remaining,
-      retryAfter: result.success ? 0 : Math.max(1, Math.ceil((result.reset - Date.now()) / 1000)),
-    };
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        apikey: anonKey,
+        Authorization: `Bearer ${anonKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        p_secret: secret,
+        p_key: bucket,
+        p_limit: opts.limit,
+        p_window_ms: opts.windowMs,
+      }),
+      cache: "no-store",
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return unavailable();
+    const result: unknown = await response.json();
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("success" in result) ||
+      typeof result.success !== "boolean" ||
+      !("remaining" in result) ||
+      typeof result.remaining !== "number" ||
+      !Number.isInteger(result.remaining) ||
+      result.remaining < 0 ||
+      result.remaining >= opts.limit ||
+      !("retryAfter" in result) ||
+      typeof result.retryAfter !== "number" ||
+      !Number.isInteger(result.retryAfter) ||
+      result.retryAfter < 0 ||
+      result.retryAfter > Math.ceil(opts.windowMs / 1000) ||
+      (result.success ? result.retryAfter !== 0 : result.retryAfter < 1 || result.remaining !== 0)
+    )
+      return unavailable();
+    return { success: result.success, remaining: result.remaining, retryAfter: result.retryAfter };
   } catch {
     console.error("[rate-limit] Distributed limiter unavailable");
     return unavailable();

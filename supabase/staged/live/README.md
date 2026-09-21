@@ -1,4 +1,8 @@
+> September 21 update: 001 and 021–023 are applied and archived under `supabase/migrations/Already Ran/`. Only 024 is queued; see the migration index. Historical proposal descriptions below are not execution instructions.
+
 # Dura live reconciliation proposal
+
+The reviewed SQL now lives in [Need To Run](../../migrations/Already%20Ran/001-dura-contract-reconciliation.sql). Follow [the migration index](../../migrations/INDEX.md); do not execute historical staged files as a batch.
 
 Target verified in authenticated dashboard: Durwood Studios (`sloptkiwuwwiioifujfy`), Dura (`ytputzzqubbaaztowyoz`), main PRODUCTION, GitHub `Durwood-Studios/Dura`.
 
@@ -22,18 +26,18 @@ Before applying, the primary agent must inspect the exact patch and current targ
 
 No hosted write is confirmed. This is a manual queue for project `ytputzzqubbaaztowyoz`, based on the observed schema; recheck the target and metadata before execution.
 
-| SQL                                                 | Action for existing Dura        | Reason                                                                                                                 |
-| --------------------------------------------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `live/001-dura-contract-reconciliation.sql`         | Review and run manually once    | Narrow transaction for the observed missing/unsafe contracts.                                                          |
-| Baseline `001`–`013`                                | Do not replay                   | Existing production objects differ from historical source; an empty dashboard migration list is not an empty database. |
-| Staged `014`                                        | Skip                            | Analytics naming and tenant composite keys already match.                                                              |
-| Staged `015`                                        | Skip                            | Optional learner stores already exist.                                                                                 |
-| Staged `016`                                        | Do not run separately           | Feedback already exists; the narrow patch adds its absent retry RPC while preserving legacy INSERT.                    |
-| Staged `017`                                        | Do not run separately           | Observed admin policies already exist; blindly recreating them collides.                                               |
-| Staged `018`                                        | Do not run separately           | The narrow patch reconciles existing annotation policy names, grants and absent vote maintenance.                      |
-| Staged `019`                                        | Skip                            | Observed profile email/signup handling and caller-guarded millisecond progress RPC already exist.                      |
-| Staged `020`                                        | Do not run separately           | Signed-proof column and lookup extension are included in the narrow patch.                                             |
-| `tests/supabase/schema-inventory.sql`               | Optional read-only inspection   | Metadata only; no learner rows or writes.                                                                              |
-| Other `tests/supabase/*.sql` and database harnesses | Local disposable databases only | Fixtures and regression tests create or mutate synthetic data; never run them in production.                           |
+| SQL                                                              | Action for existing Dura        | Reason                                                                                                                 |
+| ---------------------------------------------------------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `../migrations/Already Ran/001-dura-contract-reconciliation.sql` | Review and run manually once    | Narrow transaction for the observed missing/unsafe contracts.                                                          |
+| Baseline `001`–`013`                                             | Do not replay                   | Existing production objects differ from historical source; an empty dashboard migration list is not an empty database. |
+| Staged `014`                                                     | Skip                            | Analytics naming and tenant composite keys already match.                                                              |
+| Staged `015`                                                     | Skip                            | Optional learner stores already exist.                                                                                 |
+| Staged `016`                                                     | Do not run separately           | Feedback already exists; the narrow patch adds its absent retry RPC while preserving legacy INSERT.                    |
+| Staged `017`                                                     | Do not run separately           | Observed admin policies already exist; blindly recreating them collides.                                               |
+| Staged `018`                                                     | Do not run separately           | The narrow patch reconciles existing annotation policy names, grants and absent vote maintenance.                      |
+| Staged `019`                                                     | Skip                            | Observed profile email/signup handling and caller-guarded millisecond progress RPC already exist.                      |
+| Staged `020`                                                     | Do not run separately           | Signed-proof column and lookup extension are included in the narrow patch.                                             |
+| `tests/supabase/schema-inventory.sql`                            | Optional read-only inspection   | Metadata only; no learner rows or writes.                                                                              |
+| Other `tests/supabase/*.sql` and database harnesses              | Local disposable databases only | Fixtures and regression tests create or mutate synthetic data; never run them in production.                           |
 
 Reviewed patch SHA-256: `66d831da811b17ea322275b70790f0bbafb000b827c3d42dca3f1a90367b032d`. Verify the file checksum before running. If it differs, review the changed SQL rather than relying on this record. After any uncertain outcome, inspect the schema before retrying; the patch is intentionally not blindly replayable.

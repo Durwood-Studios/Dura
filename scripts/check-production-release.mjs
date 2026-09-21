@@ -1,23 +1,28 @@
 import { pathToFileURL } from "node:url";
 
 export const REQUIRED_RELEASE_CHECK = "Release readiness";
-export const REQUIRED_DATABASE_CONTRACT = "2026-09-023";
+export const REQUIRED_DATABASE_CONTRACT = "2026-09-025";
 
 /** Keep the existing deployment live if configured account/payment services would fail closed. */
 export function validateProductionServices(env) {
+  const problems = [];
   const hasAccounts = Boolean(env.NEXT_PUBLIC_SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-  if (hasAccounts && (!env.NEXT_PUBLIC_SUPABASE_URL || !env.NEXT_PUBLIC_SUPABASE_ANON_KEY))
-    throw new Error("Production account configuration requires both public Supabase settings");
-  if (
-    (hasAccounts || env.STRIPE_SECRET_KEY) &&
-    (!env.UPSTASH_REDIS_REST_URL || !env.UPSTASH_REDIS_REST_TOKEN)
-  )
+  const needsLimiter = hasAccounts || Boolean(env.STRIPE_SECRET_KEY);
+  if (needsLimiter) {
+    if (!env.NEXT_PUBLIC_SUPABASE_URL || !env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
+      problems.push("Production account/payment limiting requires both public Supabase settings");
+    if (!/^[0-9a-f]{64}$/.test(env.DURA_RATE_LIMIT_SECRET ?? ""))
+      problems.push(
+        "Production requires a valid server-only DURA_RATE_LIMIT_SECRET from migration 025"
+      );
+    if (env.DURA_SUPABASE_CONTRACT_VERSION !== REQUIRED_DATABASE_CONTRACT)
+      problems.push(
+        `Production requires the reviewed Supabase rollout through 025. Set DURA_SUPABASE_CONTRACT_VERSION=${REQUIRED_DATABASE_CONTRACT} only after verifying the target reconciliation and migrations; this setting is an operator attestation, not a schema inspection.`
+      );
+  }
+  if (problems.length)
     throw new Error(
-      "Production account/payment services require UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN before this release can deploy"
-    );
-  if (hasAccounts && env.DURA_SUPABASE_CONTRACT_VERSION !== REQUIRED_DATABASE_CONTRACT)
-    throw new Error(
-      `Production accounts require the reviewed database rollout through 023. Set DURA_SUPABASE_CONTRACT_VERSION=${REQUIRED_DATABASE_CONTRACT} only after verifying the target reconciliation and migrations; this setting is an operator attestation, not a schema inspection.`
+      `Production deployment blocked by ${problems.length} service prerequisite(s):\n${problems.map((problem) => `- ${problem}`).join("\n")}\nFollow supabase/staged/DEPLOYMENT-READINESS.md before retrying deployment.`
     );
 }
 

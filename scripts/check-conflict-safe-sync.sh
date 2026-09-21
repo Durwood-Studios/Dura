@@ -9,6 +9,12 @@ for migration in supabase/migrations/00[1-6]-*.sql supabase/migrations/013-*.sql
 done
 psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/staged/015-learning-record-stores.sql
 psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/live-reconciliation-fixture.sql
-psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/staged/live/001-dura-contract-reconciliation.sql
-psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/staged/022-conflict-safe-sync.sql
+psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "supabase/migrations/Already Ran/001-dura-contract-reconciliation.sql"
+psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "supabase/migrations/Already Ran/022-conflict-safe-sync.sql"
+# Reproduce hosted explicit grants before testing the correction and its replay.
+psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -c 'GRANT EXECUTE ON FUNCTION public.sync_learner_records(text,jsonb), public.delete_learner_record(uuid,text,text,bigint), public.sync_progress_v2(uuid,jsonb) TO anon;'
+for attempt in 1 2; do
+  psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f "supabase/migrations/Already Ran/024-sync-function-permissions.sql"
+  psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/sync-function-permissions.sql
+done
 psql "$DURA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f tests/supabase/conflict-safe-sync.sql

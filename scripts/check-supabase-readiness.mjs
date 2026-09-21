@@ -100,14 +100,15 @@ export function inspectSchema(snapshot) {
 }
 
 async function main() {
-  const files = (await readdir(path.join(ROOT, "supabase/staged")))
+  const queueDirectory = "supabase/migrations/Need To Run";
+  const files = (await readdir(path.join(ROOT, queueDirectory)))
     .filter((file) => file.endsWith(".sql"))
     .sort();
   const proposals = await Promise.all(
     files.map(async (file) => ({
-      file: `supabase/staged/${file}`,
+      file: `${queueDirectory}/${file}`,
       sha256: createHash("sha256")
-        .update(await readFile(path.join(ROOT, "supabase/staged", file)))
+        .update(await readFile(path.join(ROOT, queueDirectory, file)))
         .digest("hex"),
     }))
   );

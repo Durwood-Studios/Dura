@@ -27,14 +27,16 @@ test("production holds deployment when configured services lack the shared limit
     NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
     NEXT_PUBLIC_SUPABASE_ANON_KEY: "public-fixture",
   };
-  assert.throws(() => validateProductionServices(configured), /UPSTASH/);
-  assert.throws(() => validateProductionServices({ STRIPE_SECRET_KEY: "test-fixture" }), /UPSTASH/);
+  assert.throws(() => validateProductionServices(configured), /DURA_RATE_LIMIT_SECRET/);
+  assert.throws(
+    () => validateProductionServices({ STRIPE_SECRET_KEY: "test-fixture" }),
+    /DURA_RATE_LIMIT_SECRET/
+  );
   assert.doesNotThrow(() =>
     validateProductionServices({
       ...configured,
-      UPSTASH_REDIS_REST_URL: "https://example.invalid",
-      UPSTASH_REDIS_REST_TOKEN: "private-fixture",
-      DURA_SUPABASE_CONTRACT_VERSION: "2026-09-023",
+      DURA_RATE_LIMIT_SECRET: "a".repeat(64),
+      DURA_SUPABASE_CONTRACT_VERSION: "2026-09-025",
     })
   );
 });
@@ -43,8 +45,7 @@ test("production accounts wait for the matching operator-confirmed database cont
   const configured = {
     NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
     NEXT_PUBLIC_SUPABASE_ANON_KEY: "public-fixture",
-    UPSTASH_REDIS_REST_URL: "https://example.invalid",
-    UPSTASH_REDIS_REST_TOKEN: "private-fixture",
+    DURA_RATE_LIMIT_SECRET: "a".repeat(64),
   };
   for (const version of [undefined, "022", "2026-09-022", "true"])
     assert.throws(
@@ -52,7 +53,7 @@ test("production accounts wait for the matching operator-confirmed database cont
       /operator attestation/
     );
   assert.doesNotThrow(() =>
-    validateProductionServices({ ...configured, DURA_SUPABASE_CONTRACT_VERSION: "2026-09-023" })
+    validateProductionServices({ ...configured, DURA_SUPABASE_CONTRACT_VERSION: "2026-09-025" })
   );
 });
 
@@ -208,5 +209,47 @@ test("same-name check from another workflow, branch or event cannot authorize pr
       throw Error("must not fetch");
     }),
     /verifiable/
+  );
+});
+
+test("production reports missing limiter and database prerequisites together before checking CI", async () => {
+  let hasFetched = false;
+  await assert.rejects(
+    checkProductionRelease({
+      env: {
+        ...env,
+        NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: "public-fixture",
+      },
+      fetcher: async () => {
+        hasFetched = true;
+        return Response.json({ check_runs: [run()] });
+      },
+    }),
+    (error) => {
+      assert.match(error.message, /DURA_RATE_LIMIT_SECRET/);
+      assert.match(error.message, /DURA_SUPABASE_CONTRACT_VERSION=2026-09-025/);
+      assert.match(error.message, /only after verifying/);
+      assert.match(error.message, /supabase\/staged\/DEPLOYMENT-READINESS\.md/);
+      assert.doesNotMatch(error.message, /public-fixture/);
+      return true;
+    }
+  );
+  assert.equal(hasFetched, false);
+});
+
+test("partial settings report only missing limiter names alongside other configuration errors", () => {
+  assert.throws(
+    () =>
+      validateProductionServices({
+        NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
+        DURA_RATE_LIMIT_SECRET: "a".repeat(64),
+      }),
+    (error) => {
+      assert.match(error.message, /both public Supabase settings/);
+      assert.doesNotMatch(error.message, /server-only DURA_RATE_LIMIT_SECRET/);
+      assert.match(error.message, /DURA_SUPABASE_CONTRACT_VERSION/);
+      return true;
+    }
   );
 });
