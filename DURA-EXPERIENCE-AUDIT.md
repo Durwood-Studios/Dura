@@ -101,3 +101,11 @@ The authentication tutorial's secret fallback, refresh-session checks and logout
 The lesson flashcard form now has associated labels, managed entry/return focus, collision-aware placement, bounded scrollable height and48px controls. Nine production-browser checks passed across Chromium/Firefox/mobile WebKit at320×568,667×320 and375×250. Real-device software keyboard and screen-reader acceptance remain separate.
 
 Current release documentation has been reconciled with the Supabase-only release and archived migration paths; historical audit material is clearly labeled. Full unit suite:123files/1577tests passed. Build, lint, typecheck and tutorial inventory consistency passed. The remaining journey/depth/pilot/hardware work above is not completed by these repairs.
+
+### Hosted Safari follow-up — 2026-09-21
+
+The existing designated account uses GitHub sign-in. The Supabase dashboard shows built-in email delivery rather than custom SMTP; the specific missing recovery email has not been traced to a provider log.
+
+The user reported a dashboard stuck on skeletons after sign-in. Dashboard reads had no deadline and converted rejected reads into zero-valued statistics. The follow-up adds a ten-second recovery message, retry, late-result recovery, effect cleanup, and preserves errors rather than displaying invented zero progress. This mitigates the indefinite UI; the cause of the live Safari storage/session stall remains unconfirmed. Do not clear the user's browser storage to investigate it.
+
+The age form now uses equal 48px controls, a text year with numeric keyboard and four-character limit, narrow-screen stacking, and the standard blue action/focus accent. No age-validation rule or persisted learner record is changed.

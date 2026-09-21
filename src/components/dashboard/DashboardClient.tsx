@@ -11,7 +11,7 @@ import { getDB } from "@/lib/db";
 import { getAllCards, getDueCards } from "@/lib/db/flashcards";
 import { levelProgress } from "@/lib/xp";
 import { getTotalXP, getAllXPEvents } from "@/lib/db/xp";
-import { isStreakAlive, type StreakState, INITIAL_STREAK } from "@/lib/streak";
+import { isStreakAlive, type StreakState } from "@/lib/streak";
 import { getCurrentStreak } from "@/lib/streak-manager";
 import { StreakFlame } from "@/components/gamification/StreakFlame";
 import { LevelBadge } from "@/components/gamification/LevelBadge";
@@ -105,20 +105,7 @@ async function loadDashboard(): Promise<DashboardData> {
     };
   } catch (error) {
     console.error("[dashboard] load failed", error);
-    return {
-      totalXp: 0,
-      activityPoints: 0,
-      masteryPoints: 0,
-      completedCount: 0,
-      inProgressCount: 0,
-      totalTimeMs: 0,
-      dueCardCount: 0,
-      nextDue: null,
-      streak: INITIAL_STREAK,
-      lastLesson: null,
-      earliestStartedAt: null,
-      completedPhaseIds: new Set<string>(),
-    };
+    throw error;
   }
 }
 
@@ -156,17 +143,64 @@ export function DashboardClient({
 }): React.ReactElement {
   const now = useCurrentTime(true, 60000);
   const [data, setData] = useState<DashboardData | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [comebackDismissed, setComebackDismissed] = useState(false);
   const showStreak = usePreferencesStore((s) => s.prefs.showStreak);
   const dailyGoalMinutes = usePreferencesStore((s) => s.prefs.dailyGoalMinutes);
 
   useEffect(() => {
-    void loadDashboard().then(setData);
-    if (sessionStorage.getItem(COMEBACK_STORAGE_KEY)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- Read the tab-local dismissal only after hydration to preserve the server snapshot.
-      setComebackDismissed(true);
+    let isCurrent = true;
+    const timeout = window.setTimeout(() => {
+      if (isCurrent) setLoadError(true);
+    }, 10_000);
+    void loadDashboard()
+      .then((result): void => {
+        if (!isCurrent) return;
+        window.clearTimeout(timeout);
+        setData(result);
+        setLoadError(false);
+      })
+      .catch((): void => {
+        if (!isCurrent) return;
+        window.clearTimeout(timeout);
+        setLoadError(true);
+      });
+    try {
+      if (sessionStorage.getItem(COMEBACK_STORAGE_KEY)) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- Read the tab-local dismissal only after hydration to preserve the server snapshot.
+        setComebackDismissed(true);
+      }
+    } catch (error) {
+      console.error("[dashboard] Dismissal preference unavailable", error);
     }
-  }, []);
+    return (): void => {
+      isCurrent = false;
+      window.clearTimeout(timeout);
+    };
+  }, [loadAttempt]);
+
+  if (loadError && !data) {
+    return (
+      <section role="alert" className="dura-card space-y-4 p-6">
+        <h2 className="text-lg font-semibold">Your learning data is taking too long to open</h2>
+        <p className="text-text-secondary">
+          Close other Dura tabs and try again. If this continues, reload this page. Do not clear
+          your browser data: it may contain learning progress that has not synced.
+        </p>
+        <button
+          type="button"
+          className="min-h-12 rounded-lg bg-accent px-4 py-2 text-white focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
+          onClick={(): void => {
+            setLoadError(false);
+            setLoadAttempt((attempt) => attempt + 1);
+          }}
+        >
+          Try again
+        </button>
+      </section>
+    );
+  }
 
   if (!data) {
     return (

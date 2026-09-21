@@ -102,7 +102,7 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
             setMonth(null);
             setYear("");
           }}
-          className="mt-6 text-sm text-[var(--color-accent-emerald)] underline underline-offset-2"
+          className="mt-6 text-sm text-[var(--color-accent)] underline underline-offset-2"
         >
           Go back
         </button>
@@ -117,9 +117,9 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
         DURA requires account holders to be at least 13 years old.
       </p>
 
-      <div className="mt-6 flex gap-3">
+      <div className="mt-6 grid grid-cols-1 gap-3 min-[360px]:grid-cols-2">
         {/* Month selector */}
-        <div className="flex-1">
+        <div className="min-w-0">
           <label
             htmlFor="age-gate-month"
             className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]"
@@ -130,7 +130,7 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
             id="age-gate-month"
             value={month === null ? "" : month}
             onChange={(e) => setMonth(e.target.value === "" ? null : parseInt(e.target.value, 10))}
-            className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] focus:ring-2 focus:ring-[var(--color-accent-emerald)] focus:outline-none"
+            className="h-12 w-full min-w-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2.5 text-base text-[var(--color-text-primary)] focus:ring-2 focus:ring-[var(--color-accent)] focus:ring-offset-2 focus:outline-none"
           >
             <option value="">Month</option>
             {MONTHS.map((name, i) => (
@@ -142,7 +142,7 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
         </div>
 
         {/* Year input */}
-        <div className="w-28">
+        <div className="min-w-0">
           <label
             htmlFor="age-gate-year"
             className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]"
@@ -151,17 +151,18 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
           </label>
           <input
             id="age-gate-year"
-            type="number"
+            type="text"
             inputMode="numeric"
             placeholder="YYYY"
-            min={MIN_YEAR}
-            max={MAX_YEAR}
+            autoComplete="off"
+            maxLength={4}
+            pattern="[0-9]{4}"
             value={year}
             onChange={(e) => setYear(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") handleSubmit();
             }}
-            className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] focus:ring-2 focus:ring-[var(--color-accent-emerald)] focus:outline-none"
+            className="h-12 w-full min-w-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2.5 text-base text-[var(--color-text-primary)] focus:ring-2 focus:ring-[var(--color-accent)] focus:ring-offset-2 focus:outline-none"
           />
         </div>
       </div>
@@ -171,7 +172,7 @@ export default function AgeGate({ onVerified }: AgeGateProps): React.ReactElemen
       <button
         type="button"
         onClick={handleSubmit}
-        className="mt-6 w-full rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-emerald-600 focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 focus:outline-none"
+        className="mt-6 min-h-12 w-full rounded-lg bg-[var(--color-accent)] px-4 py-2.5 text-base font-medium text-white transition-colors hover:bg-[var(--color-accent-hover)] focus:ring-2 focus:ring-[var(--color-accent)] focus:ring-offset-2 focus:outline-none"
       >
         Continue
       </button>

@@ -84,3 +84,48 @@ for (const viewport of [
     await expect(trigger).toBeFocused();
   });
 }
+
+for (const width of [320, 768]) {
+  test(`age fields fit and align at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/auth/sign-up");
+    const month = page.getByLabel("Birth month", { exact: true });
+    const year = page.getByLabel("Birth year", { exact: true });
+    await month.selectOption("9");
+    await year.fill("1995");
+    await expect(year).toHaveAttribute("type", "text");
+    await expect(year).toHaveAttribute("inputmode", "numeric");
+    await inViewport(page, month);
+    await inViewport(page, year);
+    const monthBox = await month.boundingBox();
+    const yearBox = await year.boundingBox();
+    expect(monthBox?.height).toBe(48);
+    expect(yearBox?.height).toBe(48);
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
+      .toBe(true);
+  });
+}
+
+test("dashboard offers recovery when local storage never opens", async ({ page }) => {
+  await page.addInitScript(() => {
+    // Simulate an IDB open request blocked by an older tab, without clearing any records.
+    const open = IDBFactory.prototype.open;
+    IDBFactory.prototype.open = function (name: string, version?: number): IDBOpenDBRequest {
+      const request = open.call(this, name, version);
+      request.addEventListener("success", (event): void => event.stopImmediatePropagation(), true);
+      request.addEventListener("error", (event): void => event.stopImmediatePropagation(), true);
+      return request;
+    };
+  });
+  await page.goto("/dashboard");
+  await page.getByRole("button", { name: "No thanks", exact: true }).click();
+  const recovery = page
+    .getByRole("alert")
+    .filter({ hasText: "Your learning data is taking too long" });
+  await expect(recovery).toBeVisible({ timeout: 15_000 });
+  await expect(recovery).toContainText("Do not clear your browser data");
+  await recovery.getByRole("button", { name: "Try again" }).click();
+  await expect(recovery).not.toBeVisible();
+  await expect(recovery).toBeVisible({ timeout: 15_000 });
+});
